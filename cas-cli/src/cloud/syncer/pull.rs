@@ -977,8 +977,14 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
 
 /// Remove the renderer's marker block from ordinary task text. The caller
 /// persists the body through the untrusted sink, then appends this block with
-/// `TaskStore::append_trusted_note`.
-pub(crate) fn take_rendered_provenance(notes: &mut String) -> Option<String> {
+/// `TaskStore::append_trusted_note`. A note block alone is never attestation.
+pub(crate) fn take_rendered_provenance(
+    notes: &mut String,
+    rendered_from_provenance: bool,
+) -> Option<String> {
+    if !rendered_from_provenance {
+        return None;
+    }
     let (start, end) = unique_complete_provenance_block(notes)?;
     let rendered = notes[start..end].to_string();
     *notes = format!("{}{}", &notes[..start], &notes[end..])
@@ -1034,14 +1040,15 @@ pub(crate) fn record_pulled_accepted_proposal(
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.
-pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
+/// Returns whether valid server provenance was available to render.
+pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) -> bool {
     let Some(raw_provenance) = raw.get("proposal_provenance").cloned() else {
-        return;
+        return false;
     };
     let Ok(provenance) =
         serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(raw_provenance)
     else {
-        return;
+        return false;
     };
     let server = &provenance.server_attested;
     let client = &provenance.client_asserted;
@@ -1110,6 +1117,7 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+    true
 }
 
 /// cas-a8e2: one section (server-attested or client-asserted) of a rendered
@@ -2296,7 +2304,7 @@ impl CloudSyncer {
             if let Some(cas_root) = self.push_cas_root.as_deref() {
                 record_pulled_accepted_proposal(cas_root, &raw_task, &current_project_id);
             }
-            render_task_proposal_provenance(&mut raw_task);
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let raw_task_for_parking = raw_task.clone();
             let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
@@ -2312,7 +2320,8 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
             let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
                 &mut remote_task.notes, &remote_task.id,
             );
@@ -3485,7 +3494,7 @@ impl CloudSyncer {
             if let Some(cas_root) = self.push_cas_root.as_deref() {
                 record_pulled_accepted_proposal(cas_root, &raw_task, current_project_id);
             }
-            render_task_proposal_provenance(&mut raw_task);
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task);
             let team_task_revision = crate::cloud::wire_revision(&raw_task);
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
@@ -3506,7 +3515,8 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
             let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
                 &mut remote_task.notes, &remote_task.id,
             );

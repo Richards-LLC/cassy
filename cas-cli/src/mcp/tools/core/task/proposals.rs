@@ -352,7 +352,7 @@ impl CasCore {
         let mut task = materialize_accepted_proposal(proposal, target_project)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let trusted_provenance =
-            crate::cloud::syncer::take_rendered_provenance(&mut task.notes);
+            crate::cloud::syncer::take_rendered_provenance(&mut task.notes, true);
         let task_store = open_task_store_local(&self.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match task_store.get(&task.id) {

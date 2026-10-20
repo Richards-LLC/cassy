@@ -570,12 +570,13 @@ pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(
 pub fn status(cas_root: &Path, id: &str) -> Result<String, String> {
     let split = get_epic_split(cas_root, id).map_err(|error| error.to_string())?
         .ok_or_else(|| format!("no epic split {id} recorded here"))?;
+    let expiry_due = split.is_expired(Utc::now());
     let mut out = format!("Epic split {id}: {}\nepic: {}\ndecided_at: {}\ndecider: {}\ncleanup: {}\nexpiry notice: {}\nclaims (Cloud observation; project/account visibility applies):",
         split.display_state(Utc::now()), split.epic_id,
         split.decided_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "pending".into()),
         split.decided_by.as_deref().unwrap_or("unknown"),
-        if split.cleanup_pending { "pending" } else { "settled" },
-        if split.expiry_notice_pending { "pending" } else { "settled" });
+        if split.cleanup_pending || expiry_due { "pending" } else { "settled" },
+        if split.expiry_notice_pending || expiry_due { "pending" } else { "settled" });
     let claims = peer_claims(cas_root);
     for (label, ids) in [("mine", &split.mine), ("theirs", &split.theirs)] {
         if ids.is_empty() { out.push_str(&format!("\n  {label}: (none)")); }
@@ -625,10 +626,11 @@ fn local_check(cas_root: &Path) -> Result<impl Fn(&str) -> bool, String> {
 /// child with `ids`: `(split id, child)`.
 fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(String, String)>, String> {
     let now = Utc::now();
-    let splits = open_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
+    let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
     Ok(splits
         .into_iter()
         .filter(|split| Some(split.id.as_str()) != except)
+        .filter(|split| split.cleanup_pending || matches!(split.state, SplitState::Pending | SplitState::Accepted))
         .filter(|split| !split.is_expired(now))
         .find_map(|split| {
             ids.iter()
@@ -685,7 +687,7 @@ pub fn propose(
     let all: Vec<String> = mine.iter().chain(theirs).cloned().collect();
     if let Some((split, child)) = overlapping(cas_root, &all, None)? {
         return Err(format!(
-            "{child} is already in epic split {split}; cancel or reject it first"
+            "{child} is already in epic split {split}; settle pending cleanup, or cancel/reject the active split first"
         ));
     }
 

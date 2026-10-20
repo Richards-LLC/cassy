@@ -116,6 +116,8 @@ pub fn classify(
     now: DateTime<Utc>,
 ) -> Vec<TaskSimulator> {
     let cutoff = now - Duration::hours(SIMULATOR_TTL_HOURS);
+    let ids: Vec<String> = devices.iter().filter_map(|device| owner_task(&device.name)).map(str::to_string).collect();
+    others.prefetch(&ids);
     devices
         .iter()
         .filter_map(|device| {
@@ -161,52 +163,26 @@ impl Simctl {
         self
     }
 
+    /// cas-6162: bounded, in its own process group, so a timeout or a failed
+    /// wait kills simctl and anything it started (via `bounded_process`).
     fn run(&self, args: &[&str]) -> Result<String> {
-        use std::io::Read;
-        use std::process::Stdio;
-        let mut child = std::process::Command::new(&self.xcrun)
-            .arg("simctl")
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("running {} simctl {}", self.xcrun.display(), args.join(" ")))?;
-        // Drain both pipes on threads so a large device list cannot block the
-        // child while the deadline is watched here.
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let out = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            buf
-        });
-        let err = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            buf
-        });
-        let deadline = std::time::Instant::now() + self.timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait().context("waiting for xcrun simctl")? {
-                break status;
+        let mut command = std::process::Command::new(&self.xcrun);
+        command.arg("simctl").args(args);
+        let output = crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(self.timeout),
+            self.timeout,
+        )
+        .map_err(|error| match error {
+            crate::bounded_process::BoundedCommandError::TimedOut => anyhow!(
+                "xcrun simctl {} timed out after {}s",
+                args.join(" "),
+                self.timeout.as_secs_f64()
+            ),
+            crate::bounded_process::BoundedCommandError::Io => {
+                anyhow!("could not run {} simctl {}", self.xcrun.display(), args.join(" "))
             }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(anyhow!(
-                    "xcrun simctl {} timed out after {}s",
-                    args.join(" "),
-                    self.timeout.as_secs_f64()
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        };
-        let output = std::process::Output {
-            status,
-            stdout: out.join().unwrap_or_default(),
-            stderr: err.join().unwrap_or_default(),
-        };
+        })?;
         if !output.status.success() {
             return Err(anyhow!(
                 "xcrun simctl {} failed: {}",
@@ -387,9 +363,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let xcrun = dir.path().join("xcrun");
-        std::fs::write(&xcrun, "#!/bin/sh
-exec sleep 30
-").unwrap();
+        // A non-exec wrapper: the sleep is a grandchild that must die with the
+        // process group, or the bounded call would leak it.
+        std::fs::write(&xcrun, "#!/bin/sh\nsleep 30\necho done\n").unwrap();
         std::fs::set_permissions(&xcrun, std::fs::Permissions::from_mode(0o700)).unwrap();
         let simctl = Simctl::with_binary(&xcrun).with_timeout(std::time::Duration::from_millis(300));
         let none = crate::task_ownership::KnownProjects::from_roots(dir.path(), Vec::new());

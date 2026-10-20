@@ -595,6 +595,13 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
     },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
@@ -1255,6 +1262,13 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
+    },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
@@ -1920,6 +1934,13 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/violet/references/push-wake.md",
         content: include_str!("builtins/skills/violet/references/push-wake.md"),
     },
+    // slack-formatting (cas-d47fd750acf1df00): readable Slack bodies for every
+    // violet post, thread and push-wake reply, with the operator's hard rules
+    // (attached files only; times in CT).
+    BuiltinFile {
+        path: "skills/slack-formatting/SKILL.md",
+        content: include_str!("builtins/skills/slack-formatting/SKILL.md"),
+    },
     // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
@@ -2296,6 +2317,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/violet"),
         codex: Some("skills/violet"),
         grok: Some("skills/violet"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-d47fd750acf1df00: every harness that posts through Violet
+        // formats its Slack bodies with the same rules.
+        id: "slack-formatting",
+        claude: Some("skills/slack-formatting"),
+        codex: Some("skills/slack-formatting"),
+        grok: Some("skills/slack-formatting"),
         note: "",
     },
     RequiredCapability {
@@ -3726,6 +3756,7 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     // /release-notes). Kept so old installs are pruned.
     "release-notes",
     "session-learn",
+    "slack-formatting",
     "verify-before-claim",
     "violet",
 ];

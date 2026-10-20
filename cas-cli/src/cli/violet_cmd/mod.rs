@@ -16,6 +16,7 @@
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) mod credentials;
+pub mod draft_check;
 pub mod files;
 pub mod hub;
 
@@ -233,6 +234,13 @@ fn run_post(
         ));
     }
     let files = inspect_all(&args.files)?;
+    if let Some(text) = &text {
+        draft_check::check(&[draft_check::DraftMessage {
+            label: None,
+            text,
+            attached: files.iter().map(|file| file.filename.clone()).collect(),
+        }])?;
+    }
     let route = choose_route(&files);
     if route != Route::Message {
         gate_check(
@@ -521,6 +529,21 @@ fn run_thread(
             files: inspect_all(&spec.files)?,
         });
     }
+    let mut drafts = vec![draft_check::DraftMessage {
+        label: Some("top-level".to_string()),
+        text: &text,
+        attached: Vec::new(),
+    }];
+    for (index, reply) in replies.iter().enumerate() {
+        if let Some(reply_text) = &reply.text {
+            drafts.push(draft_check::DraftMessage {
+                label: Some(format!("reply {}", index + 1)),
+                text: reply_text,
+                attached: reply.files.iter().map(|file| file.filename.clone()).collect(),
+            });
+        }
+    }
+    draft_check::check(&drafts)?;
     if replies.iter().any(|reply| !reply.files.is_empty()) {
         gate_check(
             context,

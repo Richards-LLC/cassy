@@ -87,6 +87,18 @@ request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
 
+Abandoned queue messages report `undelivered` in the `message_status` header
+and JSON `legacy_status`, even though their queue rows are processed. A sender
+notice preserves the wake-gate refusal when one was recorded. Authenticated
+messages whose sender has ended use the existing local supervisor fallback;
+that supervisor receives each original source, summary and complete body in an
+ordinary inbox row. These recovery notices do not fold into the routine
+ended-worker digest. Large originals remain readable through `inbox_poll`.
+Recovery rows require daemon origin, the delivery-watchdog source and their
+recovery dedupe marker; assignment checks in the daemon and inbox poll treat
+these original bodies as history. A caller-supplied watchdog name cannot claim
+that exemption.
+
 For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
 project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
 database at a guessed path. Writable prompt-queue opens remove a regular empty

@@ -168,7 +168,7 @@ impl SyncQueue {
             decisions.push(TeamBackfillRow {
                 id: row.id,
                 entity_type: row.entity_type,
-                entity_id: row.entity_id,
+                entity_id: row.entity_id.clone(),
                 eligible,
                 reason,
             });

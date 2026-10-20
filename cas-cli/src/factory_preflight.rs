@@ -458,7 +458,7 @@ fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
         .and_then(|team| {
             let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
             let queue = SyncQueue::open_read_only(cas_root).ok()?;
-            queue.migratable_personal_row_count(team, &project).ok()
+            queue.migratable_personal_row_count(&team, &project).ok()
         })
         .unwrap_or(0);
     CloudQueueFacts {

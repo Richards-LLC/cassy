@@ -11174,6 +11174,7 @@ fn director_data_for(agents: &[Agent], session: &str) -> cas_factory::DirectorDa
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             })
             .collect(),
         activity: vec![],

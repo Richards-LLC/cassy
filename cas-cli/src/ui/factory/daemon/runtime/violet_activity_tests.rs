@@ -1575,6 +1575,7 @@ fn slack_activity_wakes_only_when_daemon_stamped() {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }],
         activity: vec![],
         agent_id_to_name: HashMap::new(),

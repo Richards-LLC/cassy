@@ -659,6 +659,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
     // recommending it produces a false wake and a wrong instruction.
     let dispatchable = |task: &&TaskSummary| {
         task.status == TaskStatus::Open
+            && task.task_type != cas_types::TaskType::Gate
             && task.assignee.is_none()
             && !data.start_gated_task_ids.contains(&task.id)
     };
@@ -711,6 +712,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
         .filter(|agent| {
             agent.name != supervisor_name
                 && agent.current_task.is_none()
+                && !agent.qa_reviewer_between_rounds
                 && !held_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.id)
@@ -2521,6 +2523,20 @@ impl DirectorEventDetector {
                     }
                 }
 
+                continue;
+            }
+
+            if agent.qa_reviewer_between_rounds {
+                // A rejected QA round leaves its reviewer waiting until the
+                // next round is opened or the delivery becomes terminal.
+                // Reset the idle episode while in that gap so it can begin
+                // cleanly once the reviewer is eligible again.
+                self.consecutive_idle_ticks.remove(&agent.id);
+                self.idle_already_emitted.remove(&agent.id);
+                self.idle_transition_at.remove(&resolved_name);
+                self.idle_handled_by_supervisor.remove(&resolved_name);
+                self.stall_nudged.remove(&agent.id);
+                self.stall_escalated.remove(&agent.id);
                 continue;
             }
 

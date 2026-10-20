@@ -14210,6 +14210,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }
     }
 
@@ -18341,6 +18342,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         };
 
         assert!(
@@ -18881,6 +18883,7 @@ mod supervisor_decision_wake_tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         };
         DirectorData {
             ready_tasks: vec![],

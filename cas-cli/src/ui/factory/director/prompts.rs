@@ -2169,6 +2169,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -5224,6 +5225,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -5710,6 +5712,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }];
         data.agent_id_to_name = [(
             "sess-id-codex-worker".to_string(),
@@ -6318,6 +6321,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         });
 
         // Foreign session sees the same epic (shared DB) but different supervisor

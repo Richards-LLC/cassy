@@ -1,7 +1,10 @@
 use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, DirectorStores};
 use crate::ui::factory::director::events::*;
 use cas_store::{AgentStore, EventStore, PendingReason, PromptQueueStore, TaskStore};
-use cas_types::{Agent, AgentRole, AgentStatus, TaskType};
+use cas_types::{
+    Agent, AgentRole, AgentStatus, Dependency, DependencyType, QaVerdict, Task, TaskStatus,
+    TaskTerminalOutcome, TaskType,
+};
 
 fn make_task(id: &str, title: &str, status: TaskStatus, assignee: Option<&str>) -> TaskSummary {
     TaskSummary {
@@ -64,6 +67,7 @@ fn make_agent(id: &str, name: &str, current_task: Option<&str>) -> AgentSummary 
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 
@@ -1371,6 +1375,7 @@ fn test_no_worker_idle_while_pending_messages_in_queue() {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }],
         activity: vec![],
         agent_id_to_name: [("agent-1".to_string(), "swift-fox".to_string())]
@@ -1567,6 +1572,192 @@ fn long_backoff_supervisor_message_does_not_permanently_suppress_worker_idle() {
         event,
         DirectorEvent::WorkerIdle { worker, .. } if worker == "backed-off-worker"
     )));
+}
+
+#[test]
+fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
+    use crate::test_support::TestEnvGuard;
+    use cas_store::{NewQaPass, open_qa_pass, claim_qa_pass, resolve_qa_pass};
+
+    let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "qa-between-rounds")]);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stores = DirectorStores::open(temp_dir.path()).unwrap();
+    stores.task_store.init().unwrap();
+    stores.agent_store.init().unwrap();
+    stores.event_store.init().unwrap();
+
+    let now = chrono::Utc::now();
+    let mut reviewer = Agent::new_with_role(
+        "reviewer-session".into(),
+        "reviewer-worker".into(),
+        AgentRole::Worker,
+    );
+    reviewer.factory_session = Some("qa-between-rounds".into());
+    reviewer.registered_at = now - chrono::Duration::minutes(5);
+    reviewer.last_heartbeat = now - chrono::Duration::minutes(5);
+    stores.agent_store.register(&reviewer).unwrap();
+
+    let mut delivery = Task::new("cas-521d-delivery".into(), "Awaiting a fix round".into());
+    delivery.status = TaskStatus::AwaitingMerge;
+    stores.task_store.add(&delivery).unwrap();
+    let head = "a".repeat(40);
+    let pass = open_qa_pass(
+        temp_dir.path(),
+        &NewQaPass {
+            task_id: &delivery.id,
+            implementer_agent_id: "implementer-session",
+            branch: "factory/implementer",
+            bound_head: &head,
+            deadline_at: now + chrono::Duration::hours(1),
+            max_rounds: 3,
+        },
+        now,
+    )
+    .unwrap();
+    let pass_id = match pass {
+        cas_store::QaPassOpen::Dispatched(pass) => pass.id,
+        other => panic!("first QA round should dispatch: {other:?}"),
+    };
+    claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.id, now).unwrap();
+    resolve_qa_pass(
+        temp_dir.path(),
+        &delivery.id,
+        &reviewer.id,
+        QaVerdict::Rejected,
+        "fix needed",
+        None,
+        "/tmp/LEDGER.md",
+        now,
+    )
+    .unwrap();
+
+    let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    let mut detector = DirectorEventDetector::new(
+        vec!["reviewer-worker".into()],
+        "supervisor".into(),
+    );
+    detector.initialize(&before);
+    let base = std::time::Instant::now();
+    for tick in 0..3 {
+        let events = detector.detect_changes_at(
+            &before,
+            None,
+            base + std::time::Duration::from_secs(tick * 2),
+            now + chrono::Duration::seconds((tick * 2) as i64),
+        );
+        assert!(
+            !events.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })),
+            "a reviewer between a rejected pass and the next round is not idle for assignment: {events:?}"
+        );
+    }
+
+    // The suppression is scoped to the interval between rounds. Once the
+    // delivery is terminal, the former reviewer becomes an ordinary idle worker.
+    let mut completed = stores.task_store.get(&delivery.id).unwrap();
+    completed.status = TaskStatus::Closed;
+    completed.closed_at = Some(now + chrono::Duration::seconds(10));
+    completed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
+    stores.task_store.update(&completed).unwrap();
+    let after = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    let first = detector.detect_changes_at(
+        &after,
+        None,
+        base + std::time::Duration::from_secs(10),
+        now + chrono::Duration::seconds(10),
+    );
+    let second = detector.detect_changes_at(
+        &after,
+        None,
+        base + std::time::Duration::from_secs(12),
+        now + chrono::Duration::seconds(12),
+    );
+    assert!(
+        first.iter().chain(&second).any(|event| matches!(
+            event,
+            DirectorEvent::WorkerIdle { worker, .. } if worker == "reviewer-worker"
+        )),
+        "the reviewer must become eligible again when the delivery leaves the failed-round gap"
+    );
+    assert!(!pass_id.is_empty());
+}
+
+#[test]
+fn cas_521d_open_gate_blocking_epic_suppresses_epic_close_prompt() {
+    use crate::test_support::TestEnvGuard;
+
+    let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stores = DirectorStores::open(temp_dir.path()).unwrap();
+    stores.task_store.init().unwrap();
+    stores.agent_store.init().unwrap();
+    stores.event_store.init().unwrap();
+
+    let mut epic = Task::new("cas-521d-epic".into(), "Rollout epic".into());
+    epic.task_type = TaskType::Epic;
+    stores.task_store.add(&epic).unwrap();
+
+    let mut child = Task::new("cas-521d-child".into(), "Last implementation task".into());
+    child.status = TaskStatus::InProgress;
+    stores.task_store.add(&child).unwrap();
+    stores
+        .task_store
+        .add_dependency(&Dependency::new(
+            child.id.clone(),
+            epic.id.clone(),
+            DependencyType::ParentChild,
+        ))
+        .unwrap();
+
+    let mut gate = Task::new("cas-521d-gate".into(), "Operator rollout gate".into());
+    gate.task_type = TaskType::Gate;
+    stores.task_store.add(&gate).unwrap();
+    // A rollout decision can block epic completion without being a child task.
+    stores
+        .task_store
+        .add_dependency(&Dependency::new(
+            epic.id.clone(),
+            gate.id.clone(),
+            DependencyType::Blocks,
+        ))
+        .unwrap();
+
+    let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    let mut detector = DirectorEventDetector::new(Vec::new(), "supervisor".into());
+    detector.initialize(&before);
+
+    let mut completed = stores.task_store.get(&child.id).unwrap();
+    completed.status = TaskStatus::Closed;
+    completed.closed_at = Some(chrono::Utc::now());
+    completed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
+    stores.task_store.update(&completed).unwrap();
+
+    let after = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    let events = detector.detect_changes_at(
+        &after,
+        Some(&epic.id),
+        std::time::Instant::now(),
+        chrono::Utc::now(),
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            DirectorEvent::EpicAllSubtasksClosed { epic_id, .. } if epic_id == &epic.id
+        )),
+        "an open Gate task that blocks the epic must keep its close prompt suppressed: {events:?}"
+    );
+    assert_eq!(
+        supervisor_actionable_state(
+            &after,
+            Some(&epic.id),
+            "supervisor",
+            &HashSet::new(),
+            chrono::Utc::now(),
+            600,
+            |_| None,
+        ),
+        None,
+        "the assembly/close nudge must also wait while the rollout gate is open"
+    );
 }
 
 #[test]
@@ -1938,6 +2129,7 @@ fn make_agent_active(
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 
@@ -2183,6 +2375,7 @@ fn make_agent_working_stalled(
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 

@@ -715,23 +715,32 @@ pub(crate) fn has_in_flight_tool_call<R: Read>(
 /// an outstanding call. Malformed/non-JSON lines (partial writes, etc.) and
 /// lines with no `message.content` array are silently skipped — they carry
 /// no tool-call evidence either way.
+///
+/// cas-3866: only the conversation's own records count: a `tool_use` from an
+/// `assistant` record, a `tool_result` from a `user` record. Claude Code also
+/// writes `api-request-blob` records that replay an assistant message's
+/// content, `tool_use` blocks included, after that call's `tool_result`.
+/// Counting the replay reopened every finished call, so an idle supervisor's
+/// unchanging tail read "tool call in flight" and the wake gate declined its
+/// reminders and relays for 12.6 h.
 fn claude_has_pending_tool_call(lines: &[String]) -> bool {
     let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in lines {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        let record = value.get("type").and_then(|t| t.as_str());
         let Some(content) = value.pointer("/message/content").and_then(|c| c.as_array()) else {
             continue;
         };
         for block in content {
             match block.get("type").and_then(|t| t.as_str()) {
-                Some("tool_use") => {
+                Some("tool_use") if record == Some("assistant") => {
                     if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
                         pending.insert(id.to_string());
                     }
                 }
-                Some("tool_result") => {
+                Some("tool_result") if record == Some("user") => {
                     if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
                         pending.remove(id);
                     }

@@ -24,6 +24,19 @@ pub(super) fn commander_control_from_gui_message(
 }
 
 impl FactoryDaemon {
+    fn send_binding_intake_reply(&mut self, client_id: usize, reply: super::violet_intake::IntakeReply) {
+        if let Some(frame) = encode_frame(&DaemonMessage::BindingIntake { reply })
+            && let Some(client) = self.gui_clients.get_mut(&client_id) {
+            queue_frame(client, &frame);
+        }
+    }
+
+    pub(super) fn finish_binding_intake_replies(&mut self) {
+        for (client, reply) in self.binding_intake.replies() {
+            self.send_binding_intake_reply(client, reply);
+        }
+    }
+
     /// Accept new GUI client connections (non-blocking).
     pub(super) fn accept_gui_clients(&mut self) -> bool {
         let mut any_new = false;
@@ -45,7 +58,7 @@ impl FactoryDaemon {
                         state,
                         scrollback: Some(scrollback),
                         protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
-                        capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                        capabilities: crate::ui::factory::protocol::local_gui_capabilities(),
                         pane_bootstrap: Vec::new(),
                     };
 
@@ -311,6 +324,30 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::BindingIntakePause { request } => {
+                let nonce = request.nonce;
+                let result = (|| {
+                    let root = self.app.cas_dir();
+                    let identity = super::violet_intake::RuntimeIdentity::current(root, &self.session_name)?;
+                    let cloud = crate::cloud::CloudConfig::load_from_cas_dir(root).map_err(|e| e.to_string())?;
+                    if cloud.active_team_id().as_deref() != Some(request.scope.team_id.as_str())
+                        || crate::cloud::resolve_canonical_id(root).as_deref() != Some(request.scope.canonical_project_id.as_str()) {
+                        return Err("pause scope does not match the runtime project/team".into());
+                    }
+                    self.binding_intake.pause(client_id, request, identity)
+                })();
+                if let Err(error) = result {
+                    self.send_binding_intake_reply(client_id, super::violet_intake::IntakeReply::refused(nonce, error));
+                }
+            }
+            ClientMessage::BindingIntakeStatus { nonce } => {
+                let reply = match crate::coordination::binding_intake::IntakeJournal::new(self.app.cas_dir()).read() {
+                    Ok(state) if !nonce.is_nil() => super::violet_intake::IntakeReply { nonce, state: Some(state), acknowledgement: None, error: None },
+                    Ok(_) => super::violet_intake::IntakeReply::refused(nonce, "missing status nonce"),
+                    Err(error) => super::violet_intake::IntakeReply::refused(nonce, error),
+                };
+                self.send_binding_intake_reply(client_id, reply);
+            }
             ClientMessage::OperatorReplyDelivered { .. }
             | ClientMessage::OperatorReplyPersisted { .. } => {
                 // Delivery receipts are emitted by the authenticated hub
@@ -328,7 +365,7 @@ impl FactoryDaemon {
                     state,
                     scrollback,
                     protocol_version: crate::ui::factory::protocol::PROTOCOL_VERSION,
-                    capabilities: crate::ui::factory::protocol::daemon_capabilities(),
+                    capabilities: crate::ui::factory::protocol::local_gui_capabilities(),
                     pane_bootstrap: Vec::new(),
                 };
                 if let Some(frame) = encode_frame(&welcome) {

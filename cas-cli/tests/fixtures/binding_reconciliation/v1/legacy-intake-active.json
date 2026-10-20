@@ -1,0 +1,23 @@
+{
+  "schema": "cassy.binding-reconciliation/v1",
+  "code": "legacy_intake_active", "reason": "legacy_intake_active",
+  "guidance": "Stop legacy intake and retry this same authorized tuple after blockers clear.",
+  "scope": {"team_id": "team-fixture", "project_id": "github.com/example/project", "workspace_id": "T0123456789", "channel_id": "C0123456789"},
+  "binding": {
+    "id": "11111111-1111-4111-8111-111111111111", "provider": "slack",
+    "team_id": "team-fixture", "project_id": "github.com/example/project", "workspace_id": "T0123456789", "channel_id": "C0123456789",
+    "mode": "legacy", "verified": true, "fence_generation": 0,
+    "activated_at": null, "legacy_fenced_at": null
+  },
+  "strict_activation": "refused", "activation_id": "55555555-5555-4555-8555-555555555555",
+  "fence_receipt": null,
+  "latest_attempt": {
+    "id": "55555555-5555-4555-8555-555555555555", "outcome": "refused", "prior_mode": "legacy", "fence_generation": 0,
+    "attempted_at": "2026-10-17T18:00:00.000Z",
+    "quiescence": {"quiet_window_secs": 300, "attested_v1_consumers": [], "blocking_v1_leases": 2, "blocking_v1_consumers": ["peer:old-reader"]},
+    "settled": {"migrated_v1_rows": 0, "retired_v1_rows": 0, "invalidated_v1_leases": 0}
+  },
+  "settled": {"migrated": 0, "retired": 0, "invalidated_leases": 0},
+  "blockers": {"unexpired_v1_leases": 2, "live_v1_consumers": ["peer:old-reader"], "live_v1_consumers_count": 1, "consumers_truncated": false},
+  "retry_after_secs": 300, "next_action": "stop_legacy_intake"
+}

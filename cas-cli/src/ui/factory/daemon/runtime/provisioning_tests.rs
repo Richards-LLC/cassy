@@ -26,6 +26,7 @@ pub(super) fn daemon(cas_dir: &Path) -> FactoryDaemon {
         compact_cols: 0,
         compact_rows: 0,
         pending_spawns: VecDeque::new(),
+        binding_intake: Default::default(),
         spawn_task: None,
         spawn_verifications: HashMap::new(),
         cloud_handle: None,

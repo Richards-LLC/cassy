@@ -264,6 +264,63 @@ fn belongs_to_peer(
         })
 }
 
+/// A live worker in a peer supervisor's factory session (cas-9f53), as
+/// `peers detail=true` lists it. It takes instructions only from its own
+/// supervisor, so a message for it is relayed through that supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerWorkerRef {
+    pub name: String,
+    pub machine: String,
+    pub supervisor: Peer,
+}
+
+impl PeerWorkerRef {
+    /// Whether `target` (`name` or `name@machine`) addresses this worker.
+    pub fn matches(&self, target: &str) -> bool {
+        let (name, machine) = match target.trim().rsplit_once('@') {
+            Some((name, machine)) => (name, Some(machine)),
+            None => (target.trim(), None),
+        };
+        self.name.eq_ignore_ascii_case(name)
+            && machine.is_none_or(|machine| {
+                self.machine.eq_ignore_ascii_case(machine)
+                    || self
+                        .supervisor
+                        .machine_id
+                        .as_deref()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(machine))
+            })
+    }
+}
+
+/// The live workers `peers detail=true` shows under each supervisor: same
+/// membership and liveness rules, so a name it lists is resolvable here.
+pub fn live_peer_workers(
+    supervisors: &[Peer],
+    agents: &[AgentInfo],
+    aliases: &[String],
+    now: DateTime<Utc>,
+) -> Vec<PeerWorkerRef> {
+    supervisors
+        .iter()
+        .flat_map(|supervisor| {
+            let owner = agents.iter().find(|a| a.id == supervisor.agent_id);
+            agents
+                .iter()
+                .filter(move |agent| belongs_to_peer(agent, supervisor, owner, aliases))
+                .filter(move |agent| {
+                    matches!(agent.status.as_str(), "active" | "idle")
+                        && heartbeat_age(agent, now).is_some_and(|age| age <= peers::PEER_LIVE_SECS)
+                })
+                .map(move |agent| PeerWorkerRef {
+                    name: agent.name.clone(),
+                    machine: supervisor.machine.clone(),
+                    supervisor: supervisor.clone(),
+                })
+        })
+        .collect()
+}
+
 /// Assemble observations from a single agents snapshot and active leases.
 /// Task titles/statuses come only from the current project's synced store.
 pub fn assemble_peer_details(
@@ -665,10 +722,7 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                 "  Session {}",
                 peer.session.as_deref().unwrap_or("-")
             ));
-            line(format!(
-                "  Focus   {}",
-                peer.focus.as_deref().unwrap_or("-")
-            ));
+            line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
             if !report.detail {
                 continue;

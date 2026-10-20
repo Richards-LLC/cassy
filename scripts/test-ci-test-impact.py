@@ -76,6 +76,30 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("opaque_test", command["stems"])
         self.assertNotIn("gamma_test", command["stems"])
 
+    def test_merge_commit_selects_source_already_present_in_first_parent(self):
+        self.put("cas-cli/src/lib.rs", 'pub mod alpha; pub mod beta; pub mod gamma; pub mod cli;\n')
+        self.put("cas-cli/src/cli/mod.rs", "pub mod update;\n")
+        self.put("cas-cli/src/cli/update.rs", "pub fn refresh() {}\n")
+        self.commit()
+        merge_base = self.git("rev-parse", "HEAD")
+
+        self.git("checkout", "-qb", "first-parent", merge_base)
+        self.put("cas-cli/src/cli/update.rs", "pub fn refresh() { /* merged update */ }\n")
+        self.commit()
+        first_parent = self.git("rev-parse", "HEAD")
+
+        self.git("checkout", "-qb", "second-parent", merge_base)
+        self.put("cas-cli/src/gamma.rs", "pub fn other() { /* sibling change */ }\n")
+        self.commit()
+        self.git("checkout", "-q", "first-parent")
+        self.git("merge", "--no-edit", "second-parent")
+
+        plan = impact.plan(self.root, first_parent, "", self.history)
+        self.assertEqual(plan["mode"], "scoped")
+        self.assertIn("cas-cli/src/cli/update.rs", plan["paths"])
+        expression = plan["commands"][0]["args"][-1]
+        self.assertIn("test(cli::)", expression)
+
     def test_reverse_crate_dependencies_widen_to_all_consumers(self):
         plan = self.select("crates/shared/src/lib.rs")
         self.assertEqual({p for c in plan["commands"] for p in c.get("packages", [c["package"]])}, {"shared", "consumer", "cas"})

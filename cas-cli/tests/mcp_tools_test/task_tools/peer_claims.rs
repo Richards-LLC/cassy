@@ -45,6 +45,8 @@ struct FakeState {
     renew_after_lock_reads: Option<(usize, bool)>,
     change_after_lock_read: Option<(usize, Option<String>)>,
     return_released_rows: bool,
+    // Pause exactly at the remote handoff, after the local lease has won.
+    release_gate: Option<(tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -84,6 +86,15 @@ impl FakeCloud {
             for mut request in thread_server.incoming_requests() {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
+                let gate = if request.url().ends_with("/release") {
+                    thread_state.lock().unwrap().release_gate.take()
+                } else {
+                    None
+                };
+                if let Some((entered, resume)) = gate {
+                    let _ = entered.send(());
+                    let _ = resume.recv();
+                }
                 let (status, json) =
                     Self::handle(&thread_state, request.method().as_str(), request.url(), &body);
                 let response = tiny_http::Response::from_string(json.to_string())
@@ -584,21 +595,94 @@ async fn an_unreachable_cloud_falls_back_to_the_local_lease_with_a_warning() {
 async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
-    let cloud = FakeCloud::start();
-    let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
-    alpha.put_task("cas-p008", TaskType::Task);
-    start(&alpha.core, "cas-p008", false).await.unwrap();
-    // The local lease is dropped without touching the cloud (a crashed path).
-    open_agent_store(&alpha.cas_dir).unwrap().release_lease("cas-p008", &alpha.agent_id).unwrap();
-    let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-p008").unwrap();
-    task.status = TaskStatus::Open;
-    task.assignee = None;
-    open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
+    for cancel_at_handoff in [false, true] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+        alpha.put_task("cas-p008", TaskType::Task);
+        let repo = alpha.cas_dir.parent().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).current_dir(repo).status().unwrap().success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-q", "--allow-empty", "-m", "seed"]);
+        for branch in ["factory/prior-1", "factory/prior-2", "factory/prior-3", "factory/prior-4", "factory/prior-5"] {
+            git(&["branch", branch]);
+        }
+        let tasks = open_task_store(&alpha.cas_dir).unwrap();
+        let mut task = tasks.get("cas-p008").unwrap();
+        task.notes = (0..78).map(|i| format!("[2026-10-18] Progress {i}: {}", "x".repeat(650))).collect::<Vec<_>>().join("\n\n");
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: format!("project:{PROJECT}"), target_branch: "main".into(),
+        });
+        tasks.update(&task).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), start(&alpha.core, "cas-p008", false)).await.unwrap().unwrap();
+        // The local lease is dropped without touching the cloud (a crashed path).
+        open_agent_store(&alpha.cas_dir).unwrap().release_lease("cas-p008", &alpha.agent_id).unwrap();
+        let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-p008").unwrap();
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
 
-    let worker = alpha.second_agent("delta-worker");
-    let taken = start(&worker, "cas-p008", false).await.expect("a local holder is not a peer");
-    let (_, lock) = cloud.active_lock("cas-p008").unwrap();
-    assert_ne!(lock.agent_id, alpha.agent_id, "{taken}");
+        let worker = alpha.second_agent("delta-worker");
+        if cancel_at_handoff {
+            let agents = open_agent_store(&alpha.cas_dir).unwrap();
+            let mut caller = agents.list(None).unwrap().into_iter().find(|a| a.name == "delta-worker").unwrap();
+            caller.metadata.insert("halt_task_work".into(), "1".into());
+            agents.update(&caller).unwrap();
+            let (entered, reached) = tokio::sync::oneshot::channel();
+            let (resume, wait) = std::sync::mpsc::channel();
+            cloud.state.lock().unwrap().release_gate = Some((entered, wait));
+            let mut pending = Box::pin(start(&worker, "cas-p008", false));
+            tokio::select! {
+                result = &mut pending => panic!("start returned before the blocked handoff: {result:?}"),
+                result = reached => result.unwrap(),
+            }
+            // Dropping the real handler models its response-deadline cancellation,
+            // synchronized with the HTTP handoff rather than a timing assumption.
+            drop(pending);
+            resume.send(()).unwrap();
+            let tasks = open_task_store(&alpha.cas_dir).unwrap();
+            let agents = open_agent_store(&alpha.cas_dir).unwrap();
+            assert_eq!(tasks.get("cas-p008").unwrap().status, TaskStatus::InProgress,
+                "a cancelled Cloud handoff must not leave an Open task with an active lease");
+            let lease = agents.get_lease("cas-p008").unwrap().unwrap();
+            assert_ne!(lease.agent_id, alpha.agent_id);
+            assert_eq!(lease.status, cas::types::LeaseStatus::Active);
+            assert!(!agents.get(&caller.id).unwrap().metadata.contains_key("halt_task_work"),
+                "a committed start must clear its old work halt before a cancellable handoff");
+            continue;
+        }
+        let taken = start(&worker, "cas-p008", false).await.expect("a local holder is not a peer");
+        let (_, lock) = cloud.active_lock("cas-p008").unwrap();
+        assert_ne!(lock.agent_id, alpha.agent_id, "{taken}");
+    }
+}
+
+#[tokio::test]
+async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    for fail_lease in [false, true] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "start-worker");
+        alpha.put_task("cas-start-rollback", TaskType::Task);
+        let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        let trigger = if fail_lease {
+            "CREATE TRIGGER refuse_start BEFORE INSERT ON task_leases
+             WHEN NEW.task_id = 'cas-start-rollback'
+             BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;"
+        } else {
+            "CREATE TRIGGER refuse_start BEFORE UPDATE OF status ON tasks
+             WHEN NEW.id = 'cas-start-rollback' AND NEW.status = 'in_progress'
+             BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;"
+        };
+        db.execute_batch(trigger).unwrap();
+        let error = start(&alpha.core, "cas-start-rollback", false).await.unwrap_err();
+        assert!(error.contains("injected start write failure"), "{error}");
+        assert_eq!(open_task_store(&alpha.cas_dir).unwrap().get("cas-start-rollback").unwrap().status, TaskStatus::Open);
+        assert!(open_agent_store(&alpha.cas_dir).unwrap().list_agent_leases(&alpha.agent_id).unwrap().is_empty(),
+            "a failed local start must not leave a new lease or an InProgress task");
+    }
 }
 
 /// A pulled task in progress under an assignee from another machine names

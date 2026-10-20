@@ -25,7 +25,8 @@ use std::time::Instant;
 
 use cas_factory::SourceChangesInfo;
 
-use super::delivery_evidence::{CiStatusRequest, GitEvidenceMap, ParkedFactsMap, StallEvidenceRequest};
+use super::delivery_evidence::{CiStatusRequest, StallExternalEvidence, ParkedFactsMap, StallEvidenceRequest};
+use super::assignment_evidence::{AssignmentEvidence, AssignmentRequest};
 use super::{
     CasDbFingerprint, FactoryApp, PhantomWorkerTarget, SessionEpicFocus, SessionProgressRead,
     merge_director_data_preserving_git, preferred_epic_focus_from_session_metadata_named,
@@ -81,6 +82,7 @@ pub(crate) struct DirectorRefreshLoad {
     requested_after: Instant,
     /// The store half of the supervisor-stall evidence.
     facts: Option<ParkedFactsMap>,
+    pub(super) assignment: Option<AssignmentRequest>,
     /// The session metadata, read with the snapshot.
     session: Option<SessionProgressRead>,
     transcript_fingerprints: TranscriptFingerprints,
@@ -93,6 +95,10 @@ pub(crate) struct DirectorRefreshLoad {
     /// non-live (cas-e98e), classified here because liveness checks each
     /// agent's process.
     phantom_workers: Option<Vec<PhantomWorkerTarget>>,
+    /// cas-df315: the project identity re-resolved with this read, when it
+    /// differs from the scope the request carried (an identity correction
+    /// while the factory runs). The loop adopts it as its project scope.
+    project_id: Option<String>,
 }
 
 impl DirectorRefreshLoad {
@@ -123,13 +129,22 @@ impl DirectorRefreshRequest {
     ) -> DirectorRefreshLoad {
         let fingerprint = CasDbFingerprint::from_cas_dir(&self.cas_dir);
         let db_changed = self.previous_fingerprint != Some(fingerprint);
-        let director = if db_changed {
+        // cas-df315: the identity was resolved once at startup, so a corrected
+        // [project] pin or remote kept the factory scoped to the old project
+        // and hid the pinned epic. Re-resolve it here, off the loop, with a
+        // database change or on the git cadence; a change forces a full read.
+        let corrected = (self.project_id.is_some() && (db_changed || self.git_due))
+            .then(|| crate::cloud::resolve_canonical_id(&self.cas_dir))
+            .flatten()
+            .filter(|resolved| self.project_id.as_deref() != Some(resolved.as_str()));
+        let project_id = corrected.as_deref().or(self.project_id.as_deref());
+        let director = if db_changed || corrected.is_some() {
             DirectorLoad::Loaded(DirectorData::load_with_stores_for_project(
                 &self.cas_dir,
                 self.worktree_root.as_deref(),
                 self.git_due,
                 stores,
-                self.project_id.as_deref(),
+                project_id,
             ))
         } else if self.git_due {
             DirectorLoad::GitOnly(DirectorData::load_git_changes_with_stores(
@@ -174,12 +189,14 @@ impl DirectorRefreshRequest {
             ),
             _ => None,
         };
+        let assignment = self.stall.as_ref().and_then(|stall| stall.assignment_request(fresh));
         DirectorRefreshLoad {
             fingerprint,
             git_due: self.git_due,
             director,
             requested_after: self.requested_after,
             facts,
+            assignment,
             session: self.session.as_deref().map(session_progress_named),
             transcript_fingerprints: self
                 .transcript_paths
@@ -189,6 +206,7 @@ impl DirectorRefreshRequest {
             focus,
             all_agents,
             phantom_workers,
+            project_id: corrected,
         }
     }
 }
@@ -246,6 +264,7 @@ pub(crate) struct DeliveryInputs {
     /// Supervisor-stall store facts against the fresh read; `None` when the
     /// read failed (uncertain) or no `SupervisorStalled` event needs them.
     pub(super) facts: Option<ParkedFactsMap>,
+    pub(super) assignment: Option<AssignmentEvidence>,
     /// The session metadata a `SupervisorStalled` event is revalidated
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
@@ -265,6 +284,7 @@ impl DeliveryInputs {
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
             facts: None,
+            assignment: None,
             session: None,
             merge_alerts: HashMap::new(),
             worker_ci_waits: HashMap::new(),
@@ -294,8 +314,9 @@ impl DeliveryInputs {
 }
 
 impl DeliveryRequest {
-    /// Merge reads run on the external lane because they fetch Git and query CI.
-    pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() }
+    /// Merge and supervisor-stall reads may query CI or peer claims, so they
+    /// belong on the external lane rather than the shared store read lane.
+    pub(crate) fn needs_external_lane(&self) -> bool { !self.merge_events.is_empty() || self.stall.is_some() }
     /// Move the idle-worker liveness out of this read, for a job of its own
     /// on the blocking lane. `None` when no `WorkerIdle` event needs it.
     pub(crate) fn take_idle_liveness(&mut self) -> Option<IdleLivenessRequest> {
@@ -352,11 +373,15 @@ impl DeliveryRequest {
                 super::merge_alert::read_worker_ci_wait(event, fresh, repo)
             }).collect()
         }).unwrap_or_default();
+        let assignment = self.stall.as_ref().and_then(|stall|
+            data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
+            .map(|request| request.read());
         DeliveryInputs {
             data,
             blocks_deps,
             idle_liveness,
             facts,
+            assignment,
             session,
             merge_alerts,
             worker_ci_waits,
@@ -516,6 +541,8 @@ pub(crate) struct DeliverabilityRequest {
     cas_dir: PathBuf,
     worktree_root: Option<PathBuf>,
     repo_root: PathBuf,
+    /// cas-df315: the app's current scope, not the read lane's startup copy.
+    project_id: Option<String>,
 }
 
 impl DeliverabilityRequest {
@@ -527,11 +554,12 @@ impl DeliverabilityRequest {
         if !prompts.iter().any(prompt_needs_fresh_recheck) {
             return vec![true; prompts.len()];
         }
-        let fresh = DirectorData::load_with_stores(
+        let fresh = DirectorData::load_with_stores_for_project(
             &self.cas_dir,
             self.worktree_root.as_deref(),
             false,
             stores,
+            self.project_id.as_deref(),
         );
         prompts
             .iter()
@@ -632,20 +660,21 @@ impl FactoryApp {
         ))
     }
 
-    /// The `CiStatus` job for the parked deliveries the last snapshot read,
-    /// or `None` when none needs git evidence (cas-223f review M1).
+    /// External evidence for parked deliveries and ready assignment candidates.
+    /// With neither, there is no job (cas-223f review M1, cas-7806).
     pub(crate) fn ci_status_request(&self) -> Option<CiStatusRequest> {
-        CiStatusRequest::new(
-            self.delivery_repo_root(),
-            &self.parked_facts,
+        let assignment = self.stall_evidence_request().and_then(|stall| stall.assignment_request(None));
+        CiStatusRequest::for_stall(
+            self.delivery_repo_root(), &self.parked_facts,
             std::sync::Arc::clone(&self.lane_ci_pending),
-            std::sync::Arc::clone(&self.delivery_containment),
+            std::sync::Arc::clone(&self.delivery_containment), assignment,
         )
     }
 
     /// Apply a finished `CiStatus` job.
-    pub(crate) fn apply_ci_status(&mut self, evidence: GitEvidenceMap) {
-        self.git_evidence = evidence;
+    pub(crate) fn apply_ci_status(&mut self, evidence: StallExternalEvidence) {
+        self.git_evidence = evidence.git;
+        self.assignment_evidence = evidence.assignment.unwrap_or_default();
     }
 
     /// Capture what the delivery stage's fresh read needs to revalidate
@@ -681,6 +710,7 @@ impl FactoryApp {
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             repo_root: self.delivery_repo_root(),
+            project_id: self.project_scope(),
         }
     }
 
@@ -698,6 +728,12 @@ impl FactoryApp {
             return Ok(Vec::new());
         }
         let git_due = load.git_due;
+        if let Some(project_id) = load.project_id
+            && let Some(stores) = self.director_stores.as_mut()
+        {
+            tracing::info!(%project_id, previous = ?stores.project_id, "cas-df315: factory project scope follows the corrected identity");
+            stores.project_id = Some(project_id);
+        }
         if let Some(facts) = load.facts {
             self.parked_facts = facts;
         }

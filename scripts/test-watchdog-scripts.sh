@@ -26,6 +26,17 @@ expect_absent() {
     fi
 }
 
+expect_count() {
+    local haystack="$1" needle="$2" expected="$3" label="$4" actual
+    actual="$(grep -cF -- "$needle" <<<"$haystack" || true)"
+    if [[ "$actual" == "$expected" ]]; then
+        printf 'ok   %s\n' "$label"; pass=$((pass + 1))
+    else
+        printf 'FAIL %s (expected %s, got %s for %s)\n' "$label" "$expected" "$actual" "$needle" >&2
+        fail=$((fail + 1))
+    fi
+}
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
@@ -33,6 +44,15 @@ cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_GH_LOG:?}"
+if [[ "${FAKE_GH_FAILURE:-}" == list-once && "$*" == *'actions/runs?status=queued&per_page=100'* ]]; then
+    count_file="${FAKE_GH_STATE:?}/list-once-count"; count=0; [[ -f "$count_file" ]] && count="$(<"$count_file")"
+    echo $((count + 1)) >"$count_file"
+    if (( count == 0 )); then
+        printf '%s\n' '{"message":"Resource not accessible by integration"}'
+        echo 'gh: transient network error' >&2
+        exit 1
+    fi
+fi
 if [[ "${FAKE_GH_FAILURE:-}" == list && "$*" == *'actions/runs?status=queued&per_page=100'* ]] ||
    [[ "${FAKE_GH_FAILURE:-}" == status && "$*" == *'actions/runs/101 --jq .status'* ]] ||
    [[ "${FAKE_GH_FAILURE:-}" == cancel && "$*" == *'actions/runs/101/cancel'* ]]; then
@@ -65,8 +85,14 @@ case "$*" in
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+cat >"$tmp/bin/sleep" <<'EOF_SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1" >>"${FAKE_SLEEP_LOG:?}"
+EOF_SLEEP
+chmod +x "$tmp/bin/sleep"
 
-run_env=(GITHUB_REPOSITORY=example/repo CASSY_NOW_EPOCH=2000 FAKE_GH_LOG="$tmp/gh.log" FAKE_GH_STATE="$tmp/state" PATH="$tmp/bin:$PATH")
+run_env=(GITHUB_REPOSITORY=example/repo CASSY_NOW_EPOCH=2000 FAKE_GH_LOG="$tmp/gh.log" FAKE_GH_STATE="$tmp/state" FAKE_SLEEP_LOG="$tmp/sleep.log" PATH="$tmp/bin:$PATH")
 mkdir -p "$tmp/state"
 merge_output="$tmp/merge-output"
 if env "${run_env[@]}" "$merge_script" >"$merge_output" 2>&1; then
@@ -97,26 +123,52 @@ else
     printf 'FAIL queued watchdog fixture exits successfully\n' >&2; fail=$((fail + 1))
 fi
 
+# A transient queued-list read retries once with the first backoff, then the
+# normal sweep proceeds and still cancels only after its status read.
+: >"$tmp/gh.log"
+: >"$tmp/sleep.log"
+transient_list_output="$tmp/transient-list-output"
+if env "${run_env[@]}" FAKE_GH_FAILURE=list-once "$queued_script" >"$transient_list_output" 2>&1; then
+    transient_list_text="$(<"$transient_list_output")"
+    expect_text "$transient_list_text" 'cancelling stale queued run=101 event=push' 'queued watchdog resumes after a transient list failure'
+    expect_absent "$transient_list_text" 'Cannot iterate over null' 'failed response body is discarded before parsing the successful list'
+    expect_count "$(<"$tmp/gh.log")" 'actions/runs?status=queued&per_page=100' 2 'queued list is retried once after a transient failure'
+    expect_count "$(<"$tmp/sleep.log")" '1' 1 'queued list retry backs off for one second'
+else
+    printf 'FAIL queued watchdog recovers from a transient list failure\n' >&2
+    cat "$transient_list_output" >&2
+    fail=$((fail + 1))
+fi
+
 # Per-run permission errors must not prevent later eligible runs being swept.
-for failure in status cancel list; do
+for failure in status cancel; do
     : >"$tmp/gh.log"
     output="$tmp/$failure-error-output"
     if env "${run_env[@]}" FAKE_GH_FAILURE="$failure" "$queued_script" >"$output" 2>&1; then result=0; else result=$?; fi
     text="$(<"$output")"; log="$(<"$tmp/gh.log")"
-    if [[ "$failure" == list ]]; then
-        if (( result != 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo 'FAIL list error must fail the job' >&2; fi
-        expect_text "$text" 'error: queued list failed call=GET repos/example/repo/actions/runs?status=queued&per_page=100' 'list permission failure names call'
-        expect_absent "$log" 'actions/runs/101' 'failed list performs no per-run calls'
-    else
-        if (( result == 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $failure error must not fail sweep" >&2; fi
-        expect_text "$text" "warning: $failure failed run=101 call=" "$failure permission failure names call and run"
-        expect_text "$log" 'actions/runs/106/cancel' "$failure error still sweeps later run"
-        if [[ "$failure" == status ]]; then
-            expect_absent "$log" 'actions/runs/101/cancel' 'failed status never attempts cancel'
-        fi
+    if (( result == 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo "$failure error must not fail sweep" >&2; fi
+    expect_text "$text" "warning: $failure failed" "$failure permission failure names call and run"
+    expect_text "$log" 'actions/runs/106/cancel' "$failure error still sweeps later run"
+    if [[ "$failure" == status ]]; then
+        expect_text "$text" 'warning: status failed after 3 attempts run=101 call=' 'status reread exhaustion warns and skips the run'
+        expect_count "$log" 'actions/runs/101 --jq .status' 3 'status reread is bounded to three attempts'
+        expect_absent "$log" 'actions/runs/101/cancel' 'failed status never attempts cancel'
     fi
     expect_text "$text" 'HTTP 403' "$failure failure retains underlying cause"
 done
+
+: >"$tmp/gh.log"
+: >"$tmp/sleep.log"
+list_output="$tmp/list-error-output"
+if env "${run_env[@]}" FAKE_GH_FAILURE=list "$queued_script" >"$list_output" 2>&1; then result=0; else result=$?; fi
+list_text="$(<"$list_output")"; list_log="$(<"$tmp/gh.log")"
+if (( result != 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo 'FAIL exhausted list read must fail the job' >&2; fi
+expect_text "$list_text" 'error: queued list failed after 3 attempts call=GET repos/example/repo/actions/runs?status=queued&per_page=100' 'list exhaustion emits a distinct error with the call'
+expect_count "$list_log" 'actions/runs?status=queued&per_page=100' 3 'queued list retries are bounded to three attempts'
+sleep_text="$(<"$tmp/sleep.log")"
+expect_count "$sleep_text" '1' 1 'first queued-list retry backs off one second'
+expect_count "$sleep_text" '2' 1 'second queued-list retry backs off two seconds'
+expect_absent "$list_log" 'actions/runs/101' 'failed list performs no per-run calls'
 
 for script in "$merge_script" "$queued_script"; do
     dry_output="$tmp/$(basename "$script").dry-output"

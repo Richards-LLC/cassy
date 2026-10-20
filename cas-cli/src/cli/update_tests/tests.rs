@@ -1734,39 +1734,58 @@ fn tty_update_without_yes_keeps_confirmation_and_human_output_enabled() {
 
 #[test]
 fn json_update_from_fake_release_never_prompts_or_leaks_self_update_output() {
-    use self_update::update::ReleaseUpdate;
-
-    let (base_url, server) = fake_release_source();
-    let args = update_test_args();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("GITHUB_TOKEN", "fixture-token-not-a-secret");
     let cli = update_test_cli(true);
-    let mut builder = configure_updater(&args, "3.17.1", &cli, false)
-        .expect("JSON mode must not require --yes on a non-TTY");
-    builder.with_url(&base_url);
-    let updater = builder.build().expect("fake release updater configuration");
 
     #[cfg(unix)]
     let _output_lock = update_output_lock();
-    let (result, output) = capture_phase(true, || updater.update());
-    server
-        .join()
-        .expect("fake release source should serve its release response");
-
-    result.expect_err("the fake download intentionally fails after release lookup");
-    assert!(
-        !output.contains("Do you want to continue?"),
-        "output was: {output:?}"
-    );
-    assert!(
-        !output.contains("Checking target-arch"),
-        "output was: {output:?}"
-    );
-    assert!(
-        !output.contains("Looking for tag"),
-        "output was: {output:?}"
-    );
+    let mut failures = Vec::new();
+    for download_fails in [true, false] {
+        let mut args = update_test_args();
+        if !download_fails {
+            // cas-a99a: exercise the reported full `cas --json update --yes`,
+            // including latest-release selection, rather than a pinned version.
+            args.version = None;
+            args.yes = true;
+        }
+        let (base_url, server) = fake_release_source(download_fails);
+        env.set("CAS_UPDATE_GITHUB_API_URL", &base_url);
+        let (result, output) = capture_phase(true, || run_full_update(
+            &cli,
+            false,
+            || perform_update(&args, "3.17.1", &cli),
+            |_| panic!("failed install must not invoke the installed binary"),
+            |_| panic!("failed install must not restart the hub"),
+            |_, _| panic!("failed install must not refresh projects"),
+        ));
+        server.join().expect("loopback release/download fixture");
+        let error = result.expect_err("download/extraction refusal must remain nonzero");
+        let cause = format!("{error:#}");
+        assert!(cause.contains("could not install Cassy 9.9.9"), "{cause}");
+        assert!(
+            cause.contains(if download_fails { "500" } else { "archive" }),
+            "the failure must reach the intended download/extraction boundary: {cause}"
+        );
+        let document = serde_json::from_str::<serde_json::Value>(&output);
+        match document {
+            Ok(receipt) => {
+                assert_eq!(receipt["binary_updated"], false, "{receipt}");
+                assert_eq!(receipt["version"], "3.17.1", "{receipt}");
+                assert_eq!(receipt["binary_status"], "failed", "{receipt}");
+                assert_eq!(receipt["refresh_status"], "not_run", "{receipt}");
+                assert_eq!(receipt["error"]["phase"], "binary", "{receipt}");
+                assert_eq!(receipt["error"]["message"], cause);
+                assert!(receipt.get("projects").is_none() && receipt.get("hub_restart").is_none(), "{receipt}");
+            }
+            Err(_) => failures.push(format!("download_fails={download_fails}: expected one JSON object, got {output:?}; error={error:#}")),
+        }
+        assert!(!output.contains("Do you want to continue?") && !output.contains("Checking target-arch") && !output.contains("Looking for tag"), "{output}");
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
-fn fake_release_source() -> (String, thread::JoinHandle<()>) {
+fn fake_release_source(download_fails: bool) -> (String, thread::JoinHandle<()>) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind fake release source");
     let base_url = format!("http://{}", server.server_addr());
     let release = format!(
@@ -1775,20 +1794,36 @@ fn fake_release_source() -> (String, thread::JoinHandle<()>) {
             "name": "9.9.9",
             "created_at": "2026-09-05T00:00:00Z",
             "assets": [{{
-                "name": "cas-linux-x86_64.tar.gz",
-                "url": "{base_url}/asset"
+                "name": "cas-{target}.tar.gz",
+                "url": "{base_url}/asset",
+                "browser_download_url": "{base_url}/asset"
             }}]
         }}"#,
-        base_url = base_url
+        base_url = base_url,
+        target = self_update::get_target(),
     );
     let handle = thread::spawn(move || {
-        let request = server
-            .incoming_requests()
-            .next()
-            .expect("updater should request the fake release");
-        request
-            .respond(tiny_http::Response::from_string(release))
-            .expect("respond with fake release");
+        loop {
+            let request = server.recv_timeout(Duration::from_secs(10)).unwrap()
+                .expect("updater must reach only the loopback release/download fixture");
+            let asset = request.url() == "/asset";
+            let response = if asset {
+                // Neither fixture can yield an executable or replace the test binary.
+                tiny_http::Response::from_string("not a release archive")
+                    .with_status_code(if download_fails { 500 } else { 200 })
+            } else {
+                // Unpinned --yes resolves a release list; pinned updates and
+                // the initial latest-release lookup request a single object.
+                let body = if request.url().ends_with("/releases") {
+                    format!("[{release}]")
+                } else {
+                    release.clone()
+                };
+                tiny_http::Response::from_string(body)
+            };
+            request.respond(response).expect("respond with fake release");
+            if asset { break; }
+        }
     });
     (base_url, handle)
 }
@@ -2587,8 +2622,9 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
     env.set("HOME", host.path());
     env.set("XDG_CONFIG_HOME", host.path().join(".config"));
     env.set("CAS_CREDENTIALS_FILE", host.path().join("credentials.env"));
+    let mut diagnostic_failures = Vec::new();
     #[cfg(unix)]
-    for mode in ["all-projects", "sync", "worker-sync"] {
+    for mode in ["all-projects", "sync", "worker-sync", "commit-msg-sync", "human-sync"] {
         use std::os::unix::fs::PermissionsExt;
         let fixture_home = host.path().join(mode);
         let project = cas_6718_drifted_project(&fixture_home);
@@ -2604,68 +2640,105 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
         let user_before = std::fs::read(&readme).unwrap();
         let hook = project.join(".git/hooks/pre-commit");
+        let commit_msg = mode == "commit-msg-sync";
         std::fs::write(
             &hook,
-            "#!/bin/sh\necho 'pre-commit: fixture refuses the managed commit' >&2\nexit 1\n",
+            if commit_msg {
+                "#!/bin/sh\nexit 0\n"
+            } else {
+                "#!/bin/sh\necho 'pre-commit: fixture refuses the managed commit' >&2\nexit 1\n"
+            },
         )
         .unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let message_hook = project.join(".git/hooks/commit-msg");
+        if commit_msg {
+            std::fs::write(&message_hook,
+                "#!/bin/sh\necho 'commit-msg: fixture refuses the managed commit' >&2\nexit 1\n").unwrap();
+            std::fs::set_permissions(&message_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let message_hook_before = std::fs::read(&message_hook).ok();
         let hook_before = std::fs::read(&hook).unwrap();
         let config_before = std::fs::read(project.join(".git/config")).unwrap();
         let mut args = update_test_args();
         args.all_projects = mode == "all-projects";
         args.sync = mode != "all-projects";
+        let human = mode == "human-sync";
+        env.set("COLUMNS", "80");
         let (result, output) =
-            capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+            capture_phase(true, || execute(&args, &update_test_cli(!human), Some(&root)));
         assert!(
             result.is_err(),
             "{mode}: refused commit must make update incomplete, got success:\n{output}"
         );
-        let rows = output
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 1, "{mode}: expected one JSON receipt:\n{output}");
-        let receipt = &rows[0];
-        // cas-fd1e: the all-projects receipt owns each phase's documents;
-        // sync still reports managed files directly. Both preserve the refusal.
-        let managed = if mode == "all-projects" {
-            receipt.pointer("/projects/0/phase_documents/skills/0/managed_files")
+        if human {
+            let error = format!("[ERROR] {}", result.unwrap_err());
+            let visible = format!("{output}{error}");
+            if visible.matches("pre-commit: fixture refuses").count() != 1
+                || visible.matches("--show-origin").count() != 1
+                || error.lines().any(|line| ratatui::text::Line::from(line).width() > 80)
+            {
+                diagnostic_failures.push(format!(
+                    "human sync repeats or overflows: causes={}, remedies={}; {error}",
+                    visible.matches("pre-commit: fixture refuses").count(),
+                    visible.matches("--show-origin").count(),
+                ));
+            }
         } else {
-            receipt.get("managed_files")
-        }
-        .unwrap_or_else(|| panic!("{mode}: missing managed-file receipt:\n{output}"));
-        assert_eq!(managed["outcome"], "commit_failed", "{output}");
-        assert!(
-            managed["conflicts"].as_array().unwrap().is_empty(),
-            "{output}"
-        );
-        let reason = managed["commit_error"]
-            .as_str()
-            .expect("distinct commit error");
-        assert!(
-            reason.contains("pre-commit: fixture refuses") && reason.contains("--show-origin"),
-            "{reason}"
-        );
-        if mode == "all-projects" {
-            assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
+            let rows = output
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1, "{mode}: expected one JSON receipt:\n{output}");
+            let receipt = &rows[0];
+            // cas-fd1e: the all-projects receipt owns each phase's documents;
+            // sync still reports managed files directly. Both preserve the refusal.
+            let managed = if mode == "all-projects" {
+                receipt.pointer("/projects/0/phase_documents/skills/0/managed_files")
+            } else {
+                receipt.get("managed_files")
+            }
+            .unwrap_or_else(|| panic!("{mode}: missing managed-file receipt:\n{output}"));
+            assert_eq!(managed["outcome"], "commit_failed", "{output}");
             assert!(
-                receipt["projects"][0]["skills"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("FAILED:"),
+                managed["conflicts"].as_array().unwrap().is_empty(),
                 "{output}"
             );
+            let reason = managed["commit_error"]
+                .as_str()
+                .expect("distinct commit error");
+            assert!(
+                reason.contains(if commit_msg { "commit-msg: fixture refuses" } else { "pre-commit: fixture refuses" })
+                    && reason.contains("--show-origin"),
+                "{reason}"
+            );
+            if commit_msg {
+                if reason.contains("active pre-commit hook") || !reason.contains("hooks directory") {
+                    diagnostic_failures.push(format!("commit-msg refusal misattributed: {reason}"));
+                }
+            }
+            if mode == "all-projects" {
+                assert_eq!(receipt["refresh_status"], "refresh_failed", "{output}");
+                assert!(
+                    receipt["projects"][0]["skills"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("FAILED:"),
+                    "{output}"
+                );
+            }
         }
         assert_eq!(cas_6718_git(&project, &["rev-parse", "HEAD"]), head);
         assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
         assert_eq!(std::fs::read(&readme).unwrap(), user_before);
         assert_eq!(std::fs::read(&hook).unwrap(), hook_before);
+        assert_eq!(std::fs::read(&message_hook).ok(), message_hook_before);
         assert_eq!(
             std::fs::read(project.join(".git/config")).unwrap(),
             config_before
         );
     }
+    assert!(diagnostic_failures.is_empty(), "{diagnostic_failures:#?}");
 }
 
 #[test]

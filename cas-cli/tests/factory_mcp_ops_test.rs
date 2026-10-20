@@ -6000,6 +6000,41 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         assert!(root.join(&closed_id).join(name).is_file(), "named cache reclaim deleted durable {name}");
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        // cas-c334: prove successful native named reclaim also returns before
+        // ordinary GC. Its aged closed-task media would otherwise be pruned.
+        let target = orphan.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("output.rlib"), b"regenerable").unwrap();
+        std::fs::write(orphan.join("source.rs"), b"uncommitted source").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(4 * 3600);
+        for path in [target.join("output.rlib"), target.clone()] {
+            std::fs::File::open(path).unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        }
+        let mut named = factory_req("gc_cleanup");
+        named.force = Some(true);
+        named.dry_run = Some(false);
+        named.reclaim_unknown_target = Some(target.canonicalize().unwrap().display().to_string());
+        // Exact-path admission deliberately rejects aliases, including macOS
+        // /var -> /private/var. Canonicalize the fixture service's root too.
+        let core = CasCore::with_daemon(env.cas_root.canonicalize().unwrap(), None, None);
+        core.set_agent_id_for_testing("test-agent-id".to_string());
+        let service = CasService::new(core, None);
+        let result = service.factory_request(Parameters(named)).await.unwrap();
+        let text = get_text(&result);
+        assert!(!target.exists(), "native exact-path reclaim must succeed: {text}");
+        assert_eq!(std::fs::read(orphan.join("source.rs")).unwrap(), b"uncommitted source");
+        for (name, bytes) in [("trace.zip", b"trace".as_slice()), ("video.webm", b"video"), ("proof.txt", b"durable proof")] {
+            assert_eq!(std::fs::read(root.join(&closed_id).join(name)).unwrap(), bytes, "successful named reclaim changed {name}: {text}");
+        }
+        assert!(root.join(&open_id).join("trace.zip").is_file());
+        assert!(root.join(&open_id).join("video.webm").is_file());
+        assert!(root.join("operator-review-stray").is_dir());
+        assert_eq!(std::fs::read(legacy.join("historical-proof.txt")).unwrap(), b"possibly shared evidence");
+    }
+
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
     preview.dry_run = Some(false);

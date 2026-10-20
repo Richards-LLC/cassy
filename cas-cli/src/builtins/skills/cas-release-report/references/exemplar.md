@@ -71,13 +71,26 @@ import `render(source, project_root=..., tokens=..., source_href=..., pdf_href=.
 emphasis=..., footer=...)`; it returns HTML without writing files. Keep the
 `references/` directory next to `scripts/` when extracting builtin resources.
 
-Tokens use `color.light.<role>.$value`, `color.dark.<role>.$value` and
+Precedence: explicit `--tokens`, the root `DESIGN.md`, root `design-tokens.json`,
+`docs/design/design-tokens.json`, bundled defaults.
+
+A root `DESIGN.md` is used when its frontmatter has `source: [...]` naming at
+least one existing `.css` file and a `maps:` block of `role: "--variable"`
+lines. Each CSS file is inlined whole; a relative `url("./face.woff2")` becomes
+a data URI (400 kB cap). Any other `url(`, `@import` or `</` fails the render, so
+the report stays offline. Each role becomes `--role: var(--variable)`, except a
+role already named like its variable. An optional `brand-mark:` SVG path is
+inlined beside the product name in the hero. The template reads the Petrastella
+roles below plus optional `hero-band`, `glass-panel`, `glass-panel-strong`,
+`glass-edge`, `glass-blur`, `glass-shadow`, `lift`, `card`, `emphasis`,
+`on-emphasis`, `radius-panel`, `radius-tile` and `radius-chip`; each falls back
+to a Petrastella role or to none, so a flat palette still renders.
+
+JSON tokens use `color.light.<role>.$value`, `color.dark.<role>.$value` and
 `typography.family.{display,body,mono}.$value` arrays. Roles are those in
 `default-tokens.json`; hex and numeric rgb/rgba values are accepted. Partial
-overrides inherit missing defaults. Precedence: explicit `--tokens`, root
-`design-tokens.json`, `docs/design/design-tokens.json`, bundled defaults. The
-agent reads DESIGN.md and resolves any other token path or maps another schema;
-the renderer does not infer visual design rules from prose. No network font loads.
+overrides inherit missing defaults. The renderer does not infer visual design
+rules from prose. No network font loads.
 
 ## Template and change-map data contract v2
 

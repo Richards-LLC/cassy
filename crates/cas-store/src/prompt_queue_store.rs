@@ -19473,6 +19473,28 @@ mod cas_f17b_tests {
                 .len(),
             0
         );
+        // A large expiry is bounded per recipient, while every excess body
+        // remains available through that recipient's explicit named read.
+        let bodies: Vec<_> = (0..7).map(|n| format!("Recover request number {n} with its complete body")).collect();
+        let ids: Vec<_> = bodies.iter().map(|body| aged_message(&queue, &sender, body)).collect();
+        assert_eq!(queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().len(), 7);
+        let delivered = queue.poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100).unwrap();
+        assert_eq!(delivered.len(), 4, "three complete notices plus one folded row");
+        let complete = delivered.iter().filter(|row| bodies.iter().any(|body| row.prompt.contains(body.as_str()))).count();
+        assert_eq!(complete, 3);
+        let folded = delivered.iter().find(|row| row.prompt.contains("notification_id=")).unwrap();
+        let references: Vec<i64> = folded.prompt.lines().filter_map(|line| line.split_once("notification_id="))
+            .filter_map(|(_, tail)| tail.split_whitespace().next()?.parse().ok()).collect();
+        assert_eq!(references.len(), 4);
+        assert!(queue.poll_named_for_recipient(&sender.name, Some("foreign-session"), &references).unwrap().is_empty());
+        let details = queue.poll_named_for_recipient(&sender.name, sender.factory_session.as_deref(), &references).unwrap();
+        assert_eq!(details.len(), 4);
+        for (original, body) in ids.iter().zip(&bodies).skip(3) {
+            assert!(details.iter().any(|row| row.prompt.contains(&original.to_string()) && row.prompt.contains(body)),
+                "explicit recipient read must recover original {original}");
+        }
+        assert!(queue.poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100).unwrap().is_empty());
+
     }
 
 

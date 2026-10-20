@@ -111,6 +111,8 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
+            "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
+            "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),

@@ -221,7 +221,7 @@ fn supervisor_owned_workers() -> Option<std::collections::HashSet<String>> {
 /// length is part of what a headroom pin has to account for; a test that
 /// re-typed the string would measure a copy rather than what ships.
 pub const CODEX_WORKER_COORDINATION_NOTE: &str = "\n\n## Codex Worker Coordination Note\n\
-Workers are running Codex. Assign task id, acceptance criteria, checks and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Read task state and execution evidence before correcting course. Codex workers must attempt task action=close first. Use the returned verification-required or MERGE REQUIRED workflow: task-verifier or mcp__cas__verification for verification, otherwise merge. After the merge, the worker re-closes the task.";
+Workers are running Codex. Assign task id, acceptance criteria, checks and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Read task state and execution evidence before correcting course. Codex workers must attempt task action=close first. Use the returned verification-required or MERGE REQUIRED workflow: task-verifier or mcp__cas__verification for verification, otherwise merge. After the merge, the worker re-closes the task.";
 
 /// Inject role-specific guidance into context
 fn inject_role_guidance(
@@ -407,7 +407,7 @@ mod tests {
                     "authoritative assignment acceptance",
                     "no prose ACK is required",
                     "inbox on the next turn",
-                    "only authenticated typed",
+                    "Directed messages wake",
                     "workers must attempt task action=close first",
                     "returned verification-required or MERGE REQUIRED workflow",
                     "mcp__cas__verification",

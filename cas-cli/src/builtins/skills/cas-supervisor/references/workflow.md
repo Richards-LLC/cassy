@@ -148,7 +148,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
    ```
 
 <!-- markdownlint-disable-next-line MD029 -->
-6. **Own the next exit rung.** If a worker owns it, use inbox updates on the next turn; only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
+6. **Own the next exit rung.** If a worker owns it, use coordination updates. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
 
 ### Resuming an Existing EPIC
 

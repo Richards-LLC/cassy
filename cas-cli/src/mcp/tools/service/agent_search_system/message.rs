@@ -1025,6 +1025,9 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        if req.wake == Some(false) || req.kind.as_deref() == Some("receipt") {
+            message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+        }
         // Resolve cross-machine peers before applying the local inbox cap.
         // Their Cloud body must be readable on the receiving machine: spilling
         // first sent a path on the sender's disk instead of the full text
@@ -1942,11 +1945,12 @@ impl CasService {
                         crate::prompt_revalidation::WorkerActionKind::Ready
                     })
                 }
+                Some("receipt" | "answer" | "ask") => None,
                 Some(other) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "worker messages support kind=status or kind=ready to the same-session supervisor, not '{other}'"
+                            "worker messages support status, ready, receipt, answer or ask; status/ready require the same-session supervisor, not '{other}'"
                         ),
                     ));
                 }
@@ -2744,6 +2748,11 @@ impl CasService {
                 .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
                     agent_id: agent.id.clone(),
                 });
+        // Local cap/spill and reply framing must not discard the sender's opt-out.
+        if (req.wake == Some(false) || req.kind.as_deref()==Some("receipt"))
+            && !crate::supervisor_message_wakes::quiet(&message) {
+            message=format!("{}\n{message}",crate::supervisor_message_wakes::QUIET);
+        }
         let enqueue_started = std::time::Instant::now();
         let peer_copy_message = peer_supervisor_copy
             .as_ref()
@@ -3967,9 +3976,19 @@ impl CasService {
                     factory.delivery_stalled_normal_secs
                 };
                 let verdict_line = recipient_verdict(&r, now, escalate_after_secs);
+                let wake_target = if r.target == "supervisor" {
+                    crate::store::open_agent_store(&self.inner.cas_root).ok()
+                        .and_then(|store| store.list(None).ok())
+                        .and_then(|agents| agents.into_iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor
+                            && agent.factory_session == r.factory_session).max_by_key(|agent| agent.registered_at))
+                        .map(|agent| agent.name).unwrap_or_else(|| r.target.clone())
+                } else { r.target.clone() };
+                let wake_cost_line = crate::supervisor_message_wakes::report(&self.inner.cas_root, &wake_target)
+                    .unwrap_or_else(|error| format!("directed_message_wake_cost: unavailable ({error})\n"));
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      {verdict_line}\
+                     {wake_cost_line}\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
@@ -4121,6 +4140,10 @@ fn pending_deadline_narrative(
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::AwaitingBusyRecipient)
     {
+        if let Some(detail)=pending_detail.filter(|detail|detail.starts_with("directed supervisor message ")
+            || detail.starts_with("quiet acknowledgement or wake=false")) {
+            return format!("supervisor wake policy: still pending — {detail}; readable at the next turn start or tool call\n");
+        }
         return format!(
             "busy recipient: still pending — wake retries stopped while the recipient works; \
              the message surfaces at its next turn start or tool call — {}\n",
@@ -4448,6 +4471,12 @@ mod pending_deadline_tests {
         assert!(line.contains("next turn start or tool call"), "{line}");
         assert!(!line.contains("never be delivered"), "{line}");
         assert!(!line.contains("PAST"), "{line}");
+        for detail in ["directed supervisor message burst debounce", "directed supervisor message held by sender-pair wake cap"] {
+            let policy=pending_deadline_narrative(DeliveryStage::Gated,Some(cas_store::PendingReason::AwaitingBusyRecipient),Some(detail),Some(1200),InboxHandoffState::NotHeld);
+            assert!(policy.contains("supervisor wake policy"),"{policy}");
+            assert!(!policy.contains("busy recipient"),"a policy hold is not evidence the recipient works: {policy}");
+        }
+
     }
 
     #[test]
@@ -6262,6 +6291,19 @@ mod cas_89e1_post_merge_message_type_tests {
                     .map(|envelope| envelope.kind),
                 Some(expected)
             );
+        }
+
+        for (kind,wake,body) in [
+            ("receipt",None,"The delivery was received."),
+            ("answer",Some(false),"A field report that can wait."),
+        ] {
+            let mut request=message_request_to("supervisor");
+            request.kind=Some(kind.into());request.wake=wake;request.message=Some(body.into());
+            service.message_send(request).await.expect("quiet message remains deliverable");
+            let rows=crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let row=rows.iter().find(|row|row.prompt.contains(body))
+                .expect("quiet body retained");
+            assert!(crate::supervisor_message_wakes::quiet(&row.prompt),"{kind}: {}",row.prompt);
         }
 
         let mut cross_session = message_request_to("supervisor-b");

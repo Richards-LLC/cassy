@@ -20,6 +20,26 @@ neither rebroadcast the reply nor stamp it selected again.
 
 ## Coordination messages and reminders
 
+Authenticated messages directed to a supervisor wake its idle pane, including
+peer field reports with no `kind`. The first message opens a fixed burst window
+(`factory.supervisor_message_debounce_secs`, default 20 seconds, range 0–300).
+Messages selected together share one body-bearing PTY turn, with each message's
+identity and delivery receipt preserved. Task-bound action envelopes retain
+individual stale-task revalidation. Busy panes, tool calls and drafts defer.
+
+`kind=receipt`, pure acknowledgements such as “thanks, received”, broadcasts and
+`wake=false` do not start turns; their bodies remain readable at the next turn.
+A rolling sender/recipient cap (`factory.supervisor_message_wakes_per_hour`,
+default 6) holds further wake attempts and places a readable wake-cap notice in
+the inbox. Other senders retain their own budget. Restarting the daemon retains
+the ledger and cap. Use `coordination action=message_status notification_id=<id>`
+for wakes in the last hour, measured turns, median input+output tokens per woken
+turn and maximum observed start latency. Claude/Codex usage is matched to the
+message id in the harness transcript; missing, truncated or unfinished evidence
+reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
+the cumulative input/output delta across that turn. Transport alone never proves
+that a model started or consumed tokens.
+
 Worker-idle merge notices wait for completed CI on the delivery's exact tip
 and a successful refresh of its integration target. Parked deliveries retry
 each minute, including when the director snapshot is unchanged. Pending CI

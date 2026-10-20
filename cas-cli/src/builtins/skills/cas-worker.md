@@ -66,7 +66,7 @@ use assigned work; `ready` and `available` are backlog
   and handoffs to `target=supervisor`.
 - Use `kind=status` for actionable updates that allow work to continue, or
   `kind=ready` for completed work awaiting coordination: these request a typed action wake.
-  Ordinary updates stay inbox-only.
+  Send receipts with `kind=receipt`, or use `wake=false` for an FYI that can wait.
 - Never block the pane: run long commands in the background with a log.
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
@@ -132,5 +132,6 @@ need: <what the supervisor must do, one line, or none>
 ```
 
 Coordination uses the literal string `supervisor` and both `summary` and `message`.
-Authenticated typed blocker, merge, status/ready, verification or lifecycle
-events may wake an idle supervisor. Text alone stays inbox-only; proof stays in notes.
+Directed messages wake an idle supervisor after debounce and pair rate limits.
+Receipts, pure acknowledgements, broadcasts and `wake=false` wait in the inbox
+on the next turn; proof stays in notes.

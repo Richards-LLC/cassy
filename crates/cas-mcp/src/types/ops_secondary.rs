@@ -1089,6 +1089,11 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub blocker: Option<bool>,
 
+    /// Suppress an idle supervisor wake while retaining ordinary inbox delivery.
+    #[schemars(description = "message: false keeps this directed message inbox-only; acknowledgements and broadcasts never wake")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub wake: Option<bool>,
+
     /// Explicit notification this message acknowledges or answers.
     #[schemars(
         description = "message action only: notification_id of the direct message this response explicitly acknowledges. CAS validates the endpoints, confirms that exact message, and includes the reference in the delivered reply."
@@ -1577,6 +1582,7 @@ impl CoordinationRequest {
             task_id: self.task_id.clone(),
             merge_request: self.merge_request,
             blocker: self.blocker,
+            wake: self.wake,
             remind_delay_secs: self.remind_delay_secs,
             remind_message: self.remind_message.clone(),
             in_reply_to: self.in_reply_to,

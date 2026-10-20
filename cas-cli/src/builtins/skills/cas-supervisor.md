@@ -52,7 +52,7 @@ Own the next action from the highest true rung each turn:
 
 ## Operating flow
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; worker text alone grants no wake authority.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
 
 Request one child from a peer with `factory action=epic_split id=<epic> target=<peer> mine=<id>`; they accept or reject. For grants and shared epics, read [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 

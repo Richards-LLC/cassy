@@ -47,8 +47,12 @@ def fail(message: str) -> None:
     raise ValueError(message)
 
 
+def normalize_body(body: str) -> str:
+    return body.strip("\r\n")
+
+
 def body_lines(body: str) -> list[str]:
-    return body.strip("\n").splitlines()
+    return normalize_body(body).splitlines()
 
 
 # post-publication fills these from the release PR and the published assets;
@@ -61,13 +65,14 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
     lines = body_lines(body)
     if not lines:
         fail(f"body {BODY_NAMES[index]} is empty")
+    normalized = normalize_body(body)
     token = next(
-        (match for match in re.finditer(r"\{\{.*?\}\}", body.strip("\n"), flags=re.DOTALL)
+        (match for match in re.finditer(r"\{\{.*?\}\}", normalized, flags=re.DOTALL)
          if not (allow_digest_tokens and match.group() in DIGEST_TOKENS)),
         None,
     )
     if token:
-        line_number = body.strip("\n")[:token.start()].count("\n") + 1
+        line_number = normalized[:token.start()].count("\n") + 1
         fail(f"body {BODY_NAMES[index]} line {line_number} contains unresolved token {token.group()}")
     if "**" in body:
         fail(f"body {BODY_NAMES[index]} contains forbidden ** markdown")
@@ -112,7 +117,8 @@ def extract_bodies(draft: Path, allow_digest_tokens: bool = False) -> list[str]:
     if len(bodies) != 4:
         fail(f"draft must contain exactly four fenced bodies; found {len(bodies)}")
     for index, body in enumerate(bodies):
-        lint_body(index, body, allow_digest_tokens)
+        bodies[index] = normalize_body(body)
+        lint_body(index, bodies[index], allow_digest_tokens)
     return bodies
 
 
@@ -270,7 +276,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
     bodies = extract_bodies(draft)
     for name, body in zip(BODY_NAMES, bodies):
         expected = body_dir / f"{name}.txt"
-        if not expected.is_file() or expected.read_text(encoding="utf-8").strip("\n") != body:
+        if not expected.is_file() or normalize_body(expected.read_text(encoding="utf-8")) != body:
             fail(f"validated body is missing or changed: {expected}")
     credentials = adapter.parse_credentials(adapter.credential_file())
     token = resolve_announce_token(adapter, credentials)
@@ -315,7 +321,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         },
     )
     paths = [body_dir / f"{name}.txt" for name in BODY_NAMES]
-    texts = [path.read_text(encoding="utf-8").rstrip("\n") for path in paths]
+    texts = [normalize_body(path.read_text(encoding="utf-8")) for path in paths]
     # The membership read may take time. Check every captured body again before
     # the first write, then post these same strings without reopening the files.
     for index, text in enumerate(texts):

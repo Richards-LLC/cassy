@@ -2,6 +2,7 @@
 use super::SyncQueue;
 use crate::error::CasError;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// Identifiers and decisions only: never contains queued content.
 #[derive(Debug, Serialize)]
@@ -155,12 +156,15 @@ impl SyncQueue {
                 .collect::<Result<Vec<_>, _>>()?
         };
         let mut decisions = Vec::with_capacity(rows.len());
-        for row in rows {
-            let reason = eligibility(&tx, &row, team, project);
-            let eligible = reason == "enqueue_team_snapshot";
-            if apply && eligible {
-                tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,?5,?6,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,row.project_id,chrono::Utc::now().to_rfc3339()])?;
+        let mut planned = BTreeSet::new();
+        for row in &rows {
+            let mut reason = eligibility(&tx, row, team, project);
+            if reason == "enqueue_team_snapshot"
+                && !planned.insert((row.entity_type.as_str().to_string(), row.entity_id.clone()))
+            {
+                reason = "duplicate_personal_preserved";
             }
+            let eligible = reason == "enqueue_team_snapshot";
             decisions.push(TeamBackfillRow {
                 id: row.id,
                 entity_type: row.entity_type,
@@ -169,8 +173,29 @@ impl SyncQueue {
                 reason,
             });
         }
+        if apply {
+            for (row, decision) in rows.iter().zip(&decisions) {
+                if decision.eligible {
+                    tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,?5,?6,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,row.project_id,chrono::Utc::now().to_rfc3339()])?;
+                }
+            }
+        }
         tx.commit()?;
         Ok(decisions)
+    }
+
+    /// Count only personal rows that would produce a new team snapshot.
+    /// Uses the same read-only eligibility plan as the explicit migration.
+    pub(crate) fn migratable_personal_row_count(
+        &self,
+        team: &str,
+        project: &str,
+    ) -> Result<usize, CasError> {
+        Ok(self
+            .migrate_personal_to_team(team, project, false)?
+            .iter()
+            .filter(|row| row.eligible)
+            .count())
     }
 
     pub(crate) fn personal_backlog_remedy(team_only: bool) -> &'static str {

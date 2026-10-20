@@ -517,6 +517,14 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         {
             AuthRequirement::NotRequired
         }
+        Commands::Cloud(cloud::CloudCommands::Queue(args))
+            if matches!(
+                args.command.as_ref(),
+                Some(cloud::CloudQueueCommand::MigrateToTeam { apply: false })
+            ) =>
+        {
+            AuthRequirement::NotRequired
+        }
         Commands::Cloud(_) => AuthRequirement::Required,
 
         Commands::Device(_) => AuthRequirement::Required,

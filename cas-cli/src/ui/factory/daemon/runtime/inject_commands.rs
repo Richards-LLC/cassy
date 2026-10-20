@@ -197,6 +197,26 @@ impl FactoryDaemon {
                 );
                 continue;
             };
+            // A completed tracked receipt includes BOTH physical writes. This
+            // is stronger than dispatch/admission, but still not a harness turn.
+            if matches!(&completion.result, Ok(cas_mux::InjectOutcome::Delivered)) {
+                let message_id = match &owner {
+                    UrgentInject::NormalRow { delivery, .. }
+                    | UrgentInject::Row { delivery, .. } => Some(delivery.queued.id),
+                    UrgentInject::BroadcastMember { row, .. }
+                    | UrgentInject::ContextReset { row, .. } => Some(*row),
+                    UrgentInject::Operator { .. } => None,
+                };
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "pty_submit_confirmed",
+                    message_id,
+                    ticket = completion.ticket.get(),
+                    target_agent = %completion.pane_id,
+                    turn_acceptance = "unconfirmed",
+                    "PTY payload and submit CR written; harness turn acceptance unconfirmed"
+                );
+            }
             tracing::debug!(
                 target: "cas::coordination",
                 stage = "urgent_inject_settled",

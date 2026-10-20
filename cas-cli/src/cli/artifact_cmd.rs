@@ -24,6 +24,38 @@ pub enum ArtifactCommands {
     Show(ShowArgs),
     /// List the artifacts published for a task
     List(ListArgs),
+    /// Reclaim closed tasks' artifact directories (and, with --simulators,
+    /// their iOS simulators); no factory session needed
+    Prune(PruneArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PruneArgs {
+    /// Keep artifacts of tasks closed more recently than this (e.g. 14d or 14;
+    /// at least 7 days)
+    #[arg(long, value_name = "DAYS", default_value = "7d", value_parser = parse_days)]
+    pub older_than: i64,
+    /// List what would be removed without removing anything
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Also reclaim this project's task-named iOS simulators (macOS)
+    #[arg(long)]
+    pub simulators: bool,
+}
+
+/// `14d` or `14`, at least the shared retention floor.
+fn parse_days(value: &str) -> Result<i64, String> {
+    let digits = value.trim().strip_suffix('d').unwrap_or(value.trim());
+    let days: i64 = digits
+        .parse()
+        .map_err(|_| format!("expected a number of days such as 14d, got {value:?}"))?;
+    if days < crate::artifacts::retention::MIN_RETENTION_DAYS {
+        return Err(format!(
+            "retention must be at least {}d after close",
+            crate::artifacts::retention::MIN_RETENTION_DAYS
+        ));
+    }
+    Ok(days)
 }
 
 #[derive(Debug, Clone, Args)]
@@ -57,6 +89,13 @@ pub fn execute(
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
         ArtifactCommands::List(args) => execute_list(args, cas_root, cli.json),
+        ArtifactCommands::Prune(args) => execute_prune(
+            args,
+            cas_root,
+            cli.json,
+            &crate::task_simulators::Simctl::default(),
+            chrono::Utc::now(),
+        ),
     }
 }
 
@@ -204,14 +243,136 @@ fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<
     Ok(())
 }
 
+/// cas-75a8 (GH #1295): the session-free form of `gc_cleanup artifacts=true`,
+/// under the same retention rule. Only this project's closed tasks are
+/// candidates; open tasks, other projects' ids and strays are never touched.
+fn execute_prune(
+    args: &PruneArgs,
+    cas_root: &Path,
+    json: bool,
+    simctl: &crate::task_simulators::Simctl,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    use crate::artifacts::retention::{Kept, apply_prune, plan_prune};
+    let config = Config::load(cas_root).unwrap_or_default();
+    let root = crate::config::project_factory_artifacts_root(
+        cas_root,
+        &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+    );
+    let tasks = crate::store::open_task_store(cas_root)
+        .context("opening the task store")?
+        .list(None)
+        .context("listing tasks")?;
+    let plan = plan_prune(cas_root, &root, &tasks, now, args.older_than)
+        .map_err(|error| anyhow::anyhow!("artifact retention evidence unavailable; nothing removed: {error}"))?;
+    let simulators = args
+        .simulators
+        .then(|| crate::task_simulators::inventory(simctl, &tasks, now));
+    let (removed, freed, errors) = if args.dry_run { (0, 0, Vec::new()) } else { apply_prune(&plan) };
+    let (sims_deleted, sims_failed) = match (&simulators, args.dry_run) {
+        (Some(Ok(list)), false) => crate::task_simulators::reclaim(simctl, list),
+        _ => (Vec::new(), Vec::new()),
+    };
+    let age = |closed: Option<chrono::DateTime<chrono::Utc>>| {
+        closed.map_or_else(|| "close date unknown".to_string(), |at| format!("closed {}d ago", (now - at).num_days()))
+    };
+
+    if json {
+        let dirs = |list: Vec<(&crate::artifacts::retention::TaskArtifactDir, Option<&str>)>| {
+            list.into_iter()
+                .map(|(dir, kept)| {
+                    serde_json::json!({
+                        "task_id": dir.task_id,
+                        "path": dir.path,
+                        "bytes": dir.bytes,
+                        "closed_at": dir.closed_at,
+                        "kept": kept,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let document = serde_json::json!({
+            "root": plan.root,
+            "retention_days": plan.retention_days,
+            "dry_run": args.dry_run,
+            "reclaimable": dirs(plan.reclaimable.iter().map(|dir| (dir, None)).collect()),
+            "reclaimable_bytes": plan.reclaimable_bytes(),
+            "kept": dirs(plan.kept.iter().map(|(dir, why)| (dir, Some(match why {
+                Kept::Recent => "recent",
+                Kept::Referenced => "referenced",
+            }))).collect()),
+            "untouched_dirs": plan.untouched,
+            "removed": removed,
+            "freed_bytes": freed,
+            "errors": errors,
+            "simulators": simulators.as_ref().map(|result| match result {
+                Ok(list) => serde_json::json!(list.iter().map(|sim| serde_json::json!({
+                    "name": sim.device.name,
+                    "udid": sim.device.udid,
+                    "task_id": sim.task_id,
+                    "state": sim.device.state,
+                    "bytes": sim.device.bytes,
+                    "verdict": sim.verdict.label(),
+                })).collect::<Vec<_>>()),
+                Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+            }),
+            "simulators_deleted": sims_deleted,
+            "simulator_errors": sims_failed,
+        });
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        return Ok(());
+    }
+
+    let verb = if args.dry_run { "would reclaim" } else { "reclaimed" };
+    let count = if args.dry_run { plan.reclaimable.len() } else { removed };
+    let bytes = if args.dry_run { plan.reclaimable_bytes() } else { freed };
+    println!(
+        "[OK] {verb} {count} closed-task artifact dir(s), {} (closed >= {}d, uncited)",
+        human_size(bytes),
+        plan.retention_days
+    );
+    println!("     root {}", plan.root.display());
+    for dir in &plan.reclaimable {
+        println!("     {:<22} {:>9}  {}", dir.task_id, human_size(dir.bytes), age(dir.closed_at));
+    }
+    for (dir, why) in &plan.kept {
+        let why = match why {
+            Kept::Recent => "kept: closed recently",
+            Kept::Referenced => "kept: still cited",
+        };
+        println!("     {:<22} {:>9}  {why}", dir.task_id, human_size(dir.bytes));
+    }
+    if plan.untouched > 0 {
+        println!("     {} other dir(s) untouched (open tasks, other projects, strays)", plan.untouched);
+    }
+    for error in &errors {
+        println!("[WARN] could not remove {error}");
+    }
+    if let Some(simulators) = &simulators {
+        print!("{}", crate::task_simulators::render(simulators));
+        if !args.dry_run {
+            println!("     simulators deleted: {}", sims_deleted.len());
+        }
+        for failure in &sims_failed {
+            println!("[WARN] simulator delete failed: {failure}");
+        }
+    }
+    if args.dry_run && !plan.reclaimable.is_empty() {
+        println!("  -> rerun without --dry-run to remove them");
+    }
+    Ok(())
+}
+
 /// Decimal units, matching what a file dialog shows the operator.
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1_000;
     const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
     match bytes {
         bytes if bytes < KB => format!("{bytes} B"),
         bytes if bytes < MB => format!("{} KB", bytes.div_ceil(KB)),
-        bytes => format!("{:.1} MB", bytes as f64 / MB as f64),
+        bytes if bytes < GB => format!("{:.1} MB", bytes as f64 / MB as f64),
+        bytes => format!("{:.1} GB", bytes as f64 / GB as f64),
     }
 }
 
@@ -246,6 +407,61 @@ pub fn render_artifact_line(artifact: &PublishedArtifact) -> String {
 mod tests {
     use super::*;
 
+    /// cas-75a8 (GH #1295): only this project's closed, uncited tasks past
+    /// retention are reclaimed; a dry run removes nothing.
+    #[test]
+    fn prune_reclaims_only_old_uncited_closed_task_dirs_cas_75a8() {
+        let env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let now = chrono::Utc::now();
+        let store = crate::store::open_task_store_local(&cas_root).unwrap();
+        let add = |id: &str, closed_days: Option<i64>, notes: &str| {
+            let mut task = cas_types::Task::new(id.into(), id.into());
+            task.notes = notes.into();
+            if let Some(days) = closed_days {
+                task.status = cas_types::TaskStatus::Closed;
+                task.closed_at = Some(now - chrono::Duration::days(days));
+                task.updated_at = now - chrono::Duration::days(days);
+            }
+            store.add(&task).unwrap();
+        };
+        add("cas-0old", Some(30), "");
+        add("cas-0new", Some(2), "");
+        add("cas-0cit", Some(30), "");
+        add("cas-0opn", None, "evidence lives in cas-0cit");
+        let config = Config::load(&cas_root).unwrap_or_default();
+        let root = crate::config::project_factory_artifacts_root(
+            &cas_root,
+            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+        );
+        assert!(root.starts_with(env.home()), "{}", root.display());
+        for id in ["cas-0old", "cas-0new", "cas-0cit", "cas-0opn", "cas-0zzz"] {
+            std::fs::create_dir_all(root.join(id)).unwrap();
+            std::fs::write(root.join(id).join("evidence.log"), b"proof").unwrap();
+        }
+        let missing = crate::task_simulators::Simctl::with_binary(env.home().join("no-xcrun"));
+        let dry = PruneArgs { older_than: 7, dry_run: true, simulators: false };
+        execute_prune(&dry, &cas_root, true, &missing, now).unwrap();
+        assert!(root.join("cas-0old").exists(), "a dry run removes nothing");
+
+        let tasks = store.list(None).unwrap();
+        let plan = crate::artifacts::retention::plan_prune(&cas_root, &root, &tasks, now, 7).unwrap();
+        let ids = |dirs: Vec<&str>| dirs.into_iter().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(plan.reclaimable.iter().map(|dir| dir.task_id.clone()).collect::<Vec<_>>(), ids(vec!["cas-0old"]));
+        assert_eq!(plan.reclaimable_bytes(), 5);
+        assert_eq!(plan.kept.len(), 2, "recent and cited closed tasks are kept");
+        assert_eq!(plan.untouched, 2, "the open task and the unknown id are untouched");
+
+        let wet = PruneArgs { older_than: 7, dry_run: false, simulators: false };
+        execute_prune(&wet, &cas_root, true, &missing, now).unwrap();
+        assert!(!root.join("cas-0old").exists());
+        for kept in ["cas-0new", "cas-0cit", "cas-0opn", "cas-0zzz"] {
+            assert!(root.join(kept).exists(), "{kept} must survive");
+        }
+        assert!(parse_days("6d").is_err() && parse_days("14d") == Ok(14) && parse_days("14") == Ok(14));
+    }
+
     #[test]
     fn sizes_render_in_the_units_a_file_dialog_uses() {
         assert_eq!(human_size(0), "0 B");
@@ -253,6 +469,7 @@ mod tests {
         assert_eq!(human_size(1_000), "1 KB");
         assert_eq!(human_size(812_345), "813 KB");
         assert_eq!(human_size(3_400_000), "3.4 MB");
+        assert_eq!(human_size(42_800_000_000), "42.8 GB");
     }
 
     #[test]

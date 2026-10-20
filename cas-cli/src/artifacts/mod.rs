@@ -22,6 +22,7 @@
 
 pub mod cloud;
 pub mod paths;
+pub mod retention;
 pub mod slack;
 
 use cas_store::{NewArtifact, PublishedArtifact, SqliteArtifactStore};

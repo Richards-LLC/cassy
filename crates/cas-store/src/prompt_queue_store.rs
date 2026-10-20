@@ -19247,3 +19247,107 @@ mod cas_bf890_notice_digest_tests {
         assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![ended]);
     }
 }
+
+
+#[cfg(test)]
+mod cas_f17b_tests {
+    use super::*;
+    use crate::{AgentStore, SqliteAgentStore};
+    use cas_types::{Agent, AgentRole};
+
+    fn fixture() -> (tempfile::TempDir, SqlitePromptQueueStore, SqliteAgentStore, Agent) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut sender = Agent::new("original-sender".into(), "vivid-dolphin".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("old-factory".into());
+        agents.register(&sender).unwrap();
+        (temp, queue, agents, sender)
+    }
+
+    fn aged_message(queue: &SqlitePromptQueueStore, sender: &Agent, body: &str) -> i64 {
+        let id = match queue.enqueue_idempotent(
+            &sender.name, "swift-heron", body, Some("old-factory"),
+            Some("pending decision"), None, body,
+            Some(&QueueOrigin::RegisteredAgent { agent_id: sender.id.clone() }),
+        ).unwrap() {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        queue.record_wake_gate_decline(id, "inline pane has an active composer or prior inject").unwrap();
+        queue.conn.lock().unwrap().execute(
+            "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+            params![(Utc::now() - chrono::Duration::days(2)).to_rfc3339(), id],
+        ).unwrap();
+        id
+    }
+
+    #[test]
+    fn cas_f17b_abandoned_status_never_claims_delivery() {
+        let (_temp, queue, _agents, sender) = fixture();
+        let id = aged_message(&queue, &sender, "please decide");
+        queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        assert!(report.delivered_at.is_none());
+        // pin: both public compatibility surfaces must explicitly report non-delivery.
+        assert_eq!(report.legacy_status.to_string(), "undelivered");
+        assert_eq!(queue.message_status(id).unwrap().unwrap().to_string(), "undelivered");
+    }
+
+    #[test]
+    fn cas_f17b_wake_decline_notice_names_cause() {
+        let (_temp, queue, _agents, sender) = fixture();
+        let id = aged_message(&queue, &sender, "please decide");
+        queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        let notices = queue.surface_for_recipient_within_budget(
+            &sender.name, sender.factory_session.as_deref(), HookDrain::Unseen,
+            10, HOOK_SURFACE_BUDGET_CHARS,
+        ).unwrap().rows;
+        assert_eq!(notices.len(), 1, "the sender needs its own actionable notice");
+        let notice = &notices[0];
+        assert_eq!(notice.origin, Some(QueueOrigin::Daemon));
+        assert!(notice.prompt.contains(&id.to_string()));
+        assert!(notice.prompt.contains("swift-heron"));
+        // pin: the notice must explain the refused wake and preserve its recorded cause.
+        assert!(notice.prompt.contains("wake gate declined 1"), "{}", notice.prompt);
+        // pin: the idle-gate cause is required evidence for this incident.
+        assert!(notice.prompt.contains("active composer or prior inject"), "{}", notice.prompt);
+        assert_eq!(queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn cas_f17b_successor_reads_abandoned_content() {
+        let (_temp, queue, agents, sender) = fixture();
+        let first = aged_message(&queue, &sender, "Keep the pending branch until the review finishes.");
+        let second_body = "The second decision needs all of this body: ".to_owned() + &"detail ".repeat(800);
+        let second = aged_message(&queue, &sender, &second_body);
+        agents.unregister(&sender.id).unwrap();
+        let mut successor = Agent::new("successor".into(), "zealous-tiger".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("new-factory".into());
+        agents.register(&successor).unwrap();
+        assert_eq!(queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().len(), 2);
+        let ordinary = queue.surface_for_recipient_within_budget(
+            &successor.name, successor.factory_session.as_deref(), HookDrain::Unseen,
+            10, HOOK_SURFACE_BUDGET_CHARS,
+        ).unwrap().rows;
+        assert!(!ordinary.is_empty(), "inherited work must surface outside the digest");
+        let notices = queue.poll_unseen_for_recipient(&successor.name, successor.factory_session.as_deref(), 10).unwrap();
+        let all: Vec<_> = ordinary.iter().chain(notices.iter()).collect();
+        for (id, body) in [(first, "Keep the pending branch until the review finishes."), (second, second_body.as_str())] {
+            // pin: pending decision is the original summary, inherited with its source and body.
+            assert!(all.iter().any(|n| n.prompt.contains(&id.to_string()) && n.prompt.contains(&sender.name)
+                // pin: the inherited summary must remain readable.
+                && n.prompt.contains("pending decision") && n.prompt.contains(body)),
+                "successor must read the complete source, summary and body of message {id}");
+        }
+        let digest = queue.surface_for_recipient_within_budget(
+            &successor.name, successor.factory_session.as_deref(), HookDrain::NoticeDigest,
+            10, HOOK_SURFACE_BUDGET_CHARS,
+        ).unwrap().rows;
+        assert!(digest.is_empty());
+    }
+}

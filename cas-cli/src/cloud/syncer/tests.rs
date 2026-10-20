@@ -1962,7 +1962,8 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     ] {
         let mut reopened = stale.clone();
         reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(5));
-        reopened["notes"] = serde_json::json!(format!("{}\n\n[2026-10-20 11:59] {event}", local.notes));
+        let minute = if event.starts_with("Decision:") { "11:55" } else { "11:59" };
+        reopened["notes"] = serde_json::json!(format!("{}\n\n[2026-10-20 {minute}] {event}", local.notes));
         let (_temp, result, store, _queue) = pull_team_task_fixtures(
             project, vec![reopened], Some(local.clone()),
         ).await;

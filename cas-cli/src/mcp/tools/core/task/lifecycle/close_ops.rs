@@ -13690,6 +13690,14 @@ fn anchored_delivery_content_gate_unbounded(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-2ea6: the history-derived ledger is judged by regeneration.
+            let (ledger_note, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+            if paths.is_empty() {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    ledger_note.unwrap_or_default()
+                )));
+            }
             // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
             // before the byte-identity proof walks those bundles again.
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {

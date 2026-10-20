@@ -338,13 +338,15 @@ async fn violets_refusal_keeps_its_code_and_the_allocated_upload() {
         .unwrap();
     let refusal = wrapped(json!({
         "ok": false,
-        "error": { "code": "file_integrity_mismatch", "message": "sha256 differs", "retryable": false }
+        "error": { "code": "contact_too_recent", "message": "verbose context ".repeat(100), "retryable": false,
+            "detail":{"last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z"} }
     }));
     let violet = ScriptedViolet::new(vec![begin_reply(&server), refusal]);
     let error = post_verified(&violet, &view, bytes, &options())
         .await
         .unwrap_err();
-    assert_eq!(error.code, "file_integrity_mismatch");
+    assert_eq!(error.code, "contact_too_recent");
+    assert!(error.message.contains("16:23:00") && error.message.contains("peer-on-prowl") && error.message.contains("https://example.slack.com/root") && error.message.contains("17:23:00"));
     assert_eq!(error.file_id.as_deref(), Some("F1148"));
     assert!(error.to_string().contains("check the channel"), "{error}");
 }

@@ -774,6 +774,11 @@ fn hub_error_codes_pass_through_and_fail_the_run() {
     );
     assert!(result.is_err());
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), refusal);
+    let contact = json!({"ok":false,"error":{"code":"contact_too_recent","message":"verbose context ".repeat(100),"detail":{"last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z"}}});
+    let hub = ScriptedHub::with(vec![contact]);
+    let (_, result) = run_cli(&["post", "--channel", "dev", "--text", "<@U123> review"], &hub, false, &no_gate);
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("16:23:00") && error.contains("peer-on-prowl") && error.contains("https://example.slack.com/root") && error.contains("17:23:00"));
 }
 
 #[test]

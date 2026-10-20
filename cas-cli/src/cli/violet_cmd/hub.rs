@@ -53,11 +53,11 @@ impl VioletError {
             .filter(|code| !code.trim().is_empty())
             .unwrap_or("violet_post_failed")
             .to_string();
-        let message = receipt
+        let message = crate::artifacts::slack::contact_refusal_evidence(&receipt).unwrap_or_else(|| receipt
             .pointer("/error/message")
             .and_then(Value::as_str)
             .map(excerpt)
-            .unwrap_or_else(|| "Violet refused the request without a message".to_string());
+            .unwrap_or_else(|| "Violet refused the request without a message".to_string()));
         let retryable = receipt
             .pointer("/error/retryable")
             .and_then(Value::as_bool)

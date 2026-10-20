@@ -414,12 +414,21 @@ pub fn envelope(result: Value) -> Result<Value, PostError> {
         .and_then(Value::as_str)
         .filter(|code| !code.trim().is_empty())
         .unwrap_or("violet_post_failed");
-    let message = value
+    let message = contact_refusal_evidence(&value).unwrap_or_else(|| value
         .pointer("/error/message")
         .and_then(Value::as_str)
         .map(excerpt)
-        .unwrap_or_else(|| "Violet refused the post".to_string());
+        .unwrap_or_else(|| "Violet refused the post".to_string()));
     Err(PostError::new(code, message))
+}
+
+/// Required contact evidence must survive the generic 300-character error
+/// excerpt used by CLI and artifact posting. This is receipt metadata only.
+pub fn contact_refusal_evidence(receipt: &Value) -> Option<String> {
+    let detail = receipt.pointer("/error/detail")?;
+    let at = detail.get("last_contact_at")?.as_str()?;
+    let text = |key: &str| detail[key].as_str().unwrap_or("unknown");
+    Some(format!("Last contact {at} by {}; {}. Next allowed {}.", text("last_poster"), text("permalink"), text("next_allowed_at")))
 }
 
 fn field(value: &Value, path: &str) -> Result<String, PostError> {

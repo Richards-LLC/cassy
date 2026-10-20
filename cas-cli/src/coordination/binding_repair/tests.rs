@@ -51,9 +51,10 @@ fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
             .write_all(&encode_message(&welcome).unwrap())
             .unwrap();
         if !capability {
-            // Like a real old runtime, stay connected until the client hangs
-            // up. On macOS, setsockopt on a peer-closed socket fails EINVAL
-            // before the buffered Welcome is read (cas-cbcc).
+            // Like a real runtime, stay connected until the client hangs up
+            // (here and after the drain reply below). On macOS, setsockopt on
+            // a peer-closed socket fails EINVAL before buffered frames are
+            // read (cas-cbcc).
             let _ = stream.read(&mut [0; 1]);
             return;
         }
@@ -96,6 +97,7 @@ fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
         stream
             .write_all(&encode_message(&DaemonMessage::BindingIntake { reply }).unwrap())
             .unwrap();
+        let _ = stream.read(&mut [0; 1]);
     })
 }
 

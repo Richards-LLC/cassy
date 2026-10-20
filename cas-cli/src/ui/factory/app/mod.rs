@@ -2979,7 +2979,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
 
     // Claude already receives the complete role contract above.
     if supervisor_cli != cas_mux::SupervisorCli::Claude {
-        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority.");
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
     }
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
@@ -3935,7 +3935,7 @@ mod tests {
             "authoritative assignment acceptance",
             "no prose ACK is required",
             "inbox on the next turn",
-            "Only authenticated typed",
+            "Directed messages wake",
             "blocker=true",
             "merge_request=true",
         ] {

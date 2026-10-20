@@ -439,6 +439,10 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
     ] {
         let (root, mut daemon) = fixture_for(cli).await;
         let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
         let peer = cas_types::Agent::new_with_role(
             "burst-peer".into(),
             "peer".into(),
@@ -466,7 +470,14 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
                 )
             })
             .collect();
-        daemon.process_prompt_queue().await.unwrap();
+        let queue=crate::store::open_prompt_queue_store(&cas).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if ids.iter().all(|id|queue.message_delivery_report(*id).unwrap().unwrap().pending_detail.as_deref()==Some("directed supervisor message burst debounce")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("fresh burst reaches debounce without typing");
         nothing_typed_or_relayed(&root, &daemon);
         // Advance the durable queue clock, without sleeping for the debounce.
         rusqlite::Connection::open(cas.join("cas.db"))
@@ -476,10 +487,10 @@ async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
                 [(chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
             )
             .unwrap();
-        daemon.process_prompt_queue().await.unwrap();
-        settle_injected_writes(&mut daemon).await;
         let typed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                daemon.process_prompt_queue().await.unwrap();
+                settle_injected_writes(&mut daemon).await;
                 let text = std::fs::read_to_string(root.path().join("input")).unwrap();
                 if text.ends_with('\r') {
                     break text;

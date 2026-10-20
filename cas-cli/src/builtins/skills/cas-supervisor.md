@@ -52,7 +52,7 @@ Own the next action from the highest true rung each turn:
 
 ## Operating flow
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
 
 Other supervisors on this repo: [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 

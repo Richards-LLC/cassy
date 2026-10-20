@@ -147,18 +147,7 @@ pub(crate) fn schedule(
 ) -> anyhow::Result<()> {
     let candidates: Vec<_> = rows
         .iter()
-        .filter_map(|row| {
-            let sender = sender(row, supervisor, agents)?;
-            let fact = facts.get(&row.id)?;
-            // Do not move another task's stale revalidation behind a batch leader.
-            (fact.assignment_stale.is_none()
-                && fact.lifecycle_task.is_none()
-                && fact.merge_request.is_none()
-                && !row.prompt.contains("<cas-blocker ")
-                && !row.prompt.contains("<cas-verification-dispatch ")
-                && !row.prompt.contains("<cas-qa-dispatch "))
-            .then(|| (row.clone(), sender))
-        })
+        .filter_map(|row| sender(row, supervisor, agents).map(|sender| (row.clone(), sender)))
         .collect();
     if candidates.is_empty() {
         return Ok(());
@@ -176,10 +165,10 @@ pub(crate) fn schedule(
         if capped.contains_key(sender) {
             continue;
         }
-        let count: u64 = conn.query_row("SELECT COUNT(*) FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
             WHERE p.sender=?1 AND p.recipient=?2 AND w.injected_at>?3",
             params![sender, supervisor, (now-chrono::Duration::hours(1)).to_rfc3339()], |row| row.get(0))?;
-        capped.insert(sender.clone(), count >= cap);
+        capped.insert(sender.clone(), count >= cap.min(i64::MAX as u64) as i64);
     }
     drop(conn);
     let queue =
@@ -231,32 +220,54 @@ pub(crate) fn schedule(
         }
         return Ok(());
     }
-    // A capped sender or quiet acknowledgement may ride in an already-needed
-    // turn for free; it cannot cause one. Every row keeps its own transport claim.
-    let lead_id = wakers
+    // A capped sender or acknowledgement may ride in an already-needed turn
+    // for free. Task-bound envelopes retain separate rows and revalidation.
+    let can_batch = |row: &QueuedPrompt| {
+        facts.get(&row.id).is_some_and(|fact| {
+            fact.assignment_stale.is_none()
+                && fact.lifecycle_task.is_none()
+                && fact.merge_request.is_none()
+        }) && !row.prompt.contains("<cas-blocker ")
+            && !row.prompt.contains("<cas-verification-dispatch ")
+            && !row.prompt.contains("<cas-qa-dispatch ")
+    };
+    let batchable: HashSet<_> = candidates
+        .iter()
+        .filter(|(row, _)| can_batch(row))
+        .map(|(row, _)| row.id)
+        .collect();
+    let batch_wakers: Vec<_> = wakers
+        .iter()
+        .filter(|(row, _)| batchable.contains(&row.id))
+        .collect();
+    let lead_id = batch_wakers
         .iter()
         .min_by_key(|(row, _)| (row.created_at, row.id))
-        .unwrap()
-        .0
-        .id;
-    let mut lead = None;
+        .map(|(row, _)| row.id);
     let mut passengers = Vec::new();
-    for (row, _) in &candidates {
-        if row.id == lead_id {
-            lead = Some(row.clone());
-        } else {
-            passengers.push(row.clone());
+    for (row, sender) in &candidates {
+        if batchable.contains(&row.id) {
+            if Some(row.id) == lead_id {
+                rows.push(row.clone());
+            } else if lead_id.is_some() {
+                passengers.push(row.clone());
+            }
+        } else if wants_wake(row) && !capped[sender] {
+            facts.entry(row.id).or_default().message_senders = vec![sender.clone()];
+            rows.push(row.clone());
         }
     }
-    let fact = facts.get_mut(&lead_id).unwrap();
-    fact.message_batch = passengers;
-    fact.message_senders = wakers
-        .into_iter()
-        .map(|(_, sender)| sender.clone())
-        .collect();
-    fact.message_senders.sort();
-    fact.message_senders.dedup();
-    rows.push(lead.unwrap());
+    if let Some(lead_id) = lead_id {
+        let fact = facts.get_mut(&lead_id).unwrap();
+        fact.message_batch = passengers;
+        fact.message_senders = batch_wakers
+            .into_iter()
+            .map(|(_, sender)| sender.clone())
+            .collect();
+        fact.message_senders.sort();
+        fact.message_senders.dedup();
+    }
+
     Ok(())
 }
 
@@ -437,7 +448,7 @@ pub(crate) fn report(cas: &Path, recipient: &str) -> anyhow::Result<String> {
             for (id, usage) in measurements {
                 if usage.complete {
                     conn.execute("UPDATE supervisor_message_wakes SET started_at=?1,input_tokens=?2,output_tokens=?3,usage_evidence=?4 WHERE lead_id=?5 AND input_tokens IS NULL",
-                        params![usage.started.map(|at|at.to_rfc3339()), usage.input,usage.output,path.display().to_string(),id])?;
+                        params![usage.started.map(|at|at.to_rfc3339()), i64::try_from(usage.input)?,i64::try_from(usage.output)?,path.display().to_string(),id])?;
                 }
             }
         }
@@ -446,13 +457,13 @@ pub(crate) fn report(cas: &Path, recipient: &str) -> anyhow::Result<String> {
         .lock()
         .map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
     let since = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let wakes: u64 = conn.query_row(
+    let wakes: i64 = conn.query_row(
         "SELECT COUNT(*) FROM supervisor_message_wakes WHERE recipient=?1 AND injected_at>?2",
         params![recipient, since],
         |row| row.get(0),
     )?;
     let mut query=conn.prepare("SELECT input_tokens+output_tokens FROM supervisor_message_wakes WHERE recipient=?1 AND injected_at>?2 AND input_tokens IS NOT NULL ORDER BY input_tokens+output_tokens")?;
-    let totals: Vec<u64> = query
+    let totals: Vec<i64> = query
         .query_map(params![recipient, since], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     let median = if totals.is_empty() {

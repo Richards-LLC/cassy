@@ -3,7 +3,7 @@
 //!
 //! This is a port of the Violet hub's own lint for those two rules
 //! (violet_ps `apps/violet/lib/readability.ts`, `lintSlackText`, at
-//! 4b6fd1143c70), so a draft refused here is refused there, with the same
+//! e0be0d043a5a), so a draft refused here is refused there, with the same
 //! `format_unreadable` envelope, violation fields, excerpt and fix text:
 //!
 //! - `unattached_file`: a post never names a file the reader cannot open from
@@ -11,7 +11,8 @@
 //!   `/Users` or `/var`; relative paths (a slash plus a known extension); bare
 //!   filenames with a document or data extension; and `art-xxxxxxxx` artifact
 //!   ids. A relative code path (`.ts`, `.js`, `.py`, `.rs`) counts only with
-//!   two or more slashes or a lowercase basename, so `React/Next.js` passes.
+//!   two or more slashes or an all-lowercase first segment, so `src/App.ts`
+//!   counts while `React/three.js` and `Svelte/d3.js` pass.
 //!   It passes when the same message attaches a file of that name, compared
 //!   case-insensitively. Backticks do not exempt a name.
 //! - `utc_time`: times are shown in CT (ET when labelled). It catches `UTC`,
@@ -208,11 +209,14 @@ pub fn violations(message: &DraftMessage<'_>) -> Vec<Value> {
         for (index, reference) in file_references(&line.file_prose) {
             let name = basename(reference);
             let explicit = reference.starts_with("~/") || reference.starts_with('/');
-            let lowercase = name.starts_with(|c: char| c.is_ascii_lowercase());
+            // A one-slash code reference names a file only when its directory
+            // segment is all lowercase; `React/three.js` is a stack pair.
+            let first_segment = reference.split('/').next().unwrap_or(reference);
+            let lowercase_directory = first_segment == first_segment.to_lowercase();
             if CODE_EXTENSION.is_match(&name)
                 && !explicit
                 && reference.matches('/').count() < CODE_PATH_SLASHES
-                && !lowercase
+                && !lowercase_directory
             {
                 continue;
             }

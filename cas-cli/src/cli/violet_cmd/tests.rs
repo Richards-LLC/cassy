@@ -920,7 +920,10 @@ fn format_unreadable_receipt() -> Value {
                  "fix": "Start with a short, plain verdict sentence."},
                 {"rule": "unattached_file", "line": 4,
                  "excerpt": "Full breakdown in ~/reports/summary.md",
-                 "fix": "Attach \"~/reports/summary.md\" to this message, or describe it without naming a path."}
+                 "fix": "Attach \"~/reports/summary.md\" to this message, or describe it without naming a path."},
+                {"rule": "fake_table", "line": 6,
+                 "excerpt": "Reels      143     145",
+                 "fix": "Put the table in a code block or rewrite its rows as • bullets."}
             ]}
         }
     })
@@ -968,7 +971,7 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let refused = ScriptedHub::default();
     let (_, result) = run_cli(
         &["post", "--channel", "cas-internal", "--text",
-          "Deploy finished at 14:42Z.\n\nSee `notes.md` and ~/reports/summary.md"],
+          "Deploy finished at 14:42Z.\n\nSee `notes.md` and ~/reports/summary.md\nPatched src/App.ts."],
         &refused,
         false,
         &no_gate,
@@ -986,7 +989,17 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
         .collect();
     assert_eq!(
         found,
-        [("utc_time".to_string(), 1), ("unattached_file".to_string(), 3), ("unattached_file".to_string(), 3)]
+        [
+            ("utc_time".to_string(), 1),
+            ("unattached_file".to_string(), 3),
+            ("unattached_file".to_string(), 3),
+            ("unattached_file".to_string(), 4),
+        ]
+    );
+    assert_eq!(
+        violations[3]["fix"],
+        "Attach \"src/App.ts\" to this message, or describe it without naming a path.",
+        "a one-slash code path with a lowercase folder names a file"
     );
     assert_eq!(violations[0]["fix"], "Show \"14:42Z\" in CT (or labelled ET), never UTC.");
     assert_eq!(
@@ -1000,7 +1013,7 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let allowed = ScriptedHub::with(vec![file_receipt("F1", "Summary.md", b"# summary\n")]);
     let (_, result) = run_cli(
         &["post", "--channel", "cas-internal", "--file", path.to_str().unwrap(), "--text",
-          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on React/Next.js and Node.js."],
+          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on React/Next.js, React/three.js, Svelte/d3.js and Node.js."],
         &allowed,
         false,
         &no_gate,

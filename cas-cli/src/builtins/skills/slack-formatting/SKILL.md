@@ -24,7 +24,7 @@ People scan; they do not read. In NN/g eyetracking studies 79% of users scanned 
 
 The operator set these two, and they are never traded for brevity or tone. They apply to prose: text inside a fenced code block and inside a Slack `<url|label>` link is exempt. `cas violet post|thread` refuses a draft that breaks them before sending, and the hub refuses it with `format_unreadable` (`unattached_file`, `utc_time`).
 
-**Rule 9 catches** `~/` paths and paths under `/home`, `/tmp`, `/mnt`, `/Users` or `/var`; relative paths (a slash plus a known extension); bare filenames with a document or data extension (`notes.md`, `report.pdf`, `data.csv`); and `art-xxxxxxxx` artifact ids. A relative path to code (`.ts`, `.js`, `.py`, `.rs`) counts only with two or more slashes or a lowercase file name, so `React/Next.js` and `Node.js` pass while `src/app.ts` does not. Backticks do not exempt a name, but every URL is exempt. It passes only when the same message attaches a file of that name (compared case-insensitively).
+**Rule 9 catches** `~/` paths and paths under `/home`, `/tmp`, `/mnt`, `/Users` or `/var`; relative paths (a slash plus a known extension); bare filenames with a document or data extension (`notes.md`, `report.pdf`, `data.csv`); and `art-xxxxxxxx` artifact ids. A relative path to code (`.ts`, `.js`, `.py`, `.rs`) counts only with two or more slashes or an all-lowercase first folder, so `src/App.ts` is refused while `React/three.js`, `Svelte/d3.js` and `Node.js` pass. Backticks do not exempt a name, but every URL is exempt. It passes only when the same message attaches a file of that name (compared case-insensitively).
 
 - Don't: `Full breakdown in ~/reports/stall-summary.md`
 - Don't: `See docs/postmortem.md and art-1234abcd for details`
@@ -111,7 +111,7 @@ The rules above are the target. The Violet hub refuses a post outright, with `fo
 | `no_breathing_room` | more than 6 non-blank lines run together without a blank line |
 | `long_top_level` | the top-level message is over 900 characters |
 | `markdown_syntax` | a line has `**`, starts with a heading (`#` to `######` then a space; `#channel` is fine), or starts with a `-` or `*` bullet |
-| `fake_table` | 3 or more lines each have 2 or more gaps of 3+ spaces between words |
+| `fake_table` | 3 or more consecutive non-blank lines each have 2 or more gaps of 3+ spaces between words (a blank or non-matching line ends the run) |
 | `bold_sentence` | a bold span is over 80 characters |
 | `unattached_file` | rule 9: a path, filename or artifact id is named and no file of that name is attached |
 | `utc_time` | rule 10: a time shows UTC, GMT, `HH:MMZ`, or an ISO timestamp ending in `Z` or `+00:00` |

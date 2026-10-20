@@ -1783,23 +1783,37 @@ mod worker_attention_tests {
         register_supervisor(&cas_dir, "dispatch-burst-test");
         let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
         let now = chrono::Utc::now();
-        for n in 0..25 {
-            let id = format!("cas-burst{n:02}");
-            tasks.add(&cas_types::Task::new(id.clone(), id.clone())).unwrap();
-            cas_store::create_verification_dispatch(
-                &cas_dir,
-                &id,
-                "worker-id",
-                "supervisor-id",
-                now - chrono::Duration::minutes(60 - n),
-            )
-            .unwrap();
-        }
+        let dispatches = (0..25)
+            .map(|n| {
+                let id = format!("cas-burst{n:02}");
+                tasks.add(&cas_types::Task::new(id.clone(), id.clone())).unwrap();
+                cas_store::create_verification_dispatch(
+                    &cas_dir,
+                    &id,
+                    "worker-id",
+                    "supervisor-id",
+                    now - chrono::Duration::minutes(60 - n),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
         escalate_expired_verification_dispatches(&cas_dir, now);
         escalate_expired_verification_dispatches(&cas_dir, now);
-        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(100).unwrap();
-        let woken = (0..25)
-            .filter(|n| rows.iter().any(|row| row.prompt.contains(&format!("cas-burst{n:02}"))))
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        let woken = dispatches
+            .iter()
+            .filter(|dispatch| {
+                let key = worker_attention_relay_key(
+                    Some("dispatch-burst-test"),
+                    "verification_dispatch_expired",
+                    "supervisor",
+                    &dispatch.id,
+                );
+                queue
+                    .get_by_transition_key(&key)
+                    .unwrap()
+                    .is_some_and(|relay| relay.prompt_delivered_at.is_some())
+            })
             .count();
         assert_eq!(woken, 25, "the newest five must not starve behind the oldest twenty");
     }

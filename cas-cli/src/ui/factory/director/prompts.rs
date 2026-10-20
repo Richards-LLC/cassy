@@ -779,6 +779,30 @@ pub(crate) fn external_response_hint(cas_root: &std::path::Path, from: &str) -> 
     format!("{route}\n\nDO NOT USE SENDMESSAGE.")
 }
 
+/// Queue an external notifier's message (the bridge's POST /message and
+/// `cas factory message`) for `target`. Sender text cannot carry a server
+/// assignment binding: leading `<cas-assignment>` lookalikes are stripped with
+/// the same function the MCP route uses before the reply line is added.
+pub(crate) fn enqueue_external_message(
+    cas_root: &std::path::Path,
+    from: &str,
+    target: &str,
+    message: &str,
+    no_wrap: bool,
+) -> anyhow::Result<i64> {
+    let message = crate::prompt_revalidation::strip_assignment_envelopes(message);
+    let payload = if no_wrap {
+        message.to_string()
+    } else {
+        format!("{}\n\n{}", message.trim_end(), external_response_hint(cas_root, from))
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
+    Ok(match std::env::var("CAS_FACTORY_SESSION").ok() {
+        Some(session) => queue.enqueue_with_session(from, target, &payload, &session)?,
+        None => queue.enqueue(from, target, &payload)?,
+    })
+}
+
 /// Resolve the harness of the worker a director event is about (cas-dc1b).
 ///
 /// Worker-facing lines (assignment, stall nudge, reply footer) and the
@@ -1495,7 +1519,7 @@ pub fn generate_prompt_at(
                  Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  {test_policy}\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor.",
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.",
                 test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
             );
 
@@ -1918,10 +1942,21 @@ pub fn generate_prompt_at(
                 // means un-persisted work + full in-flight context loss, not
                 // "safe". Point at the actual triage triad instead —
                 // `is-wedged` classifies before anyone kills anything.
+                // cas-73b89: a worker with nothing pending to wake it will
+                // not resume on its own; say so, so a message is the obvious fix.
+                let pending_wake = data.agents.iter().any(|agent| {
+                    agent.name == *worker
+                        && super::events::worker_has_pending_wake(data, agent)
+                });
+                let cause = if pending_wake {
+                    "an auto-nudge did not unstick it"
+                } else {
+                    "no reminder or message is pending to wake it, so it will not resume on \
+                     its own. If it is waiting, message it to continue"
+                };
                 let text = format!(
                     "Worker {worker} has been stalled on task {task_id} for about \
-                     {elapsed_mins}m — alive heartbeat, no activity, and an auto-nudge \
-                     did not unstick it.\n\n\
+                     {elapsed_mins}m — alive heartbeat, no activity, and {cause}.\n\n\
                      Triage before acting:\n\
                      1. `cas factory is-wedged {worker}` — classifies Alive / Wedged / \
                      Starved / Dead from PID + transcript evidence.\n\
@@ -2201,6 +2236,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -2298,7 +2334,7 @@ mod tests {
                 "no prose ACK is required",
                 "execution plan is optional",
                 "inbox on the next turn",
-                "only authenticated typed",
+                "Directed messages wake",
                 "blocker=true",
                 "merge_request=true",
             ] {
@@ -5273,6 +5309,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -5759,6 +5796,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }];
         data.agent_id_to_name = [(
             "sess-id-codex-worker".to_string(),
@@ -6367,6 +6405,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         });
 
         // Foreign session sees the same epic (shared DB) but different supervisor

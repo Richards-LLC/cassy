@@ -19,6 +19,9 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "slack.stakeholder_contacts" => Some(serde_json::to_string(
+                &self.slack.as_ref().cloned().unwrap_or_default().stakeholder_contacts
+            ).expect("serializable stakeholder policies")),
             "hub.tailscale_serve" => Some(
                 self.hub
                     .as_ref()
@@ -26,6 +29,7 @@ impl Config {
                     .unwrap_or(true)
                     .to_string(),
             ),
+            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",
@@ -108,6 +112,8 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
+            "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
+            "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),

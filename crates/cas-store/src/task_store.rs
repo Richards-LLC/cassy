@@ -1342,6 +1342,29 @@ impl TaskStore for SqliteTaskStore {
         Ok(tasks)
     }
 
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        if assignees.is_empty() || statuses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let assignees = serde_json::to_string(assignees)?;
+        let statuses =
+            serde_json::to_string(&statuses.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM tasks
+             WHERE assignee COLLATE NOCASE IN (SELECT value FROM json_each(?1))
+               AND status IN (SELECT value FROM json_each(?2))
+             ORDER BY priority, created_at DESC",
+        )?;
+        Ok(stmt
+            .query_map(params![assignees, statuses], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Find one recorded epic lane, preferring a live owner over historical
     /// terminal rows. Spawn does not decode the project's whole task backlog.
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {

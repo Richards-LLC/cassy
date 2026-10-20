@@ -1749,7 +1749,7 @@ fn assemble_markdown(
             },
         ));
     } else {
-        zero_notes.push("No GitHub issues were closed with this release.".to_string());
+        zero_notes.push("No GitHub issues are counted in this report's fixes ledger.".to_string());
     }
     let green_timing =
         if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
@@ -1940,7 +1940,7 @@ fn assemble_markdown(
     };
     output.push('\n');
     if sources.issues.is_empty() {
-        output.push_str("No GitHub issues were closed with this release.\n\n");
+        output.push_str("No GitHub issues are counted in this report's fixes ledger.\n\n");
     }
     if !sources.issues_still_open.is_empty() {
         output.push_str(&format!(
@@ -2520,13 +2520,21 @@ const { pathToFileURL } = require('node:url');
       await document.fonts.ready;
       document.querySelectorAll('details').forEach(panel => { panel.open = true; });
     });
+    // The running folio wears the report's own tokens: its title and page
+    // count in the mono stack and muted ink the page declares.
+    const folio = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement);
+      const token = name => style.getPropertyValue(name).trim();
+      return { color: token('--ink-muted') || 'GrayText', font: token('--font-mono') || 'monospace' };
+    });
+    const attr = text => text.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
     for (const format of ['A4', 'Letter']) {
       await page.pdf({
         path: path.join(output, path.basename(input, '.html') + '-' + format + '.pdf'),
         format, printBackground: true, preferCSSPageSize: false,
         margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
         displayHeaderFooter: true, headerTemplate: '<span></span>',
-        footerTemplate: '<div style="font:8px sans-serif;width:100%;text-align:center;color:#555"><span class="pageNumber"></span> / <span class="totalPages"></span></div>'
+        footerTemplate: `<div style="width:100%;margin:0 15mm;display:flex;justify-content:space-between;gap:12px;font:7px ${attr(folio.font)};color:${attr(folio.color)}"><span class="title"></span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`
       });
     }
   } finally { await browser.close(); }
@@ -3465,7 +3473,8 @@ mod tests {
         let page_one = &report[..report.find("## What you can do now").unwrap()];
         assert!(!page_one.contains("| 0 |"), "{page_one}");
         assert!(!page_one.contains("unavailable |"), "{page_one}");
-        assert!(report.contains("No GitHub issues were closed with this release."));
+        assert!(report.contains("No GitHub issues are counted in this report"));
+        assert!(!report.contains("No GitHub issues were closed with this release."));
         assert!(report.contains("Not measured for this release: green to published"));
     }
 

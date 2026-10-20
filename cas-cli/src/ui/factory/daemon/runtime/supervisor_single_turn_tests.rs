@@ -420,7 +420,260 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(&peer).unwrap();
     let body = "Please coordinate this delivery with me.";
     enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1",[(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()]).unwrap();
     daemon.process_prompt_queue().await.unwrap();
     let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
+}
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
+    if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
+    for guard in ["budget", "codex-budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let cli = if guard == "codex-budget" { cas_mux::SupervisorCli::Codex } else { cas_mux::SupervisorCli::Claude };
+        let budget = guard.ends_with("budget");
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
+        let peer = cas_types::Agent::new_with_role(
+            "guard-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+        let bodies = if budget {
+            vec![format!("Budget report A {}", "a".repeat(2600)), format!("Budget report B {}", "b".repeat(2600))]
+        } else { vec!["First field report".into(), "Second field report".into()] };
+        assert!(bodies.iter().all(|body| cas_store::fits_hook_surface(body)));
+        let ids: Vec<_> = bodies.iter().map(|body| enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() })).collect();
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let held = if guard.ends_with("leader") { 0 } else { 1 };
+        if !budget {
+            let row = queue.queued_prompt(ids[held]).unwrap().unwrap();
+            let legacy = super::delivery::claude_teams_inbox_text(
+                &format!("{}\n{}", crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&row), row.prompt),
+                &row.prompt, "director", row.id,
+            );
+            daemon.teams.as_ref().unwrap().write_to_inbox("supervisor", "director", &legacy, None, None).unwrap();
+            let pane = daemon.app.supervisor_name().to_string();
+            let bytes = daemon.app.mux.pane_bytes_received(&pane).unwrap();
+            if guard.starts_with("memory") {
+                daemon.inbox_deferred_writes.insert(row.id, super::queue_and_events::InboxDeferredWrite {
+                    pane, bytes_at_write: bytes, written_at: Instant::now(), delivered_at: chrono::Utc::now(),
+                });
+            } else { queue.record_deferred_inbox(row.id, bytes).unwrap(); }
+        }
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+            [(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()],
+        ).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        let inbox = teams_messages(&daemon);
+        if guard == "codex-budget" {
+            let typed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    settle_injected_writes(&mut daemon).await;
+                    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                    if typed.ends_with('\r') && ids.iter().all(|id|
+                        queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) { break typed; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("oversized Codex directed batch submitted");
+            assert_eq!(typed.matches('\r').count(), 1, "one Codex turn");
+            for (id, body) in ids.iter().zip(&bodies) {
+                assert_eq!(typed.matches(body).count(), 1, "full body without truncation or duplicate passenger");
+                assert!(typed.contains(&format!("[cas #{id} ")));
+            }
+            assert!(inbox.is_empty(), "Codex must not receive a duplicate Teams copy");
+        } else if budget {
+            assert_eq!(inbox.len(), 1, "oversized directed burst must use the full-body Teams path");
+            let text = inbox[0]["text"].as_str().unwrap();
+            for body in &bodies { assert!(text.contains(body), "no truncation or lost passenger"); }
+        } else {
+            let held_marker = format!("[cas #{} ", ids[held]);
+            assert_eq!(inbox.iter().filter(|message| message["text"].as_str().unwrap().contains(&held_marker)).count(), 1,
+                "{guard}: the held legacy copy must not be duplicated; headers={:?}",
+                inbox.iter().map(|message| message["text"].as_str().unwrap().lines().next()).collect::<Vec<_>>());
+            assert!(!std::fs::read_to_string(root.path().join("input")).unwrap().contains(&bodies[held]),
+                "{guard}: legacy content must not be typed again as a batch member");
+            if guard == "memory-leader" {
+                assert_ne!(queue.message_delivery_report(ids[1]).unwrap().unwrap().stage,
+                    cas_store::DeliveryStage::Delivered, "a held leader cannot consume its unsent passenger");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_staggered_arrivals_share_one_deadline_and_turn() {
+    if !fixture_child("cas_bc4d_staggered_arrivals_share_one_deadline_and_turn") { return; }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let peer = cas_types::Agent::new_with_role(
+        "staggered-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+    );
+    crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+    // Move the durable clock between arrivals without waiting out the debounce.
+    let advance = |seconds| {
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let rows: Vec<(i64, String, String)> = conn.prepare(
+            "SELECT id,created_at,next_attempt_at FROM prompt_queue WHERE processed_at IS NULL"
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap().collect::<Result<_,_>>().unwrap();
+        for (id, created, deadline) in rows {
+            let shift = |value: &str| (chrono::DateTime::parse_from_rfc3339(value).unwrap()
+                - chrono::Duration::seconds(seconds)).to_rfc3339();
+            conn.execute("UPDATE prompt_queue SET created_at=?1,next_attempt_at=?2 WHERE id=?3",
+                rusqlite::params![shift(&created),shift(&deadline),id]).unwrap();
+        }
+    };
+    let mut ids = Vec::new();
+    let bodies = ["Staggered report one", "Staggered report two", "Staggered report three"];
+    for body in bodies {
+        if !ids.is_empty() { advance(5); }
+        ids.push(enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() }));
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let deadlines: Vec<_> = ids.iter().map(|id| {
+            let value: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1",
+                [id], |row| row.get(0)).unwrap();
+            chrono::DateTime::parse_from_rfc3339(&value).unwrap()
+        }).collect();
+        assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]),
+            "arrivals within the window must keep the leader's deadline: {deadlines:?}");
+    }
+    advance(21);
+    daemon.process_prompt_queue().await.unwrap();
+    settle_injected_writes(&mut daemon).await;
+    let typed = typed_once(&root, &mut daemon, bodies[0]).await;
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    for (id, body) in ids.iter().zip(bodies) {
+        assert_eq!(typed.matches(body).count(), 1);
+        assert!(typed.contains(&format!("[cas #{id} ")));
+        assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Delivered);
+    }
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed,
+        "no separate turn for staggered passengers");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
+    if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // Both harnesses use the same body, claim and completion path.
+    for cli in [
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Codex,
+    ] {
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
+        let peer = cas_types::Agent::new_with_role(
+            "burst-peer".into(),
+            "peer".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&peer)
+            .unwrap();
+        let bodies = [
+            "First field report",
+            "Second field report",
+            "Third field report",
+        ];
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| {
+                enqueue(
+                    &daemon,
+                    "peer",
+                    body,
+                    cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: peer.id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let queue=crate::store::open_prompt_queue_store(&cas).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if ids.iter().all(|id|queue.message_delivery_report(*id).unwrap().unwrap().pending_detail.as_deref()==Some("directed supervisor message burst debounce")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("fresh burst reaches debounce without typing");
+        nothing_typed_or_relayed(&root, &daemon);
+        // Advance the durable queue clock, without sleeping for the debounce.
+        rusqlite::Connection::open(cas.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+                [(chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
+            )
+            .unwrap();
+        let typed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                settle_injected_writes(&mut daemon).await;
+                let text = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if text.ends_with('\r') && ids.iter().all(|id|
+                    queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) {
+                    break text;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one submitted burst body");
+        assert_eq!(typed.matches('\r').count(), 1, "one turn: {typed:?}");
+        assert!(typed.contains("From: peer"),"coalesced bodies retain sender attribution: {typed:?}");
+        for body in bodies {
+            assert_eq!(typed.matches(body).count(), 1, "{typed:?}");
+        }
+        assert!(
+            teams_messages(&daemon).is_empty(),
+            "no duplicate Teams copy"
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        for id in &ids {
+            assert!(
+                typed.contains(&format!("[cas #{id} ")),
+                "each row retains its identity"
+            );
+            assert_eq!(
+                queue.message_delivery_report(*id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Delivered
+            );
+        }
+        assert!(
+            crate::supervisor_message_wakes::report(&cas, daemon.app.supervisor_name())
+                .unwrap()
+                .contains("directed_message_wakes_last_hour: 1")
+        );
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("input")).unwrap(),
+            typed,
+            "no second turn for batch passengers"
+        );
+    }
 }

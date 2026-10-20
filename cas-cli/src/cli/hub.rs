@@ -948,7 +948,7 @@ pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
     }
 }
 
-fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
+pub(super) fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
     lock_holder_display_state_with_timeout(holder, HUB_LAUNCH_TIMEOUT)
 }
 
@@ -1013,7 +1013,7 @@ fn render_status(
     state: HubDisplayState,
     binary_version: &str,
 ) -> String {
-    if state == HubDisplayState::Running {
+    let mut rendered = if state == HubDisplayState::Running {
         let endpoint = record
             .public_url
             .as_deref()
@@ -1035,7 +1035,23 @@ fn render_status(
                 .unwrap_or(&record.started_at),
             record.version,
         )
+    };
+    if let Some(warning) = version_warning(state, &record.version, binary_version) {
+        rendered.push_str(&format!("\nWarning: {warning}"));
     }
+    rendered
+}
+
+fn version_warning(
+    state: HubDisplayState,
+    running_version: &str,
+    binary_version: &str,
+) -> Option<String> {
+    (state == HubDisplayState::Running && running_version != binary_version).then(|| {
+        format!(
+            "hub version drift (running {running_version}, binary {binary_version})\n  Fix: cas hub service install"
+        )
+    })
 }
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
@@ -2362,6 +2378,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "state": hub_record_state_json(&record, state),
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
+                "version_warning": version_warning(state, &record.version, env!("CARGO_PKG_VERSION")),
                 "tailscale_serve": transport,
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
@@ -2956,18 +2973,10 @@ pub(crate) fn restart_stale_hub(
     // before any early return below, so a hub that needs no restart, or is
     // not running at all, still gets the new policy on this update.
     let tailscale_serve = host_tailscale_default()?;
-    let service_changed = match super::hub_service::refresh_installed_service(tailscale_serve) {
-        Ok(changed) => changed,
-        Err(error) => {
-            tracing::warn!(error = %format!("{error:#}"), "cas update: hub service unit refresh failed");
-            if !cli.json {
-                eprintln!(
-                    "cas update: could not refresh the hub service definition: {error:#}; rerun `cas hub service install` to rewrite it"
-                );
-            }
-            false
-        }
-    };
+    // Never restart through a definition we could not validate or refresh:
+    // the manager would simply launch its old candidate again.
+    let service_changed = super::hub_service::refresh_installed_service(tailscale_serve)
+        .context("cannot refresh hub service; run `cas hub service install` before retrying `cas update`")?;
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let holder = paths.lock_holders().into_iter().next();
@@ -3941,6 +3950,14 @@ mod tests {
 
         assert!(rendered.contains("version 3.4.1"), "{rendered}");
         assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+        assert!(rendered.contains("version drift"), "{rendered}");
+        assert!(rendered.contains("cas hub service install"), "{rendered}");
+        let current = render_status(
+            &record("3.7.7", DEFAULT_HUB_PORT, None),
+            HubDisplayState::Running,
+            "3.7.7",
+        );
+        assert!(!current.contains("version drift"), "{current}");
     }
 
     #[test]
@@ -3952,6 +3969,9 @@ mod tests {
         let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
         assert!(rendered.contains("last pid 42 exited"), "{rendered}");
+        assert!(rendered.contains("cas hub start"), "{rendered}");
+        assert!(!rendered.contains("version drift"), "{rendered}");
+        assert!(!rendered.contains("cas hub service install"), "{rendered}");
         assert!(
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"

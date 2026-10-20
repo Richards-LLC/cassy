@@ -50,6 +50,55 @@ pub struct SlackConfig {
     /// started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub violet_bot_user_ids: Option<Vec<String>>,
+    /// Desired Cloud policies. Until capability negotiation succeeds these
+    /// produce local warnings, never a claim of shared exclusion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
+}
+
+/// Machine-wide managed Viktor upstream setting. Absence keeps the default on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ViktorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl ViktorConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StakeholderContactPolicy {
+    pub workspace_id: String,
+    pub user_id: String,
+    pub minimum_interval_secs: u64,
+    #[serde(default)]
+    pub mode: StakeholderContactMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StakeholderContactMode {
+    #[default]
+    Refuse,
+    Warn,
+}
+
+impl StakeholderContactPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        let slack_id = |id: &str, prefix: char| {
+            id.starts_with(prefix) && id.len() > 1 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        if !slack_id(&self.workspace_id, 'T') || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
+            || self.minimum_interval_secs == 0 || self.minimum_interval_secs > i64::MAX as u64
+        {
+            return Err("stakeholder_contacts requires Slack workspace T…, user U…/W…, and a positive minimum_interval_secs".into());
+        }
+        Ok(())
+    }
 }
 
 impl SlackConfig {
@@ -683,6 +732,14 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 
+    /// Seconds to collect directed supervisor messages into one submitted turn.
+    #[serde(default = "default_supervisor_message_debounce_secs")]
+    pub supervisor_message_debounce_secs: u64,
+
+    /// Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.
+    #[serde(default = "default_supervisor_message_wakes_per_hour")]
+    pub supervisor_message_wakes_per_hour: u64,
+
     /// Maximum number of characters accepted in an ordinary agent message.
     #[serde(default = "default_message_max_chars")]
     pub message_max_chars: usize,
@@ -1003,6 +1060,10 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
     14
 }
 
+fn default_supervisor_message_debounce_secs() -> u64 { 20 }
+
+fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -1028,11 +1089,12 @@ fn default_supervisor_stall_after_secs() -> u64 {
 }
 
 fn default_delivery_stalled_priority_secs() -> u64 {
-    10 * 60
+    // cas-badb (GH #1302): an unread message escalates within five minutes.
+    5 * 60
 }
 
 fn default_delivery_stalled_normal_secs() -> u64 {
-    30 * 60
+    5 * 60
 }
 
 fn default_target_cache_high_watermark_percent() -> u8 {
@@ -1079,6 +1141,8 @@ impl Default for FactoryConfig {
             scratch_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
+            supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
+            supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
             note_max_chars: default_note_max_chars(),
@@ -2180,11 +2244,12 @@ mod tests {
         assert_eq!(fc.delivery_stalled_normal_secs, 120);
         assert_eq!(
             FactoryConfig::default().delivery_stalled_priority_secs,
-            10 * 60
+            5 * 60,
+            "cas-badb: an unread message escalates within five minutes"
         );
         assert_eq!(
             FactoryConfig::default().delivery_stalled_normal_secs,
-            30 * 60
+            5 * 60
         );
     }
 

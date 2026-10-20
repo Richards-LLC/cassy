@@ -61,6 +61,13 @@ Post order: user top-level → capture `message.message_id` → user reply → d
 - **One punch per top-level message.**
 - **Plain language** in the User thread.
 - **Honest reverts:** if something shipped and came back out, say so plainly.
+- **Before/after screenshots:** when a change in the User reply has a real
+  Before and a real After capture (a `pairs[]` entry in that delivery's
+  `qa/pairs/pairs.json`), attach both JPGs to that reply, Before first; their
+  file names carry the labels. Say so in words in the change's line. A change
+  with one side, an `unpaired[]` shot or no capture gets no image, and a
+  mocked or edited capture is never attached. One reply carries at most ten
+  files, so five pairs: keep the changes a user would notice most.
 
 ## Artifact
 

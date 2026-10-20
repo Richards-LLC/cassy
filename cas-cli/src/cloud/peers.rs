@@ -42,6 +42,10 @@ pub const META_OWNER: &str = "owner";
 /// Metadata key carrying the branch checked out where the agent works
 /// (cas-f707). Optional; empty when unknown or detached.
 pub const META_BRANCH: &str = "branch";
+/// Metadata key a supervisor publishes while its own harness refuses every
+/// turn for an account reason (GH #1319): the harness's message, e.g.
+/// "Login expired · Please run /login". Empty or absent when healthy.
+pub const META_HARNESS_AUTH_FAILED: &str = "harness_auth_failed";
 
 /// A peer is live while its last heartbeat is at most this old. Matches the
 /// local supervisor liveness window in `worker_status`.
@@ -84,6 +88,10 @@ pub struct Peer {
     /// `None` when either account is unknown (cas-d58d).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub own: Option<bool>,
+    /// GH #1319: the supervisor's harness cannot authenticate, so nothing it
+    /// receives is read. Such a peer is never `live`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness_auth_failed: Option<String>,
 }
 
 impl Peer {
@@ -177,6 +185,17 @@ pub fn repo_peers(
     self_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<Peer> {
+    repo_rows(agents, canonical_id, alias_class, self_id, now, supervisor_peer)
+}
+
+fn repo_rows(
+    agents: &[AgentInfo],
+    canonical_id: &str,
+    alias_class: &[String],
+    self_id: Option<&str>,
+    now: DateTime<Utc>,
+    row: fn(&AgentInfo, DateTime<Utc>) -> Option<Peer>,
+) -> Vec<Peer> {
     let mut peers: Vec<Peer> = agents
         .iter()
         .filter(|agent| Some(agent.id.as_str()) != self_id)
@@ -185,7 +204,7 @@ pub fn repo_peers(
                 crate::cloud::project_ids_match_with_aliases(&repo, canonical_id, alias_class)
             })
         })
-        .filter_map(|agent| supervisor_peer(agent, now))
+        .filter_map(|agent| row(agent, now))
         .collect();
     sort_peers(&mut peers);
     peers
@@ -202,7 +221,24 @@ fn agent_meta(agent: &AgentInfo, key: &str) -> Option<String> {
 /// `agent` as a listed peer: a supervisor that has not shut down and was
 /// seen within [`PEER_LISTING_WINDOW_SECS`].
 fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
-    if agent.status == "shutdown" || agent_meta(agent, META_ROLE).as_deref() != Some("supervisor") {
+    if agent.status == "shutdown" {
+        return None;
+    }
+    supervisor_row(agent, now)
+}
+
+/// GH #1319: `agent` as an ended supervisor (its session shut down) seen
+/// within [`PEER_LISTING_WINDOW_SECS`]. Never listed; kept only so a message
+/// addressed to it can reach its successor or be refused by name.
+fn ended_supervisor(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
+    if agent.status != "shutdown" {
+        return None;
+    }
+    supervisor_row(agent, now).map(|peer| Peer { live: false, ..peer })
+}
+
+fn supervisor_row(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
+    if agent_meta(agent, META_ROLE).as_deref() != Some("supervisor") {
         return None;
     }
     let last_heartbeat = DateTime::parse_from_rfc3339(&agent.last_heartbeat)
@@ -222,8 +258,11 @@ fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
         focus_title: agent_meta(agent, META_FOCUS).and(agent_meta(agent, META_FOCUS_TITLE)),
         last_heartbeat,
         heartbeat_age_secs,
-        // The cloud computes `stale` live (cloud PR #153).
-        live: heartbeat_age_secs <= PEER_LIVE_SECS && agent.status != "stale",
+        // The cloud computes `stale` live (cloud PR #153). A supervisor whose
+        // harness is logged out heartbeats but reads nothing (GH #1319).
+        live: heartbeat_age_secs <= PEER_LIVE_SECS
+            && agent.status != "stale"
+            && agent_meta(agent, META_HARNESS_AUTH_FAILED).is_none(),
         user_id: agent
             .user_id
             .as_deref()
@@ -233,6 +272,7 @@ fn supervisor_peer(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
         owner: agent_meta(agent, META_OWNER),
         branch: agent_meta(agent, META_BRANCH),
         own: None,
+        harness_auth_failed: agent_meta(agent, META_HARNESS_AUTH_FAILED),
     })
 }
 
@@ -368,10 +408,20 @@ pub fn user_peers(
     self_id: Option<&str>,
     now: DateTime<Utc>,
 ) -> Vec<Peer> {
+    user_rows(agents, owner_user_id, self_id, now, supervisor_peer)
+}
+
+fn user_rows(
+    agents: &[AgentInfo],
+    owner_user_id: &str,
+    self_id: Option<&str>,
+    now: DateTime<Utc>,
+    row: fn(&AgentInfo, DateTime<Utc>) -> Option<Peer>,
+) -> Vec<Peer> {
     let mut peers: Vec<Peer> = agents
         .iter()
         .filter(|agent| Some(agent.id.as_str()) != self_id)
-        .filter_map(|agent| supervisor_peer(agent, now))
+        .filter_map(|agent| row(agent, now))
         .filter(|peer| peer.user_id.as_deref() == Some(owner_user_id))
         .collect();
     sort_peers(&mut peers);
@@ -399,7 +449,11 @@ pub fn render_peers(canonical_id: &str, peers: &[Peer]) -> String {
         return out;
     }
     for peer in peers {
-        let state = if peer.live { "live" } else { "stale" };
+        let state = match (peer.live, peer.harness_auth_failed.is_some()) {
+            (_, true) => "logged out",
+            (true, false) => "live",
+            (false, false) => "stale",
+        };
         // cas-d58d: every peer names its owning account, on its own line so
         // a long email never pushes the session line past 80 columns.
         out.push_str(&format!(
@@ -456,6 +510,136 @@ pub fn resolve_same_repo_target<'a>(
     })
 }
 
+/// Who reads the mailbox a resolved target names (GH #1319).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotHolder<'a> {
+    /// The addressed supervisor reads its own mailbox (or is down without a
+    /// successor and will claim it when it returns): send to it.
+    Addressed,
+    /// The addressed supervisor ended, or its harness is logged out, and one
+    /// live supervisor of the same project on the same machine holds its
+    /// slot. `note` tells the sender who got it instead.
+    Successor { peer: &'a Peer, note: String },
+    /// Nobody can read it. The reason names why; nothing is sent.
+    Refused(String),
+}
+
+/// The most recent ended supervisor `target` names: an agent id, a name or
+/// `name@machine` (GH #1319).
+pub fn ended_target<'a>(ended: &'a [Peer], target: &str) -> Option<&'a Peer> {
+    let target = target.trim();
+    let target = target.strip_prefix("supervisor:").unwrap_or(target).trim();
+    let (name, machine) = match target.rsplit_once('@') {
+        Some((name, machine)) => (name, Some(machine)),
+        None => (target, None),
+    };
+    ended
+        .iter()
+        .filter(|peer| {
+            peer.agent_id.eq_ignore_ascii_case(target)
+                || (peer.name.eq_ignore_ascii_case(name)
+                    && machine.is_none_or(|machine| same_machine_label(peer, machine)))
+        })
+        .max_by_key(|peer| peer.last_heartbeat)
+}
+
+fn same_machine_label(peer: &Peer, machine: &str) -> bool {
+    peer.machine.eq_ignore_ascii_case(machine)
+        || peer
+            .machine_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(machine))
+}
+
+/// Whether `addressed` can read a message, and if not, which live supervisor
+/// of the same project on the same machine holds its slot (GH #1319).
+///
+/// A supervisor that only went quiet keeps its address while no successor
+/// exists: its daemon claims the message when it returns. One that ended, or
+/// whose harness is logged out, never will, so the send is refused by name
+/// rather than reported as delivered.
+pub fn slot_holder<'a>(peers: &'a [Peer], addressed: &Peer, ended: bool) -> SlotHolder<'a> {
+    let label = format!("{}@{}", addressed.name, addressed.machine);
+    let why = if ended {
+        format!(
+            "{label} ended {} ago (its session shut down)",
+            age(addressed.heartbeat_age_secs)
+        )
+    } else if let Some(failure) = addressed.harness_auth_failed.as_deref() {
+        format!("{label}'s harness is logged out (\"{failure}\"), so it reads no messages")
+    } else if !addressed.live {
+        format!("{label} was last seen {} ago", age(addressed.heartbeat_age_secs))
+    } else {
+        return SlotHolder::Addressed;
+    };
+    let project_of = |peer: &Peer| {
+        peer.canonical_id
+            .as_deref()
+            .and_then(crate::cloud::normalize_project_canonical_id)
+    };
+    let project = project_of(addressed);
+    let same_project = |peer: &&Peer| {
+        project.is_some()
+            && project_of(peer) == project
+            && peer.agent_id != addressed.agent_id
+            && peer.live
+    };
+    let on_machine = |peer: &&Peer| {
+        same_machine_label(peer, &addressed.machine)
+            || addressed
+                .machine_id
+                .as_deref()
+                .is_some_and(|id| same_machine_label(peer, id))
+    };
+    let successors: Vec<&Peer> = peers.iter().filter(same_project).filter(on_machine).collect();
+    let project_name = addressed
+        .project_name()
+        .unwrap_or_else(|| "its project".to_string());
+    match successors.as_slice() {
+        [successor] => SlotHolder::Successor {
+            peer: successor,
+            note: format!(
+                "{why}; delivered to its successor {}@{} instead.",
+                successor.name, successor.machine
+            ),
+        },
+        // Only quiet: it claims its own mail when it returns.
+        _ if !ended && addressed.harness_auth_failed.is_none() => SlotHolder::Addressed,
+        [] => {
+            let elsewhere: Vec<String> = peers
+                .iter()
+                .filter(same_project)
+                .map(|peer| format!("{}@{}", peer.name, peer.machine))
+                .collect();
+            let elsewhere = if elsewhere.is_empty() {
+                String::new()
+            } else {
+                format!(" (live elsewhere: {}; address one by name)", elsewhere.join(", "))
+            };
+            SlotHolder::Refused(format!(
+                "{why}, and no live supervisor of {project_name} runs on {} to take its \
+                 messages{elsewhere}. Nothing was sent.",
+                addressed.machine
+            ))
+        }
+        many => SlotHolder::Refused(format!(
+            "{why}, and {} live supervisors of {project_name} run on {}: {}. Address one by \
+             name. Nothing was sent.",
+            many.len(),
+            addressed.machine,
+            many.iter()
+                .map(|peer| format!(
+                    "{}@{} (session {})",
+                    peer.name,
+                    peer.machine,
+                    peer.session.as_deref().unwrap_or("unknown")
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// The note under a same-repo list whose `own` scope hid other accounts'
 /// supervisors (cas-d58d). Empty when nothing was hidden.
 pub fn render_hidden_note(hidden: usize) -> String {
@@ -485,6 +669,9 @@ pub enum PeerDiscovery {
         /// Live workers in the listed peers' sessions (cas-9f53), so a send
         /// to one names the supervisor to relay through.
         workers: Vec<crate::cloud::peers_detail::PeerWorkerRef>,
+        /// Supervisors of this repo whose session ended (GH #1319), so a
+        /// message to one reaches its successor or is refused by name.
+        ended: Vec<Peer>,
     },
     /// Not logged in to Cassy Cloud: cross-machine peers are unknowable.
     NotLoggedIn,
@@ -536,6 +723,9 @@ pub fn discover_peers(
         .list_agent_infos()?;
     let mut peers = repo_peers(&agents, &canonical_id, &alias_class, self_id, Utc::now());
     exclude_project_agents(cas_root, &mut peers)?;
+    let mut ended =
+        repo_rows(&agents, &canonical_id, &alias_class, self_id, Utc::now(), ended_supervisor);
+    exclude_project_agents(cas_root, &mut ended)?;
     // cas-d58d: label each peer with its account; the project's scope may
     // keep only the caller's own.
     // The token's own agent list is asked for only when it can decide
@@ -560,6 +750,7 @@ pub fn discover_peers(
         peers,
         hidden,
         workers,
+        ended,
     })
 }
 
@@ -570,6 +761,8 @@ pub enum UserPeerDiscovery {
     Found {
         owner_user_id: String,
         peers: Vec<Peer>,
+        /// The user's supervisors whose session ended (GH #1319).
+        ended: Vec<Peer>,
     },
     /// Not logged in to Cassy Cloud: other projects' supervisors are unknowable.
     NotLoggedIn,
@@ -596,9 +789,12 @@ pub fn discover_user_peers(
     let owner = caller_user_id(&agents, self_id).map_err(crate::error::CasError::Other)?;
     let mut peers = user_peers(&agents, &owner, self_id, Utc::now());
     exclude_project_agents(cas_root, &mut peers)?;
+    let mut ended = user_rows(&agents, &owner, self_id, Utc::now(), ended_supervisor);
+    exclude_project_agents(cas_root, &mut ended)?;
     Ok(UserPeerDiscovery::Found {
         owner_user_id: owner,
         peers,
+        ended,
     })
 }
 
@@ -638,8 +834,14 @@ pub fn render_user_peers(peers: &[Peer], verbose: bool) -> String {
     }
     // cas-8522: each row declares what its supervisor owns.
     let row = |peer: &Peer| {
+        // GH #1319: a logged-out harness heartbeats but reads nothing.
+        let logged_out = if peer.harness_auth_failed.is_some() {
+            " | harness logged out"
+        } else {
+            ""
+        };
         format!(
-            "  {} {} on {}, seen {} ago\n    session {} | epic {}\n",
+            "  {} {} on {}, seen {} ago\n    session {} | epic {}{logged_out}\n",
             peer.name,
             project(peer),
             peer.machine,

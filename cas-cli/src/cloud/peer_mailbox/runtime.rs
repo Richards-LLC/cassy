@@ -171,6 +171,7 @@ impl PeerMailboxRuntime {
                 &self.factory_session,
                 &self.consumer_id,
                 &history,
+                &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {
@@ -193,6 +194,11 @@ impl PeerMailboxRuntime {
         });
         if let Some(error) = outbox_error {
             report.errors.push(format!("peer outbox: {error}"));
+        }
+        if let Err(error) = crate::cloud::epic_split::reconcile(
+            &self.cas_dir, &self.factory_session, chrono::Utc::now(),
+        ) {
+            report.errors.push(format!("epic split reconciliation: {error}"));
         }
         report
     }

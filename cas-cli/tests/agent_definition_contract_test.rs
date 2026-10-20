@@ -235,8 +235,13 @@ fn session_learn_stop_hook_uses_a_dedicated_classifier_prompt() {
     assert!(stop_flow.contains("session_learn_dedup_candidates(store.as_ref())"));
 }
 
+/// cas-f0a1: the documented test-first command finds a case added to an
+/// existing test file; a new file is never required.
 #[test]
 fn verifier_test_first_command_runs_on_a_fixture_repo() {
+    let body = load(VERIFIER_PATHS[0]);
+    let gate = body.split("- `test-first`:").nth(1).expect("test-first gate");
+    let command = gate.split("```bash").nth(1).unwrap().split("```").next().unwrap().trim();
     let temp = tempfile::tempdir().expect("temporary git fixture");
     let repo = temp.path();
     run_git(repo, ["init", "--quiet", "--initial-branch=main"]);
@@ -244,42 +249,37 @@ fn verifier_test_first_command_runs_on_a_fixture_repo() {
     run_git(repo, ["config", "user.email", "cassy@example.invalid"]);
 
     // History on the target branch that is not part of the delivery.
-    fs::write(repo.join("seed.txt"), "seed\n").unwrap();
     fs::write(repo.join("old_test.rs"), "#[test] fn old() {}\n").unwrap();
-    run_git(repo, ["add", "seed.txt", "old_test.rs"]);
+    run_git(repo, ["add", "old_test.rs"]);
     run_git(repo, ["commit", "--quiet", "-m", "seed"]);
 
-    // The delivery: one branch commit adding a test.
+    // The delivery adds one case to the existing test file.
     run_git(repo, ["checkout", "--quiet", "-b", "factory/worker"]);
-    fs::write(repo.join("contract_test.rs"), "#[test] fn contract() {}\n").unwrap();
-    run_git(repo, ["add", "contract_test.rs"]);
-    run_git(repo, ["commit", "--quiet", "-m", "add test"]);
+    fs::write(repo.join("old_test.rs"), "#[test] fn old() {}\n#[test] fn added() {}\n").unwrap();
+    run_git(repo, ["commit", "--quiet", "-am", "add a case"]);
 
-    // This is the exact command shape documented by task-verifier.md: the
-    // delivery base is the merge-base with the task's target branch (never a
-    // fixed commit count), and POSIX grep's `-E` selects extended regexps.
     let output = Command::new("sh")
         .current_dir(repo)
         .arg("-c")
-        .arg(
-            "BASE=$(git merge-base HEAD main) && git diff --name-status \"$BASE\" HEAD | grep -E '^A[[:space:]]+.*(_test\\.rs|tests/.*\\.rs)'",
-        )
+        .arg(format!("BASE=$(git merge-base HEAD main) && {command}"))
         .output()
         .expect("run documented verifier command");
-    assert!(
-        output.status.success(),
-        "documented test-first command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("contract_test.rs"),
-        "the delivered test file is found: {stdout}"
-    );
-    assert!(
-        !stdout.contains("old_test.rs"),
-        "target-branch history is not attributed to the delivery: {stdout}"
-    );
+    assert!(stdout.contains("fn added"), "the delivered case is found: {command}");
+    assert!(!stdout.contains("fn old"), "target-branch history is not attributed: {stdout}");
+}
+
+/// cas-f0a1: one verdict never becomes a rule; a verifier records its lesson
+/// as a candidate that only repetition across tasks raises for a decision.
+#[test]
+fn verification_never_calls_rule_create() {
+    for path in VERIFIER_PATHS {
+        let body = load(path);
+        for mutation in ["create", "update", "promote", "helpful"] {
+            assert!(!body.contains(&format!("rule action={mutation}")), "{path}: {mutation}");
+        }
+        assert!(body.contains("rule action=observe"), "{path}");
+    }
 }
 
 fn run_git<const N: usize>(repo: &Path, args: [&str; N]) {

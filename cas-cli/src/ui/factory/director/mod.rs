@@ -47,7 +47,7 @@ pub use prompts::{
     worker_now_has_real_assignment, MergeAlertEvidence, MergeAlertFreshness, Prompt,
 };
 pub(crate) use prompts::{
-    external_response_hint,
+    enqueue_external_message, external_response_hint,
     apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,
     prompt_is_still_deliverable,
 };

@@ -46,6 +46,43 @@ fn test_task_crud() {
     let open = store.list(Some(TaskStatus::Open)).unwrap();
     assert_eq!(open.len(), 0);
 
+    // Binding queries return only the requested owners and live statuses.
+    task.assignee = Some("worker-a".into());
+    store.update(&task).unwrap();
+    for (other_id, assignee, status) in [
+        ("cas-id00", Some("worker-id"), TaskStatus::Blocked),
+        ("cas-done", Some("worker-a"), TaskStatus::Closed),
+        ("cas-peer", Some("worker-b"), TaskStatus::InProgress),
+        ("cas-none", None, TaskStatus::InProgress),
+    ] {
+        let mut other = Task::new(other_id.into(), "query exclusion".into());
+        other.assignee = assignee.map(str::to_owned);
+        other.status = status;
+        store.add(&other).unwrap();
+    }
+    let mut ids = store
+        .ids_by_assignees_and_statuses(
+            &["WORKER-A", "worker-id"],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
+        )
+        .unwrap();
+    ids.sort();
+    let mut expected = vec![id.clone(), "cas-id00".into()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&[], &[TaskStatus::InProgress])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&["worker-a"], &[])
+            .unwrap()
+            .is_empty()
+    );
+
     // Delete task
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());
@@ -897,30 +934,33 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
 }
 
 #[test]
-fn sync_update_rejects_a_local_park_after_the_pull_snapshot() {
-    let (temp, store) = create_test_store();
-    let mut task = Task::new("cas-86eb-race".into(), "local delivery".into());
-    task.status = TaskStatus::InProgress;
-    store.add(&task).unwrap();
-    let expected = store.get(&task.id).unwrap();
-    let mut pulled = expected.clone();
-    pulled.title = "stale remote body".into();
-    // A second writer parks after the syncer's read but before its write.
-    let second_writer = SqliteTaskStore::open(temp.path()).unwrap();
-    task.status = TaskStatus::AwaitingMerge;
-    task.pending_worktree_merge = true;
-    task.deliverables.parked_branch = Some("factory/replay".into());
-    task.deliverables.factory_branch_anchor = Some("a".repeat(40));
-    let parked_at = second_writer.update(&task).unwrap();
-    assert_eq!(store.update_from_sync(&pulled, &expected).unwrap(), None);
-    let retained = store.get(&task.id).unwrap();
-    assert!(retained.lifecycle_matches(&task));
-    assert_eq!(retained.title, task.title);
-    assert_eq!(retained.updated_at, parked_at);
-    assert_eq!(
-        store.list(Some(TaskStatus::AwaitingMerge)).unwrap().len(),
-        1
-    );
+fn sync_update_rejects_local_park_or_close_after_pull_snapshot_cas_755a() {
+    for state in [TaskStatus::AwaitingMerge, TaskStatus::Closed] {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("cas-86eb-race".into(), "local delivery".into());
+        task.status = TaskStatus::InProgress;
+        store.add(&task).unwrap();
+        let expected = store.get(&task.id).unwrap();
+        let mut pulled = expected.clone();
+        pulled.title = "stale remote body".into();
+        pulled.updated_at += chrono::Duration::hours(1);
+        // Deterministically interleave a second writer between the pull's
+        // snapshot and conditional apply, including a completed local close.
+        let second_writer = SqliteTaskStore::open(temp.path()).unwrap();
+        task.status = state;
+        task.pending_worktree_merge = state == TaskStatus::AwaitingMerge;
+        task.closed_at = (state == TaskStatus::Closed).then(Utc::now);
+        task.close_reason = (state == TaskStatus::Closed).then(|| "delivery merged".into());
+        task.deliverables.parked_branch = Some("factory/replay".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let committed_at = second_writer.update(&task).unwrap();
+        assert_eq!(store.update_from_sync(&pulled, &expected).unwrap(), None);
+        let retained = store.get(&task.id).unwrap();
+        assert!(retained.lifecycle_matches(&task), "{state}");
+        assert_eq!(retained.title, task.title);
+        assert_eq!(retained.updated_at, committed_at);
+        assert_eq!(store.list(Some(state)).unwrap().len(), 1);
+    }
 }
 
 /// cas-3122: a replica that applies an older pulled row must keep that row's

@@ -770,6 +770,9 @@ mod tests {
                 expires_at: now,
                 created_at: now,
                 decided_at: Some(now),
+                decided_by: None,
+                cleanup_pending: false,
+                expiry_notice_pending: false,
             },
         )
         .unwrap();

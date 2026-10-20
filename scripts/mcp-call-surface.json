@@ -2,6 +2,7 @@
   "tools": {
     "artifact": {
       "actions": [
+        "fetch",
         "list",
         "post",
         "publish",
@@ -12,6 +13,8 @@
         "channel",
         "id",
         "initial_comment",
+        "note_type",
+        "notes",
         "path",
         "reply_to",
         "task_id",
@@ -180,6 +183,7 @@
         "theirs",
         "to_slot_id",
         "ttl_secs",
+        "wake",
         "worker_names",
         "workers"
       ]
@@ -286,6 +290,7 @@
     },
     "rule": {
       "actions": [
+        "candidates",
         "check_similar",
         "create",
         "delete",
@@ -294,6 +299,7 @@
         "history",
         "list",
         "list_all",
+        "observe",
         "promote",
         "restore",
         "show",

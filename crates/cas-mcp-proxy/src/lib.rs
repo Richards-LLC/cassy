@@ -83,6 +83,46 @@ pub trait ProxyCallObserver: Send + Sync {
     fn call_succeeded(&self, event: ProxyCallEvent<'_>);
 }
 
+/// Awaited preparation shared by every dispatch path. Remote authorization
+/// belongs here, rather than in the synchronous policy or success observer.
+pub trait ProxyCallInterceptor: Send + Sync {
+    fn prepare<'a>(
+        &'a self,
+        caller: &'a ProxyCaller,
+        server: &'a str,
+        tool: &'a str,
+        arguments: Option<serde_json::Map<String, Value>>,
+    ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>>;
+
+    /// Opt in by route before the transport converts a result to JSON.
+    /// Preparation-only interceptors never pay for result conversion.
+    fn observes_result(&self, _server: &str, _tool: &str) -> bool {
+        false
+    }
+
+    /// Await non-authoritative evidence without blocking the async executor.
+    /// Recording failures must not turn an accepted upstream call into a retry.
+    fn call_succeeded<'a>(
+        &'a self,
+        _event: ProxyCallEvent<'a>,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+pub struct PreparedProxyCall {
+    pub arguments: Option<serde_json::Map<String, Value>>,
+    pub response: Option<rmcp::model::CallToolResult>,
+    pub warning: Option<String>,
+    pub failure_context: Option<String>,
+}
+
+impl PreparedProxyCall {
+    pub fn forward(arguments: Option<serde_json::Map<String, Value>>) -> Self {
+        Self { arguments, response: None, warning: None, failure_context: None }
+    }
+}
+
 /// A policy decision requested before an upstream MCP tool call is forwarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyPolicyDecision {
@@ -545,6 +585,7 @@ pub struct ProxyEngine {
     session_id: String,
     policy: RwLock<Arc<dyn ProxyPolicy>>,
     observer: RwLock<Option<Arc<dyn ProxyCallObserver>>>,
+    interceptor: RwLock<Option<Arc<dyn ProxyCallInterceptor>>>,
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
     /// Client-side bound on one upstream tool call (cas-53ce).
     call_timeout: std::sync::RwLock<Duration>,
@@ -600,6 +641,7 @@ impl ProxyEngine {
             session_id,
             policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
             observer: RwLock::new(None),
+            interceptor: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
             call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
             reconnect_gate: tokio::sync::Mutex::new(()),
@@ -813,6 +855,10 @@ impl ProxyEngine {
     /// Install the observer for successful upstream calls.
     pub async fn set_call_observer(&self, observer: Arc<dyn ProxyCallObserver>) {
         *self.observer.write().await = Some(observer);
+    }
+
+    pub async fn set_call_interceptor(&self, interceptor: Arc<dyn ProxyCallInterceptor>) {
+        *self.interceptor.write().await = Some(interceptor);
     }
 
     /// Return the bounded, redacted authorization audit trail for this proxy
@@ -1394,6 +1440,17 @@ impl ProxyEngine {
         self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
 
+        let interceptor = self.interceptor.read().await.clone();
+        let prepared = if let Some(interceptor) = &interceptor {
+            interceptor.prepare(caller, server_name, tool_name, arguments).await?
+        } else {
+            PreparedProxyCall::forward(arguments)
+        };
+        if let Some(response) = prepared.response {
+            return Ok(response);
+        }
+        let arguments = prepared.arguments;
+
         let result = self
             .call_upstream(
                 server_name,
@@ -1404,7 +1461,46 @@ impl ProxyEngine {
                     task: None,
                 },
             )
-            .await?;
+            .await;
+        let mut result = match prepared.failure_context {
+            Some(context) => result.with_context(|| context)?,
+            None => result?,
+        };
+
+        if let Some(interceptor) = interceptor
+            .filter(|interceptor| interceptor.observes_result(server_name, tool_name))
+        {
+            let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
+            interceptor.call_succeeded(ProxyCallEvent {
+                caller, server: server_name, tool: tool_name,
+                arguments: &arguments, result: &serialized,
+            }).await;
+        }
+        if let Some(warning) = prepared.warning {
+            // Keep warnings in JSON receipts too: CLI and artifact callers
+            // decode the first receipt, while direct MCP sees all content.
+            if let Some(value) = result.structured_content.as_mut().filter(|value| value.is_object()) {
+                value["dispatch_warning"] = Value::String(warning.clone());
+            }
+            for content in &mut result.content {
+                if let rmcp::model::RawContent::Text(text) = &mut content.raw
+                    && let Ok(mut value) = serde_json::from_str::<Value>(&text.text)
+                    && value.is_object()
+                {
+                    value["dispatch_warning"] = Value::String(warning.clone());
+                    text.text = value.to_string();
+                }
+            }
+            if result.content.is_empty()
+                && let Some(structured) = &result.structured_content
+            {
+                // execute's text projection must retain structured-only
+                // receipts when adding the warning creates the first content.
+                result.content.push(rmcp::model::Content::text(structured.to_string()));
+            } else {
+                result.content.push(rmcp::model::Content::text(warning));
+            }
+        }
 
         // The receipted external-verification lane owns its own polling and
         // lifecycle. Observing it here would create a second inbound watch and
@@ -1609,10 +1705,7 @@ impl ProxyEngine {
                 let timed_out = matches!(error, rmcp::service::ServiceError::Timeout { .. });
                 let error = anyhow::Error::from(error);
                 let error = if timed_out {
-                    error.context(format!(
-                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and {RECONNECTING_UPSTREAM_MARKER}",
-                        timeout.as_secs_f64()
-                    ))
+                    error.context(client_timeout_message(&resolved_public_tool, &resolved_public, timeout))
                 } else {
                     error.context(format!(
                         "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
@@ -1864,6 +1957,14 @@ fn classify_error(error: &anyhow::Error) -> String {
 /// cas-8ccd (GH #1292): the phrase every "dropped and reconnecting" upstream
 /// error carries, so callers can recognise it without matching free text.
 pub const RECONNECTING_UPSTREAM_MARKER: &str = "reconnects with backoff";
+
+/// The context for a call the proxy timed out and dropped (cas-85c1).
+fn client_timeout_message(tool: &str, public: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "tool call '{tool}' on '{public}' timed out after {}s (client timeout); the connection was dropped and {RECONNECTING_UPSTREAM_MARKER}",
+        timeout.as_secs_f64()
+    )
+}
 
 /// The absent-upstream text for a connection in reconnect backoff.
 fn reconnecting_absent_message(public: &str, code: &str, wait_secs: u64) -> String {
@@ -2776,6 +2877,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn interceptor_refusal_covers_direct_and_execute_dispatch() {
+        struct Refuse;
+        impl ProxyCallInterceptor for Refuse {
+            fn prepare<'a>(&'a self, caller: &'a ProxyCaller, server: &'a str, tool: &'a str,
+                arguments: Option<serde_json::Map<String, Value>>,
+            ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>> {
+                Box::pin(async move {
+                    assert_eq!(caller.agent_id, "registered-worker");
+                    assert_eq!((server, tool), ("violet", "violet_post"));
+                    Ok(PreparedProxyCall { arguments, warning:None, failure_context:None,
+                        response:Some(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("contact_too_recent")])) })
+                })
+            }
+        }
+        let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
+        engine.set_call_interceptor(Arc::new(Refuse)).await;
+        let caller = registered_worker_caller();
+        let direct = engine.call_tool(&caller, "violet", "violet_post", None).await.unwrap();
+        assert_eq!(direct["isError"], true);
+        let execute = engine.execute(&caller, r#"{"server":"violet","tool":"violet_post","args":{}}"#, None).await.unwrap();
+        assert!(execute.is_error && execute.text.contains("contact_too_recent"));
+        // No upstream exists, so either missed dispatch path fails above.
+    }
+
+    #[tokio::test]
+    async fn interceptor_leaves_non_violet_results_byte_identical() {
+        struct VioletOnly;
+        impl ProxyCallInterceptor for VioletOnly {
+            fn prepare<'a>(&'a self, _: &'a ProxyCaller, _: &'a str, _: &'a str,
+                arguments: Option<serde_json::Map<String, Value>>,
+            ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>> {
+                Box::pin(async move { Ok(PreparedProxyCall::forward(arguments)) })
+            }
+            fn call_succeeded<'a>(&'a self, _: ProxyCallEvent<'a>) -> futures::future::BoxFuture<'a, ()> {
+                panic!("unrelated result must not reach the interceptor's result conversion");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([("fake".into(), fake_upstream(dir.path()))])).await.unwrap();
+        let caller = registered_worker_caller();
+        let expected: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+            "content":[{"type":"text","text":"  { \"raw\": [1, 2] }\nλ\tend  "},
+                {"type":"image","data":"AAECAw==","mimeType":"image/png"}],
+            "structuredContent":{"nested":[null,false,3.5]},"isError":false,
+            "_meta":{"opaque":"preserve me"}
+        })).unwrap();
+        let args = serde_json::json!({"result":expected}).as_object().cloned();
+        let baseline = engine.call_tool_raw(&caller, ProxyDispatchKind::Direct, "fake", "echo", args.clone()).await.unwrap();
+        assert_eq!(serde_json::to_vec(&baseline).unwrap(), serde_json::to_vec(&expected).unwrap());
+        engine.set_call_interceptor(Arc::new(VioletOnly)).await;
+        let intercepted = engine.call_tool_raw(&caller, ProxyDispatchKind::Direct, "fake", "echo", args).await.unwrap();
+        assert_eq!(serde_json::to_vec(&intercepted).unwrap(), serde_json::to_vec(&baseline).unwrap());
+        engine.shutdown().await;
+    }
+
     /// GH #988: `supervisor:` routes admit supervisors and plain sessions,
     /// refuse workers and the director with a named reason, and stay visible
     /// in the catalog as supervisor-only.
@@ -3231,8 +3388,9 @@ for line in sys.stdin:
             os._exit(0)
         if name == "hang":
             time.sleep(30)
-        send({"jsonrpc": "2.0", "id": ident, "result": {
-            "content": [{"type": "text", "text": "ok"}], "isError": False}})
+        result = message["params"].get("arguments", {}).get("result", {
+            "content": [{"type": "text", "text": "ok"}], "isError": False})
+        send({"jsonrpc": "2.0", "id": ident, "result": result})
     elif ident is not None:
         send({"jsonrpc": "2.0", "id": ident, "result": {}})
 "#,
@@ -3960,6 +4118,11 @@ for line in sys.stdin:
         ))
         .context("tool call 'violet_read' on 'violet' failed");
         assert!(!upstream_call_is_reconnectable(&application));
+        // cas-85c1: the proxy's own client timeout drops and reconnects too.
+        let timeout = std::time::Duration::from_secs(30);
+        let timed_out = anyhow::Error::from(rmcp::service::ServiceError::Timeout { timeout })
+            .context(client_timeout_message("violet_read", "violet", timeout));
+        assert!(upstream_call_is_reconnectable(&timed_out));
         let credential = anyhow::anyhow!(
             "MCP upstream 'violet' is absent: its credential is unavailable or was rejected (authentication_required); restore its credential, then retry"
         );

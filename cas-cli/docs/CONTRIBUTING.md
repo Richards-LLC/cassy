@@ -20,6 +20,26 @@ neither rebroadcast the reply nor stamp it selected again.
 
 ## Coordination messages and reminders
 
+Authenticated messages directed to a supervisor wake its idle pane, including
+peer field reports with no `kind`. The first message opens a fixed burst window
+(`factory.supervisor_message_debounce_secs`, default 20 seconds, range 0–300).
+Messages selected together share one body-bearing PTY turn, with each message's
+identity and delivery receipt preserved. Task-bound action envelopes retain
+individual stale-task revalidation. Busy panes, tool calls and drafts defer.
+
+`kind=receipt`, pure acknowledgements such as “thanks, received”, broadcasts and
+`wake=false` do not start turns; their bodies remain readable at the next turn.
+A rolling sender/recipient cap (`factory.supervisor_message_wakes_per_hour`,
+default 6) holds further wake attempts and places a readable wake-cap notice in
+the inbox. Other senders retain their own budget. Restarting the daemon retains
+the ledger and cap. Use `coordination action=message_status notification_id=<id>`
+for wakes in the last hour, measured turns, median input+output tokens per woken
+turn and maximum observed start latency. Claude/Codex usage is matched to the
+message id in the harness transcript; missing, truncated or unfinished evidence
+reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
+the cumulative input/output delta across that turn. Transport alone never proves
+that a model started or consumed tokens.
+
 Worker-idle merge notices wait for completed CI on the delivery's exact tip
 and a successful refresh of its integration target. Parked deliveries retry
 each minute, including when the director snapshot is unchanged. Pending CI
@@ -87,12 +107,49 @@ request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
 
+Claude MCP responses append factory mail only when the call's tool-use id
+belongs to the registered parent's top-level transcript. Subagent and untagged
+Claude calls preserve the parent mailbox. Transport handoff remains provisional:
+the parent's next turn can surface the body without an explicit poll. Overflow
+notes name the unread message id and summary; the next eligible turn or tool
+boundary retries bodies that did not fit. `message_status` reports
+`recipient_receipt` separately for transport handoff and rendered context.
+
+Abandoned queue messages report `undelivered` in the `message_status` header
+and JSON `legacy_status`, even though their queue rows are processed. A sender
+notice preserves the wake-gate refusal when one was recorded. Authenticated
+messages whose sender has ended use the existing local supervisor fallback;
+that supervisor receives each original source, summary and complete body.
+Each sweep emits at most three full-body recovery notices per recipient and
+one folded reference list for the rest. Each listed `notification_id` names a
+recipient-owned card: an explicit `inbox_poll notification_id=<id>` hydrates its
+retained abandoned original after the usual recipient/session checks. Cards
+stay out of automatic drains and unread counts. Recovery notices do not fold
+into the routine ended-worker digest. Large originals remain readable through
+`inbox_poll`.
+Recovery rows require daemon origin, the delivery-watchdog source and their
+recovery dedupe marker; assignment checks in daemon delivery, inbox poll and
+turn-start hooks use the same store predicate to treat these bodies as history.
+A caller-supplied watchdog name cannot claim that exemption. Recovery rows use
+the queue delivery and hook lane. The director's separate event-generated
+prompts have no queue provenance; their ordinary stale-assignment recheck
+continues to refuse closed work.
+
 For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
 project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
 database at a guessed path. Writable prompt-queue opens remove a regular empty
 `.cas/prompt_queue.db` artifact when it has no SQLite recovery sidecars; nonempty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
+
+Cross-project task ownership inspection self-execs the internal
+`--internal-task-ownership-probe` route before ordinary CLI startup. Raw database,
+WAL and shared-memory reads, immutable SQLite and checkpoint-lock queries run in
+those fresh processes, preserving the caller's POSIX locks. Two probe phases
+retain the WAL/main fingerprint comparison and checkpoint-race checks; retries
+share a ten-second deadline per store. Helper failures, malformed responses and
+active checkpointers leave ownership unproven. This route is internal; retention
+and simulator callers continue using `KnownProjects`.
 
 `cas doctor` inspects legacy `prompt_queue` columns without initializing the
 queue or recording migration detections. If required health-check columns are
@@ -137,6 +194,15 @@ reminders; original owner and target IDs stay in the durable reminder record.
 
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
+Supervisor assignment messages retain their explicit `task_id`, or the worker's
+unambiguous current assignment, in a durable task binding. When the sole current
+task has started, an assignment clause naming another task binds that next task,
+even before its assignee is updated. Binding and merge selection query only the
+recipient's tasks in the relevant statuses. A previous task's close receipt or a
+caller-supplied `<cas-assignment>` tag cannot change the server binding. A stale
+assignment send returns an explicit refusal naming its task and status and a
+`pass task_id=<id>` hint, including a withdrawal during the sender's first-delivery
+wait.
 An obsolete relay is retained with `superseded_stale`, its task/status reason
 and a terminal-task reconciliation acknowledgement. Hooks, named wakes, inbox
 polls and repeats of earlier polls share this atomic guard; notification ids
@@ -520,6 +586,31 @@ from the health-only `mailbox_status`. Each split retains its stored `state` and
 an effective `display_state` (`expired` for a lapsed pending proposal), its task
 shares, peer, reason, expiry and decision time.
 
+For a single-child handover, request it with `factory action=epic_split
+id=<epic> target=<owner> mine=<child>`; the owner accepts or rejects the proposal.
+Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
+omitted, but not both. The proposer claims only `mine`; acceptance claims only
+the recipient's share. Existing expiry, cancel and start guards apply.
+
+Accept, reject, cancel and expiry carry typed `epic_split_decided` peer intent,
+eligible to wake through the existing mailbox and pane gates. Read
+`factory action=epic_split id=<split> decision=status` (or just `id=<split>`) for
+state, `decided_at`, authenticated decider, observed claims and unfinished cleanup.
+Unavailable claim reads stay explicitly unavailable. Empty shares print `(none)`.
+
+`coordination action=remind remind_event=epic_split_decided
+remind_filter='{"split_id":"<split>"}' remind_message="Continue split work"`
+fires once for the latest persisted decided state, including late registration
+and daemon restart. The existing reminder scan handles it; no extra poller runs.
+
+The mailbox duty persists unanswered expiry and its retryable work. Expiry lifts
+the split guard and each side releases only claims held by its own supervisor;
+rejection also releases the proposer's own share on receipt. Claims taken by a
+worker or a peer remain untouched. Cleanup failures remain visible and retryable.
+Expiry notices reuse the existing peer outbox's logical send across restart.
+Once expiry is recorded, a delayed acceptance cannot resurrect the split; an
+expiry received after acceptance releases the recipient's own split claims.
+
 ## Adding Features
 
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.
@@ -630,6 +721,29 @@ no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
 ### cas-src close surfaces
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
+
+### Portable proof artifacts
+
+`artifact action=publish task_id=<id> path=<log> note_type=platform_proof
+notes="<platform, command, revision, result>"` publishes and appends a proof note
+in one MCP call. Use `loaded_proof` for loaded evidence. A failed Cloud commit
+keeps the local artifact record but does not append a portable proof claim.
+The note carries the committed record (including Cloud id, size and SHA-256),
+so normal task sync transports it without syncing machine-local paths or a
+new artifact store. An existing committed id cited in `task action=notes` is
+attached the same way. Citing an unpublished artifacts-root path warns the
+writer without discarding the note.
+
+On the receiving machine, `artifact action=fetch task_id=<id> id=<art-id>` or
+`cas artifact fetch --task <id> <art-id>` resolves that note through the existing
+Cloud signed-view endpoint, verifies size and SHA-256 using the artifact
+relay's download path, and atomically writes a local copy under the receiving
+task's scoped artifacts directory. It imports the record into the existing
+artifact ledger, making `show`, `list` and close citations usable there too.
+`--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
+or bearer is included in the note, output or saved record. Fetch requires the
+synced task and Cloud credentials; proof interpretation remains the verifier's
+responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 
 ### Evidence-only task close
 
@@ -896,18 +1010,22 @@ and the service's `server_ops_tests`; no new CLI command is introduced.
 
 ### Task branch adoption
 
-For an inherited factory delivery, use `task action=transfer id=<task-id>
-to_agent=<worker> adopt_branch=true` (add `supervisor_override=true` when a
-supervisor transfers another worker's active lease). Cassy copies the task's
+For an inherited factory delivery, the supervisor runs `task action=transfer
+id=<task-id> to_agent=<worker> adopt_branch=true supervisor_override=true`
+from its own context. Cassy copies the task's
 recorded delivery tip to `factory/<receiver>-<task-id>` in the receiver's
 registered worktree, then updates its assignment and delivery anchor. Commit
 there; the isolation guard still rejects the old owner on that branch.
 
 The receiver must have a clean isolated worktree in the task's repository,
-with HEAD able to fast-forward to the delivery. Dirty, divergent and foreign
-checkouts are refused before assignment or lease changes. The original branch
-is preserved as handoff history. Omitting `adopt_branch` keeps the existing
-assignment-only transfer behavior.
+with its own HEAD able to fast-forward to the delivery. If it is already on
+this task's exact source branch, adoption creates the receiver's branch at
+the recorded tip without moving the source, even when the source has advanced.
+No worker checkout is needed first. Dirty worktrees, divergent receiver
+branches, unrelated foreign branches and other repositories are refused before
+assignment or lease changes. The original branch is preserved as handoff
+history. Omitting `adopt_branch` keeps the existing assignment-only transfer
+behavior.
 
 ### MCP mutation timeout receipts
 
@@ -2021,6 +2139,8 @@ Every file in a managed builtin skill directory other than its `SKILL.md` (refer
 ```
 
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
+
+Lanes never hand-merge the ledger (cas-fb11). `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>` reruns the generator on the merged history and commits the result. Cassy's merge runs that script. After a manual `git merge`, run it yourself; run `python3 scripts/cas-merge-drivers.py install` once per clone first. The committed ledger then equals a fresh generator run, which the release gate's `builtin-projections` row checks. `scripts/test-regenerate-generated-artifacts.py` merges two lanes that both add builtin history.
 
 ### Viktor distribution
 

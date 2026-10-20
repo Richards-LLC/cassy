@@ -2310,8 +2310,11 @@ pub(crate) fn team_only_mismatch_line(queue: &SyncQueue, team_only: bool) -> Opt
 }
 
 pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
+    let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    let team = config.active_team_id()?;
+    let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
     let queue = SyncQueue::open_read_only(cas_root).ok()?;
-    queue.personal_row_count().ok()
+    queue.migratable_personal_row_count(&team, &project).ok()
 }
 
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
@@ -2349,7 +2352,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             fmt.write_raw("Not logged in to Cassy Cloud")?;
             fmt.newline()?;
             if let Some(count) = held {
-                fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
                 fmt.newline()?;
             }
             fmt.write_raw("  Run ")?;
@@ -2448,7 +2451,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     ))?;
                     fmt.newline()?;
                     if let Some(count) = held {
-                        fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                        fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
                         fmt.newline()?;
                     }
 
@@ -4444,13 +4447,20 @@ fn execute_sync_with_output(
 
 fn write_sync_summaries(out: &mut dyn io::Write, summaries: &[SyncSummary], json: bool, verbose: bool) -> anyhow::Result<()> {
     if json {
-        serde_json::to_writer(&mut *out, &serde_json::json!({
+        let has_held_personal = summaries.iter().any(|summary| {
+            summary.team_configured
+                && summary.held_personal_pending + summary.held_personal_failed > 0
+        });
+        let mut value = serde_json::json!({
             "operation":"sync_summary",
             "push":summaries.iter().find(|s|s.kind == SyncSummaryKind::Push),
             "pull":summaries.iter().find(|s|s.kind == SyncSummaryKind::Pull),
-            "held_personal_reason":summaries.iter().any(|s|s.team_configured && s.held_personal_pending+s.held_personal_failed>0).then_some("team_linked_sync_drains_team_queue_only"),
-            "recovery_command":"cas cloud queue migrate-to-team",
-        }))?;
+            "held_personal_reason":has_held_personal.then_some("team_linked_sync_drains_team_queue_only"),
+        });
+        if has_held_personal {
+            value["recovery_command"] = serde_json::json!("cas cloud queue migrate-to-team");
+        }
+        serde_json::to_writer(&mut *out, &value)?;
         writeln!(out)?;
     } else {
         let mut fmt = Formatter::stdout(out, ActiveTheme::default());
@@ -6095,55 +6105,36 @@ fn attributed_rows(
         .collect())
 }
 
-const PROPOSAL_PROVENANCE_BEGIN: &str = "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---";
-const PROPOSAL_PROVENANCE_END: &str = "--- END CLIENT-ASSERTED PROPOSAL PROVENANCE ---";
-const PROPOSAL_PROVENANCE_SERVER_END: &str = "--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---";
-
 /// A task materialized by an accepted cross-project proposal is intentionally
 /// retained in the target project even though its origin belongs to a peer.
-/// Pull persists the server-attested target project in the task notes; only a
-/// complete marker block targeting this project qualifies.
+/// Only the local acceptance record says so (cas-11ba): the accept path and
+/// the sync pull of a server-attested proposal write `accepted_proposal_targets`,
+/// while task notes are free text a close or cancel reason can fill.
 fn is_accepted_proposal_task(
     conn: &rusqlite::Connection,
     task_id: &str,
     current_project: &str,
 ) -> anyhow::Result<bool> {
-    let has_notes = conn
-        .prepare("PRAGMA table_info(tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|column| column == "notes");
-    if !has_notes {
+    let has_table = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'accepted_proposal_targets'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_table {
         return Ok(false);
     }
-
-    let notes: Option<String> =
-        conn.query_row("SELECT notes FROM tasks WHERE id = ?1", [task_id], |row| {
-            row.get(0)
-        })?;
-    let Some(notes) = notes else {
-        return Ok(false);
-    };
-    let Some(start) = notes.find(PROPOSAL_PROVENANCE_BEGIN) else {
-        return Ok(false);
-    };
-    let Some((end_offset, end_marker)) = [PROPOSAL_PROVENANCE_END, PROPOSAL_PROVENANCE_SERVER_END]
-        .iter()
-        .filter_map(|marker| notes[start..].find(marker).map(|offset| (offset, *marker)))
-        .min_by_key(|(offset, _)| *offset)
-    else {
-        return Ok(false);
-    };
-    let end = start + end_offset + end_marker.len();
-    let block = &notes[start..end];
-    let target = block.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("target_project_canonical_id:")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    });
-    Ok(target.is_some_and(|target| project_ids_match(target, current_project)))
+    use rusqlite::OptionalExtension;
+    let target: Option<String> = conn
+        .query_row(
+            "SELECT target_project_canonical_id FROM accepted_proposal_targets WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(target.is_some_and(|target| project_ids_match(&target, current_project)))
 }
 
 /// A task with a local external-blocker projection is deliberately retained:
@@ -7853,6 +7844,15 @@ mod team_cmd_tests {
         assert!(args.retry);
         assert_eq!(args.retry_reason.as_deref(), Some("project_mismatch"));
 
+        let nul_retry = CloudQueueArgs::try_parse_from([
+            "queue",
+            "--retry",
+            "--retry-reason",
+            "invalid_json_nul",
+        ])
+        .unwrap();
+        assert_eq!(nul_retry.retry_reason.as_deref(), Some("invalid_json_nul"));
+
         let alias =
             CloudQueueArgs::try_parse_from(["queue", "--retry", "--reason", "timeout"]).unwrap();
         assert_eq!(alias.retry_reason.as_deref(), Some("timeout"));
@@ -8236,6 +8236,14 @@ mod team_cmd_tests {
         assert_eq!(value["push"]["held_personal_rejected"]["team_owned_project"], 2);
         assert_eq!(value["push"]["team_backlog_pending"], 0);
         assert_eq!(value["recovery_command"], "cas cloud queue migrate-to-team");
+
+        let mut empty_summary = team_only_push_summary();
+        empty_summary.held_personal_pending = 0;
+        empty_summary.held_personal_failed = 0;
+        let mut empty_output = Vec::new();
+        write_sync_summaries(&mut empty_output, &[empty_summary], true, false).unwrap();
+        let empty: serde_json::Value = serde_json::from_slice(&empty_output).unwrap();
+        assert!(empty.get("recovery_command").is_none(), "{empty}");
     }
 
     /// cas-25c1 fixture: a team-linked checkout whose personal queue holds
@@ -9564,14 +9572,30 @@ mod purge_foreign_safety_tests {
         seed_project_scoped_db(&conn);
         conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT", [])
             .unwrap();
+        // cas-11ba: a provenance block in free-text notes (a close, cancel or
+        // request_changes reason can carry one) proves nothing.
         conn.execute(
             "UPDATE tasks SET notes = ?1 WHERE id = 'foreign-1'",
             ["--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---\n  target_project_canonical_id: cas-src\n--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"],
         )
         .unwrap();
-
         let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        assert!(
+            set.tasks.iter().any(|task| task.id == "foreign-1"),
+            "a forged notes block must not retain a foreign task"
+        );
 
+        for sql in cas_store::ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS {
+            conn.execute(sql, []).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO accepted_proposal_targets
+             (task_id, proposal_id, target_project_canonical_id, recorded_at)
+             VALUES ('foreign-1', 'proposal-1', 'cas-src', '2026-10-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
         assert!(
             set.tasks.iter().all(|task| task.id != "foreign-1"),
             "an accepted proposal materialized in this project must be retained"

@@ -485,7 +485,7 @@ impl CasService {
         } else {
             let event_type = req.remind_event.unwrap();
 
-            // Validate event type (must match DirectorEvent variants)
+            // Director events plus persisted split decisions and external conditions.
             let valid_events = [
                 "task_assigned",
                 "task_completed",
@@ -494,6 +494,7 @@ impl CasService {
                 "agent_registered",
                 "epic_started",
                 "epic_completed",
+                "epic_split_decided",
                 EXTERNAL_BRANCH_CONTAINED_EVENT,
                 EXTERNAL_TAG_EXISTS_EVENT,
                 EXTERNAL_CI_COMPLETED_EVENT,
@@ -536,6 +537,13 @@ impl CasService {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, error));
             }
             let mut filter = filter;
+            if event_type == "epic_split_decided"
+                && filter.as_ref().and_then(|value| value.get("split_id"))
+                    .and_then(serde_json::Value::as_str).is_none_or(|id| id.trim().is_empty())
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "epic_split_decided requires remind_filter={\"split_id\":\"<split>\"}"));
+            }
             if let Some(filter) = filter.as_mut() {
                 normalize_external_filter(&event_type, filter);
             }
@@ -637,10 +645,18 @@ impl CasService {
             )
         })?;
 
+        // cas-c5ab: a held worker's suspended reminders still wait.
+        let held = store.list_suspended(Some(&my_id)).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list held reminders: {e}"),
+            )
+        })?;
+
         // Merge, dedup by ID (a self-reminder appears in both)
         let mut seen = std::collections::HashSet::new();
         let mut reminders = Vec::new();
-        for r in owned.into_iter().chain(targeting_me) {
+        for r in owned.into_iter().chain(targeting_me).chain(held) {
             if seen.insert(r.id) {
                 reminders.push(r);
             }
@@ -765,9 +781,14 @@ impl CasService {
                 format!(" [orphaned session: {origin}]")
             };
 
+            let held_desc = if r.status == cas_store::ReminderStatus::Suspended {
+                " [held: re-armed when the worker is released]"
+            } else {
+                ""
+            };
             lines.push(format!(
-                "  #{}: [{}] {}{}{}",
-                r.id, trigger_desc, r.message, target_desc, scope_desc
+                "  #{}: [{}] {}{}{}{}",
+                r.id, trigger_desc, r.message, target_desc, scope_desc, held_desc
             ));
         }
 
@@ -851,7 +872,9 @@ fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
                 reminder.created_at.to_rfc3339()
             ),
         },
-        ReminderStatus::Pending | ReminderStatus::Fired => reminder.status.to_string(),
+        ReminderStatus::Pending | ReminderStatus::Fired | ReminderStatus::Suspended => {
+            reminder.status.to_string()
+        }
     }
 }
 

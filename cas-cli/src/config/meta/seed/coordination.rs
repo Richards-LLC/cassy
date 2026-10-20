@@ -27,10 +27,10 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          ConfigType::Int, "600", Constraint::Min(0)),
         ("factory.delivery_stalled_priority_secs", "Priority Message Delivery Threshold",
          "Seconds before an unread critical or high-priority coordination message produces a delivery-stalled notice.",
-         ConfigType::Int, "600", Constraint::Min(0)),
+         ConfigType::Int, "300", Constraint::Min(0)),
         ("factory.delivery_stalled_normal_secs", "Normal Message Delivery Threshold",
          "Seconds before an unread normal-priority coordination message produces a delivery-stalled notice.",
-         ConfigType::Int, "1800", Constraint::Min(0)),
+         ConfigType::Int, "300", Constraint::Min(0)),
         ("factory.strict_cli", "Require Requested Worker CLI",
          "Refuse fallback to another harness when the requested Codex CLI is unavailable; also enabled by --strict-cli.",
          ConfigType::Bool, "false", Constraint::None),
@@ -185,6 +185,22 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
             "Put worker Cargo targets and build-cache baselines on a dedicated scratch drive such as /mnt/rewind/cas",
             "Leave empty to keep targets inside each worker checkout",
         ],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.supervisor_message_debounce_secs", section: "factory", name: "Supervisor Message Debounce",
+        description: "Seconds to collect directed supervisor messages into one submitted turn.", value_type: ConfigType::Int, default: "20",
+        constraint: Constraint::Range(0, 300), advanced: false, requires_feature: None,
+        keywords: &["factory", "message", "wake", "cost"],
+        use_cases: &["Bound directed-message wake latency and token cost"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.supervisor_message_wakes_per_hour", section: "factory", name: "Supervisor Message Wake Cap",
+        description: "Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.", value_type: ConfigType::Int, default: "6",
+        constraint: Constraint::Range(1, 1000), advanced: false, requires_feature: None,
+        keywords: &["factory", "message", "wake", "cost"],
+        use_cases: &["Bound directed-message wake latency and token cost"],
     });
 
     registry.register(ConfigMeta {

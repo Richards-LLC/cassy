@@ -200,14 +200,27 @@ pub enum CodexModelSupport {
 /// A catalogue older than this may predate the model, so it cannot refuse it.
 const CODEX_CATALOG_MAX_AGE_DAYS: i64 = 7;
 
-/// The numeric components of a codex version (`codex-cli 0.163.0` → [0,163,0]).
+/// The numeric components of a codex version (`codex-cli 0.163.0` → [0,163,0]),
+/// from the first token that starts with a digit, so a trailing token such
+/// as `(abc1234)` cannot hide it (cas-c8de).
 fn codex_version_parts(version: &str) -> Option<Vec<u64>> {
-    let token = version.split_whitespace().last()?.trim_start_matches('v');
+    let token = version
+        .split_whitespace()
+        .map(|token| token.trim_start_matches('v'))
+        .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))?;
     let parts: Vec<u64> = token
         .split(['.', '-', '+'])
         .map_while(|part| part.parse().ok())
         .collect();
     (!parts.is_empty()).then_some(parts)
+}
+
+/// `older < newer` with missing trailing components read as zero, so 0.163
+/// and 0.163.0 are the same version (cas-c8de).
+fn codex_version_older(older: &[u64], newer: &[u64]) -> bool {
+    let len = older.len().max(newer.len());
+    let padded = |parts: &[u64]| parts.iter().copied().chain(std::iter::repeat(0)).take(len).collect::<Vec<_>>();
+    padded(older) < padded(newer)
 }
 
 /// Codex records the ChatGPT account's model list in `models_cache.json`
@@ -220,12 +233,13 @@ fn codex_version_parts(version: &str) -> Option<Vec<u64>> {
 /// run. So a cache whose `client_version` is missing, or older than
 /// `installed_codex` (the `codex --version` that will run the worker), is not
 /// evidence of absence. With the installed version unknown, a recorded
-/// `client_version` keeps the catalogue's verdict.
+/// `client_version` keeps the catalogue's verdict. `installed_codex` is asked
+/// only when the catalogue would otherwise refuse (cas-c8de).
 pub fn codex_account_model_support(
     codex_home: &std::path::Path,
     model: &str,
     now: chrono::DateTime<chrono::Utc>,
-    installed_codex: Option<&str>,
+    installed_codex: &dyn Fn() -> Option<String>,
 ) -> CodexModelSupport {
     let read_json = |name: &str| -> Result<serde_json::Value, String> {
         let path = codex_home.join(name);
@@ -275,8 +289,8 @@ pub fn codex_account_model_support(
             "models_cache.json does not record the codex client that fetched it".to_string(),
         );
     };
-    if let Some(installed) = installed_codex.and_then(codex_version_parts)
-        && cache_client < installed
+    if let Some(installed) = installed_codex().as_deref().and_then(codex_version_parts)
+        && codex_version_older(&cache_client, &installed)
     {
         return CodexModelSupport::Unverified(format!(
             "models_cache.json was fetched by codex {} and lists only that client's models; the installed codex is {}",
@@ -304,15 +318,32 @@ pub fn claude_transcript_auth_failure(tail: &str) -> AuthFailureEvidence {
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        if kind == "assistant" {
+        // GH #1319: a logged-out Claude writes its refusal as a synthetic
+        // assistant record (`isApiErrorMessage: true`, `error:
+        // "authentication_failed"`, text "Login expired · Please run
+        // /login"). It is not an answer, so it must not read as healthy.
+        let api_error = kind == "assistant"
+            && record
+                .get("isApiErrorMessage")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+        if kind == "assistant" && !api_error {
             // The model answered, so whatever the credential state was, it
             // worked. This is the guard against killing a worker over a
             // transient 401 the harness retried past.
             latest = Some(AuthFailureEvidence::Healthy);
             continue;
         }
-        let text = claude_record_text(&record);
-        if text.is_empty() || !claude_text_is_auth_failure(&text) {
+        let auth_error = api_error
+            && record.get("error").and_then(serde_json::Value::as_str)
+                == Some("authentication_failed");
+        let text = match api_error {
+            true => Some(claude_api_error_text(&record))
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| claude_record_text(&record)),
+            false => claude_record_text(&record),
+        };
+        if text.is_empty() || !(auth_error || claude_text_is_auth_failure(&text)) {
             continue;
         }
         let occurrence = record
@@ -340,6 +371,20 @@ fn claude_record_text(record: &serde_json::Value) -> String {
         }
     }
     String::new()
+}
+
+/// The visible text of a synthetic API-error assistant record.
+fn claude_api_error_text(record: &serde_json::Value) -> String {
+    record
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn claude_text_is_auth_failure(text: &str) -> bool {
@@ -484,28 +529,28 @@ mod tests {
             )
             .unwrap();
         };
-        let installed = Some("codex-cli 0.163.0");
+        let installed = || Some("codex-cli 0.163.0".to_string());
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now, installed),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unverified(_)
         ));
         write("chatgpt", now);
         assert_eq!(
-            codex_account_model_support(home.path(), "gpt-6-sol", now, installed),
+            codex_account_model_support(home.path(), "gpt-6-sol", now, &installed),
             CodexModelSupport::Supported
         );
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now, installed),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unsupported { ref listed, .. } if listed == &["gpt-6-sol"]
         ));
         write("chatgpt", now - chrono::Duration::days(30));
         assert!(matches!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now, installed),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Unverified(_)
         ));
         write("apikey", now);
         assert_eq!(
-            codex_account_model_support(home.path(), "gpt-6.1-sol", now, installed),
+            codex_account_model_support(home.path(), "gpt-6.1-sol", now, &installed),
             CodexModelSupport::Supported
         );
     }
@@ -526,7 +571,13 @@ mod tests {
             }
             std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
         };
-        let support = || codex_account_model_support(home.path(), "gpt-6.1-sol", now, Some("codex-cli 0.163.0"));
+        let installed = std::cell::Cell::new("codex-cli 0.163.0");
+        let probes = std::cell::Cell::new(0);
+        let probe = || {
+            probes.set(probes.get() + 1);
+            Some(installed.get().to_string())
+        };
+        let support = || codex_account_model_support(home.path(), "gpt-6.1-sol", now, &probe);
 
         catalogue(Some("0.146.0"));
         assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
@@ -534,6 +585,18 @@ mod tests {
         assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
         catalogue(Some("0.163.0"));
         assert!(matches!(support(), CodexModelSupport::Unsupported { .. }), "{:?}", support());
+
+        // cas-c8de: a trailing build token and an uneven-length version are
+        // still read, and a listed model never runs the probe.
+        installed.set("codex-cli 0.163.0 (abc1234)");
+        catalogue(Some("0.146.0"));
+        assert!(matches!(support(), CodexModelSupport::Unverified(_)), "{:?}", support());
+        catalogue(Some("0.163"));
+        assert!(matches!(support(), CodexModelSupport::Unsupported { .. }), "0.163 is 0.163.0: {:?}", support());
+        probes.set(0);
+        let listed = || codex_account_model_support(home.path(), "gpt-5.6-sol", now, &probe);
+        assert_eq!(listed(), CodexModelSupport::Supported);
+        assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
     #[test]

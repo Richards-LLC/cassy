@@ -32,7 +32,8 @@ use chrono::{DateTime, Utc};
 
 use cas_store::{
     EpicSplit, SplitDirection, SplitState, decide_epic_split, get_epic_split, insert_epic_split,
-    list_epic_splits, open_epic_splits,
+    list_epic_splits, open_epic_splits, decide_epic_split_by, finish_epic_split_work,
+    pending_epic_split_work,
 };
 
 use crate::cloud::peer_claims::{Acquire, ClaimKind, PeerClaims};
@@ -55,6 +56,7 @@ pub enum SplitKind {
     Accept,
     Reject,
     Cancel,
+    Expired,
 }
 
 impl SplitKind {
@@ -64,6 +66,7 @@ impl SplitKind {
             SplitKind::Accept => "accept",
             SplitKind::Reject => "reject",
             SplitKind::Cancel => "cancel",
+            SplitKind::Expired => "expired",
         }
     }
 
@@ -73,6 +76,7 @@ impl SplitKind {
             "accept" => Some(SplitKind::Accept),
             "reject" => Some(SplitKind::Reject),
             "cancel" => Some(SplitKind::Cancel),
+            "expired" => Some(SplitKind::Expired),
             _ => None,
         }
     }
@@ -260,7 +264,8 @@ pub enum Ingested {
 }
 
 /// Record the split line of a peer message the cloud delivered to local
-/// supervisor `recipient`. Idempotent. Never claims, releases or sends.
+/// supervisor `recipient`. Idempotent. Rejected/expired decisions release
+/// only this database's own split claims before the mailbox acknowledges them.
 pub fn ingest(
     cas_root: &Path,
     recipient: &Agent,
@@ -274,7 +279,7 @@ pub fn ingest(
         let Some(expires_at) = line.expires_at else {
             return Ok(Ingested::Ignored(format!("proposal {} has no expiry", line.id)));
         };
-        if line.epic.is_empty() || line.peer_takes.is_empty() {
+        if line.epic.is_empty() || (line.proposer_takes.is_empty() && line.peer_takes.is_empty()) {
             return Ok(Ingested::Ignored(format!("proposal {} names no share", line.id)));
         }
         if let Some(existing) = get_epic_split(cas_root, &line.id).map_err(store_error)?
@@ -304,6 +309,9 @@ pub fn ingest(
                 expires_at,
                 created_at: Utc::now(),
                 decided_at: None,
+                decided_by: None,
+                cleanup_pending: false,
+                expiry_notice_pending: false,
             },
         )
         .map_err(store_error)?;
@@ -340,10 +348,21 @@ pub fn ingest(
             &[SplitState::Pending, SplitState::Accepted],
             SplitState::Cancelled,
         ),
+        SplitKind::Expired => {
+            if line.at < split.expires_at {
+                return Ok(Ingested::Ignored(format!("premature expiry of {}", line.id)));
+            }
+            // A persisted expiry cannot be resurrected by a delayed acceptance.
+            (&[SplitState::Pending, SplitState::Accepted], SplitState::Expired)
+        }
         SplitKind::Proposal => unreachable!("handled above"),
     };
-    let changed = decide_epic_split(cas_root, &line.id, from, to, line.reason.as_deref(), Utc::now())
+    let changed = decide_epic_split_by(cas_root, &line.id, from, to, line.reason.as_deref(), line.at,
+        Some(&message.sender_agent_id))
         .map_err(store_error)?;
+    if let Some(current) = get_epic_split(cas_root, &line.id).map_err(store_error)? {
+        cleanup_decision(cas_root, &current)?;
+    }
     Ok(if changed {
         Ingested::Decided { id: line.id, state: to }
     } else {
@@ -476,6 +495,139 @@ fn release_share(claims: &PeerClaims, ids: &[String], caller_id: &str) -> usize 
         .count()
 }
 
+fn cleanup_decision(cas_root: &Path, split: &EpicSplit) -> Result<(), String> {
+    if !split.cleanup_pending {
+        return Ok(());
+    }
+    if !split.mine.is_empty() {
+        let claims = peer_claims(cas_root)?;
+        for id in &split.mine {
+            claims.release_own(id, &split.local_agent_id)
+                .map_err(|error| format!("{} cleanup pending for {id}: {error}", split.id))?;
+        }
+    }
+    finish_epic_split_work(cas_root, split, true).map_err(|error| error.to_string())
+}
+
+fn expiry_notice_id(owner: &str, split_id: &str) -> String {
+    format!("split-expiry:{owner}:{split_id}")
+}
+
+/// The same expiry observed locally and through its authenticated peer is one
+/// queue event. Unrelated senders retain their ordinary message identity.
+pub(crate) fn expiry_notice_key(
+    root: &Path, recipient: &Agent, message: &ClaimedPeerMessage,
+) -> Result<Option<String>, String> {
+    let Some(line) = SplitMessage::parse(&message.body).filter(|line| line.kind == SplitKind::Expired)
+        else { return Ok(None) };
+    let split = get_epic_split(root, &line.id).map_err(|error| error.to_string())?;
+    Ok(split.filter(|split| split.local_agent_id == recipient.id
+        && split.peer_agent_id == message.sender_agent_id && line.at >= split.expires_at)
+        .map(|split| expiry_notice_id(&recipient.id, &split.id)))
+}
+
+/// Reconcile durable split work on the existing mailbox duty. No Cloud calls
+/// hold the SQLite lock. Failed cleanup/expiry delivery remains pending.
+pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(), String> {
+    if !has_store(cas_root) { return Ok(()) }
+    let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+    let owners: std::collections::HashMap<_, _> = agents.list(None).map_err(|error| error.to_string())?
+        .into_iter().filter(|owner| owner.factory_session.as_deref() == Some(session))
+        .map(|owner| (owner.id.clone(), owner)).collect();
+    let owner_ids: Vec<_> = owners.keys().map(String::as_str).collect();
+    let mut errors = Vec::new();
+    for mut split in pending_epic_split_work(cas_root, now, &owner_ids).map_err(|error| error.to_string())? {
+        let owner = &owners[&split.local_agent_id];
+        let mut work = || -> Result<(), String> {
+            if split.state == SplitState::Pending {
+                decide_epic_split_by(cas_root, &split.id, &[SplitState::Pending], SplitState::Expired,
+                    Some("unanswered proposal expired"), now, Some(&split.local_agent_id))
+                    .map_err(|error| error.to_string())?;
+                split = get_epic_split(cas_root, &split.id).map_err(|error| error.to_string())?
+                    .ok_or("split disappeared during expiry")?;
+            }
+            let cleanup_error = cleanup_decision(cas_root, &split).err();
+            if split.expiry_notice_pending {
+                let line = SplitMessage {
+                    kind: SplitKind::Expired, id: split.id.clone(), epic: split.epic_id.clone(),
+                    proposer_takes: vec![], peer_takes: vec![], expires_at: Some(split.expires_at),
+                    at: split.decided_at.ok_or("expiry has no decision time")?,
+                    reason: split.reason.clone(),
+                };
+                let body = format!("{}\nEpic split {} expired unanswered; its split guard is lifted. Each side releases only its own frozen claims; use decision=status to inspect pending cleanup.", line.render(), split.id);
+                // The local notice is authored by this daemon's own supervisor,
+                // never presented as a statement from the remote peer.
+                let message = ClaimedPeerMessage {
+                    id: expiry_notice_id(&owner.id, &split.id),
+                    project_id: crate::cloud::resolve_canonical_id(cas_root).ok_or("project has no canonical id")?,
+                    recipient_agent_id: owner.id.clone(), sender_agent_id: owner.id.clone(),
+                    sender_name: owner.name.clone(), sender_machine_id: owner.machine_id.clone(),
+                    sender_label: Some(crate::cloud::peers::machine_label_for(cas_root)),
+                    sender_session: owner.factory_session.clone(), body: body.clone(),
+                    summary: Some(format!("epic split {} expired", split.id)), in_reply_to: None,
+                    created_at: line.at.to_rfc3339(), attempts: 1, scope: Default::default(),
+                };
+                crate::store::open_prompt_queue_store(cas_root).map_err(|error| error.to_string())?
+                    .enqueue_idempotent(&format!("peer:{}@{}", owner.name, message.sender_machine()),
+                        &owner.name, &peer_mailbox::render_prompt(&message), Some(session),
+                        message.summary.as_deref(), Some(cas_store::NotificationPriority::High),
+                        &message.id, Some(&cas_store::QueueOrigin::Daemon))
+                    .map_err(|error| error.to_string())?;
+                sent(peer_mailbox::send_split_expiry(cas_root, &owner.id, &split.peer_agent_id,
+                    &body, &split.id))?;
+                finish_epic_split_work(cas_root, &split, false).map_err(|error| error.to_string())?;
+            }
+            if let Some(error) = cleanup_error { return Err(error) }
+            Ok(())
+        };
+        if let Err(error) = work() { errors.push(error); }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
+/// Local decision state plus explicitly observed Cloud claims. Unavailable
+/// ownership is reported as unavailable rather than as an empty inventory.
+pub fn status(cas_root: &Path, id: &str) -> Result<String, String> {
+    let split = get_epic_split(cas_root, id).map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no epic split {id} recorded here"))?;
+    let expiry_due = split.is_expired(Utc::now());
+    let mut out = format!("Epic split {id}: {}\nepic: {}\ndecided_at: {}\ndecider: {}\ncleanup: {}\nexpiry notice: {}\nclaims (Cloud observation; project/account visibility applies):",
+        split.display_state(Utc::now()), split.epic_id,
+        split.decided_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "pending".into()),
+        split.decided_by.as_deref().unwrap_or("unknown"),
+        if split.cleanup_pending || expiry_due { "pending" } else { "settled" },
+        if split.expiry_notice_pending || expiry_due { "pending" } else { "settled" });
+    let claims = peer_claims(cas_root);
+    for (label, ids) in [("mine", &split.mine), ("theirs", &split.theirs)] {
+        if ids.is_empty() { out.push_str(&format!("\n  {label}: (none)")); }
+        for task in ids {
+            let observed = match &claims {
+                Ok(claims) => match claims.holder(task) {
+                    Ok(Some(holder)) => holder,
+                    Ok(None) => "none visible".into(),
+                    Err(error) => format!("unavailable ({error})"),
+                },
+                Err(error) => format!("unavailable ({error})"),
+            };
+            out.push_str(&format!("\n  {label} {task}: {observed}"));
+        }
+    }
+    Ok(out)
+}
+
+/// Persisted, latest decision used by one-shot reminders, including reminders
+/// registered after the decision or after a daemon restart.
+pub fn decision_data(split: &EpicSplit) -> Option<serde_json::Value> {
+    (split.state != SplitState::Pending).then(|| serde_json::json!({
+        "split_id": split.id, "epic_id": split.epic_id, "state": split.state.as_str(),
+        "decided_at": split.decided_at, "decided_by": split.decided_by,
+    }))
+}
+
+fn share_label(ids: &[String]) -> String {
+    if ids.is_empty() { "(none)".into() } else { ids.join(", ") }
+}
+
 fn peer_claims(cas_root: &Path) -> Result<PeerClaims, String> {
     PeerClaims::for_project(cas_root).ok_or_else(|| {
         "epic_split needs Cassy Cloud: this project is not logged in (`cas login`) or has no \
@@ -490,15 +642,19 @@ fn local_check(cas_root: &Path) -> Result<impl Fn(&str) -> bool, String> {
     Ok(move |id: &str| agents.get(id).is_ok())
 }
 
-/// Splits that may still bind (not expired), other than `except`, sharing a
-/// child with `ids`: `(split id, child)`.
+/// Splits reserving a child in `ids`, other than `except`: `(split id, child)`.
+/// Outgoing proposals reserve through expiry cleanup; a live successor may
+/// cancel an expired orphan after proving its owner is gone. Cleanup work and
+/// accepted splits also reserve, while expired incoming proposals do not.
 fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(String, String)>, String> {
     let now = Utc::now();
-    let splits = open_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
+    let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
     Ok(splits
         .into_iter()
         .filter(|split| Some(split.id.as_str()) != except)
-        .filter(|split| !split.is_expired(now))
+        .filter(|split| split.cleanup_pending || split.state == SplitState::Accepted
+            || (split.state == SplitState::Pending
+                && (split.direction == SplitDirection::Outgoing || !split.is_expired(now))))
         .find_map(|split| {
             ids.iter()
                 .find(|id| split.mine.contains(id) || split.theirs.contains(id))
@@ -507,7 +663,8 @@ fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<
 }
 
 /// Propose splitting `epic_id` with peer supervisor `peer_target`: claim
-/// `mine` now, record the proposal, and send it.
+/// `mine` now, record the proposal, and send it. Either share may be empty
+/// for a one-sided request or grant, but at least one task must be named.
 pub fn propose(
     cas_root: &Path,
     caller: &Caller,
@@ -517,8 +674,8 @@ pub fn propose(
     theirs: &[String],
     ttl_secs: Option<i64>,
 ) -> Result<String, String> {
-    if mine.is_empty() || theirs.is_empty() {
-        return Err("epic_split needs both shares: mine=<ids> and theirs=<ids>".to_string());
+    if mine.is_empty() && theirs.is_empty() {
+        return Err("epic_split needs at least one share: mine=<ids> or theirs=<ids>".to_string());
     }
     if let Some(both) = mine.iter().find(|id| theirs.contains(id)) {
         return Err(format!("{both} is in both mine and theirs; the shares must be disjoint"));
@@ -553,17 +710,31 @@ pub fn propose(
     let all: Vec<String> = mine.iter().chain(theirs).cloned().collect();
     if let Some((split, child)) = overlapping(cas_root, &all, None)? {
         return Err(format!(
-            "{child} is already in epic split {split}; cancel or reject it first"
+            "{child} is already in epic split {split}; settle pending cleanup, or cancel/reject the active split first"
         ));
     }
 
-    let peer = match discover_peers(cas_root, Some(&caller.id)) {
-        Ok(PeerDiscovery::Found { peers, .. }) => {
-            peer_mailbox::resolve_peer_target(&peers, peer_target)?
-                .cloned()
-                .ok_or_else(|| {
-                    format!("no peer supervisor of this repository is named '{peer_target}'")
-                })?
+    let (peer, redirect) = match discover_peers(cas_root, Some(&caller.id)) {
+        Ok(PeerDiscovery::Found { peers, ended, .. }) => {
+            // GH #1319: an offer to a supervisor that ended, or whose harness
+            // is logged out, goes to its successor or is refused by name.
+            let (addressed, was_ended) = match peer_mailbox::resolve_peer_target(&peers, peer_target)? {
+                Some(peer) => (peer.clone(), false),
+                None => (
+                    crate::cloud::peers::ended_target(&ended, peer_target)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!("no peer supervisor of this repository is named '{peer_target}'")
+                        })?,
+                    true,
+                ),
+            };
+            match crate::cloud::peers::slot_holder(&peers, &addressed, was_ended) {
+                crate::cloud::peers::SlotHolder::Addressed => (addressed, None),
+                // cas-2db0: the proposer is told who received it instead.
+                crate::cloud::peers::SlotHolder::Successor { peer, note } => (peer.clone(), Some(note)),
+                crate::cloud::peers::SlotHolder::Refused(reason) => return Err(reason),
+            }
         }
         Ok(PeerDiscovery::NotLoggedIn) => {
             return Err("this project is not logged in to Cassy Cloud (`cas login`)".to_string());
@@ -598,6 +769,9 @@ pub fn propose(
         expires_at: now + chrono::Duration::seconds(ttl),
         created_at: now,
         decided_at: None,
+        decided_by: None,
+        cleanup_pending: false,
+        expiry_notice_pending: false,
     };
     let rollback = |why: &str| {
         let _ = decide_epic_split(
@@ -633,8 +807,8 @@ pub fn propose(
          Expires at {} unless accepted.",
         line.render(),
         caller.name,
-        mine.join(", "),
-        theirs.join(", "),
+        share_label(mine),
+        share_label(theirs),
         split.expires_at.format("%H:%M UTC"),
     );
     let delivery = match sent(peer_mailbox::send_to_peer(
@@ -662,11 +836,14 @@ pub fn propose(
         peer.name,
         peer.machine,
         delivery.describe(),
-        mine.join(", "),
+        share_label(mine),
         peer.name,
-        theirs.join(", "),
+        share_label(theirs),
         split.expires_at.format("%H:%M UTC"),
     );
+    if let Some(note) = redirect {
+        out.push_str(&format!("\n{note}"));
+    }
     for warning in warnings {
         out.push_str(&format!("\n⚠️  {warning}"));
     }
@@ -718,7 +895,7 @@ pub fn answer(
     };
 
     if !accept {
-        let changed = decide_epic_split(cas_root, id, &[SplitState::Pending], SplitState::Rejected, reason, now)
+        let changed = decide_epic_split_by(cas_root, id, &[SplitState::Pending], SplitState::Rejected, reason, now, Some(&caller.id))
             .map_err(store_error)?;
         if !changed {
             return Err(format!("{id} changed while rejecting it; check `epic_split`"));
@@ -762,7 +939,8 @@ pub fn answer(
     let duration = crate::cloud::peer_claims::lease_duration_secs(cas_root);
     let warnings = claim_share(&claims, &split.mine, caller, duration, &is_local)
         .map_err(|failure| format!("epic split {id} not accepted, and nothing claimed: {failure}"))?;
-    let changed = decide_epic_split(cas_root, id, &[SplitState::Pending], SplitState::Accepted, None, now)
+    let committed_at = Utc::now();
+    let changed = decide_epic_split_by(cas_root, id, &[SplitState::Pending], SplitState::Accepted, None, committed_at, Some(&caller.id))
         .map_err(|error| {
             release_share(&claims, &split.mine, &caller.id);
             store_error(error)
@@ -771,12 +949,14 @@ pub fn answer(
         release_share(&claims, &split.mine, &caller.id);
         return Err(format!("{id} changed while accepting it; check `epic_split`"));
     }
+    let mut acceptance = line(SplitKind::Accept);
+    acceptance.at = committed_at;
     let body = format!(
         "{}\nAccepted epic split {id} of {}: I take {}; you keep {}.",
-        line(SplitKind::Accept).render(),
+        acceptance.render(),
         split.epic_id,
-        split.mine.join(", "),
-        split.theirs.join(", "),
+        share_label(&split.mine),
+        share_label(&split.theirs),
     );
     match send_to_split_peer(
         cas_root,
@@ -794,9 +974,9 @@ pub fn answer(
                 split.peer_name,
                 split.peer_machine,
                 delivery.describe(),
-                split.mine.join(", "),
+                share_label(&split.mine),
                 split.peer_name,
-                split.theirs.join(", "),
+                share_label(&split.theirs),
             );
             for warning in warnings {
                 out.push_str(&format!("\n⚠️  {warning}"));
@@ -816,9 +996,9 @@ pub fn answer(
 }
 
 /// Cancel split `id`: normally release this side's supervisor claims and tell
-/// the peer. A live supervisor may also supersede an accepted split owned by
-/// another registered supervisor once that owner is proven gone past the
-/// heartbeat TTL. The override records its actor and reason on the split.
+/// the peer. A live supervisor may also supersede an accepted split or an
+/// expired outgoing proposal once its registered owner is proven gone past
+/// the heartbeat TTL. The override records its actor and reason on the split.
 pub fn cancel(
     cas_root: &Path,
     caller: &Caller,
@@ -832,7 +1012,8 @@ pub fn cancel(
     let superseded_owner = if split.local_agent_id == caller.id {
         None
     } else {
-        if split.state != SplitState::Accepted {
+        let expired_proposal = split.direction == SplitDirection::Outgoing && split.is_expired(Utc::now());
+        if split.state != SplitState::Accepted && !expired_proposal {
             return Err(format!("{id} belongs to another supervisor of this database"));
         }
         let agents = crate::store::open_agent_store(cas_root)
@@ -889,7 +1070,7 @@ pub fn cancel(
                 split.peer_name
             ));
         }
-        (SplitState::Rejected | SplitState::Cancelled, _) => {
+        (SplitState::Rejected | SplitState::Cancelled | SplitState::Expired, _) => {
             return Err(format!("{id} is already {}", split.state.as_str()));
         }
         _ => {}
@@ -911,13 +1092,14 @@ pub fn cancel(
     });
     let cancellation_reason = supersede_reason.as_deref().or(reason);
     let now = Utc::now();
-    let changed = decide_epic_split(
+    let changed = decide_epic_split_by(
         cas_root,
         id,
         &[SplitState::Pending, SplitState::Accepted],
         SplitState::Cancelled,
         cancellation_reason,
         now,
+        Some(&caller.id),
     )
     .map_err(store_error)?;
     if !changed {
@@ -1039,8 +1221,8 @@ fn render_split_list(splits: &[EpicSplit], now: DateTime<Utc>) -> String {
             &format!("with {}@{}", split.peer_name, split.peer_machine),
             4,
         ));
-        out.push_str(&wrap(&format!("mine {}", split.mine.join(", ")), 4));
-        out.push_str(&wrap(&format!("theirs {}", split.theirs.join(", ")), 4));
+        out.push_str(&wrap(&format!("mine {}", share_label(&split.mine)), 4));
+        out.push_str(&wrap(&format!("theirs {}", share_label(&split.theirs)), 4));
         let when = match (split.state, split.decided_at) {
             (SplitState::Pending, _) if !split.is_expired(now) => {
                 Some(format!("expires {}", split.expires_at.format("%H:%M UTC")))
@@ -1118,6 +1300,9 @@ mod tests {
                 expires_at: now + chrono::Duration::days(1),
                 created_at: now,
                 decided_at: Some(now),
+                decided_by: None,
+                cleanup_pending: false,
+                expiry_notice_pending: false,
             },
         )
         .unwrap();
@@ -1222,6 +1407,9 @@ mod tests {
             expires_at: now,
             created_at: now,
             decided_at: Some(now),
+            decided_by: None,
+            cleanup_pending: false,
+            expiry_notice_pending: false,
         };
         let text = render_split_list(&[split], now);
         assert!(text.starts_with("Epic splits:\n  split-0a1b2c3d [cancelled, outgoing] epic cas-e100\n"), "{text}");
@@ -1282,6 +1470,9 @@ mod tests {
                 expires_at: now + chrono::Duration::minutes(30),
                 created_at: now,
                 decided_at: None,
+                decided_by: None,
+                cleanup_pending: false,
+                expiry_notice_pending: false,
             },
         )
         .unwrap();

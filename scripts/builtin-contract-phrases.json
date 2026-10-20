@@ -4347,7 +4347,7 @@
       ],
       "contains": [
         {
-          "text": "git diff --name-status \"$BASE\" HEAD | grep -E ",
+          "text": "git diff \"$BASE\" HEAD | grep -nE ",
           "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
         },
         {

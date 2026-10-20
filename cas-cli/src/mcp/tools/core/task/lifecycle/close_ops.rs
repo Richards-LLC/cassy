@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
 mod proof_claims;
@@ -6217,10 +6218,7 @@ impl CasCore {
         parked.pending_worktree_merge = false;
         parked.updated_at = now;
 
-        let timestamp = now.format("%Y-%m-%d %H:%M");
-        let audit = format!(
-            "[{timestamp}] Close rejected: {reason}. Task parked as awaiting_merge; worker lease released until supervisor merge completes."
-        );
+        let audit = audit::parked_note(now, reason);
         parked.notes = if parked.notes.is_empty() {
             audit
         } else {
@@ -7080,6 +7078,13 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let caller_task = format!("{}task", self.guidance_prefix());
+        if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -8079,12 +8084,29 @@ impl CasCore {
                 .unwrap_or(close_project_root.as_path());
             match parked_delivery_head(parked_repo, &task) {
                 Ok(Some(anchor)) => {
-                    let live_tip = task.assignee.as_deref().and_then(|assignee| {
-                        resolve_branch_sha(
-                            &close_project_root,
-                            &close_measured_factory_branch(&close_project_root, &task, assignee),
-                        )
-                    });
+                    // cas-1377c: a parked task's lease is released, so with no
+                    // assignee the delivery branch is the recorded one. Without
+                    // it the anchor from an earlier park stayed the head, and a
+                    // waiver bound to the delivered tip never matched.
+                    // cas-4575: only a per-task branch holds nothing but this
+                    // task's commits. The later-task cut-off needs an assignee,
+                    // so a shared factory/<worker> branch keeps its anchor.
+                    let per_task_suffix = format!("-{}", task.id);
+                    let live_tip = task
+                        .assignee
+                        .as_deref()
+                        .map(|assignee| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        })
+                        .or_else(|| {
+                            task_delivery_branch(&close_project_root, &task).filter(|branch| {
+                                branch
+                                    .trim_start_matches("origin/")
+                                    .strip_prefix("factory/")
+                                    .is_some_and(|lane| lane.ends_with(&per_task_suffix))
+                            })
+                        })
+                        .and_then(|branch| resolve_branch_sha(&close_project_root, &branch));
                     Some(
                         self.eligible_awaiting_merge_advance(
                             task_store.as_ref(),
@@ -10538,8 +10560,7 @@ impl CasCore {
 
         if let Some(reason) = &req.reason {
             task.close_reason = Some(reason.clone());
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let close_note = format!("[{timestamp}] Closed: {reason}");
+            let close_note = audit::closed_note(now, reason);
             if task.notes.is_empty() {
                 task.notes = close_note;
             } else {
@@ -11303,12 +11324,21 @@ impl CasCore {
                 "TASK CANCEL REJECTED: reason is required and must not be blank.",
             ));
         }
+        if let Some(message) = crate::mcp::tools::core::task::caller_note_marker_rejection(reason) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let superseded_by = req
             .superseded_by
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        if let Some(message) = superseded_by
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         if let Some(pointer) = superseded_by.as_deref()
             && (pointer.len() > 512 || !delivery_audit_text_is_portable(pointer))
         {
@@ -11374,18 +11404,7 @@ impl CasCore {
         }
 
         let now = chrono::Utc::now();
-        let pointer_note = superseded_by
-            .as_deref()
-            .map(|pointer| format!(" Superseded by: {pointer}."))
-            .unwrap_or_default();
-        let cancel_note = format!(
-            "[{}] CANCELLED: supervisor {} ({}) ended this task without delivery. Reason: {}{}",
-            now.format("%Y-%m-%d %H:%M"),
-            supervisor.name,
-            supervisor.id,
-            reason,
-            pointer_note,
-        );
+        let cancel_note = audit::cancel_note(now, &supervisor, reason, superseded_by.as_deref());
         if task.notes.is_empty() {
             task.notes = cancel_note;
         } else {
@@ -11458,6 +11477,13 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReopenRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = req
+            .reason
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -11585,17 +11611,11 @@ impl CasCore {
         // Terminal exits must be independently intelligible after replication:
         // the actor and the reason are both embedded in the note, rather than
         // relying on ephemeral caller context or a generic updated_at stamp.
-        let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
-        let verb = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
-            "Review scope reset"
-        } else if old_status == TaskStatus::Blocked {
-            "Unblocked"
-        } else {
-            "Reopened"
-        };
+        let reopen_note = audit::reopen_note(
+            task.updated_at, old_status, fresh_scope_dispatch.is_some(), &actor, reason,
+        );
         let actor = format!("{} ({})", actor.name, actor.id).replace(['\n', '\r'], " ");
         let reason = reason.replace(['\n', '\r'], " ");
-        let reopen_note = format!("[{timestamp}] {verb}: actor={actor} reason={reason}");
         if task.notes.is_empty() {
             task.notes = reopen_note;
         } else {
@@ -11758,6 +11778,11 @@ impl CasCore {
                 ErrorCode::INVALID_PARAMS,
                 "task request_changes rejected: reason must explain what must change and whether prior commits should stand or be reverted",
             ));
+        }
+        if let Some(message) =
+            crate::mcp::tools::core::task::caller_note_marker_rejection(&req.reason)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
 
         let task_store = self.open_task_store()?;
@@ -12998,6 +13023,133 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
         })
 }
 
+/// cas-2ea6: the builtin reference-history ledger and its generator.
+const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
+const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+/// cas-2ea6: the most a keyed regeneration may take inside a close gate. A
+/// few keys took about 1 s on cas-src (40 keys: 6 s); a whole-history run
+/// takes about 30 s, which no close gate can spend.
+const REFERENCE_HISTORY_CAP: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// cas-2ea6: the ledger is derived from git history, so a lane's copy can
+/// carry hashes of versions that never reached the target (the cas-9dee
+/// shape). It is delivered when, for every key whose delivered hashes the
+/// target lacks, the target's entry equals a fresh run of the target's own
+/// generator for that key at the target (`--rev --only`). A target entry that
+/// differs from that run stays dropped, and so does an undecidable run (an
+/// older generator, the gate's deadline). Returns the acceptance note and the
+/// paths that remain dropped.
+fn without_regenerated_ledger(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: Vec<String>,
+) -> (Option<String>, Vec<String>) {
+    if !paths.iter().any(|path| path == REFERENCE_HISTORY_LEDGER) {
+        return (None, paths);
+    }
+    let origin = format!("origin/{parent_branch}");
+    let target_ref = if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin) {
+        origin
+    } else {
+        parent_branch.to_string()
+    };
+    let Some(target) = resolve_branch_sha(repo_path, &format!("{target_ref}^{{commit}}")) else {
+        return (None, paths);
+    };
+    let Some(keys) = dropped_ledger_keys_regenerate(repo_path, anchor, &target) else {
+        return (None, paths);
+    };
+    let note = format!(
+        "{REFERENCE_HISTORY_LEDGER} entries {} on `{target_ref}` equal a fresh {REFERENCE_HISTORY_GENERATOR} run at {}, so the lane-only hashes are versions that never shipped, not a drop (cas-2ea6)",
+        keys.join(", "),
+        &target[..target.len().min(12)],
+    );
+    (Some(note), paths.into_iter().filter(|path| path != REFERENCE_HISTORY_LEDGER).collect())
+}
+
+/// cas-2ea6: the ledger keys whose `anchor` hashes `target` lacks, when each
+/// of their `target` entries equals the target generator's `--rev --only`
+/// run. `None` when the drop must stand or cannot be decided.
+fn dropped_ledger_keys_regenerate(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    target: &str,
+) -> Option<Vec<String>> {
+    type Entries = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+    let show = |revision: &str, path: &str| {
+        std::process::Command::new("git")
+            .args(["show", &format!("{revision}:{path}")])
+            .current_dir(repo_path)
+            .measurement_output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let entries = |bytes: &[u8]| -> Option<Entries> {
+        let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        doc.get("files")?
+            .as_object()?
+            .iter()
+            .map(|(key, hashes)| {
+                let hashes = hashes.as_array()?.iter().map(|hash| hash.as_str().map(str::to_owned)).collect::<Option<_>>()?;
+                Some((key.clone(), hashes))
+            })
+            .collect()
+    };
+    let delivered = entries(&show(anchor, REFERENCE_HISTORY_LEDGER)?)?;
+    let landed = entries(&show(target, REFERENCE_HISTORY_LEDGER)?)?;
+    let dropped: Vec<String> = delivered
+        .iter()
+        .filter(|(key, hashes)| landed.get(*key).is_none_or(|kept| !hashes.is_subset(kept)))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if dropped.is_empty() {
+        return None;
+    }
+    // An older generator ignores `--rev`/`--only` and would rewrite the
+    // caller's checkout instead: run only one that declares `--only`.
+    let generator = show(target, REFERENCE_HISTORY_GENERATOR)?;
+    if !String::from_utf8_lossy(&generator).contains("--only)") {
+        return None;
+    }
+    let scratch = tempfile::tempdir().ok()?;
+    let script = scratch.path().join("gen-builtin-reference-history.sh");
+    let fresh = scratch.path().join("reference-history.json");
+    std::fs::write(&script, generator).ok()?;
+    let mut command = std::process::Command::new("bash");
+    command.arg(&script).args(["--rev", target, "--output"]).arg(&fresh).current_dir(repo_path);
+    for key in &dropped {
+        command.args(["--only", key]);
+    }
+    let budget = epic_measurement::deadline()
+        .map(|deadline| deadline.remaining())
+        .unwrap_or(std::time::Duration::MAX)
+        .min(REFERENCE_HISTORY_CAP);
+    let started = std::time::Instant::now();
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(budget),
+        std::time::Duration::MAX,
+    );
+    tracing::info!(
+        target: "cas::close",
+        stage = "reference_history_regeneration",
+        keys = dropped.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ok = output.as_ref().is_ok_and(|output| output.status.success()),
+        "cas-2ea6: keyed reference-history regeneration finished"
+    );
+    if !output.ok()?.status.success() {
+        return None;
+    }
+    let regenerated = entries(&std::fs::read(&fresh).ok()?)?;
+    dropped
+        .iter()
+        .all(|key| regenerated.get(key) == landed.get(key))
+        .then_some(dropped)
+}
+
 /// cas-baf7: the delivery's own non-artifact paths (its source), measured
 /// against the anchor's first parent, or its second for a merge anchor.
 /// `None` when Git cannot say.
@@ -13180,12 +13332,29 @@ fn epic_anchor_content_presence(
     let DeliveryContentPresence::Dropped { paths } = &presence else {
         return (presence, None);
     };
+    // cas-2ea6: the history-derived ledger is judged by regeneration.
+    let (ledger_note, remaining) = without_regenerated_ledger(repo, anchor, target, paths.clone());
+    if remaining.is_empty() {
+        return (DeliveryContentPresence::Present { paths: paths.clone() }, ledger_note);
+    }
+    let presence = if ledger_note.is_some() {
+        DeliveryContentPresence::Dropped { paths: remaining }
+    } else {
+        presence
+    };
+    let DeliveryContentPresence::Dropped { paths } = &presence else {
+        return (presence, None);
+    };
+    let joined = |note: Option<String>| match (note, ledger_note.clone()) {
+        (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
+        (note, ledger) => note.or(ledger),
+    };
     match target_identical_delivered_paths(task, repo, anchor, target, None, &identity, paths, false) {
         Some((note, remaining)) if remaining.is_empty() => {
-            (DeliveryContentPresence::Present { paths: paths.clone() }, note)
+            (DeliveryContentPresence::Present { paths: paths.clone() }, joined(note))
         }
-        Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, note),
-        None => (presence, None),
+        Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, joined(note)),
+        None => (presence, joined(None)),
     }
 }
 
@@ -13243,10 +13412,9 @@ fn dropped_line_samples(
         let target_text = git(&["show", &format!("{target}:{path}")]).unwrap_or_default();
         let target_lines: std::collections::HashSet<&str> =
             target_text.lines().map(str::trim).collect();
-        let missing: Vec<String> = patch
-            .lines()
-            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
-            .map(|line| line[1..].trim())
+        let missing: Vec<String> = task_attribution::hunk_lines(&patch)
+            .filter_map(|(_, line)| line.strip_prefix('+'))
+            .map(str::trim)
             .filter(|line| !line.is_empty() && !target_lines.contains(line))
             .take(PER_PATH)
             .map(|line| {
@@ -13610,11 +13778,26 @@ fn anchored_delivery_content_gate_unbounded(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            // cas-2ea6: the history-derived ledger is judged by regeneration,
+            // and its note rides on whichever check accepts the rest.
+            let (ledger_note, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
+            let with_ledger = |note: String| match &ledger_note {
+                Some(ledger) if note.is_empty() => ledger.clone(),
+                Some(ledger) => format!("{note}; {ledger}"),
+                None => note,
+            };
+            if paths.is_empty() {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    with_ledger(String::new())
+                )));
+            }
             // cas-24d8: decide an artifacts-only drop by the cas-baf7 rule
             // before the byte-identity proof walks those bundles again.
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    with_ledger(note)
                 )));
             }
             let (identical, paths) = match target_identical_delivered_paths(
@@ -13633,12 +13816,13 @@ fn anchored_delivery_content_gate_unbounded(
             if paths.is_empty() {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
                     "DECISION: delivery content accepted for task {task_id}: {}.",
-                    identical.unwrap_or_default()
+                    with_ledger(identical.unwrap_or_default())
                 )));
             }
             if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
                 return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                    "DECISION: delivery content accepted for task {task_id}: {}.",
+                    with_ledger(note)
                 )));
             }
             match validated_delivery_drop_review(
@@ -13650,7 +13834,8 @@ fn anchored_delivery_content_gate_unbounded(
             ) {
                 Ok(Some(review)) => {
                     return Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                        "DECISION: reviewed delivery content supersession accepted for task {task_id}; {review}"
+                        "DECISION: reviewed delivery content supersession accepted for task {task_id}; {}",
+                        with_ledger(review)
                     )));
                 }
                 Err(reason) => {
@@ -18790,7 +18975,9 @@ fn reanchored_delivery_content_in_parent(
 /// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
 /// task-specific and remains stable when a worker later reuses the same
 /// factory branch for another epic. When that anchor is absent or no longer
-/// resolves, both the historical `parked_branch` and a distinct current
+/// resolves, all existing per-task branches (local or origin) are measured,
+/// excluding shared worker branches that can carry other tasks' history. Without a per-task
+/// branch, both the historical `parked_branch` and a distinct current
 /// assignee-derived live branch are checked. Taking the maximum unmerged count
 /// avoids double-counting shared history while ensuring reassignment cannot
 /// hide either worker's stranded commits.
@@ -18933,14 +19120,50 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut resolved_anchor =
             recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
 
-        let mut fallback_branches = Vec::new();
-        if let Some(branch) = parked_branch.as_ref() {
-            fallback_branches.push(branch.clone());
-        }
-        if let Some(branch) = live_factory_branch.as_ref()
-            && !fallback_branches.contains(branch)
-        {
-            fallback_branches.push(branch.clone());
+        // cas-6d70: per-task lanes isolate this delivery from the worker's
+        // reused bare branch. Resolve against the same local/origin snapshot
+        // as measurement, including a parked task lane after reassignment.
+        let task_branch_suffix = format!("-{}", t.id);
+        let mut fallback_branches = if has_delivery {
+            task_delivery_branch_candidates(t)
+                .into_iter()
+                .filter(|branch| {
+                    branch.starts_with("factory/")
+                        && branch.ends_with(&task_branch_suffix)
+                        && git_snapshot.read_ref(branch).read_ref().is_some()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        // cas-2b10: a reset retires a dead holder's old-style shared lane into
+        // handoff history (cas-47a2); it is still a lane this child may have
+        // stranded work on, judged by the same cas-dbbf attribution below.
+        let handoff_shared_lanes: Vec<&str> = if has_delivery {
+            t.deliverables
+                .handoff_branches
+                .iter()
+                .map(String::as_str)
+                .filter(|branch| {
+                    branch.starts_with("factory/")
+                        && !branch.ends_with(&task_branch_suffix)
+                        && git_snapshot.read_ref(branch).read_ref().is_some()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // cas-b28c: reassignment can leave work on multiple task lanes.
+        // Measure them all; the loop below takes the highest unmerged count.
+        if fallback_branches.is_empty() {
+            if let Some(branch) = parked_branch.as_ref() {
+                fallback_branches.push(branch.clone());
+            }
+            for branch in live_factory_branch.iter().map(String::as_str).chain(handoff_shared_lanes.iter().copied()) {
+                if !fallback_branches.iter().any(|known| known == branch) {
+                    fallback_branches.push(branch.to_string());
+                }
+            }
         }
         let factory_branch = fallback_branches.first().cloned().or(parked_branch);
         let additional_factory_branches: Vec<String> =
@@ -19095,14 +19318,16 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     .unwrap_or_else(|| {
                         count_unmerged_factory_commits(repo_path, refname, parent_branch)
                     });
-                // cas-dbbf: the assignee's bare `factory/<assignee>` lane is
+                // cas-dbbf: the assignee's bare `factory/<assignee>` lane (or a
+                // retired holder's, cas-2b10) is
                 // reused for later tasks. When every commit it holds beyond
                 // the target claims another task, none of them is this
                 // child's work, so they strand nothing here (cas-73b8 and
                 // cas-93db applied the same rule to a single task's close).
                 // An unnamed commit, or one naming this child, still counts.
                 let count = if count > 0
-                    && live_factory_branch.as_deref() == Some(commit)
+                    && (live_factory_branch.as_deref() == Some(commit)
+                        || handoff_shared_lanes.contains(&commit))
                     && task_attribution::lane_commits_all_claim_other_tasks(
                         repo_path,
                         refname,
@@ -23395,8 +23620,21 @@ fn run_lightweight_structural_lint_at_tip(
         let mut current_path = String::new();
         let mut current_is_rust = false;
         let mut current_file_line = 0usize;
-        for line in diff_text.lines() {
-            if line.starts_with("+++ ") {
+        let mut hunk_lines = task_attribution::hunk_lines(&diff_text).peekable();
+        for (line_index, line) in diff_text.lines().enumerate() {
+            // Consume actual hunk content before interpreting file metadata:
+            // `+++ b/example.rs` can itself be an added content line.
+            if let Some((_, content)) = hunk_lines.next_if(|(index, _)| *index == line_index) {
+                if let Some(content) = content.strip_prefix('+') {
+                    current_file_line += 1;
+                    result.push(DiffEntry::Added(AddedLine {
+                        content,
+                        path: current_path.clone(),
+                        file_line: current_file_line,
+                        is_rust_file: current_is_rust,
+                    }));
+                }
+            } else if line.starts_with("+++ ") {
                 // "+++ b/path/to/file.ext" in a unified git diff.
                 // Strip the diff prefix ("b/") to obtain the bare path.
                 let path = line[4..].trim_start_matches("b/");
@@ -23422,14 +23660,6 @@ fn run_lightweight_structural_lint_at_tip(
                     current_file_line = new_start.saturating_sub(1);
                 }
                 result.push(DiffEntry::HunkBoundary);
-            } else if line.starts_with('+') && !line.starts_with("+++") {
-                current_file_line += 1;
-                result.push(DiffEntry::Added(AddedLine {
-                    content: &line[1..],
-                    path: current_path.clone(),
-                    file_line: current_file_line,
-                    is_rust_file: current_is_rust,
-                }));
             }
         }
         result
@@ -31726,6 +31956,211 @@ esac
         );
     }
 
+    /// cas-2ea6: the cas-9dee shape. A lane's reference-history ledger records
+    /// the hash of a draft it later rewrote away, so that version never ships.
+    /// The integration regenerates the ledger from the merged history inside
+    /// the merge, and the lane-only line is gone. The target's ledger equals a
+    /// fresh generator run for the dropped key, so the delivery is not
+    /// dropped. A target ledger that differs from a fresh run still refuses,
+    /// and a target generator without `--only` is never run.
+    #[test]
+    fn regenerated_reference_history_is_not_a_dropped_delivery_cas_2ea6() {
+        const GENERATOR: &str = include_str!("../../../../../../../scripts/gen-builtin-reference-history.sh");
+        const LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let write = |relative: &str, body: &str| {
+            let path = p.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let generate = || {
+            let run = std::process::Command::new("bash")
+                .arg("scripts/gen-builtin-reference-history.sh")
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(p.join(LEDGER)).unwrap()).unwrap()
+        };
+        git(p, &["checkout", "-q", "main"]);
+        write("scripts/gen-builtin-reference-history.sh", GENERATOR);
+        write("cas-cli/src/builtins/agents/task-verifier.body.md", "Verify the task.\n");
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# Demo\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "builtins"]);
+        generate();
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "ledger"]);
+
+        // The lane drafts a reference and records it, then rewrites the draft;
+        // its ledger keeps the draft's hash beside the shipped version's.
+        git(p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+        write("cas-cli/src/builtins/skills/demo/references/guide.md", "# Guide draft\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "cas-test1: draft the guide"]);
+        let draft = generate();
+        git(p, &["checkout", "-q", "--", LEDGER]);
+        git(p, &["reset", "-q", "--hard", "HEAD~1"]);
+        write("cas-cli/src/builtins/skills/demo/references/guide.md", "# Guide\n");
+        git(p, &["add", "-A"]);
+        git(p, &["commit", "-q", "-m", "cas-test1: add the guide"]);
+        let mut lane = generate();
+        let key = "skills/demo/references/guide.md";
+        let mut hashes: Vec<serde_json::Value> = lane["files"][key].as_array().unwrap().clone();
+        hashes.extend(draft["files"][key].as_array().unwrap().iter().cloned());
+        hashes.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        hashes.dedup();
+        lane["files"][key] = serde_json::Value::Array(hashes);
+        write(LEDGER, &(serde_json::to_string_pretty(&lane).unwrap() + "\n"));
+        git(p, &["commit", "-q", "-am", "cas-test1: record the guide in the ledger"]);
+        let anchor = head_sha(p);
+
+        // The integration regenerates the ledger from the merged history.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
+        generate();
+        git(p, &["commit", "-q", "-a", "--amend", "--no-edit"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::ProceedWithNote(note) => assert!(note.contains("cas-2ea6"), "{note}"),
+            other => panic!("a ledger equal to a fresh run is delivered: {other:?}"),
+        }
+
+        // A target ledger that is not a fresh run (a hand edit drops the
+        // shipped version's hash) still refuses.
+        let mut stale = generate();
+        stale["files"][key] = serde_json::json!([]);
+        write(LEDGER, &(serde_json::to_string_pretty(&stale).unwrap() + "\n"));
+        git(p, &["commit", "-q", "-am", "hand-edit the ledger"]);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED") && message.contains(LEDGER), "{message}")
+            }
+            other => panic!("a ledger that differs from a fresh run still refuses: {other:?}"),
+        }
+
+        // A target generator without `--only` ignores the arguments and
+        // rewrites the caller's checkout: it is never run, and the drop stands.
+        write(
+            "scripts/gen-builtin-reference-history.sh",
+            &format!("#!/usr/bin/env bash\necho rewritten > {LEDGER}\n"),
+        );
+        git(p, &["commit", "-q", "-am", "an older generator"]);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+            MergeStateGateOutcome::Reject(_)
+        ));
+        let status = git_command(p, &["status", "--porcelain"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "", "the gate must not rewrite the checkout");
+    }
+
+    /// cas-18aa: the cas-da9a shape, minimized. Round one of the task lands a
+    /// draft block in guarded.txt. Changes are requested, so round two starts
+    /// from the newer target and moves that block (the task's own later
+    /// commit); the target meanwhile evolves the same file elsewhere, before
+    /// and after the worker's last sync, and then lands round two. Every line
+    /// the task finally delivered is present and its round-one draft is gone
+    /// from the task's own final tree as well, so this is no drop. Losing the
+    /// moved block on the target still is. cas-e594: so is losing a draft
+    /// line the delivery kept that diffs as `+++i;`, and reintroducing a
+    /// draft-removed `-- note`, which diffs as `--- note`. Neither is a header.
+    #[test]
+    fn a_task_draft_it_later_replaced_is_not_dropped_by_target_evolution_cas_18aa() {
+        // "": the clean replacement; "drop": the target loses the moved block;
+        // "kept-plus": the target loses `++i;`, a draft line the delivery kept;
+        // "reintroduced-dash": the target restores `-- note`, which the draft removed.
+        let build = |variant: &str| {
+            let dir = init_factory_repo("worker");
+            let p = dir.path().to_path_buf();
+            let lines = |edit: &dyn Fn(&mut Vec<String>)| {
+                let mut file: Vec<String> = std::fs::read_to_string(p.join("guarded.txt"))
+                    .map(|text| text.lines().map(str::to_owned).collect())
+                    .unwrap_or_else(|_| (1..=40).map(|n| format!("line {n}")).collect());
+                edit(&mut file);
+                std::fs::write(p.join("guarded.txt"), file.join("\n") + "\n").unwrap();
+            };
+            let commit = |message: &str| {
+                git(&p, &["add", "."]);
+                git(&p, &["commit", "-qm", message]);
+            };
+            let on = |branch: &str| git(&p, &["checkout", "-q", branch]);
+            on("main");
+            lines(&|file| file[5] = "-- note".to_string());
+            commit("baseline");
+            // Round one: the draft lands.
+            git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+            lines(&|file| {
+                file.splice(10..10, ["draft guard".to_string(), "draft check one".to_string(), "draft check two".to_string()]).for_each(drop);
+                if variant == "kept-plus" {
+                    file.insert(13, "++i;".to_string());
+                }
+                if variant == "reintroduced-dash" {
+                    file.remove(5);
+                }
+            });
+            commit("cas-test1: draft the guard");
+            on("main");
+            git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round one"]);
+            lines(&|file| file[30] = "line 31 evolved by another lane".to_string());
+            commit("cas-test2: another lane edits guarded.txt");
+            // Round two: from the newer target, the task moves its draft.
+            git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
+            lines(&|file| {
+                file.retain(|line| !line.starts_with("draft "));
+                file.splice(20..20, ["moved guard".to_string(), "guard resolves its operands".to_string()]).for_each(drop);
+            });
+            commit("cas-test1: move the guard to its resolver");
+            on("main");
+            lines(&|file| file[33] = "line 34 evolved before the sync".to_string());
+            commit("cas-test3: edit guarded.txt before the sync");
+            on("factory/worker");
+            git(&p, &["merge", "--no-ff", "-q", "main", "-m", "Merge main into factory/worker cas-test1"]);
+            let anchor = head_sha(&p);
+            on("main");
+            lines(&|file| {
+                file[36] = "line 37 evolved after the sync".to_string();
+                file[3] = "line 4 evolved after the sync".to_string();
+            });
+            commit("merge(sync): target syncs guarded.txt after the worker's last sync");
+            git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "Merge branch 'factory/worker' cas-test1 round two"]);
+            match variant {
+                "drop" => lines(&|file| file.retain(|line| !line.contains("guard"))),
+                "kept-plus" => lines(&|file| file.retain(|line| line != "++i;")),
+                "reintroduced-dash" => lines(&|file| file.insert(5, "-- note".to_string())),
+                _ => {}
+            }
+            if !variant.is_empty() {
+                commit("cas-test4: the target changes what the task delivered");
+            }
+            (dir, anchor)
+        };
+        let window = window_at(0, "cas-18aa repro");
+        let identity = TaskCommitIdentity { task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+
+        let (dir, anchor) = build("");
+        let presence =
+            super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+        assert!(
+            matches!(presence, Some(DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. })),
+            "the task's own replaced draft is not a drop: {presence:?}"
+        );
+
+        let not_refused: Vec<_> = ["drop", "kept-plus", "reintroduced-dash"]
+            .into_iter()
+            .filter_map(|variant| {
+                let (dir, anchor) = build(variant);
+                let presence =
+                    super::task_attribution::merge_tip_content_presence(dir.path(), "main", &anchor, Some(&window), &identity, None);
+                (!matches!(&presence, Some(DeliveryContentPresence::Dropped { paths }) if paths == &vec!["guarded.txt".to_string()]))
+                    .then(|| format!("{variant}: {presence:?}"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "changing what the task delivered must still refuse: {not_refused:#?}");
+    }
+
     /// Replays immutable production delivery anchors. Run explicitly in a
     /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
     #[test]
@@ -36946,61 +37381,142 @@ mod epic_status_gate_tests {
         );
     }
 
-    /// cas-dbbf: a worker reuses its bare `factory/<worker>` lane for later
-    /// tasks. A closed child that delivered on its per-task branch, now
-    /// merged, must not be stranded by the lane's later commits when every
-    /// one of them claims a different task (cas-c5b8 triage: cas-cfd6 and
-    /// cas-c577 on epic cas-829b). The lane is still measured for the
-    /// child's own work: an unmerged commit naming the child keeps blocking.
+    /// cas-6d70 extends cas-dbbf: shared-lane history need not name another
+    /// task. A merged per-task branch alone determines the child's lane state.
     #[test]
-    fn a_reused_lane_holding_another_tasks_commits_does_not_strand_a_delivered_child_cas_dbbf() {
-        let dir = tempfile::tempdir().unwrap();
+    fn merged_per_task_lanes_ignore_shared_worker_history_cas_6d70() {
+        let dir = init_epic_repo(&[]);
+        let bare = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-        git(p, &["checkout", "-q", "-b", "factory/worker-cas-d0e1"]);
-        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
-        git(p, &["add", "delivered.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: the delivery (cas-d0e1)"]);
+        add_origin(p, bare.path());
+        let mut children = Vec::new();
+        for (id, worker) in [("cas-b47c", "solid-newt-84"), ("cas-5f3b", "keen-otter-36")] {
+            let branch = crate::factory_isolation::worker_task_branch(worker, id);
+            git(p, &["checkout", "-q", "-b", &branch, "main"]);
+            commit_returning_sha(p, &format!("{id}.rs"), "fn delivered() {}\n");
+            git(p, &["checkout", "-q", "main"]);
+            git(p, &["merge", "--no-ff", "-q", "-m", "land task", &branch]);
+            git(p, &["push", "-q", "origin", &branch]);
+
+            let shared = format!("factory/{worker}");
+            git(p, &["checkout", "-q", "-b", &shared, "main"]);
+            // Unlabelled unrelated history defeats the old attribution heuristic.
+            commit_returning_sha(p, &format!("{worker}.rs"), "fn unrelated() {}\n");
+            git(p, &["checkout", "-q", "main"]);
+            assert_eq!(count_unmerged_factory_commits(p, &shared, "main"), 1);
+
+            let mut delivered = child(id, TaskStatus::Closed, Some(worker));
+            if id == "cas-b47c" {
+                delivered.deliverables.parked_branch = Some(branch.clone());
+                git(p, &["branch", "-q", "-D", &branch]);
+            } // cas-5f3b leaves the legacy bare receipt; discover its local task ref.
+            children.push(delivered);
+        }
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        for (row, delivered) in statuses.iter().zip(&children) {
+            let branch = crate::factory_isolation::worker_task_branch(
+                delivered.assignee.as_deref().unwrap(), &delivered.id,
+            );
+            assert_eq!(row.unmerged_count, 0, "shared history must not strand {row:?}");
+            assert_eq!(row.factory_branch.as_deref(), Some(branch.as_str()));
+            assert!(row.additional_factory_branches.is_empty(), "{row:?}");
+            assert_eq!(row.checked_ref_reads.len(), 1, "{row:?}");
+            assert!(!row.refs_unresolved, "{row:?}");
+        }
+        assert!(matches!(statuses[0].checked_ref_reads[0], CheckedRefRead::Origin { .. }));
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert!(report.contains("All child factory branches are merged"), "{report}");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)), "{out:?}");
+    }
+
+    #[test]
+    fn unmerged_per_task_commit_still_blocks_epic_close_cas_6d70() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let branch = "factory/worker-cas-b47c";
+        git(p, &["branch", "factory/worker", "main"]);
+        git(p, &["checkout", "-q", "-b", branch]);
+        commit_returning_sha(p, "undelivered.rs", "fn undelivered() {}\n");
         git(p, &["checkout", "-q", "main"]);
-        git(p, &["merge", "--no-ff", "-q", "-m", "land cas-d0e1", "factory/worker-cas-d0e1"]);
-        // The worker's bare lane, reused for the next task and not merged.
-        git(p, &["checkout", "-q", "-b", "factory/worker", "main"]);
+        let mut delivered = child("cas-b47c", TaskStatus::Closed, Some("worker"));
+        delivered.deliverables.parked_branch = Some(branch.to_string());
+        let children = [delivered];
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert_eq!(statuses[0].unmerged_count, 1, "{statuses:?}");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    #[test]
+    fn prior_holders_unmerged_task_lane_blocks_epic_close_cas_b28c() {
+        let dir = init_epic_repo(&[("current", 2), ("previous", 3)]);
+        let p = dir.path();
+        let current = "factory/current-cas-b28c";
+        let previous = "factory/previous-cas-b28c";
+        git(p, &["branch", current, "main"]);
+        git(p, &["checkout", "-q", "-b", previous, "main"]);
+        commit_returning_sha(p, "undelivered.rs", "fn undelivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        let mut reassigned = child("cas-b28c", TaskStatus::Closed, Some("current"));
+        reassigned.deliverables.parked_branch = Some(previous.to_string());
+        let children = [reassigned];
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        let row = &statuses[0];
+        assert_eq!(row.unmerged_count, 1, "prior holder's work must remain visible: {row:?}");
+        assert_eq!(row.factory_branch.as_deref(), Some(current));
+        assert_eq!(row.additional_factory_branches, [previous]);
+        assert_eq!(row.checked_ref_reads.len(), 2);
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    /// cas-dbbf fallback: without a per-task ref, only commits attributable to
+    /// this child (or with unknown ownership) strand the reused bare lane.
+    #[test]
+    fn bare_lane_foreign_task_attribution_without_task_refs_cas_b28c() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let branch = "factory/worker";
+        git(p, &["checkout", "-q", "-b", branch, "main"]);
+        commit_returning_sha(p, "delivered.rs", "fn delivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "-m", "land task", branch]);
+        git(p, &["checkout", "-q", branch]);
         std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
         git(p, &["add", "next.rs"]);
-        git(p, &["commit", "-q", "-m", "feat: next task's work (cas-0be7)"]);
+        git(p, &["commit", "-q", "-m", "feat: next task (cas-0be7)"]);
         git(p, &["checkout", "-q", "main"]);
+        let children = [child("cas-b28c", TaskStatus::Closed, Some("worker"))];
+        assert!(!git_ref_exists(p, "factory/worker-cas-b28c"));
+        assert_eq!(count_unmerged_factory_commits(p, branch, "main"), 1);
 
-        let mut delivered = child("cas-d0e1", TaskStatus::Closed, Some("worker"));
-        delivered.deliverables.parked_branch = Some("factory/worker-cas-d0e1".to_string());
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
-        assert_eq!(
-            statuses[0].unmerged_count, 0,
-            "another task's commits on the reused lane strand nothing for this child"
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert_eq!(statuses[0].unmerged_count, 0, "foreign-task residue must clear");
+        assert_eq!(statuses[0].factory_branch.as_deref(), Some(branch));
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
         );
-        let task = epic("cas-epic-reused-lane");
-        let req = base_req(&task.id);
-        assert!(
-            matches!(
-                run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&delivered)),
-                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
-            ),
-            "a reused lane must not block the epic close"
-        );
+        assert!(matches!(out, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)), "{out:?}");
 
-        // The child's own unmerged work on the same lane is still reported.
-        git(p, &["checkout", "-q", "factory/worker"]);
-        std::fs::write(p.join("delivered.rs"), "fn delivered() { follow_up() }\n").unwrap();
-        git(p, &["add", "delivered.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: follow-up (cas-d0e1)"]);
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("follow-up.rs"), "fn follow_up() {}\n").unwrap();
+        git(p, &["add", "follow-up.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: own follow-up (cas-b28c)"]);
         git(p, &["checkout", "-q", "main"]);
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
-        assert!(
-            statuses[0].unmerged_count > 0,
-            "this child's own unmerged commit on the bare lane must keep blocking"
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert!(statuses[0].unmerged_count > 0, "own work must still strand bare lane");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
         );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
     }
 
     #[test]

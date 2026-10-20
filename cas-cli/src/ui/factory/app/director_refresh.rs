@@ -270,8 +270,8 @@ pub(crate) struct DeliveryInputs {
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
     pub(super) merge_alerts: HashMap<String, super::merge_alert::Ready>,
-    /// Worker -> (current task, exact pushed tip) with positively pending CI.
-    pub(super) worker_ci_waits: HashMap<String, (String, String)>,
+    /// Current task/tip/CI and positive build waits, read off the loop.
+    pub(super) worker_waits: HashMap<String, super::merge_alert::WorkerWait>,
 }
 
 impl DeliveryInputs {
@@ -288,7 +288,7 @@ impl DeliveryInputs {
             assignment: None,
             session: None,
             merge_alerts: HashMap::new(),
-            worker_ci_waits: HashMap::new(),
+            worker_waits: HashMap::new(),
         }
     }
 
@@ -368,10 +368,10 @@ impl DeliveryRequest {
                 Some((ready.evidence.task_id.clone(), ready))
             }).collect()
         }).unwrap_or_default();
-        let worker_ci_waits = data.as_ref().ok().map(|fresh| {
+        let worker_waits = data.as_ref().ok().map(|fresh| {
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
             self.merge_events.iter().filter_map(|event| {
-                super::merge_alert::read_worker_ci_wait(event, fresh, repo)
+                super::merge_alert::read_worker_wait(event, fresh, &self.cas_dir, repo)
             }).collect()
         }).unwrap_or_default();
         let assignment = self.stall.as_ref().and_then(|stall|
@@ -385,7 +385,7 @@ impl DeliveryRequest {
             assignment,
             session,
             merge_alerts,
-            worker_ci_waits,
+            worker_waits,
         }
     }
 }

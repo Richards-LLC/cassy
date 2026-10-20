@@ -1,6 +1,6 @@
 ---
 name: cas-html-reports
-description: Use when producing a human-readable report or analysis that must outlive the conversation, including investigations, audits, decision briefs, benchmarks, post-mortems, or executive updates; not published version releases (cas-release-report).
+description: "Use when producing durable HTML analysis: investigations, audits, decision briefs, benchmarks, post-mortems or executive updates; use cas-release-report for published releases; not feature reports or client deliverables."
 metadata:
   managed_by: cas
 ---
@@ -55,8 +55,8 @@ A deliverable is a report when **all three** hold:
 
 Canonical cases: investigation and diagnostic write-ups, metrics and mining analyses, audits, decision
 briefs, comparisons and benchmarks, incident post-mortems, status summaries (a published version release uses `cas-release-report`), financial
-reports, executive and board updates, product and feature showcases, system explainers, client
-deliverables, research and market analyses.
+reports, executive and board updates, system explainers, research and market analyses. A client's
+SOW delivery uses `cas-sow-delivery-report`.
 
 ## When HTML is NOT required
 

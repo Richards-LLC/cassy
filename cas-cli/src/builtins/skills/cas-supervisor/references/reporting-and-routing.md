@@ -8,6 +8,8 @@
 
 Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/violet/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand.
 
+Before/after screenshots come from each visual delivery's QA bundle, at `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/` ([layout](../../cas-qa-craft/references/evidence-bundle.md#beforeafter-pairs)). When you route release notes or a report, name the task ids whose `bundle.json` records `pairs_status: complete` or `partial`; the drafter shows only their paired shots.
+
 ## Cross-team routing
 
 Route every bug through the issue-repository registry; [filing-cas-bugs.md](filing-cas-bugs.md) has the destinations, filing steps, and receipt policy.

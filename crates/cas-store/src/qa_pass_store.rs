@@ -695,6 +695,49 @@ pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Resu
     latest_with_conn(&conn, task_id)
 }
 
+/// Reviewer identities and round numbers for tasks whose latest QA round failed.
+/// Callers apply task-lifecycle and configured round-limit policy.
+pub fn latest_failed_qa_reviewers(
+    cas_dir: &Path,
+    task_ids: &[String],
+) -> Result<std::collections::HashMap<String, (String, u32)>> {
+    if task_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let placeholders = (1..=task_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.task_id, current.reviewer_agent_id, current.round
+         FROM qa_passes current
+         WHERE current.task_id IN ({placeholders})
+           AND current.state = 'failed'
+           AND current.reviewer_agent_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM qa_passes newer
+             WHERE newer.task_id = current.task_id
+               AND (newer.requested_at > current.requested_at
+                 OR (newer.requested_at = current.requested_at AND newer.round > current.round)
+                 OR (newer.requested_at = current.requested_at AND newer.round = current.round
+                     AND newer.id > current.id))
+           )"
+    ))?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(task_ids.iter()),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, u32>(2)?),
+            ))
+        },
+    )?;
+    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+        .map_err(StoreError::Database)
+}
+
 /// Passed or waived round for exactly `head`, if any.
 pub fn satisfying_qa_pass_for_head(
     cas_dir: &Path,
@@ -984,6 +1027,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failed.state, QaPassState::Failed);
+        assert_eq!(
+            latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()])
+                .unwrap()
+                .get("cas-ui1"),
+            Some(&("qa-worker".into(), 1)),
+            "the caller needs the failed round to apply its review limit"
+        );
         assert!(
             satisfying_qa_pass_for_head(dir.path(), "cas-ui1", "aaaa1111")
                 .unwrap()
@@ -992,6 +1042,7 @@ mod tests {
 
         let round2 = dispatched(open_qa_pass(dir.path(), &new("cccc3333", now), now).unwrap());
         assert_eq!(round2.round, 2);
+        assert!(latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()]).unwrap().is_empty());
         claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
         resolve_qa_pass(
             dir.path(),
@@ -1008,6 +1059,7 @@ mod tests {
             .unwrap()
             .expect("approved head satisfies the gate");
         assert_eq!(passing.state, QaPassState::Passed);
+        assert!(latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()]).unwrap().is_empty());
         match open_qa_pass(dir.path(), &new("cccc3333", now), now).unwrap() {
             QaPassOpen::AlreadySatisfied(pass) => assert_eq!(pass.id, passing.id),
             other => panic!("a passed head must not redispatch, got {other:?}"),

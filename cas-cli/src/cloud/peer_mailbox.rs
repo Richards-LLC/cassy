@@ -223,20 +223,29 @@ pub struct PeerEnvelope {
 pub enum PeerMessageKind {
     Ask,
     Blocker,
+    Receipt,
+    Quiet,
+    EpicSplitDecided,
 }
 
 impl PeerMessageKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
+            Self::Receipt => "receipt",
+            Self::Quiet => "quiet",
             Self::Blocker => "blocker",
+            Self::EpicSplitDecided => "epic_split_decided",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
             "ask" => Some(Self::Ask),
+            "receipt" => Some(Self::Receipt),
+            "quiet" => Some(Self::Quiet),
             "blocker" => Some(Self::Blocker),
+            "epic_split_decided" => Some(Self::EpicSplitDecided),
             _ => None,
         }
     }
@@ -244,10 +253,7 @@ impl PeerMessageKind {
 
 impl PeerEnvelope {
     pub fn wakes_idle(&self) -> bool {
-        self.in_reply_to
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-            || self.kind.is_some()
+        !matches!(self.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet))
     }
 }
 
@@ -374,12 +380,17 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let machine = machine_of(message);
     let (kind, body) = split_message_intent(&message.body);
     let (attachments, body) = split_attachments(body);
-    // Existing first-line split proposals are typed asks too. Preserve their
+    let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
+        Some(PeerMessageKind::Quiet)
+    } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
         crate::cloud::epic_split::SplitMessage::parse(body)
-            .filter(|split| split.kind == crate::cloud::epic_split::SplitKind::Proposal)
-            .map(|_| PeerMessageKind::Ask)
+            .map(|split| match split.kind {
+                crate::cloud::epic_split::SplitKind::Proposal => PeerMessageKind::Ask,
+                _ => PeerMessageKind::EpicSplitDecided,
+            })
     });
     let cross_project = message.scope == PeerScope::User;
     // cas-2a5a: another project's supervisor is advisory only. It may ask,
@@ -1146,6 +1157,7 @@ pub fn deliver_claimed_with(
         factory_session,
         consumer_id,
         &RecipientHistory::default(),
+        &|_, _| Ok(None),
         on_admitted,
     )
 }
@@ -1160,6 +1172,7 @@ fn deliver_claimed_with_history(
     factory_session: &str,
     consumer_id: &str,
     history: &RecipientHistory,
+    queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
@@ -1332,6 +1345,13 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
+        let key = match queue_key(recipient, message) {
+            Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
+            Err(error) => {
+                report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
+                continue; // Retry before admitting a second logical decision.
+            }
+        };
         let summary = format!(
             "peer {}@{}: {}",
             message.sender_name,
@@ -1349,7 +1369,7 @@ fn deliver_claimed_with_history(
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),
-            &format!("peer:{}", message.id),
+            &key,
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {
@@ -1430,6 +1450,21 @@ pub(crate) fn send_raw(
         PeerScope::Project,
         None,
     )
+}
+
+/// One durable logical expiry notice, reused if reconciliation restarts after
+/// Cloud acceptance but before its split work flag is settled.
+pub(crate) fn send_split_expiry(
+    root: &Path, sender: &str, recipient: &str, body: &str, split_id: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    let project_id = crate::cloud::resolve_canonical_id(root)
+        .ok_or_else(|| PeerSendError::Failed { cause: "project has no canonical id".into(), retry: String::new() })?;
+    outbox::enqueue_and_send(root, PeerSend {
+        project_id, sender_agent_id: sender.into(), recipient_agent_id: recipient.into(),
+        body: body.into(), summary: Some(format!("epic split {split_id} expired")),
+        in_reply_to: None, dedupe_key: format!("split-expiry:{sender}:{split_id}"),
+        scope: PeerScope::Project, recipient_project_id: None,
+    }, recipient)
 }
 
 /// Send `body` from local supervisor `sender_agent_id` to `peer`, a
@@ -1521,6 +1556,9 @@ pub struct PeerReply {
 /// `sender_agent_id` / `sender_name`. The row must be a Daemon-stamped peer
 /// envelope addressed to that supervisor; the reply goes to the original
 /// sender with `in_reply_to` = the original cloud id, and the row is acked.
+/// `successor` redirects it to the supervisor now holding the original
+/// sender's slot (GH #1319).
+#[allow(clippy::too_many_arguments)]
 pub fn reply_to_peer_row(
     cas_root: &Path,
     queue: &dyn PromptQueueStore,
@@ -1529,6 +1567,7 @@ pub fn reply_to_peer_row(
     sender_name: &str,
     body: &str,
     summary: Option<&str>,
+    successor: Option<&Peer>,
 ) -> Result<Option<PeerReply>, String> {
     let Some(row) = queue
         .queued_prompt(row_id)
@@ -1563,14 +1602,23 @@ pub fn reply_to_peer_row(
     // scope; the cloud refuses it unless both share the user.
     let recipient_project =
         (envelope.scope == PeerScope::User).then(|| envelope.repo.clone());
+    // GH #1319: the original sender ended or cannot read; its successor holds
+    // the slot. The reply still names the message it answers.
+    let (recipient_id, to) = match successor {
+        Some(peer) => (peer.agent_id.clone(), format!("{}@{}", peer.name, peer.machine)),
+        None => (
+            envelope.sender_agent_id.clone(),
+            format!("{}@{}", envelope.sender_name, envelope.machine),
+        ),
+    };
     let receipt = send_scoped(
         cas_root,
         sender_agent_id,
-        &envelope.sender_agent_id,
+        &recipient_id,
         body,
         summary,
         Some(&envelope.id),
-        &format!("{}@{}", envelope.sender_name, envelope.machine),
+        &to,
         envelope.scope,
         recipient_project,
     )
@@ -1578,10 +1626,7 @@ pub fn reply_to_peer_row(
     queue
         .ack(row_id)
         .map_err(|error| format!("reply sent, but acking message {row_id} failed: {error}"))?;
-    Ok(Some(PeerReply {
-        receipt,
-        to: format!("{}@{}", envelope.sender_name, envelope.machine),
-    }))
+    Ok(Some(PeerReply { receipt, to }))
 }
 
 /// The HTTP mailbox for a project, from its own cloud config.

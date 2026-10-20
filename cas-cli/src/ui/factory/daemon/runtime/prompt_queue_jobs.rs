@@ -69,6 +69,8 @@ pub(crate) enum QueueStamp {
         reason: cas_store::PendingReason,
         detail: Option<String>,
     },
+    /// One submitted supervisor turn, persisted off the control loop.
+    DirectedWake { cas_dir: PathBuf, recipient: String, senders: Vec<String>, created_at: chrono::DateTime<chrono::Utc>, injected_at: chrono::DateTime<chrono::Utc> },
     /// What the wake nudge did.
     WakeAttempt {
         attempt: cas_store::WakeAttempt,
@@ -147,6 +149,7 @@ impl QueueStamp {
             Self::TransportDelivered => "transport_delivered",
             Self::TransportReceipt => "transport_receipt",
             Self::PendingReason { .. } => "pending_reason",
+            Self::DirectedWake { .. } => "directed_wake",
             Self::WakeAttempt { .. } => "wake_attempt",
             Self::Retry { .. } => "retry",
             Self::Dropped { .. } => "dropped",
@@ -168,6 +171,9 @@ impl QueueStamp {
 
     pub(crate) fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
+            Self::DirectedWake { cas_dir, recipient, senders, created_at, injected_at } =>
+                crate::supervisor_message_wakes::record(cas_dir,row,recipient,senders,*created_at,*injected_at)
+                    .map_err(|error| cas_store::StoreError::Other(error.to_string())),
             Self::ReleaseClaim { claim_token } => queue
                 .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),
@@ -1013,7 +1019,7 @@ impl QueueJobs {
         }
     }
 
-    fn generation(&mut self) -> u64 {
+    pub(crate) fn generation(&mut self) -> u64 {
         self.next_generation += 1;
         self.next_generation
     }
@@ -1220,6 +1226,14 @@ impl QueueJobs {
     pub(crate) fn release_inject_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
         if let Some(claim_token) = self.in_flight.token_of(row, recipient) {
             self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { claim_token });
+        }
+    }
+
+    /// Cancel a prepared batch member if its leader was consumed meanwhile.
+    /// Late pending completions follow the existing stale-generation release path.
+    pub(crate) fn cancel_unadmitted_claim(&mut self, cas_dir: &Path, row: i64, recipient: &str) {
+        if let Some(ClaimState::Ready(ClaimOutcome::Claimed(claim_token),_)) = self.claims.remove(&(row,recipient.to_string())) {
+            self.submit_stamp(cas_dir,row,recipient,0,QueueStamp::ReleaseClaim { claim_token });
         }
     }
 
@@ -1634,7 +1648,11 @@ impl QueueJobs {
     }
 
     fn owner_of(&self, spec: &JobSpec, external: bool) -> Option<SubmittedRefresh> {
-        (spec.criticality == Criticality::Refresh).then(|| SubmittedRefresh {
+        // Merge-alert jobs are critical, but their completion owner must also
+        // survive shutdown until native delivery and fallback checks settle.
+        (spec.criticality == Criticality::Refresh
+            || (external && spec.kind == super::factory_jobs::MERGE_ALERT_INBOX))
+        .then(|| SubmittedRefresh {
             key: spec.key.clone(),
             kind: spec.kind,
             generation: spec.generation,
@@ -1651,7 +1669,7 @@ impl QueueJobs {
             return;
         };
         match submitted {
-            Submitted::Queued | Submitted::QueuedDroppedOldest { .. } => {
+            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } => {
                 self.owner_entry(&refresh).outstanding.push_back(refresh.generation);
             }
             Submitted::Coalesced { replaced_generation } => {
@@ -1667,8 +1685,7 @@ impl QueueJobs {
             Submitted::DroppedRefresh => {
                 self.report_dropped(refresh.key, refresh.kind, refresh.generation, refresh.external);
             }
-            Submitted::QueuedBehindKey
-            | Submitted::Closed
+            Submitted::Closed
             | Submitted::LaneMismatch { .. } => {}
         }
         if let Submitted::QueuedDroppedOldest {
@@ -1747,6 +1764,13 @@ impl QueueJobs {
         work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
         self.submit_job_read(spec, true, move |stores| QueueJobOutcome::External(work(stores)))
+    }
+
+    /// Completion owners must remain alive until their critical jobs settle.
+    pub(crate) fn external_kind_pending(&self, kind: &str) -> bool {
+        self.job_owners.values().any(|owner| {
+            owner.external && owner.kind == kind && !owner.outstanding.is_empty()
+        })
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).

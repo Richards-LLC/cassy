@@ -207,6 +207,19 @@ fn csv(ids: &[&str]) -> String {
     ids.join(",")
 }
 
+fn assert_split_decision(side: &Side, id: &str, decision: &str) {
+    let rows = cas::store::open_prompt_queue_store(&side.machine.cas_dir)
+        .unwrap().peek_all(100).unwrap();
+    let row = rows.iter().find(|row| {
+        // pin: select the split protocol's public decision kind, not its human wording.
+        row.prompt.contains(id) && row.prompt.contains(&format!("kind=\"{decision}\""))
+    }).unwrap_or_else(|| panic!("{id} {decision} must reach the proposer: {rows:?}"));
+    assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+    // pin: split decision envelopes are typed independently of reply/FYI intent.
+    assert!(row.prompt.contains("kind=\"epic_split_decided\""), "{}", row.prompt);
+    assert!(cas::cloud::peer_mailbox::parse_envelope(&row.prompt).unwrap().wakes_idle());
+}
+
 /// Soundwave proposes A–C for itself and D–F for prowl; prowl's daemon
 /// receives it and prowl accepts. Returns the split id.
 async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -> String {
@@ -275,6 +288,7 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
     assert!(refused.message.contains("registered supervisor"), "{}", refused.message);
 
     let id = propose_and_accept(&cloud, &soundwave, &prowl).await;
+    assert_split_decision(&soundwave, &id, "accept");
 
     // Each side is refused on the other's children: start, claim and spawn.
     for child in PROWL_TAKES {
@@ -354,6 +368,7 @@ async fn epic_split_cancel_releases_only_the_cancellers_own_claims() {
     assert!(held.contains("HELD BY A PEER") && !held.contains("SPLIT"), "{held}");
     let report = soundwave.tick().await;
     assert_eq!(report.delivered, 1, "{report:?}");
+    assert_split_decision(&soundwave, &id, "cancel");
     let listed = soundwave.factory(json!({})).await.unwrap();
     assert!(listed.contains("[cancelled, outgoing]"), "{listed}");
     assert!(listed.contains("operator reassigned prowl"), "{listed}");
@@ -374,6 +389,238 @@ async fn epic_split_cancel_releases_only_the_cancellers_own_claims() {
     assert!(again.contains("already cancelled"), "{again}");
 }
 
+/// One task changes hands without an unrelated filler share. Exercise both
+/// directions through MCP, the mailbox and the real start guard.
+async fn one_sided_handover(request: bool) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let (proposer, recipient, shares) = if request {
+        // Prowl requests one child from soundwave, omitting theirs.
+        (&prowl, &soundwave, json!({"mine": "cas-d1"}))
+    } else {
+        // Soundwave grants one child to prowl with an explicit empty mine.
+        (&soundwave, &prowl, json!({"mine": "", "theirs": "cas-d1"}))
+    };
+    let mut proposal = shares;
+    proposal["id"] = json!(EPIC);
+    proposal["target"] = json!(if request { "soundwave" } else { "prowl" });
+    let proposed = proposer.factory(proposal).await.unwrap();
+    let id = split_id(&proposed);
+    assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), request.then_some("pr"));
+    assert_eq!(recipient.tick().await.delivered, 1);
+
+    let accepted = recipient.factory(json!({"id": id, "decision": "accept"})).await.unwrap();
+    assert!(accepted.contains("Accepted epic split"), "{accepted}");
+    assert_eq!(proposer.tick().await.delivered, 1);
+    for child in SOUNDWAVE_TAKES.iter().chain(PROWL_TAKES.iter()) {
+        assert_eq!(
+            cloud_holder(&cloud, child).as_deref(),
+            (*child == "cas-d1").then_some("pr"),
+            "only the handed-over task is claimed: {child}"
+        );
+    }
+    let refused = soundwave.start("cas-d1", false).await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
+
+    let cancelled = prowl.factory(json!({"id": id, "decision": "cancel"})).await.unwrap();
+    assert!(cancelled.contains("released 1 of your own claim"), "{cancelled}");
+    assert_eq!(cloud_holder(&cloud, "cas-d1"), None);
+    assert_eq!(soundwave.tick().await.delivered, 1);
+    soundwave.start("cas-d1", false).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_one_sided_request() {
+    one_sided_handover(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_one_sided_grant() {
+    one_sided_handover(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_reject_notifies_and_releases_requester_cas_ae81() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let proposed = prowl.factory(json!({"id": EPIC, "target": "soundwave", "mine": "cas-d1"}))
+        .await.unwrap();
+    let id = split_id(&proposed);
+    assert_eq!(soundwave.tick().await.delivered, 1);
+    soundwave.factory(json!({"id": id, "decision": "reject", "reason": "host not ready"}))
+        .await.unwrap();
+    assert_eq!(prowl.tick().await.delivered, 1);
+    assert_eq!(cloud_holder(&cloud, "cas-d1"), None, "rejection releases the requester's own claim");
+    assert_split_decision(&prowl, &id, "reject");
+    // Crash after release but before its settlement write: prevent a new
+    // supervisor-owned split claim until that older cleanup is settled.
+    rusqlite::Connection::open(prowl.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET cleanup_pending=1 WHERE id=?1", [&id]).unwrap();
+    let held = prowl.factory(json!({"id": EPIC, "target": "soundwave", "mine": "cas-d1"}))
+        .await.unwrap_err();
+    assert!(held.contains(&id), "{held}");
+    assert!(prowl.tick().await.errors.is_empty());
+    soundwave.start("cas-d1", false).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_status_reports_decider_and_claims_cas_ae81() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = propose_and_accept(&cloud, &soundwave, &prowl).await;
+    let status = soundwave.factory(json!({"id": id, "decision": "status"})).await.unwrap();
+    for expected in [&id, "accepted", "decided_at", "decider", "pr", "cas-a1", "sw", "cas-d1", "claims"] {
+        assert!(status.contains(expected), "status must show {expected}: {status}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_decided_reminder_is_supported_cas_ae81() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let result = soundwave.coordination(json!({"action": "remind", "remind_event": "epic_split_decided",
+        "remind_filter": "{\"split_id\":\"split-12345678\"}", "remind_message": "continue after decision"}))
+        .await.unwrap();
+    assert!(result.contains("Reminder"), "{result}");
+    let reminders = cas::store::open_reminder_store(&soundwave.machine.cas_dir).unwrap()
+        .get_event_reminders("epic_split_decided").unwrap();
+    assert_eq!(reminders.len(), 1);
+    assert_eq!(reminders[0].trigger_event.as_deref(), Some("epic_split_decided"));
+    assert_eq!(reminders[0].trigger_filter, Some(json!({"split_id": "split-12345678"})));
+}
+
+fn expire(side: &Side, id: &str, seconds_ago: i64) {
+    rusqlite::Connection::open(side.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET expires_at=?1 WHERE id=?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(seconds_ago)).to_rfc3339(), id])
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_expired_orphan_recovery_preserves_live_gap_cas_44c8() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let mut soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    expire(&soundwave, &id, 1);
+    let refused = soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap_err();
+    assert!(refused.contains(&id), "live-owner expiry gap still reserves the claim: {refused}");
+
+    let mut successor = Agent::new("sw-next".into(), "replacement-soundwave-cas-44c8".into());
+    successor.role = AgentRole::Supervisor;
+    successor.factory_session = Some("factory-sw-next".into());
+    successor.machine_id = Some("machine-soundwave".into());
+    register(&soundwave.machine, &successor);
+    let core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing(successor.id.clone());
+    soundwave.service = cas::mcp::CasService::new(core, None);
+    soundwave.id = "sw-next";
+    assert!(soundwave.factory(json!({"id": id, "decision": "cancel"})).await.is_err(),
+        "a successor cannot supersede a live owner's expiry gap");
+    let agents = open_agent_store(&soundwave.machine.cas_dir).unwrap();
+    let mut owner = agents.get("sw").unwrap();
+    owner.status = cas::types::AgentStatus::Shutdown;
+    owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(2);
+    agents.update(&owner).unwrap();
+
+    let recovered = soundwave.factory(json!({"id": id, "decision": "cancel", "reason": "recover ended session"}))
+        .await.unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "supersession releases the ended owner's claim: {recovered}");
+    let old = cas_store::get_epic_split(&soundwave.machine.cas_dir, &id).unwrap().unwrap();
+    assert_eq!(old.state, cas_store::SplitState::Cancelled);
+    assert_eq!(old.decided_by.as_deref(), Some("sw-next"));
+    let audit = old.reason.unwrap();
+    assert!(audit.contains("sw-next") && audit.contains("sw") && audit.contains("recover ended session"), "{audit}");
+    soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await.unwrap();
+    cas::cloud::epic_split::reconcile(&soundwave.machine.cas_dir, "factory-sw", chrono::Utc::now()).unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-next"),
+        "the orphan cannot later release its replacement's claim");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_reconcile_filters_owner_before_limit_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    expire(&soundwave, &id, 1);
+    let mut dead = Agent::new("dead-owner".into(), "dead-owner".into());
+    dead.role = AgentRole::Supervisor;
+    dead.factory_session = Some("ended-session".into());
+    dead.status = cas::types::AgentStatus::Shutdown;
+    open_agent_store(&soundwave.machine.cas_dir).unwrap().register(&dead).unwrap();
+    let original = cas_store::get_epic_split(&soundwave.machine.cas_dir, &id).unwrap().unwrap();
+    // Fill the entire work budget with earlier rows this session cannot own.
+    for index in 0..64 {
+        let mut orphan = original.clone();
+        orphan.id = format!("split-orphan-{index:02}");
+        orphan.local_agent_id = if index % 2 == 0 { "missing-owner" } else { "dead-owner" }.into();
+        orphan.expires_at -= chrono::Duration::minutes(1);
+        cas_store::insert_epic_split(&soundwave.machine.cas_dir, &orphan).unwrap();
+    }
+    let report = soundwave.tick().await;
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "other sessions must not exhaust this session's work budget");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_reconcile_continues_after_failure_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let first = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    let second = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a2"}))
+        .await.unwrap());
+    expire(&soundwave, &first, 2);
+    expire(&soundwave, &second, 1);
+    cloud.inject_failure("POST", "/release", 403, 1);
+    let report = soundwave.tick().await;
+    assert!(!report.errors.is_empty(), "the first cleanup must fail: {report:?}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw"));
+    assert_eq!(cloud_holder(&cloud, "cas-a2"), None, "one failed split must not stop later work");
+    assert!(soundwave.tick().await.errors.is_empty());
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "failed work remains retryable");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_independent_expiry_notifies_each_side_once_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    assert_eq!(prowl.tick().await.delivered, 1);
+    for side in [&soundwave, &prowl] {
+        expire(side, &id, 1);
+        // Reconcile both clocks before either daemon pulls the other's notice.
+        cas::cloud::epic_split::reconcile(&side.machine.cas_dir, &format!("factory-{}", side.id), chrono::Utc::now())
+            .unwrap();
+    }
+    for side in [&soundwave, &prowl] {
+        let report = side.tick().await;
+        assert!(report.errors.is_empty(), "{report:?}");
+        let rows = cas::store::open_prompt_queue_store(&side.machine.cas_dir).unwrap().peek_all(100).unwrap();
+        // pin: count the protocol decision, independent of human expiry wording.
+        let notices = rows.iter().filter(|row| row.prompt.contains(&id) && row.prompt.contains("kind=\"expired\""));
+        assert_eq!(notices.count(), 1, "one logical expiry notice for {}: {rows:?}", side.id);
+    }
+}
+
 /// An unaccepted proposal expires; a proposal whose own share cannot all be
 /// claimed is refused and leaves no claim or proposal behind.
 #[tokio::test(flavor = "multi_thread")]
@@ -382,6 +629,13 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     let cloud = FakeCloud::start();
     let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
     let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+
+    let empty = soundwave
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "", "theirs": ""}))
+        .await
+        .unwrap_err();
+    assert!(empty.contains("mine") && empty.contains("theirs"), "{empty}");
+    assert!(cloud.messages_to("pr").is_empty());
 
     // All or nothing: prowl already works cas-a2, so soundwave's proposal to
     // take A–C fails, and cas-a1 (claimable) is not left claimed.
@@ -397,9 +651,9 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     assert!(cloud.messages_to("pr").is_empty(), "nothing was proposed");
     assert!(soundwave.factory(json!({})).await.unwrap().contains("No epic splits"));
 
-    // Expiry: a one-second proposal nobody accepts.
+    // Expiry: move both stored deadlines into the past, without a timed sleep.
     let proposed = soundwave
-        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-a3", "ttl_secs": 1}))
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1", "theirs": "cas-a3"}))
         .await
         .unwrap();
     let id = split_id(&proposed);
@@ -407,7 +661,31 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     // While open, the proposer's own gate holds.
     let refused = soundwave.start("cas-a3", false).await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER") && refused.contains("pending"), "{refused}");
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    for supervisor in [&soundwave, &prowl] {
+        rusqlite::Connection::open(supervisor.machine.cas_dir.join("cas.db")).unwrap()
+            .execute("UPDATE epic_splits SET expires_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(), id])
+            .unwrap();
+    }
+
+    let gap = soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await;
+    assert!(gap.as_ref().is_err_and(|error| error.contains(&id)),
+        "unprocessed expiry must reserve its old claim before a new proposal: {gap:?}");
+
+    let expiry = soundwave.tick().await;
+    assert!(expiry.errors.is_empty(), "{expiry:?}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "expiry releases the proposer's own claim");
+    assert_split_decision(&soundwave, &id, "expired");
+    assert_eq!(prowl.tick().await.delivered, 1);
+    assert_split_decision(&prowl, &id, "expired");
+
+    // Simulate restart after the outbox send but before settling its work flag.
+    let sent = cloud.messages_to("pr").len();
+    rusqlite::Connection::open(soundwave.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET expiry_notice_pending=1 WHERE id=?1", [&id]).unwrap();
+    let retry = soundwave.tick().await;
+    assert!(retry.errors.is_empty(), "{retry:?}");
+    assert_eq!(cloud.messages_to("pr").len(), sent, "expiry reuses its original logical send");
 
     let late = prowl
         .factory(json!({"id": id, "decision": "accept"}))
@@ -421,6 +699,9 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     }
     // The gate lifts with the proposal.
     soundwave.start("cas-a3", false).await.unwrap();
+    soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await.unwrap();
+    assert!(soundwave.tick().await.errors.is_empty());
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw"), "the new split keeps its claim after old expiry cleanup");
 }
 
 /// cas-0078 no-theft for split claims: a split never takes a cloud claim from

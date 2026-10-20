@@ -64,7 +64,9 @@ pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
+mod accepted_proposal_store;
 mod qa_batch_store;
+mod rule_candidate_store;
 mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
@@ -131,19 +133,28 @@ pub use delegation_receipt_store::{
     SqliteDelegationReceiptStore,
 };
 pub use epic_split_store::{
-    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection, SplitState, decide_epic_split,
-    get_epic_split, insert_epic_split, list_epic_splits, open_epic_splits,
+    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
+    SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
+    insert_epic_split, list_epic_splits, open_epic_splits, pending_epic_split_work,
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
-    claim_qa_pass,
-    latest_qa_pass, list_qa_passes, open_qa_pass, open_qa_pass_reporting_superseded,
-    release_qa_claim_for_reviewer, release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
+    claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
+    open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer,
+    release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
     satisfying_qa_passes, set_qa_task,
     waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
 pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
     list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
+pub use rule_candidate_store::{
+    RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
+    list_rule_candidates, observe_rule_candidate, rule_candidate_similarity, similar_rule_candidates,
+};
+pub use accepted_proposal_store::{
+    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, accepted_proposal_targets,
+    record_accepted_proposal_target,
+};
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,
@@ -208,10 +219,12 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
+    REQUEST_CHANGES_AUDIT_PREFIX, request_changes_audit_note,
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
     RequestChangesBoundary, RequestChangesOutcome, SqliteVerificationStore,
     TaskReopenLifecycleOutbox, VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
     VERIFICATION_SCHEMA, VerificationStore, add_system_verification, add_verification_with_conn,
+    adopt_orphaned_verification_dispatches,
     bind_server_verifier_handoff, bind_server_verifier_handoff_and_register_child,
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -782,6 +795,33 @@ pub trait TaskStore: Send + Sync {
 
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
+
+    /// IDs owned by any named assignee in any supplied status. Empty filters
+    /// match nothing. Assignee names are ASCII case-insensitive, like routing.
+    /// SQLite overrides this to avoid decoding the project's task backlog.
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        if assignees.is_empty() {
+            return Ok(ids);
+        }
+        for status in statuses {
+            for task in self.list(Some(*status))? {
+                if task.assignee.as_deref().is_some_and(|owner| {
+                    assignees
+                        .iter()
+                        .any(|name| owner.eq_ignore_ascii_case(name))
+                }) && !ids.contains(&task.id)
+                {
+                    ids.push(task.id);
+                }
+            }
+        }
+        Ok(ids)
+    }
 
     /// Find a lane owner through the store's visibility policy, preferring a
     /// live epic over historical terminal records.

@@ -122,6 +122,41 @@ impl Fixture {
         fixture
     }
 
+    fn in_progress(&mut self) {
+        let store = crate::store::open_task_store_local(&self.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.status = TaskStatus::InProgress;
+        store.update(&task).unwrap();
+        assert!(crate::store::open_agent_store(&self.app.cas_dir).unwrap()
+            .try_claim(&task.id, "merge-w", 600, None).unwrap().is_success());
+        let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut self.event else {
+            panic!("fixture must carry the active delivery");
+        };
+        active.task_status = TaskStatus::InProgress;
+        active.close_rejected_reason = None;
+        // A real terminal turn in this fixture's own account makes liveness idle.
+        // Without it the generic liveness gate suppresses the relay before CI is read.
+        let account = self.app.cas_dir.join("worker-account");
+        let sessions = account.join("sessions/2026/10/17");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session = "019f84af-3121-7950-ba14-b01db2dad6c7";
+        let clone = self.repo.path().canonicalize().unwrap();
+        let meta = serde_json::json!({"timestamp":"2026-10-17T19:00:00Z", "type":"session_meta",
+            "payload":{"session_id":session, "cwd":clone, "originator":"codex-tui", "source":"cli"}});
+        let done = serde_json::json!({"timestamp":"2026-10-17T19:00:01Z", "type":"event_msg",
+            "payload":{"type":"task_complete"}});
+        std::fs::write(sessions.join(format!("rollout-2026-10-17T19-00-00-{session}.jsonl")),
+            format!("{meta}\n{done}\n")).unwrap();
+        let agents = crate::store::open_agent_store(&self.app.cas_dir).unwrap();
+        let mut worker = agents.get("merge-w").unwrap();
+        worker.cc_session_id = Some(session.into());
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        worker.metadata.insert("worker_cli".into(), "codex".into());
+        worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
+        worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
+        agents.update(&worker).unwrap();
+    }
+
     fn ci(&self, conclusion: Option<&str>) {
         std::fs::write(
             self.app.cas_dir.join("ci.json"),
@@ -142,7 +177,7 @@ impl Fixture {
             .1
     }
 
-    fn advance_target(&self, merge: bool) {
+    pub(crate) fn advance_target(&self, merge: bool) {
         let integration = tempfile::tempdir().unwrap();
         git(
             integration.path(),
@@ -202,44 +237,53 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 /// A worker waiting on its own pushed CI is not stalled, even if repeated
 /// idle episodes arrive while the task is still in progress.
 #[test]
-fn cas_83e1_in_progress_delivery_waits_for_its_pushed_tip_ci() {
+fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let mut f = Fixture::new();
-    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
-    let mut task = store.get("cas-9efb-test").unwrap();
-    task.status = TaskStatus::InProgress;
-    store.update(&task).unwrap();
-    assert!(crate::store::open_agent_store(&f.app.cas_dir).unwrap()
-        .try_claim(&task.id, "merge-w", 600, None).unwrap().is_success());
-    let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut f.event else {
-        panic!("fixture must carry the active delivery");
-    };
-    active.task_status = TaskStatus::InProgress;
-    active.close_rejected_reason = None;
-    // A real terminal turn in this fixture's own account makes liveness idle.
-    // Without it the generic liveness gate suppresses the relay before CI is read.
-    let account = f.app.cas_dir.join("worker-account");
-    let sessions = account.join("sessions/2026/10/17");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let session = "019f84af-3121-7950-ba14-b01db2dad6c7";
-    let clone = f.repo.path().canonicalize().unwrap();
-    let meta = serde_json::json!({"timestamp":"2026-10-17T19:00:00Z", "type":"session_meta",
-        "payload":{"session_id":session, "cwd":clone, "originator":"codex-tui", "source":"cli"}});
-    let done = serde_json::json!({"timestamp":"2026-10-17T19:00:01Z", "type":"event_msg",
-        "payload":{"type":"task_complete"}});
-    std::fs::write(sessions.join(format!("rollout-2026-10-17T19-00-00-{session}.jsonl")),
-        format!("{meta}\n{done}\n")).unwrap();
-    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
-    let mut worker = agents.get("merge-w").unwrap();
-    worker.cc_session_id = Some(session.into());
-    worker.metadata.insert("worker_cli".into(), "codex".into());
-    worker.metadata.insert("clone_path".into(), clone.to_str().unwrap().into());
-    worker.metadata.insert("worker_account_dir".into(), account.to_str().unwrap().into());
-    agents.update(&worker).unwrap();
+    f.in_progress();
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
+    use cas_store::ReminderStore;
+    let reminders = cas_store::SqliteReminderStore::open(&f.app.cas_dir).unwrap();
+    reminders.init().unwrap();
+    let long = reminders.create_with_scope("merge-w", Some("merge-w"), "check next week",
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::days(7)),
+        None, None, 604800, None, Some("merge-w"), true, None).unwrap();
+    assert_eq!(f.relay().len(), 1, "an untasked week-long reminder cannot hide a stuck worker");
+    reminders.cancel(long, "merge-w").unwrap();
+    // The real reminder store is reloaded by the delivery read, not the cached panel.
+    let reminder = reminders.create_with_scope("merge-w", Some("merge-w"), "check build",
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::days(7)),
+        None, None, 604800, None, Some("merge-w"), false, Some("cas-9efb-test")).unwrap();
+    assert!(f.relay().is_empty(), "a pending self-reminder owes the worker its next wake");
+    reminders.cancel(reminder, "merge-w").unwrap();
+
+    let short = reminders.create_with_scope("merge-w", Some("merge-w"), "check soon",
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::minutes(3)),
+        None, None, 3600, None, Some("merge-w"), false, None).unwrap();
+    assert!(f.relay().is_empty(), "an untasked short-horizon wake still suppresses idle");
+    reminders.cancel(short, "merge-w").unwrap();
+
+    // Use the same OS lane lock the real runner holds during admission and
+    // execution. Its release leaves a file behind, which must not hide idle.
+    let lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.repo.path()).unwrap().unwrap();
+    #[cfg(target_os = "linux")]
+    assert!(f.relay().is_empty(), "queued/admitted build owns the worker lane");
+    drop(lane);
+    // A reminder for an old task and another worker's build are not this wait.
+    reminders.create_with_scope("merge-w", Some("merge-w"), "old task",
+        cas_store::ReminderTriggerType::Time, Some(Utc::now() + chrono::Duration::minutes(3)),
+        None, None, 3600, None, Some("merge-w"), false, Some("cas-old")).unwrap();
+    let _other_lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.remote.path()).unwrap().unwrap();
     std::fs::write(f.app.cas_dir.join("gh-requests"), "").unwrap();
-    assert_eq!(f.relay().len(), 1, "fixture must expose an idle in-progress delivery before CI is pending");
+    let minute = now + chrono::Duration::minutes(1);
+    f.app.merge_alert_retries.now = Some(minute);
+    let retries = f.app.merge_alert_retry_events_at(minute);
+    assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
+    assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
+        "after the wake ends, an idle worker must still alert without a new detector event");
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
-    assert!(relays <= 1, "relay at most once while the pushed tip's CI is pending; got {relays}");
+    assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
     let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
     let requests = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap();
     assert!(requests.contains(&format!("commits/{tip}/check-runs")), "query the pushed tip: {requests}");
@@ -256,6 +300,42 @@ fn cas_83e1_in_progress_delivery_waits_for_its_pushed_tip_ci() {
     assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
     std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[]}"#).unwrap();
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
+}
+
+/// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
+#[test]
+fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
+    assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");
+    for minutes in [1, 2, 5] {
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(minutes));
+        assert!(f.relay().is_empty(), "identical idle signal must not wake again at minute {minutes}");
+    }
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1));
+    assert_eq!(f.relay().len(), 1, "a long backoff permits a reminder about a genuinely stuck worker");
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new tip\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "new tip"]);
+    assert_eq!(f.relay().len(), 1, "new tip is a changed idle signal");
+    assert!(f.relay().is_empty());
+    // Missing worker refs are a stable state, not permission to wake each minute.
+    git(f.repo.path(), &["switch", "-q", "--detach", "epic/test"]);
+    git(f.repo.path(), &["branch", "-D", "factory/merge-w"]);
+    git(f.repo.path(), &["update-ref", "-d", "refs/remotes/origin/factory/merge-w"]);
+    assert_eq!(f.relay().len(), 1, "unknown commit still owes one alert");
+    for minutes in [1, 2] {
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(1) + chrono::Duration::minutes(minutes));
+        assert!(f.relay().is_empty(), "unknown commit must coalesce at minute {minutes}");
+    }
+    // A failed fresh read has no worker_waits row; it needs the same unknown key.
+    let events = vec![f.event.clone()];
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::hours(2));
+    assert_eq!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.len(), 1);
+    assert!(f.app.revalidate_and_prompt_for_delivery_from(&events, DeliveryInputs::failed_for_test()).1.is_empty(),
+        "failed reads retain first-alert liveness without manufacturing repeated wakes");
+
 }
 
 #[test]

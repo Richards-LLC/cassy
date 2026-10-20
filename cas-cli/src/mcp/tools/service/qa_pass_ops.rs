@@ -50,6 +50,11 @@ impl CasService {
             .parse()
             .map_err(|error: cas_types::TypeError| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         let summary = required(req.summary.as_deref(), "summary")?;
+        if let Some(message) =
+            crate::mcp::tools::core::task::caller_note_marker_rejection(summary)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {message}")));
+        }
         let ledger_path = required(req.ledger_path.as_deref(), "ledger_path (this round's LEDGER.md)")?;
         if !std::path::Path::new(ledger_path).is_file() {
             return Err(Self::error(
@@ -162,6 +167,9 @@ impl CasService {
         }
         let task_id = required(req.task_id.as_deref(), "task_id (the delivery to review)")?;
         let reason = required(req.summary.as_deref(), "summary (why this delivery needs independent QA)")?;
+        if let Some(message) = crate::mcp::tools::core::task::caller_note_marker_rejection(reason) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_request rejected: {message}")));
+        }
         let supervisor = if req.head_sha.is_some() {
             // Recovering an explicit receipt can open review of an unparked
             // delivery, so require the registered factory supervisor role.
@@ -241,6 +249,9 @@ impl CasService {
         }
         let task_id = required(req.task_id.as_deref(), "task_id")?;
         let reason = required(req.summary.as_deref(), "summary (the waiver reason)")?;
+        if let Some(message) = crate::mcp::tools::core::task::caller_note_marker_rejection(reason) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {message}")));
+        }
         let supervisor = self.inner.get_agent_id()?;
         let task = self
             .inner
@@ -619,7 +630,7 @@ impl CasService {
         "The supervisor was told it may merge this exact tip.".to_string()
     }
 
-    fn route_qa_rejection(&self, pass: &QaPass, reviewer: &str, summary: &str) -> String {
+    pub(crate) fn route_qa_rejection(&self, pass: &QaPass, reviewer: &str, summary: &str) -> String {
         let reason = format!(
             "Independent QA round {} by {reviewer} rejected {} @{}: {} Ledger with evidence: {}. \
              Fix the findings, push, and close again; the next park opens round {}.",

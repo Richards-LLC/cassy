@@ -214,6 +214,8 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     };
 
     let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
+    config.normalize_viktor_server_names();
+    let name = normalize_viktor_server_name(&name);
     let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
     let (raw_name, is_update) = match resolved {
         Some((raw_name, _)) => (raw_name, true),
@@ -225,6 +227,7 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     guard_supervisor_only(&raw_name, Some(&server_config), &config, cas_root)?;
     config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
+    enable_viktor_for_user_scope(&scope, &raw_name)?;
     let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {
@@ -245,6 +248,25 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
         fmt.field("Config", &path.display().to_string())?;
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn normalize_viktor_server_name(name: &str) -> String {
+    if name.eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER) {
+        cmcp_core::config::VIKTOR_SERVER.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn enable_viktor_for_user_scope(scope: &str, name: &str) -> Result<()> {
+    if scope.eq_ignore_ascii_case("user")
+        && name.eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER)
+    {
+        crate::cli::viktor::set_enabled(true)?;
+    }
     Ok(())
 }
 
@@ -467,7 +489,9 @@ fn parse_envs(raw: &[String]) -> HashMap<String, String> {
 #[cfg(feature = "mcp-proxy")]
 fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) -> Result<()> {
     let (mut config, path) = load_config_for_scope(scope, cas_root)?;
-    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(name, &config, cas_root)?
+    config.normalize_viktor_server_names();
+    let name = normalize_viktor_server_name(name);
+    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(&name, &config, cas_root)?
     else {
         if cli.json {
             println!(
@@ -484,6 +508,29 @@ fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) ->
     };
 
     guard_supervisor_only(&raw_name, None, &config, cas_root)?;
+    if scope.eq_ignore_ascii_case("user") && raw_name.eq_ignore_ascii_case("viktor") {
+        crate::cli::viktor::set_enabled(false)?;
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "action": "removed",
+                    "name": public_name,
+                    "viktor_enabled": false
+                })
+            );
+        } else {
+            let theme = ActiveTheme::default();
+            let mut stdout = io::stdout();
+            let mut fmt = Formatter::stdout(&mut stdout, theme);
+            StatusLine::success(format!(
+                "Removed server \"{public_name}\" and disabled managed Viktor; restore it with `cas config set viktor.enabled true`"
+            ))
+            .render(&mut fmt)?;
+        }
+        return Ok(());
+    }
+
     debug_assert!(config.remove_server(&raw_name));
 
     config.save_to(&path)?;
@@ -654,6 +701,13 @@ enum ImportSource {
 }
 
 #[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportScope {
+    User,
+    Project,
+}
+
+#[cfg(feature = "mcp-proxy")]
 impl std::fmt::Display for ImportSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -668,6 +722,7 @@ struct ImportedServer {
     name: String,
     config: ServerConfig,
     source: ImportSource,
+    scope: ImportScope,
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -712,9 +767,11 @@ fn execute_import(
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
     let mut config = load_config(cas_root)?;
+    config.normalize_viktor_server_names();
     let mut added = 0usize;
     let mut skipped = 0usize;
     let mut updated = 0usize;
+    let mut imported_user_viktor = false;
     let public_discovered =
         cas_types::public_upstream_ids(discovered.iter().map(|server| server.name.as_str()));
 
@@ -752,6 +809,10 @@ fn execute_import(
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
+                imported_user_viktor |= server.scope == ImportScope::User
+                    && server
+                        .name
+                        .eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER);
             }
             updated += 1;
         } else {
@@ -765,6 +826,10 @@ fn execute_import(
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
+                imported_user_viktor |= server.scope == ImportScope::User
+                    && server
+                        .name
+                        .eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER);
             }
             added += 1;
         }
@@ -781,6 +846,9 @@ fn execute_import(
     } else {
         let path = project_config_path(cas_root);
         config.save_to(&path)?;
+        if imported_user_viktor {
+            enable_viktor_for_user_scope("user", cmcp_core::config::VIKTOR_SERVER)?;
+        }
 
         if cli.json {
             let names: Vec<String> = discovered
@@ -862,20 +930,20 @@ fn discover_claude() -> Result<Vec<ImportedServer>> {
     // User-scoped: ~/.claude.json
     let user_config = home.join(".claude.json");
     if user_config.exists() {
-        servers.extend(parse_claude_json(&user_config)?);
+        servers.extend(parse_claude_json(&user_config, ImportScope::User)?);
     }
 
     // Project-scoped: .mcp.json
     let project_config = PathBuf::from(".mcp.json");
     if project_config.exists() {
-        servers.extend(parse_claude_json(&project_config)?);
+        servers.extend(parse_claude_json(&project_config, ImportScope::Project)?);
     }
 
     Ok(servers)
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
+fn parse_claude_json(path: &Path, scope: ImportScope) -> Result<Vec<ImportedServer>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -888,7 +956,7 @@ fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
 
     let mut servers = Vec::new();
     for (name, value) in mcp_servers {
-        match parse_claude_server(name, value) {
+        match parse_claude_server(name, value, scope) {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
@@ -904,7 +972,11 @@ fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_claude_server(name: &str, value: &serde_json::Value) -> Result<Option<ImportedServer>> {
+fn parse_claude_server(
+    name: &str,
+    value: &serde_json::Value,
+    scope: ImportScope,
+) -> Result<Option<ImportedServer>> {
     let obj = value
         .as_object()
         .context("server config is not an object")?;
@@ -971,9 +1043,10 @@ fn parse_claude_server(name: &str, value: &serde_json::Value) -> Result<Option<I
     };
 
     Ok(Some(ImportedServer {
-        name: name.to_string(),
+        name: normalize_viktor_server_name(name),
         config,
         source: ImportSource::Claude,
+        scope,
     }))
 }
 
@@ -987,20 +1060,20 @@ fn discover_codex() -> Result<Vec<ImportedServer>> {
     // User-scoped: ~/.codex/config.toml
     let user_config = home.join(".codex").join("config.toml");
     if user_config.exists() {
-        servers.extend(parse_codex_toml(&user_config)?);
+        servers.extend(parse_codex_toml(&user_config, ImportScope::User)?);
     }
 
     // Project-scoped: .codex/config.toml
     let project_config = PathBuf::from(".codex").join("config.toml");
     if project_config.exists() {
-        servers.extend(parse_codex_toml(&project_config)?);
+        servers.extend(parse_codex_toml(&project_config, ImportScope::Project)?);
     }
 
     Ok(servers)
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
+fn parse_codex_toml(path: &Path, scope: ImportScope) -> Result<Vec<ImportedServer>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -1014,7 +1087,7 @@ fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
 
     let mut servers = Vec::new();
     for (name, value) in mcp_servers {
-        match parse_codex_server(name, value) {
+        match parse_codex_server(name, value, scope) {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
@@ -1030,7 +1103,11 @@ fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_codex_server(name: &str, value: &toml::Value) -> Result<Option<ImportedServer>> {
+fn parse_codex_server(
+    name: &str,
+    value: &toml::Value,
+    scope: ImportScope,
+) -> Result<Option<ImportedServer>> {
     let table = value.as_table().context("server config is not a table")?;
 
     // Skip disabled servers.
@@ -1107,9 +1184,10 @@ fn parse_codex_server(name: &str, value: &toml::Value) -> Result<Option<Imported
     };
 
     Ok(Some(ImportedServer {
-        name: name.to_string(),
+        name: normalize_viktor_server_name(name),
         config,
         source: ImportSource::Codex,
+        scope,
     }))
 }
 
@@ -1167,6 +1245,7 @@ fn extract_auth_header(
 mod tests {
     use super::*;
     use cmcp_core::config::ServerConfig;
+    use cas_store::PromptQueueStore;
     use std::collections::HashMap;
 
     fn agent_context() -> crate::config::operator_policy::InvocationContext {
@@ -1325,5 +1404,241 @@ mod tests {
         let v = serde_json::to_value(&cfg).unwrap();
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("plain_SECRET"), "un-redacted value retains secret: {s}");
+    }
+
+    #[tokio::test]
+    async fn removing_user_viktor_persists_machine_opt_out_cas_1312() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let project_root = home.join("project/.cas");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let mut project_config = Config::default();
+        project_config.add_server(
+            "viktor".into(),
+            ServerConfig::Stdio {
+                command: "cas-ebce-missing-viktor".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+        );
+        project_config
+            .save_to(&project_root.join("proxy.toml"))
+            .unwrap();
+
+        let user_path = cmcp_core::config::Scope::User.config_path().unwrap();
+        let mut user_config = Config::default();
+        user_config.ensure_viktor_managed_default();
+        user_config.save_to(&user_path).unwrap();
+
+        let effective = crate::mcp::load_proxy_config_for_process(&project_root).unwrap();
+        let engine = cmcp_core::ProxyEngine::from_configs(effective.servers.clone())
+            .await
+            .unwrap();
+        crate::mcp::write_proxy_snapshot_cache_for_config(&project_root, &engine, &effective)
+            .await
+            .unwrap();
+        assert!(
+            crate::mcp::viktor_watch::session_start_warning(&project_root).is_some(),
+            "unhealthy Viktor should warn while enabled"
+        );
+
+        let cli = crate::cli::Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("false"),
+            "removing user Viktor must persist the startup opt-out"
+        );
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(!user_config.servers.contains_key("viktor"));
+        assert!(user_config.allowlist.iter().all(|route| route.server != "viktor"));
+        assert!(
+            crate::mcp::viktor_watch::session_start_warning(&project_root).is_none(),
+            "the opt-out suppresses the warning even with an unhealthy project snapshot"
+        );
+
+        crate::cli::config::execute_subcommand(
+            &crate::cli::ConfigCommands::Set(crate::cli::config::ConfigSetArgs {
+                key: "viktor.enabled".into(),
+                value: "true".into(),
+                store: Default::default(),
+            }),
+            &cli,
+            &project_root,
+        )
+        .unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("true"));
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(user_config.servers.contains_key("viktor"));
+        assert_eq!(
+            user_config
+                .allowlist
+                .iter()
+                .filter(|route| route.server == "viktor")
+                .count(),
+            cmcp_core::config::VIKTOR_CONVERSATION_TOOLS.len()
+        );
+        assert!(crate::mcp::viktor_watch::session_start_warning(&project_root).is_some());
+
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("false"));
+
+        let agents = crate::store::open_agent_store(&project_root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "supervisor".to_string(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("factory-1".to_string());
+        agents.register(&supervisor).unwrap();
+        cas_store::SqliteViktorWatchStore::open(&project_root)
+            .unwrap()
+            .record(
+                "thread-before-opt-out",
+                "run-before-opt-out",
+                "worker-session",
+                "worker-1",
+                "worker",
+                Some("factory-1"),
+                None,
+                None,
+                cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+            )
+            .unwrap();
+        let alert_engine = cmcp_core::ProxyEngine::from_configs(HashMap::from([(
+            "viktor".to_string(),
+            ServerConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                auth: Some("env:CAS_TEST_MISSING_VIKTOR_KEY".to_string()),
+                headers: HashMap::new(),
+                oauth: false,
+            },
+        )]))
+        .await
+        .unwrap();
+        assert!(!alert_engine.upstream_connected("viktor").await);
+        assert_eq!(
+            crate::mcp::viktor_watch::alert_unpollable_watches(&project_root, &alert_engine)
+                .await
+                .unwrap(),
+            0,
+            "the opted-out daemon must not queue an absent-upstream prompt"
+        );
+        let queue = cas_store::SqlitePromptQueueStore::open(&project_root).unwrap();
+        queue.init().unwrap();
+        assert!(queue.poll_for_target("supervisor", 10).unwrap().is_empty());
+        alert_engine.shutdown().await;
+
+        let add_args = [
+            "--scope".to_string(),
+            "user".to_string(),
+            "Viktor".to_string(),
+            "https://operator.example.invalid/mcp".to_string(),
+        ];
+        execute_add(&add_args, &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("true"),
+            "explicitly adding user Viktor must clear the managed opt-out"
+        );
+        cmcp_core::config::Config::reconcile_viktor_managed_default(
+            &user_path,
+            host_config.viktor_enabled(),
+        )
+        .unwrap();
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(user_config.servers.contains_key("viktor"));
+        assert_eq!(
+            user_config
+                .servers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("viktor"))
+                .count(),
+            1,
+            "adding Viktor with different casing must keep one canonical server entry"
+        );
+        assert!(matches!(
+            user_config.servers.get("viktor"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://operator.example.invalid/mcp"
+        ));
+
+        let mut legacy_user_config = Config::load_from(&user_path).unwrap();
+        let operator_server = legacy_user_config.servers.remove("viktor").unwrap();
+        legacy_user_config
+            .servers
+            .insert("Viktor".into(), operator_server);
+        for route in &mut legacy_user_config.allowlist {
+            if route.server == "viktor" {
+                route.server = "Viktor".into();
+            }
+        }
+        legacy_user_config.save_to(&user_path).unwrap();
+
+        execute_remove("VIKTOR", "user", &cli, &project_root).unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("false"));
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(
+            user_config
+                .servers
+                .keys()
+                .all(|name| !name.eq_ignore_ascii_case("viktor")),
+            "opting out must remove Viktor entries regardless of stored casing"
+        );
+
+        let project_path = project_root.join("proxy.toml");
+        let mut project_config = Config::load_from(&project_path).unwrap();
+        project_config.remove_server("viktor");
+        project_config.save_to(&project_path).unwrap();
+        env.set_current_dir(home.join("project"));
+        let claude_config = serde_json::json!({
+            "mcpServers": {
+                "Viktor": {
+                    "type": "http",
+                    "url": "https://imported.example.invalid/mcp"
+                }
+            }
+        });
+        std::fs::write(
+            home.join(".claude.json"),
+            serde_json::to_vec(&claude_config).unwrap(),
+        )
+        .unwrap();
+
+        execute_import(Some("claude"), false, false, &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("true"),
+            "importing a user-scope Viktor server must re-enable managed Viktor"
+        );
+        let project_config = Config::load_from(&project_path).unwrap();
+        assert!(project_config.servers.contains_key("viktor"));
+        assert_eq!(
+            project_config
+                .servers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("viktor"))
+                .count(),
+            1,
+            "importing Viktor with different casing must use the canonical name"
+        );
+        assert!(matches!(
+            project_config.servers.get("viktor"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://imported.example.invalid/mcp"
+        ));
     }
 }

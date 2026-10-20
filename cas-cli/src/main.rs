@@ -57,6 +57,33 @@ fn main() -> ExitCode {
             }
         };
     }
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-task-ownership-probe"))
+    {
+        let mut args = std::env::args_os().skip(2);
+        let (Some(phase), Some(db), Some(output), None) =
+            (args.next(), args.next(), args.next(), args.next())
+        else {
+            eprintln!("ownership probe requires phase, database and response paths");
+            return ExitCode::FAILURE;
+        };
+        return match phase
+            .to_str()
+            .ok_or("invalid ownership probe phase".to_owned())
+            .and_then(|phase| {
+                cas::task_ownership::run_internal_ownership_probe(
+                    phase,
+                    std::path::Path::new(&db),
+                    std::path::Path::new(&output),
+                )
+            }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("ownership probe failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Native Codex Cargo admission must not wait for Sentry, logging,
     // telemetry or development-tracer databases before selecting its route.
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {

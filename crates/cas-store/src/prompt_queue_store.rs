@@ -268,14 +268,19 @@ pub const NOTICE_DIGEST_KIND: &str = "notice_digest";
 /// CAS made rather than mail that spells the copy's lead.
 pub const PEER_COPY_KIND: &str = "worker_peer_copy";
 
-/// cas-bf890: the predicate for [`NOTICE_DIGEST_KIND`] rows over an unaliased
-/// `prompt_queue`, for the daemon's selection.
+/// Non-rendering metadata (digests and explicit recovery cards) must not
+/// trigger a daemon transport delivery.
 const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
-     AND COALESCE(kind, '') = 'notice_digest')";
+     AND (COALESCE(kind, '') = 'notice_digest'
+     OR (source = 'delivery-watchdog' AND COALESCE(kind, '') = 'recovery_reference')))";
 
-/// cas-bf890: [`NOT_NOTICE_DIGEST_SQL`] over the hook drains' `q` alias.
+/// Hook drains exclude digests; recovery cards have their own filter below.
 const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' \
      AND COALESCE(q.kind, '') = 'notice_digest')";
+
+/// cas-286c: explicit-read cards never consume automatic delivery slots.
+const NOT_RECOVERY_REFERENCE_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon'
+     AND q.source = 'delivery-watchdog' AND COALESCE(q.kind, '') = 'recovery_reference')";
 
 /// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
 const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND COALESCE(q.origin_kind, '') = 'daemon' \
@@ -979,7 +984,7 @@ pub enum EnqueueIdempotentResult {
     AlreadyExists(i64),
 }
 
-/// Delivery status of a prompt queue message (legacy three-value ladder).
+/// Compatibility delivery status, including explicit terminal non-delivery.
 ///
 /// Preserved for existing MCP/clients. Prefer [`MessageDeliveryReport`] for
 /// stage-based observability (cas-2c5f).
@@ -991,6 +996,9 @@ pub enum MessageStatus {
     Delivered,
     /// Target agent has confirmed receipt
     Confirmed,
+    /// The queue terminally abandoned the message without delivery.
+    #[serde(rename = "undelivered")]
+    Undelivered,
 }
 
 impl std::fmt::Display for MessageStatus {
@@ -999,6 +1007,7 @@ impl std::fmt::Display for MessageStatus {
             Self::Pending => write!(f, "pending"),
             Self::Delivered => write!(f, "delivered"),
             Self::Confirmed => write!(f, "confirmed"),
+            Self::Undelivered => write!(f, "undelivered"),
         }
     }
 }
@@ -1962,7 +1971,7 @@ pub struct MessageDeliveryReport {
     /// record. It is deliberately omitted from the public status response.
     #[serde(skip)]
     pub prompt: String,
-    /// Legacy three-value status (processed_at/acked_at) for older clients.
+    /// Compatibility status; abandonment takes precedence over processed_at.
     pub legacy_status: MessageStatus,
     /// Highest monotonic stage reached (authoritative columns only).
     pub stage: DeliveryStage,
@@ -2998,12 +3007,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// Get messages that were processed but not acked within the timeout
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>>;
 
-    /// Get delivery status of a specific message (legacy three-value ladder).
+    /// Get compatibility delivery status, with explicit abandonment.
     fn message_status(&self, prompt_id: i64) -> Result<Option<MessageStatus>>;
 
     /// Stage-based delivery report (cas-2c5f). `None` if the id does not exist.
     /// Returns `Err` if required timestamps are corrupt (never fabricates `now`).
     fn message_delivery_report(&self, prompt_id: i64) -> Result<Option<MessageDeliveryReport>>;
+
+    /// Whether this is a trusted recovery notice containing historical message
+    /// content, which must not be interpreted as a fresh task assignment.
+    fn is_abandonment_recovery(&self, prompt_id: i64) -> Result<bool>;
 
     /// Read one queue row, including its stamped origin and device recipient.
     /// Unlike a pending peek this also finds rows already transported to an
@@ -3949,6 +3962,9 @@ impl SqlitePromptQueueStore {
         let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, prompt_id)? else {
             return Ok(());
         };
+        if let Some(content) = notice.recovery_content.as_deref() {
+            return Self::insert_abandonment_recovery_in_tx(tx, &notice, content);
+        }
         Self::insert_abandonment_notice_in_tx(
             tx,
             &notice.sender,
@@ -3966,7 +3982,8 @@ impl SqlitePromptQueueStore {
         let original = tx
             .query_row(
                 "SELECT source, target, factory_session, origin_agent_id, origin_kind,
-                    COALESCE(last_pending_detail, last_pending_reason, 'undeliverable')
+                    COALESCE(last_pending_detail, last_pending_reason, 'undeliverable'),
+                    COALESCE(wake_gate_declines, 0), wake_attempt_detail, summary, prompt
              FROM prompt_queue WHERE id = ? AND highest_stage = 'abandoned'
                AND source <> 'delivery-watchdog'
                -- GH #1196: an automatic Commander mirror of a pane reply was
@@ -3981,11 +3998,26 @@ impl SqlitePromptQueueStore {
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, u32>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, String>(9)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((mut sender, target, mut session, origin_id, origin_kind, mut reason)) = original
+        let Some((
+            mut sender,
+            target,
+            mut session,
+            origin_id,
+            origin_kind,
+            mut reason,
+            declines,
+            wake_detail,
+            summary,
+            prompt,
+        )) = original
         else {
             return Ok(None);
         };
@@ -3995,25 +4027,50 @@ impl SqlitePromptQueueStore {
         if is_operator_target(&target) {
             reason = "no Commander device received it before it expired".to_string();
         }
+        let source = sender.clone();
+        let mut inherited = false;
         if origin_kind.as_deref() == Some("registered_agent") {
-            (sender, session) = Self::abandonment_recipient_in_tx(
+            (sender, session, inherited) = Self::abandonment_recipient_in_tx(
                 tx,
                 origin_id.as_deref(),
                 &sender,
                 session.as_deref(),
             )?;
         }
+        if declines > 0 && !is_operator_target(&target) {
+            reason.push_str(&format!(
+                "; wake gate declined {declines} times: {}",
+                wake_detail
+                    .as_deref()
+                    .unwrap_or("no wake-gate detail recorded")
+            ));
+        }
+        // An ended sender's successor needs the actual work. Wake-starved
+        // authenticated messages also need an actionable notice, even if the
+        // original target has since ended. Neither belongs in the routine
+        // ended-worker digest or a folding episode that may omit message bodies.
+        let recovery_content = (origin_kind.as_deref() == Some("registered_agent")
+            && !is_operator_target(&target)
+            && (inherited || declines > 0))
+            .then(|| {
+                format!(
+                    "Original source: {source}\nSummary: {}\nOriginal message:\n{prompt}",
+                    summary.as_deref().unwrap_or("(none)")
+                )
+            });
         Ok(Some(AbandonedSenderNotice {
             sender,
             session,
             prompt_id,
             target,
             reason,
+            recovery_content,
         }))
     }
 
-    /// A maintenance sweep may expire an entire backlog. Resolve authenticated
-    /// sender identities first, then leave at most one notice in each inbox.
+    /// A maintenance sweep may expire an entire backlog. Recovery notices keep
+    /// three full recovery bodies per recipient; excess originals remain
+    /// accessible by explicit reference. Routine failures fold per inbox.
     /// Give each aged, unprocessed row an honest terminal state (cas-f7b0;
     /// communication contract v2, P1.3). Shared by the roster sweep and the
     /// 24 h stale expiry, so the two cannot disagree.
@@ -4105,19 +4162,66 @@ impl SqlitePromptQueueStore {
 
         // GH #1196: Commander and agent abandonments are separate episodes.
         // cas-bf890: so are a supervisor's notices about ended recipients.
-        let mut groups: BTreeMap<
-            (String, Option<String>, bool, bool),
-            Vec<AbandonedSenderNotice>,
-        > = BTreeMap::new();
+        let mut groups: BTreeMap<(String, Option<String>, bool, bool), Vec<AbandonedSenderNotice>> =
+            BTreeMap::new();
+        let mut recoveries: BTreeMap<(String, Option<String>), Vec<AbandonedSenderNotice>> =
+            BTreeMap::new();
         for id in prompt_ids {
             if let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, *id)? {
+                if notice.recovery_content.is_some() {
+                    recoveries
+                        .entry((notice.sender.clone(), notice.session.clone()))
+                        .or_default()
+                        .push(notice);
+                    continue;
+                }
                 let operator = is_operator_target(&notice.target);
                 let digest = !operator
                     && Self::abandonment_is_digest_in_tx(tx, &notice.sender, &notice.target)?;
                 groups
-                    .entry((notice.sender.clone(), notice.session.clone(), operator, digest))
+                    .entry((
+                        notice.sender.clone(),
+                        notice.session.clone(),
+                        operator,
+                        digest,
+                    ))
                     .or_default()
                     .push(notice);
+            }
+        }
+        for ((sender, session), mut notices) in recoveries {
+            notices.sort_by_key(|notice| notice.prompt_id);
+            let mut references = Vec::new();
+            for (index, notice) in notices.iter().enumerate() {
+                if index < 3 {
+                    Self::insert_abandonment_recovery_in_tx(
+                        tx,
+                        notice,
+                        notice.recovery_content.as_deref().unwrap(),
+                    )?;
+                } else {
+                    let reference_id = Self::insert_recovery_reference_in_tx(tx, notice)?;
+                    references.push(format!(
+                        "notification_id={reference_id} (original #{}, to {})",
+                        notice.prompt_id, notice.target
+                    ));
+                }
+            }
+            if !references.is_empty() {
+                let ids = notices
+                    .iter()
+                    .skip(3)
+                    .map(|notice| notice.prompt_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                tx.execute(
+                    "INSERT OR IGNORE INTO prompt_queue
+                        (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
+                     VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
+                    params![sender, format!("{} more undelivered messages. Read each complete original with inbox_poll and its reference:\n{}", references.len(), references.join("\n")),
+                        Utc::now().to_rfc3339(), session, format!("{} more undelivered messages", references.len()),
+                        format!("delivery-abandoned-recovery:fold:{ids}")],
+                )?;
             }
         }
         for ((sender, session, operator, digest), mut notices) in groups {
@@ -4170,12 +4274,13 @@ impl SqlitePromptQueueStore {
         Ok(())
     }
 
+    /// Resolve the sender, retaining whether a replacement inherited the notice.
     fn abandonment_recipient_in_tx(
         tx: &Connection,
         sender_id: Option<&str>,
         stored_name: &str,
         stored_session: Option<&str>,
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<(String, Option<String>, bool)> {
         let has_agents = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents')",
             [],
@@ -4191,7 +4296,7 @@ impl SqlitePromptQueueStore {
                 )
                 .optional()?
             {
-                return Ok(sender);
+                return Ok((sender.0, sender.1, false));
             }
             // Prefer an explicitly re-registered sender with the same name
             // and session, then the project's current supervisor.
@@ -4207,12 +4312,12 @@ impl SqlitePromptQueueStore {
                 )
                 .optional()?
             {
-                return Ok(supervisor);
+                return Ok((supervisor.0, supervisor.1, true));
             }
         }
         // Sessionless logical addressing survives the period with no live
         // supervisor and is visible to the next supervisor's inbox poll.
-        Ok(("supervisor".to_string(), None))
+        Ok(("supervisor".to_string(), None, true))
     }
 
     /// cas-bf890 (GH #1215 §3): whether the notice that `target` never got
@@ -4250,6 +4355,91 @@ impl SqlitePromptQueueStore {
             params![notice_recipient, target],
             |row| row.get::<_, bool>(0),
         )?)
+    }
+
+    /// A complete recovery notice, bounded to three per recipient and sweep.
+    /// Excess originals use recipient-owned explicit-read reference cards.
+    fn insert_abandonment_recovery_in_tx(
+        tx: &Connection,
+        notice: &AbandonedSenderNotice,
+        content: &str,
+    ) -> Result<()> {
+        let body = format!(
+            "Message {} to {} was abandoned as undeliverable: {}\n{content}",
+            notice.prompt_id, notice.target, notice.reason
+        );
+        tx.execute(
+            "INSERT OR IGNORE INTO prompt_queue
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
+             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
+            params![notice.sender, body, Utc::now().to_rfc3339(), notice.session,
+                format!("Undelivered message {} to {}", notice.prompt_id, notice.target),
+                format!("delivery-abandoned-recovery:{}", notice.prompt_id)],
+        )?;
+        Ok(())
+    }
+
+    fn insert_recovery_reference_in_tx(
+        tx: &Connection,
+        notice: &AbandonedSenderNotice,
+    ) -> Result<i64> {
+        let dedupe = format!("delivery-abandoned-recovery:{}", notice.prompt_id);
+        tx.execute(
+            "INSERT OR IGNORE INTO prompt_queue
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key, kind)
+             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?, 'recovery_reference')",
+            params![notice.sender, format!("Recovery reference for undelivered message {}", notice.prompt_id),
+                Utc::now().to_rfc3339(), notice.session, format!("Undelivered message {}", notice.prompt_id), dedupe],
+        )?;
+        Ok(tx.query_row(
+            "SELECT id FROM prompt_queue WHERE dedupe_key = ?",
+            params![dedupe],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Called only after a named read passes the card's recipient/session SQL.
+    /// Keep the original abandoned; only the recipient-owned card is surfaced.
+    fn hydrate_recovery_reference_in_tx(tx: &Connection, prompt: &mut QueuedPrompt) -> Result<()> {
+        let reference: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE id = ? AND origin_kind = 'daemon'
+                AND source = 'delivery-watchdog' AND kind = 'recovery_reference')",
+            params![prompt.id],
+            |row| row.get(0),
+        )?;
+        if !reference {
+            return Ok(());
+        }
+        let original = tx.query_row(
+            "SELECT original.id, original.source, original.target, original.summary, original.prompt,
+                    COALESCE(original.last_pending_detail, original.last_pending_reason, 'undeliverable'),
+                    COALESCE(original.wake_gate_declines, 0), original.wake_attempt_detail
+             FROM prompt_queue card JOIN prompt_queue original
+               ON original.id = CAST(substr(card.dedupe_key, length('delivery-abandoned-recovery:') + 1) AS INTEGER)
+              AND card.dedupe_key = 'delivery-abandoned-recovery:' || original.id
+             WHERE card.id = ? AND original.highest_stage = 'abandoned'",
+            params![prompt.id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, u32>(6)?, row.get::<_, Option<String>>(7)?)),
+        ).optional()?;
+        prompt.prompt = match original {
+            Some((id, source, target, summary, body, mut reason, declines, detail)) => {
+                if declines > 0 {
+                    reason.push_str(&format!(
+                        "; wake gate declined {declines} times: {}",
+                        detail.as_deref().unwrap_or("no wake-gate detail recorded")
+                    ));
+                }
+                format!(
+                    "Message {id} to {target} was abandoned as undeliverable: {reason}\nOriginal source: {source}\nSummary: {}\nOriginal message:\n{body}",
+                    summary.as_deref().unwrap_or("(none)")
+                )
+            }
+            None => format!(
+                "The original for recovery reference {} is no longer retained.",
+                prompt.id
+            ),
+        };
+        Ok(())
     }
 
     fn insert_abandonment_notice_in_tx(
@@ -4519,6 +4709,7 @@ struct AbandonedSenderNotice {
     prompt_id: i64,
     target: String,
     reason: String,
+    recovery_content: Option<String>,
 }
 
 /// Options for [`SqlitePromptQueueStore::atomic_stage_stamp`].
@@ -4605,6 +4796,7 @@ impl SqlitePromptQueueStore {
              WHERE 1 = 1
                {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
                {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+               {NOT_RECOVERY_REFERENCE_Q_SQL}
                {deliverable_sql}
                AND (q.target = ? OR q.target = 'all_workers')
                {audience_sql}
@@ -5883,10 +6075,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                -- cas-b5ad: the daemon's transport claim is a reservation,
                -- not a read; a claimed row whose wake keeps being declined is
                -- still unread, and its sender must hear that it stalled.
+               -- cas-badb (GH #1302): text typed into a pane is not a read
+               -- either until a turn is observed (observed_wake) or the
+               -- recipient's own session surfaces or polls it.
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen
                      WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                       AND seen.source <> 'transport_claimed'
+                       AND seen.source NOT IN ('transport_claimed', 'transport_delivered')
                )
                {recipient_acted}
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
@@ -5951,7 +6146,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND NOT EXISTS (
                            SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target
-                              AND seen.source <> 'transport_claimed'
+                              AND seen.source NOT IN ('transport_claimed', 'transport_delivered')
                        )",
                     params![prompt_id, factory_session, stale_cutoff],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
@@ -7270,23 +7465,38 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(prompts)
     }
 
+    fn is_abandonment_recovery(&self, prompt_id: i64) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue
+              WHERE id = ? AND origin_kind = 'daemon' AND source = 'delivery-watchdog'
+                AND dedupe_key GLOB 'delivery-abandoned-recovery:*')",
+            params![prompt_id],
+            |row| row.get(0),
+        )?)
+    }
+
     fn message_status(&self, prompt_id: i64) -> Result<Option<MessageStatus>> {
-        // Legacy ladder: processed_at / acked_at only (includes non-delivery
-        // drains). Structured stage uses separate columns.
+        // Legacy processed rows keep their historic mapping, except abandoned
+        // messages: retiring a queue row is never evidence of delivery.
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let result = conn.query_row(
-            "SELECT processed_at, acked_at FROM prompt_queue WHERE id = ?",
+            "SELECT processed_at, acked_at, highest_stage FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
                 let processed_at: Option<String> = row.get(0)?;
                 let acked_at: Option<String> = row.get(1)?;
-                Ok((processed_at, acked_at))
+                let stage: Option<String> = row.get(2)?;
+                Ok((processed_at, acked_at, stage))
             },
         );
         match result {
-            Ok((_, Some(_))) => Ok(Some(MessageStatus::Confirmed)),
-            Ok((Some(_), None)) => Ok(Some(MessageStatus::Delivered)),
-            Ok((None, _)) => Ok(Some(MessageStatus::Pending)),
+            Ok((_, _, Some(stage))) if stage == DeliveryStage::Abandoned.as_str() => {
+                Ok(Some(MessageStatus::Undelivered))
+            }
+            Ok((_, Some(_), _)) => Ok(Some(MessageStatus::Confirmed)),
+            Ok((Some(_), None, _)) => Ok(Some(MessageStatus::Delivered)),
+            Ok((None, _, _)) => Ok(Some(MessageStatus::Pending)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -7456,7 +7666,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )?;
         let legacy_processed = processed_at_s.is_some();
 
-        let legacy_status = if confirmed_at.is_some() {
+        let legacy_status = if highest_stage_s.as_deref() == Some(DeliveryStage::Abandoned.as_str()) {
+            MessageStatus::Undelivered
+        } else if confirmed_at.is_some() {
             MessageStatus::Confirmed
         } else if legacy_processed {
             MessageStatus::Delivered
@@ -8323,7 +8535,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let (sender, session) = Self::abandonment_recipient_in_tx(
+            let (sender, session, _) = Self::abandonment_recipient_in_tx(
                 &tx,
                 Some(sender_agent_id),
                 sender_name,
@@ -8990,7 +9202,8 @@ impl SqlitePromptQueueStore {
                 "AND (q.highest_stage IS NULL
                      OR q.highest_stage NOT IN ('dropped', 'suppressed', 'abandoned'))"
             };
-            let deliverable_sql = format!("AND q.created_at >= ? {terminal_stage_sql}");
+            let reference_sql = if named_read { "" } else { NOT_RECOVERY_REFERENCE_Q_SQL };
+            let deliverable_sql = format!("AND q.created_at >= ? {terminal_stage_sql} {reference_sql}");
             // Filtering after the drain would already acknowledge and consume
             // the alarm. Keep all automatic hook variants on this SQL boundary.
             let daemon_nudge_sql = if source == SurfacingSource::HookSurfaced {
@@ -9201,7 +9414,12 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
-            let prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            let mut prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            if named_read {
+                for prompt in &mut prompts {
+                    Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;
+                }
+            }
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -14335,7 +14553,7 @@ mod tests {
         );
         let report = store.message_delivery_report(id).unwrap().unwrap();
         assert_eq!(report.stage, DeliveryStage::Abandoned);
-        assert_eq!(report.legacy_status, MessageStatus::Delivered);
+        assert_eq!(report.legacy_status, MessageStatus::Undelivered);
         assert!(report.delivered_at.is_none());
         assert_eq!(
             report.pending_reason,
@@ -14812,14 +15030,17 @@ mod tests {
                     .contains(&format!("; ids {}, {}", later[0], later[1]))
             );
             // An ended sender still falls back to the current supervisor,
-            // with one aggregate in that supervisor's own session.
+            // with each original readable in that supervisor's own session.
             agents.unregister(&a.id).unwrap();
             let orphaned = [enqueue_old(&a, "orphan-worker"), enqueue_old(&a, "orphan-worker")];
             assert_eq!(run_sweep(), 2);
             let fallback = store.poll_unseen_for_recipient(&b.name, b.factory_session.as_deref(), 10).unwrap();
-            assert_eq!(fallback.len(), 1);
-            assert_eq!(fallback[0].factory_session, b.factory_session);
-            assert!(fallback[0].prompt.contains(&format!("; ids {}, {}", orphaned[0], orphaned[1])));
+            assert_eq!(fallback.len(), orphaned.len());
+            for (notice, id) in fallback.iter().zip(orphaned) {
+                assert_eq!(notice.factory_session, b.factory_session);
+                // pin: preserve each original message id and target in the successor notice.
+                assert!(notice.prompt.contains(&format!("Message {id} to orphan-worker")));
+            }
         }
     }
 
@@ -19242,5 +19463,241 @@ mod cas_bf890_notice_digest_tests {
         let rendered = drain(&store, HookDrain::Unseen);
         assert_eq!(rendered, vec![lifecycle, blocker]);
         assert_eq!(drain(&store, HookDrain::NoticeDigest), vec![ended]);
+    }
+}
+
+
+#[cfg(test)]
+mod cas_f17b_tests {
+    use super::*;
+    use crate::{AgentStore, SqliteAgentStore};
+    use cas_types::{Agent, AgentRole};
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        SqlitePromptQueueStore,
+        SqliteAgentStore,
+        Agent,
+    ) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut sender = Agent::new("original-sender".into(), "vivid-dolphin".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("old-factory".into());
+        agents.register(&sender).unwrap();
+        (temp, queue, agents, sender)
+    }
+
+    fn aged_message(queue: &SqlitePromptQueueStore, sender: &Agent, body: &str) -> i64 {
+        let id = match queue
+            .enqueue_idempotent(
+                &sender.name,
+                "swift-heron",
+                body,
+                Some("old-factory"),
+                Some("pending decision"),
+                None,
+                body,
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: sender.id.clone(),
+                }),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        queue
+            .record_wake_gate_decline(id, "inline pane has an active composer or prior inject")
+            .unwrap();
+        queue
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(2)).to_rfc3339(), id],
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn cas_f17b_abandoned_status_never_claims_delivery() {
+        let (_temp, queue, _agents, sender) = fixture();
+        let id = aged_message(&queue, &sender, "please decide");
+        queue
+            .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap();
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        assert!(report.delivered_at.is_none());
+        // pin: both public compatibility surfaces must explicitly report non-delivery.
+        assert_eq!(report.legacy_status.to_string(), "undelivered");
+        // pin: explicit failure is the public JSON contract, never Pending or Delivered.
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["legacy_status"],
+            "undelivered"
+        );
+        assert_eq!(
+            queue.message_status(id).unwrap().unwrap().to_string(),
+            "undelivered"
+        );
+    }
+
+    #[test]
+    fn cas_f17b_wake_decline_notice_names_cause() {
+        let (_temp, queue, _agents, sender) = fixture();
+        let id = aged_message(&queue, &sender, "please decide");
+        queue
+            .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap();
+        let notices = queue
+            .surface_for_recipient_within_budget(
+                &sender.name,
+                sender.factory_session.as_deref(),
+                HookDrain::Unseen,
+                10,
+                HOOK_SURFACE_BUDGET_CHARS,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(
+            notices.len(),
+            1,
+            "the sender needs its own actionable notice"
+        );
+        let notice = &notices[0];
+        assert_eq!(notice.origin, Some(QueueOrigin::Daemon));
+        assert!(notice.prompt.contains(&id.to_string()));
+        assert!(notice.prompt.contains("swift-heron"));
+        assert!(
+            // pin: the notice must explain the refused wake, including its count.
+            notice.prompt.contains("wake gate declined 1"),
+            "{}",
+            notice.prompt
+        );
+        assert!(
+            // pin: the idle-gate cause is required evidence for this incident.
+            notice.prompt.contains("active composer or prior inject"),
+            "{}",
+            notice.prompt
+        );
+        assert_eq!(
+            queue
+                .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+                .unwrap()
+                .len(),
+            0
+        );
+        // A large expiry is bounded per recipient, while every excess body
+        // remains available through that recipient's explicit named read.
+        let bodies: Vec<_> = (0..7)
+            .map(|n| format!("Recover request number {n} with its complete body"))
+            .collect();
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| aged_message(&queue, &sender, body))
+            .collect();
+        assert_eq!(
+            queue
+                .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(
+            queue
+                .count_unseen_for_recipient(&sender.name, sender.factory_session.as_deref())
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            queue
+                .peek_for_targets(
+                    &[sender.name.as_str()],
+                    sender.factory_session.as_deref(),
+                    100
+                )
+                .unwrap()
+                .len(),
+            4
+        );
+        let preview = queue
+            .surface_for_recipient_within_budget(
+                &sender.name,
+                sender.factory_session.as_deref(),
+                HookDrain::Unseen,
+                100,
+                0,
+            )
+            .unwrap();
+        assert!(preview.rows.is_empty());
+        assert_eq!(
+            preview.over_budget.len(),
+            4,
+            "reference cards must not enter hook drains"
+        );
+        let delivered = queue
+            .poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100)
+            .unwrap();
+        assert_eq!(
+            delivered.len(),
+            4,
+            "three complete notices plus one folded row"
+        );
+        let complete = delivered
+            .iter()
+            .filter(|row| bodies.iter().any(|body| row.prompt.contains(body.as_str())))
+            .count();
+        assert_eq!(complete, 3);
+        let folded = delivered
+            .iter()
+            .find(|row| row.prompt.contains("notification_id="))
+            .unwrap();
+        let references: Vec<i64> = folded
+            .prompt
+            .lines()
+            .filter_map(|line| line.split_once("notification_id="))
+            .filter_map(|(_, tail)| tail.split_whitespace().next()?.parse().ok())
+            .collect();
+        assert_eq!(references.len(), 4);
+        assert!(
+            queue
+                .poll_named_for_recipient(&sender.name, Some("foreign-session"), &references)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            queue
+                .poll_named_for_recipient(
+                    "foreign-recipient",
+                    sender.factory_session.as_deref(),
+                    &references
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let details = queue
+            .poll_named_for_recipient(&sender.name, sender.factory_session.as_deref(), &references)
+            .unwrap();
+        assert_eq!(details.len(), 4);
+        for (original, body) in ids.iter().zip(&bodies).skip(3) {
+            assert!(
+                details
+                    .iter()
+                    .any(|row| row.prompt.contains(&original.to_string())
+                        && row.prompt.contains(body)),
+                "explicit recipient read must recover original {original}"
+            );
+        }
+        assert!(
+            queue
+                .poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -18,6 +18,7 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            ("slack.stakeholder_contacts".into(), self.get("slack.stakeholder_contacts").unwrap()),
             (
                 "hub.tailscale_serve".to_string(),
                 self.get("hub.tailscale_serve").unwrap(),
@@ -184,6 +185,14 @@ impl Config {
             (
                 "factory.scratch_root".to_string(),
                 factory.scratch_root.clone().unwrap_or_default(),
+            ),
+            (
+                "factory.supervisor_message_debounce_secs".to_string(),
+                factory.supervisor_message_debounce_secs.to_string(),
+            ),
+            (
+                "factory.supervisor_message_wakes_per_hour".to_string(),
+                factory.supervisor_message_wakes_per_hour.to_string(),
             ),
             (
                 "factory.message_max_chars".to_string(),

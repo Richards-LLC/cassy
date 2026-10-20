@@ -23,19 +23,23 @@ metadata:
    [references/exemplar.md](references/exemplar.md): page one leads with what
    shipped, one dot per CHANGELOG change grouped by product area, with plain
    titles. GitHub issues closed is a secondary figure counted by the generator;
-   do not hand-correct it. Every user and developer change stays Was → Now; keep
+   do not hand-correct it. Every user and developer change stays Was → Now. Where
+   the delivering task's artifacts hold a real before and after capture of the
+   same surface, add its `Before:`/`After:` pair (exemplar.md); never a lone
+   after shot or a general QA render. Keep
    the exact source URLs, retrieval times and full asset digests. Rerun step 2 to
    re-render; an existing Markdown source is kept unless you pass
    `--refresh-sources`.
 4. Fill `v<version>.brief.md` from
    [references/brief-template.md](references/brief-template.md). The renderer takes
-   project tokens from `design-tokens.json` or `docs/design/design-tokens.json`
-   (roles named as in the project's `DESIGN.md`), else the bundled Petrastella
-   defaults. Record which in the brief.
-5. Preserve the identity: a sandstone/serif verdict, a change map of equal-area
-   dots (one per shipped change) in named product areas, a quiet numbered folio
-   and one decorative row of dots at install. Project tokens may adapt the palette
-   and fonts; retain the motif, hierarchy and section order. Keep the generator's
+   project tokens from the root `DESIGN.md` when its frontmatter names CSS
+   `source` files and `maps` roles (exemplar.md), else `design-tokens.json` or
+   `docs/design/design-tokens.json`, else the bundled Petrastella defaults.
+   Record which in the brief.
+5. Preserve the identity: a serif verdict, a change map of equal-area dots (one
+   per shipped change) in named product areas, a quiet numbered folio and one
+   decorative row of dots at install. The project's tokens decide palette,
+   surfaces, faces and radii; retain the motif, hierarchy and section order. Keep the generator's
    area order across releases. Dots count changes, never impact or severity.
    Page one never shows a zero row or an unmeasured value: omit them, and name
    them in the counting note. Write in plain words; avoid internal terms such as

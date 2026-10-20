@@ -273,6 +273,33 @@ impl SqliteRequestJournal {
         load_operation(&*conn, request_id)
     }
 
+    /// Local evidence for degraded stakeholder warnings, never shared authority.
+    pub fn read_stakeholder_contact_evidence(cas_dir: &Path) -> Result<Vec<Value>, JournalError> {
+        let path = cas_dir.join("cas.db");
+        if !path.exists() { return Ok(Vec::new()); }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| JournalError::Storage(error.to_string()))?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_work_operations')", [], |row| row.get(0)
+        ).map_err(|error| JournalError::Storage(error.to_string()))?;
+        if !exists { return Ok(Vec::new()); }
+        Self { conn: Arc::new(Mutex::new(conn)) }.stakeholder_contact_evidence()
+    }
+
+    /// Existing journal rows only; does not create a second evidence store.
+    pub fn stakeholder_contact_evidence(&self) -> Result<Vec<Value>, JournalError> {
+        let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let mut query = conn.prepare(
+            "SELECT response_json FROM external_work_operations WHERE kind='stakeholder_contact' AND response_json IS NOT NULL ORDER BY updated_at DESC, rowid DESC"
+        ).map_err(|error| JournalError::Storage(error.to_string()))?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| JournalError::Storage(error.to_string()))?;
+        rows.map(|row| {
+            let row = row.map_err(|error| JournalError::Storage(error.to_string()))?;
+            serde_json::from_str(&row).map_err(|error| JournalError::Storage(error.to_string()))
+        }).collect()
+    }
+
     pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
         let conn = self
             .conn
@@ -281,7 +308,8 @@ impl SqliteRequestJournal {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM external_work_operations
-                WHERE stage IN ('prepared','retry_wait','dispatching')
+                WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                  AND stage IN ('prepared','retry_wait','dispatching')
                   AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                   AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
              )",
@@ -311,7 +339,8 @@ impl SqliteRequestJournal {
             let mut statement = transaction
                 .prepare(
                     "SELECT request_id FROM external_work_operations
-                     WHERE stage IN ('prepared','retry_wait','dispatching')
+                 WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                   AND stage IN ('prepared','retry_wait','dispatching')
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
                      ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2",
@@ -355,6 +384,100 @@ impl SqliteRequestJournal {
         )
         .map_err(|error| JournalError::Storage(error.to_string()))?;
         Ok(())
+    }
+}
+
+impl SqliteRequestJournal {
+    /// cas-8239 (GH #1300): the `violet_post` fields of `registration_id`'s
+    /// current reply intent for the thread rooted at `reply_to`, so a reply
+    /// can be posted without copying claim fields by hand. Only completed
+    /// operations count, in the order they were made. A reply intent stays
+    /// current until a later release, transfer, or a claim or accept at
+    /// another generation retires it; a renewal extends its claim's expiry.
+    /// An expired claim, another session's intent, or none yields `None`.
+    pub fn current_reply_post(
+        &self,
+        registration_id: &str,
+        reply_to: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Value>, JournalError> {
+        let operations: Vec<(String, String, String)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT kind, input_json, response_json FROM external_work_operations
+                     WHERE stage = 'terminal' AND response_json IS NOT NULL
+                     ORDER BY created_at, rowid",
+                )
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            rows.collect::<Result<_, _>>().map_err(|error| JournalError::Storage(error.to_string()))?
+        };
+        // resource id -> (violet_post block, claim generation, claim expiry)
+        let mut current: std::collections::HashMap<String, (Value, u64, Option<DateTime<Utc>>)> =
+            std::collections::HashMap::new();
+        let expiry = |receipt: &Value| {
+            receipt["expires_at"]
+                .as_str()
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&Utc))
+        };
+        for (kind, input, response) in operations {
+            let (Ok(input), Ok(response)) =
+                (serde_json::from_str::<Value>(&input), serde_json::from_str::<Value>(&response))
+            else {
+                continue;
+            };
+            if input["actor"]["registration_id"] != registration_id || response["code"] != "completed" {
+                continue;
+            }
+            let receipt = &response["receipt"];
+            let Some(resource) = input["resource_id"].as_str().or(receipt["resource"]["id"].as_str()) else {
+                continue;
+            };
+            let resource = resource.to_string();
+            let generation = receipt["generation"].as_u64();
+            match kind.as_str() {
+                "reply_intent" => {
+                    let Some(expected) = input["expected_generation"].as_u64() else { continue };
+                    // Expiry is judged below, after any later renewal.
+                    let ready = with_reply_ready(response.clone(), &resource, expected, DateTime::<Utc>::MIN_UTC);
+                    match ready.get("violet_post") {
+                        Some(block) => {
+                            current.insert(resource, (block.clone(), expected, expiry(receipt)));
+                        }
+                        None => {
+                            current.remove(&resource);
+                        }
+                    }
+                }
+                "renew_claim" => {
+                    if let Some(entry) = current.get_mut(&resource)
+                        && generation == Some(entry.1)
+                    {
+                        entry.2 = expiry(receipt).or(entry.2);
+                    }
+                }
+                "release_claim" | "transfer_claim" => {
+                    current.remove(&resource);
+                }
+                _ => {
+                    if current.get(&resource).is_some_and(|entry| generation != Some(entry.1)) {
+                        current.remove(&resource);
+                    }
+                }
+            }
+        }
+        Ok(current
+            .into_values()
+            .filter(|(block, _, expires)| block["reply_to"] == reply_to && expires.is_some_and(|at| at > now))
+            .map(|(block, _, _)| block)
+            .next())
     }
 }
 
@@ -448,6 +571,31 @@ pub trait VioletThreadResolver: Send + Sync {
     /// Resolve only through Violet's authenticated `violet_read` contract and
     /// return its normalized, verified thread identity.
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError>;
+}
+
+/// cas-85c1 (GH #1292): the one mapping from a proxied `violet_read` call to
+/// the resolver result, shared by the MCP and daemon resolvers so both mark
+/// a dropped, reconnecting upstream the same way (via the proxy's structural
+/// classifier) and the service retries it within its reconnect window.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn violet_proxy_outcome(
+    outcome: Result<anyhow::Result<Value>, tokio::time::error::Elapsed>,
+) -> Result<Value, RemoteError> {
+    match outcome {
+        Ok(Ok(value)) => decode_violet_result(value),
+        Ok(Err(error)) => {
+            let message = format!(
+                "Violet could not resolve the Slack permalink: {}",
+                cmcp_core::describe_upstream_call_error(&error)
+            );
+            Err(if cmcp_core::upstream_call_is_reconnectable(&error) {
+                RemoteError::reconnecting(message)
+            } else {
+                RemoteError::unavailable(message)
+            })
+        }
+        Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
+    }
 }
 
 /// Decode the MCP envelope around Violet's deployed `violet_read` response and
@@ -1413,8 +1561,14 @@ fn valid_uuid(value: &str) -> Result<String, ExternalWorkError> {
 }
 
 fn validate_uuid_field(value: &str, field: &str) -> Result<(), ExternalWorkError> {
-    let parsed = Uuid::parse_str(value)
-        .map_err(|_| error("invalid_request", format!("{field} must be a UUID")))?;
+    let parsed = Uuid::parse_str(value).map_err(|_| {
+        let message = if field == "occurrence_id" {
+            "occurrence_id is optional; use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID".to_string()
+        } else {
+            format!("{field} must be a UUID")
+        };
+        error("invalid_request", message)
+    })?;
     if value != parsed.to_string() {
         return Err(error(
             "invalid_request",
@@ -1897,6 +2051,88 @@ mod tests {
         assert_eq!(journal.lease_due(RECONCILE_BATCH_LIMIT, expiry, RECONCILE_LEASE).unwrap().len(), 1);
     }
 
+    /// A resolver that classifies through the shared proxy mapping: proxied
+    /// transport drops first, then Violet's real answer.
+    #[cfg(feature = "mcp-proxy")]
+    struct ProxiedDrops {
+        calls: AtomicUsize,
+        drops: usize,
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    impl VioletThreadResolver for ProxiedDrops {
+        fn resolve(&self, _external_ref: &str, _timeout: Duration) -> Result<Value, RemoteError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = if call < self.drops {
+                Ok(Err(anyhow::Error::from(rmcp::service::ServiceError::TransportClosed)
+                    .context("tool call 'violet_read' on 'violet' failed")))
+            } else {
+                let capture: Value = serde_json::from_str(include_str!(
+                    "../../tests/fixtures/coordination_contract/v1/captured/violet-production-2026-10-16.json"
+                ))
+                .unwrap();
+                Ok(Ok(capture["cases"][0]["response"].clone()))
+            };
+            violet_proxy_outcome(outcome)
+        }
+    }
+
+    /// cas-85c1 (GH #1292): a daemon reconcile of a journaled claim retries a
+    /// dropped upstream within the window and succeeds; a drop that persists
+    /// fails clearly and posts nothing to Cloud. The resolver is a test double
+    /// that feeds proxied rmcp errors through `violet_proxy_outcome`, the
+    /// mapping every production resolver uses (see the guard test below).
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn daemon_reconcile_retries_a_proxied_violet_drop_cas_85c1() {
+        let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        for (drops, succeeds) in [(2, true), (usize::MAX, false)] {
+            let journal = journal();
+            let context = OperationContext {
+                project_id: "github.com/richards-llc/cassy".into(),
+                registration_id: "reg-supervisor-alpha-01".into(),
+            };
+            journal.prepare(REQUEST_ID, "claim", &claim(REQUEST_ID, link).input(&context)).unwrap();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let violet = Arc::new(ProxiedDrops { calls: AtomicUsize::new(0), drops });
+            let mut service = ExternalWorkService::new(journal, cloud.clone(), violet.clone(), context);
+            service.violet_reconnect_window = Duration::from_millis(150);
+            let outcome = service.reconcile_due(chrono::Utc::now().timestamp_millis());
+            if succeeds {
+                assert_eq!(outcome.unwrap()[0]["code"], "acquired");
+                assert_eq!(violet.calls.load(Ordering::SeqCst), 3);
+                assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+            } else {
+                let error = outcome.unwrap_err().to_string();
+                assert!(error.contains("authority_unavailable") && error.contains("after retrying"), "{error}");
+                assert!(violet.calls.load(Ordering::SeqCst) > 1);
+                assert_eq!(cloud.posts.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    /// cas-85c1: every production Violet resolver maps proxied outcomes
+    /// through `violet_proxy_outcome`, so the CLI, MCP and daemon paths all
+    /// retry a reconnecting upstream. A new copy of the old mapping fails this.
+    #[test]
+    fn every_violet_resolver_uses_the_shared_proxy_mapping_cas_85c1() {
+        // pin: the resolvers wrap a live ProxyEngine that a unit test cannot
+        // drive into a reconnecting drop, so the shared-mapping contract is
+        // checked on their source; the behaviour is proven by the daemon test.
+        for (path, source) in [
+            ("cli/coordination.rs", include_str!("../cli/coordination.rs")), // pin: CLI resolver
+            ("mcp/tools/service/coordination_external_work.rs", include_str!("../mcp/tools/service/coordination_external_work.rs")), // pin: MCP resolver
+            ("ui/factory/daemon/runtime/external_work_reconcile_jobs.rs", include_str!("../ui/factory/daemon/runtime/external_work_reconcile_jobs.rs")), // pin: daemon resolver
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(production.contains("violet_proxy_outcome(result)"), "{path} must use the shared mapping");
+            assert!(
+                !production.contains("Ok(Ok(value)) => decode_violet_result(value)"),
+                "{path} keeps its own copy of the proxied-outcome mapping"
+            );
+        }
+    }
+
     #[test]
     fn request_is_durable_before_dispatch_and_receipt_is_returned() {
         let journal = journal();
@@ -2150,6 +2386,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reply_intent_explains_occurrence_id_slack_timestamp_cas_be34() {
+        let journal = journal();
+        let service = service(
+            Arc::new(FakeCloud::new(journal.clone())),
+            Arc::new(FakeViolet::ok()),
+            journal,
+        );
+
+        let error = service
+            .execute(reply_intent(REQUEST_ID, Some("1760616000.123456")))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid_request: occurrence_id is optional; use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
+        );
+    }
+
     /// cas-f869 (GH #1272): reply_intent sends Cloud's exact wire request and
     /// hands back violet_post fields built from receipt.reply_intent.id and
     /// its claim generation, never receipt.operation_id. A replay of the same
@@ -2252,6 +2507,41 @@ mod tests {
             assert_eq!((result["code"].as_str(), result["reason"].as_str()), (Some("invalid_response"), Some("claim_expiry_unreadable")));
             assert!(result.get("violet_post").is_none());
         }
+    }
+
+    /// cas-8239 (GH #1300): `cas violet post` takes a managed reply's claim
+    /// fields from the caller's own live reply intent in the journal. Another
+    /// session's intent, another thread, a lapsed claim or a released claim
+    /// yields none, so the hub still refuses the reply.
+    #[test]
+    fn current_reply_post_is_only_the_callers_live_intent_cas_8239() {
+        let case = &fixture("reply_intents")["cases"][0];
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        *cloud.post_result.lock().unwrap() = Ok(case["response"]["payload"].clone());
+        let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal.clone());
+        service.now = before_expiry;
+        let request_id = case["request"]["payload"]["request_id"].as_str().unwrap();
+        service.execute(reply_intent(request_id, Some("00000cc2-1111-4111-8111-000000000cc2"))).unwrap();
+        let (me, root) = ("reg-supervisor-alpha-01", "1760616000.123456");
+
+        let post = journal.current_reply_post(me, root, before_expiry()).unwrap().expect("the live intent");
+        assert_eq!(post["coordination_operation_id"], "00007e91-1111-4111-8111-000000007e91");
+        assert_eq!(post["expected_generation"], 1);
+        assert!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).unwrap().is_none());
+        assert!(journal.current_reply_post(me, "1760616999.000001", before_expiry()).unwrap().is_none());
+        assert!(journal.current_reply_post(me, root, at_expiry()).unwrap().is_none(), "lapsed claim");
+
+        let release = &fixture("release")["cases"][0];
+        *cloud.post_result.lock().unwrap() = Ok(release["response"]["payload"].clone());
+        service
+            .execute(ExternalWorkCommand::ReleaseClaim {
+                resource_id: RESOURCE_ID.into(),
+                expected_generation: 1,
+                request_id: Some(release["request"]["payload"]["request_id"].as_str().unwrap().into()),
+            })
+            .unwrap();
+        assert!(journal.current_reply_post(me, root, before_expiry()).unwrap().is_none(), "released claim");
     }
 
     /// cas-f869: Cloud's refusals pass through with their next step and no

@@ -107,6 +107,17 @@ fn run_cli(
     json: bool,
     gate: &dyn Fn(&Value) -> Option<String>,
 ) -> (String, Result<(), VioletError>) {
+    run_cli_claimed(argv, hub, json, gate, None)
+}
+
+/// [`run_cli`] for a caller whose current reply intent is `claim`.
+fn run_cli_claimed(
+    argv: &[&str],
+    hub: &ScriptedHub,
+    json: bool,
+    gate: &dyn Fn(&Value) -> Option<String>,
+    claim: Option<Value>,
+) -> (String, Result<(), VioletError>) {
     #[derive(clap::Parser)]
     struct Harness {
         #[command(subcommand)]
@@ -121,11 +132,13 @@ fn run_cli(
         shared.0.borrow_mut().connects += 1;
         Ok(Box::new(shared.clone()))
     };
+    let reply_claim = |reply_to: &str| claim.clone().filter(|block| block["reply_to"] == reply_to);
     let mut context = RunContext {
         json,
         raw_args: &raw,
         gate,
         connect: &mut connect,
+        reply_claim: &reply_claim,
     };
     let mut out = Vec::new();
     let result = run_violet(&parsed.command, &mut context, &mut out);
@@ -145,9 +158,11 @@ fn exactly_one_mebibyte_goes_inline_in_one_call() {
     let dir = TempDir::new().unwrap();
     let bytes = vec![b'a'; INLINE_LIMIT as usize];
     let path = write_file(&dir, "edge.txt", &bytes);
-    let hub = ScriptedHub::with(vec![file_receipt("F1", "edge.txt", &bytes)]);
+    let mut receipt = file_receipt("F1", "edge.txt", &bytes);
+    receipt["dispatch_warning"] = json!("shared exclusion is unavailable; last 16:23 by peer; https://slack.test/root");
+    let hub = ScriptedHub::with(vec![receipt]);
 
-    let (_, result) = run_cli(
+    let (out, result) = run_cli(
         &[
             "post",
             "--channel",
@@ -160,12 +175,14 @@ fn exactly_one_mebibyte_goes_inline_in_one_call() {
         &no_gate,
     );
     result.unwrap();
+    assert!(out.contains("[WARN] shared exclusion is unavailable; last 16:23 by peer; https://slack.test/root"));
 
     let calls = hub.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     let (tool, args) = &calls[0];
     assert_eq!(tool, "violet_post");
     assert_eq!(args["kind"], "file");
+    assert!(args.get("request_id").is_none());
     assert_eq!(args["file"]["content_encoding"], "text");
     assert_eq!(args["file"]["size_bytes"], INLINE_LIMIT);
     assert_eq!(args["file"]["sha256"], sha(&bytes));
@@ -755,6 +772,11 @@ fn hub_error_codes_pass_through_and_fail_the_run() {
     );
     assert!(result.is_err());
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), refusal);
+    let contact = json!({"ok":false,"error":{"code":"contact_too_recent","message":"verbose context ".repeat(100),"detail":{"last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z"}}});
+    let hub = ScriptedHub::with(vec![contact]);
+    let (_, result) = run_cli(&["post", "--channel", "dev", "--text", "<@U123> review"], &hub, false, &no_gate);
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("16:23:00") && error.contains("peer-on-prowl") && error.contains("https://example.slack.com/root") && error.contains("17:23:00"));
 }
 
 #[test]
@@ -1206,4 +1228,62 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     // pin: the plain refusal names the thread message and prints the hub's violation fields so an agent can apply the fix without --json
     assert!(error.to_string().contains("(reply 1)\n  - unattached_file (line 1): Report is art-1234abcd."), "{error}");
     assert_eq!(thread.connects(), 0);
+}
+
+/// cas-8239 (GH #1300): a supervisor holding the thread's claim and reply
+/// intent posts a local file into the managed thread with one command; the
+/// intent's fields and a request_id ride on the post (`--request-id` retries
+/// the same reply). Without an intent no fields are invented, and the hub's
+/// managed_reply_required refusal comes back as a failure.
+#[test]
+fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
+    #[derive(clap::Parser)]
+    struct Harness { #[command(subcommand)] command: VioletCommand }
+    let rejected = <Harness as clap::Parser>::try_parse_from([
+        "violet", "post", "--channel", "dev", "--text", "update",
+        "--request-id", "00000091-2222-4222-8222-000000000091",
+    ]).err().expect("request-id is managed-reply-only in Violet's contract");
+    assert_eq!(rejected.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    let dir = TempDir::new().unwrap();
+    let bytes = b"\x89PNG before and after";
+    let path = write_file(&dir, "after.png", bytes);
+    let root = "1760616000.123456";
+    let intent = json!({
+        "channel": "C08COORD01", "reply_to": root,
+        "coordination_operation_id": "00007e91-1111-4111-8111-000000007e91", "expected_generation": 1,
+    });
+    let argv = ["post", "--channel", "gabber-internal", "--reply-to", root, "--file", path.to_str().unwrap()];
+
+    let hub = ScriptedHub::with(vec![file_receipt("F1", "after.png", bytes)]);
+    let (_, result) = run_cli_claimed(&argv, &hub, false, &no_gate, Some(intent.clone()));
+    result.unwrap();
+    let (tool, args) = &hub.calls()[0];
+    assert_eq!(tool, "violet_post");
+    assert_eq!((&args["reply_to"], &args["kind"]), (&json!(root), &json!("file")));
+    assert_eq!(args["coordination_operation_id"], intent["coordination_operation_id"]);
+    assert_eq!(args["expected_generation"], 1);
+    assert!(uuid::Uuid::parse_str(args["request_id"].as_str().unwrap()).is_ok(), "{args}");
+
+    let retry = "00000091-2222-4222-8222-000000000091";
+    let hub = ScriptedHub::with(vec![file_receipt("F1", "after.png", bytes)]);
+    let with_id: Vec<&str> = argv.iter().copied().chain(["--request-id", retry]).collect();
+    run_cli_claimed(&with_id, &hub, false, &no_gate, Some(intent.clone())).1.unwrap();
+    assert_eq!(hub.calls()[0].1["request_id"], retry);
+
+    // cas-d626: past the inline limit a managed reply fails before any call.
+    let big = write_file(&dir, "big.bin", &vec![b'a'; INLINE_LIMIT as usize + 1]);
+    let too_big = ["post", "--channel", "gabber-internal", "--reply-to", root, "--file", big.to_str().unwrap()];
+    let hub = ScriptedHub::with(Vec::new());
+    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert!(error.message.contains(&INLINE_LIMIT.to_string()), "{error}");
+    assert_eq!(hub.connects(), 0);
+
+    let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
+        "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});
+    let hub = ScriptedHub::with(vec![refusal]);
+    let (_, result) = run_cli_claimed(&with_id, &hub, false, &no_gate, None);
+    assert_eq!(result.unwrap_err().code, "managed_reply_required");
+    let args = &hub.calls()[0].1;
+    assert!(args.get("coordination_operation_id").is_none() && args.get("request_id").is_none(), "{args}");
 }

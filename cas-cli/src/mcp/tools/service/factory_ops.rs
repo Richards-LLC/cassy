@@ -193,10 +193,14 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
 fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    // cas-c8de: the account probes and the codex version probe share one
+    // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
-    preflight_account_auth_with(specs, |cli, account_dir| {
-        crate::capability::probe_account_auth(cli, account_dir, deadline)
-    })
+    preflight_account_auth_with(
+        specs,
+        |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+        || installed_codex_version(deadline),
+    )
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -204,6 +208,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
 fn preflight_account_auth_with(
     specs: &[cas_mux::WorkerSpec],
     probe: impl Fn(cas_mux::SupervisorCli, Option<&str>) -> cas_factory::CapabilityEvidence,
+    codex_version: impl Fn() -> Option<String>,
 ) -> Result<(), String> {
     let mut seen: std::collections::BTreeSet<(cas_mux::SupervisorCli, Option<String>)> =
         std::collections::BTreeSet::new();
@@ -239,7 +244,7 @@ fn preflight_account_auth_with(
             crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
         ));
     }
-    preflight_codex_model_support(specs, chrono::Utc::now())
+    preflight_codex_model_support(specs, chrono::Utc::now(), &codex_version)
 }
 
 /// Refuse a Codex spawn whose target account cannot run its model, before any
@@ -253,12 +258,15 @@ fn preflight_account_auth_with(
 fn preflight_codex_model_support(
     specs: &[cas_mux::WorkerSpec],
     now: chrono::DateTime<chrono::Utc>,
+    codex_version: &dyn Fn() -> Option<String>,
 ) -> Result<(), String> {
     use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
     let mut seen = std::collections::BTreeSet::new();
-    // cas-49d3: the codex that will run the worker, probed once and only when
-    // a Codex spec names a model; the catalogue is judged against it.
-    let mut installed_codex: Option<Option<String>> = None;
+    // cas-49d3: the codex that will run the worker, judged against the
+    // catalogue. cas-c8de: probed at most once, and only when a catalogue
+    // would otherwise refuse.
+    let installed_codex: std::cell::OnceCell<Option<String>> = std::cell::OnceCell::new();
+    let installed = || installed_codex.get_or_init(codex_version).clone();
     for spec in specs {
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
@@ -278,9 +286,8 @@ fn preflight_codex_model_support(
         let Some(home) = codex_home_path(account_dir.as_deref()) else {
             continue;
         };
-        let installed = installed_codex.get_or_insert_with(installed_codex_version).as_deref();
         if let CodexModelSupport::Unsupported { catalog, listed } =
-            codex_account_model_support(&home, model, now, installed)
+            codex_account_model_support(&home, model, now, &installed)
         {
             let account = account_dir
                 .as_deref()
@@ -299,13 +306,13 @@ fn preflight_codex_model_support(
 }
 
 /// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
-/// bounded so a hung binary cannot stall a spawn; `None` when it cannot be read.
-fn installed_codex_version() -> Option<String> {
-    let budget = std::time::Duration::from_secs(3);
+/// bounded by the preflight's own deadline (cas-c8de) so a hung binary
+/// cannot stall a spawn; `None` when it cannot be read in time.
+fn installed_codex_version(deadline: crate::bounded_process::Deadline) -> Option<String> {
     let output = crate::bounded_process::run_command(
         std::process::Command::new("codex").arg("--version"),
-        crate::bounded_process::Deadline::after(budget),
-        budget,
+        deadline,
+        std::time::Duration::from_secs(3),
     )
     .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -2335,6 +2342,11 @@ impl CasService {
             .filter(|brief| !brief.is_empty())
             .map(str::to_string);
         if let Some(brief) = spawn_brief.as_deref() {
+            if let Some(message) =
+                crate::mcp::tools::core::task::caller_note_marker_rejection(brief)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+            }
             if req.task_id.is_none() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
@@ -3795,29 +3807,18 @@ impl CasService {
             ));
         };
 
-        // Hold semantics deliberately cancel rather than suspend: reminders
-        // are one-shot watchdogs whose original timing and event context are
-        // stale once a supervisor has explicitly parked the worker. Release
-        // restores normal future signaling but never resurrects old waits.
-        let cancelled_reminders = if held {
-            let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to open reminder store: {error}"),
-                )
-            })?;
-            reminders
-                .cancel_pending_for_target(&worker.id)
-                .map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to cancel pending worker reminders: {error}"),
-                    )
-                })?
-        } else {
-            0
-        };
-
+        // cas-73b89: a hold suspends the worker's reminders and release
+        // re-arms them. Cancelling them left a released worker with no wake:
+        // kind-hound-79 sat idle for about an hour after a one-minute hold.
+        // cas-c5ab: the hold state is persisted first, so a failed write
+        // leaves the reminders untouched; a failed reminder update rolls the
+        // hold state back.
+        let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open reminder store: {error}"),
+            )
+        })?;
         let path = metadata_path(&factory_session);
         persist_session_metadata_worker_hold_at(&path, worker_name, held).map_err(|error| {
             Self::error(
@@ -3825,6 +3826,24 @@ impl CasService {
                 format!("Failed to update worker hold state: {error}"),
             )
         })?;
+        let updated = if held {
+            reminders.suspend_pending_for_target(&worker.id)
+        } else {
+            reminders.resume_suspended_for_target(&worker.id)
+        };
+        let reminder_count = match updated {
+            Ok(count) => count,
+            Err(error) => {
+                let rollback = persist_session_metadata_worker_hold_at(&path, worker_name, !held)
+                    .err()
+                    .map(|rollback| format!("; restoring the hold state also failed: {rollback}"))
+                    .unwrap_or_default();
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to update the worker's reminders: {error}{rollback}"),
+                ));
+            }
+        };
 
         let event_type = if held {
             "worker_hold_armed"
@@ -3843,10 +3862,12 @@ impl CasService {
         let verb = if held { "Held" } else { "Released" };
         let reminder_summary = if held {
             format!(
-                " Cancelled {cancelled_reminders} pending reminder(s) targeted to this worker; release does not revive cancelled one-shot reminders."
+                " Suspended {reminder_count} pending reminder(s) targeted to this worker; release_worker re-arms them."
             )
         } else {
-            String::new()
+            format!(
+                " Re-armed {reminder_count} suspended reminder(s); any whose event or time came during the hold fires on the next daemon tick."
+            )
         };
         Ok(Self::success(format!(
             "{verb} worker {worker_name} for factory session {factory_session}. Hold state survives a daemon restart of this session and is cleared on worker removal or session shutdown.{reminder_summary}"
@@ -10576,12 +10597,74 @@ pub(crate) fn worker_auth_failure_evidence(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> crate::factory_auth_health::AuthFailureEvidence {
-    use crate::factory_auth_health::AuthFailureEvidence;
-    let cli = worker_cli_from_agent(agent);
-    let Some(transcript) = worker_transcript_path_for_agent(cas_root, agent) else {
-        return AuthFailureEvidence::Unavailable;
+    auth_failure_evidence_at(
+        worker_transcript_path_for_agent(cas_root, agent).as_deref(),
+        worker_cli_from_agent(agent),
+    )
+}
+
+/// GH #1319: account health of a supervisor's own harness, read from its
+/// transcript. A logged-out supervisor heartbeats like a healthy one while
+/// every turn it is given ends in "Login expired · Please run /login".
+pub(crate) fn supervisor_auth_failure_evidence(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    let cli = agent
+        .metadata
+        .get("supervisor_cli")
+        .and_then(|value| value.parse::<cas_mux::SupervisorCli>().ok())
+        .unwrap_or(cas_mux::SupervisorCli::Claude);
+    let project = agent
+        .metadata
+        .get("clone_path")
+        .filter(|path| !path.trim().is_empty())
+        .cloned()
+        .or_else(|| cas_root.parent().map(|path| path.to_string_lossy().into_owned()));
+    let transcript = resolve_worker_transcript_path_for_account(
+        project.as_deref(),
+        agent.cc_session_id.as_deref().unwrap_or(&agent.id),
+        cli,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+    );
+    // cas-2db0: this runs on every presence heartbeat. Re-read the tail only
+    // when the transcript's mtime or size moved since the last beat.
+    type Seen = (std::time::SystemTime, u64, crate::factory_auth_health::AuthFailureEvidence);
+    static SCANS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Seen>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let Some(path) = transcript else {
+        return auth_failure_evidence_at(None, cli);
     };
-    let Some(tail) = read_transcript_tail(&transcript) else {
+    let stamp = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+    if let Some((modified, len)) = stamp
+        && let Some((seen_modified, seen_len, evidence)) =
+            SCANS.lock().ok().and_then(|scans| scans.get(&path).cloned())
+        && (seen_modified, seen_len) == (modified, len)
+    {
+        return evidence;
+    }
+    let evidence = auth_failure_evidence_at(Some(&path), cli);
+    if let (Some((modified, len)), Ok(mut scans)) = (stamp, SCANS.lock()) {
+        // cas-ceeb: one entry per supervisor transcript this process has
+        // seen; a session churn past the bound starts the cache afresh.
+        const MAX_SCANS: usize = 64;
+        if scans.len() >= MAX_SCANS && !scans.contains_key(&path) {
+            scans.clear();
+        }
+        scans.insert(path, (modified, len, evidence.clone()));
+    }
+    evidence
+}
+
+fn auth_failure_evidence_at(
+    transcript: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    use crate::factory_auth_health::AuthFailureEvidence;
+    let Some(tail) = transcript.and_then(read_transcript_tail) else {
         return AuthFailureEvidence::Unavailable;
     };
     match cli {
@@ -10610,15 +10693,7 @@ pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
 /// Bounded tail read shared by the transcript scanners. A transcript can grow
 /// without limit; the terminal records that matter are always at its end.
 fn read_transcript_tail(path: &std::path::Path) -> Option<String> {
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let metadata = std::fs::metadata(path).ok()?;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let mut file = std::fs::File::open(path).ok()?;
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail).ok()?;
-    Some(tail)
+    super::worker_liveness::read_jsonl_tail(path, 256 * 1024).map(|(_, tail)| tail)
 }
 
 fn codex_rollout_reports_usage_limit(
@@ -10641,26 +10716,16 @@ fn codex_rollout_usage_limit_evidence(
     let Some(rollout) = rollout else {
         return UsageLimitEvidence::Unavailable;
     };
-    let Ok(metadata) = std::fs::metadata(rollout) else {
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let Some((start, tail)) = super::worker_liveness::read_jsonl_tail(rollout, 256 * 1024) else {
         return UsageLimitEvidence::Unavailable;
     };
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let Ok(mut file) = std::fs::File::open(rollout) else {
-        return UsageLimitEvidence::Unavailable;
-    };
-    use std::io::{Read, Seek, SeekFrom};
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
-    let mut tail = String::new();
-    if file.read_to_string(&mut tail).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
     // Rollouts are append-only JSONL.  A limit line that is followed by a
     // successful terminal turn is historical rollout text, not a live outage.
-    // Keep the record timestamp (or its byte offset as a legacy fallback) as
-    // the durable episode identity used by daemon restarts and retry keys.
+    // Keep the record timestamp as the durable episode identity used by daemon
+    // restarts and retry keys. A legacy record without one falls back to
+    // `tail-<window start + line index>`: a position within the read window,
+    // not a byte offset, counting from the first whole line after the cut.
     let mut latest_terminal = None;
     for (line_index, line) in tail.lines().enumerate() {
         let limited = line.contains("You've hit your usage limit")
@@ -11576,17 +11641,8 @@ fn transcript_path_fast_in(
 /// Returns `None` when the file can't be opened, the tail has no parseable
 /// assistant entry with a `usage` field, or any I/O error occurs.
 pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-
-    const TAIL_BYTES: u64 = 8192;
-    let start = file_len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     // Scan in reverse: the last assistant entry with usage is the freshest.
     for line in buf.lines().rev() {
@@ -11634,23 +11690,9 @@ fn read_context_usage_from_tail_for_cli(
         });
     }
 
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-    const TAIL_BYTES: u64 = 8192;
-    file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
-        .ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    // A bounded seek can land on one of the at most three continuation
-    // bytes of a UTF-8 code point. Drop only that incomplete leading scalar;
-    // invalid UTF-8 anywhere else still fails closed as a malformed rollout.
-    let buf = (0..=3).find_map(|offset| {
-        bytes
-            .get(offset..)
-            .and_then(|tail| std::str::from_utf8(tail).ok())
-    })?;
+    // cas-189b: the shared bounded reader drops the line the seek cut, so a
+    // split code point there cannot hide usage.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     for line in buf.lines().rev() {
         if !line.contains("\"type\":\"token_count\"") {
@@ -12107,10 +12149,48 @@ mod spawn_lifecycle_tests {
         ).unwrap();
         let error = preflight_account_auth_with(&specs, |_, _| {
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
         assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
         assert!(error.contains("No worktree was created"), "{error}");
+    }
+
+    /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
+    /// client (prowl's ChatGPT.app 0.146) cannot refuse a model the installed
+    /// codex (0.163, printed with a trailing build token) runs. The version
+    /// probe runs once, and not at all when the catalogue lists the model.
+    #[test]
+    fn an_older_client_cache_does_not_refuse_the_spawn_cas_c8de() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        let (specs, _, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let model = specs[0].model.clone().unwrap();
+        let cache = |client: &str, slug: &str| {
+            std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+                "fetched_at": chrono::Utc::now(), "client_version": client, "models": [{"slug": slug}]
+            }).to_string()).unwrap();
+        };
+        let probes = std::cell::Cell::new(0);
+        let logged_in = |_: cas_mux::SupervisorCli, _: Option<&str>| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        };
+        let installed = || {
+            probes.set(probes.get() + 1);
+            Some("codex-cli 0.163.0 (abc1234)".to_string())
+        };
+
+        cache("0.146.0", "gpt-5.6-sol");
+        preflight_account_auth_with(&specs, logged_in, installed).expect("an older client's cache cannot refuse");
+        assert_eq!(probes.get(), 1);
+        cache("0.146.0", "gpt-5.6-sol");
+        assert!(preflight_account_auth_with(&specs, logged_in, || None).is_err(), "unknown installed codex keeps the verdict");
+        probes.set(0);
+        cache("0.146.0", &model);
+        preflight_account_auth_with(&specs, logged_in, installed).unwrap();
+        assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
     #[test]
@@ -12121,7 +12201,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "Codex login status reports no authenticated account",
             )
-        })
+        }, || None)
         .expect_err("a logged-out account must refuse the spawn");
         assert!(error.contains("~/.codex-alt"), "{error}");
         assert!(error.contains("codex login"), "{error}");
@@ -12140,7 +12220,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "logged out",
             )
-        })
+        }, || None)
         .expect_err("refusal expected");
         assert!(error.contains("~/.codex"), "{error}");
     }
@@ -12157,13 +12237,13 @@ mod spawn_lifecycle_tests {
                     cas_factory::CapabilityAvailability::Unknown,
                     "Codex login status probe timed out",
                 )
-            })
+            }, || None)
             .is_ok()
         );
         assert!(
             preflight_account_auth_with(&specs, |_, _| {
                 evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-            })
+            }, || None)
             .is_ok()
         );
     }
@@ -12187,7 +12267,7 @@ mod spawn_lifecycle_tests {
             );
             calls.fetch_add(1, Ordering::SeqCst);
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        })
+        }, || None)
         .expect("healthy accounts pass");
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -17951,6 +18031,47 @@ effort = "high"
         assert!(ambiguous_output.contains(&first_rel));
         assert!(ambiguous_output.contains(&second_rel));
         assert!(ambiguous_output.contains("Likely synthesized:"));
+    }
+
+    /// cas-ceeb, cas-b76b: a transcript over 256 KiB whose tail starts in the
+    /// middle of a UTF-8 character still reads. A Claude transcript ending in
+    /// the real "Login expired" refusal classifies as an account failure; a
+    /// Codex rollout ending in an out-of-credit turn classifies as limited.
+    #[test]
+    fn a_long_transcript_cut_mid_character_still_detects_the_logout() {
+        const TAIL: usize = 256 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        // A '界' run whose 256 KiB tail starts one byte into a character.
+        let long = |name: &str, record: &str| {
+            let run = "界".repeat(100_000);
+            let pad = (0..3)
+                .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
+                .unwrap();
+            let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
+            assert!(!body.is_char_boundary(body.len() - TAIL), "the fixture must cut a character");
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let claude = long(
+            "session.jsonl",
+            r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#,
+        );
+        assert!(
+            auth_failure_evidence_at(Some(&claude), cas_mux::SupervisorCli::Claude).failed(),
+            "a logged-out supervisor with a long transcript must be detected"
+        );
+        let codex = long(
+            "rollout.jsonl",
+            r#"{"timestamp":"2026-10-20T19:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        );
+        assert!(
+            matches!(
+                codex_rollout_usage_limit_evidence(Some(&codex), cas_mux::SupervisorCli::Codex),
+                UsageLimitEvidence::Limited { .. }
+            ),
+            "an out-of-credit worker with a long rollout must be detected"
+        );
     }
 
     #[test]

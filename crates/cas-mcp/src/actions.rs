@@ -75,6 +75,8 @@ pub const RULE_ACTIONS: &[&str] = &[
     "harmful",
     "sync",
     "check_similar",
+    "observe",
+    "candidates",
 ];
 
 pub const SKILL_ACTIONS: &[&str] = &[
@@ -238,7 +240,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
 /// Verification actions dispatched only in builds with the `mcp-proxy` feature.
 pub const VERIFICATION_PROXY_ACTIONS: &[&str] = &["external_verify"];
 
-pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "post"];
+pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "fetch", "post"];
 
 pub const KNOWLEDGE_ACTIONS: &[&str] = &["search", "read", "write", "list", "status"];
 

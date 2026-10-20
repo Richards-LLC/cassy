@@ -46,6 +46,18 @@ impl Config {
         };
 
         match key {
+            "slack.stakeholder_contacts" => {
+                let policies: Vec<StakeholderContactPolicy> = serde_json::from_str(value)
+                    .map_err(|error| MemError::Parse(format!("Invalid stakeholder_contacts JSON: {error}")))?;
+                let mut seen = std::collections::BTreeSet::new();
+                for policy in &policies {
+                    policy.validate().map_err(MemError::Parse)?;
+                    if !seen.insert((&policy.workspace_id, &policy.user_id)) {
+                        return Err(MemError::Parse("Duplicate stakeholder workspace/user policy".into()));
+                    }
+                }
+                self.slack.get_or_insert_with(Default::default).stakeholder_contacts = policies;
+            }
             "factory.commander_mirror_enabled" => {
                 self.factory.get_or_insert_with(Default::default).commander_mirror_enabled =
                     value.parse().map_err(|_| MemError::Parse(
@@ -57,6 +69,13 @@ impl Config {
                     .get_or_insert_with(Default::default)
                     .tailscale_serve = Some(value.parse().map_err(|_| {
                     MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
+                })?);
+            }
+            "viktor.enabled" => {
+                self.viktor
+                    .get_or_insert_with(ViktorConfig::default)
+                    .enabled = Some(value.parse().map_err(|_| {
+                    MemError::Parse("Invalid boolean for viktor.enabled".into())
                 })?);
             }
             "slack.transport" => {
@@ -292,6 +311,14 @@ impl Config {
                         "Invalid integer value for factory.supervisor_queue_retention_days: {value}"
                     ))
                 })?;
+            }
+            "factory.supervisor_message_debounce_secs" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_debounce_secs: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_debounce_secs = number;
+            }
+            "factory.supervisor_message_wakes_per_hour" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_wakes_per_hour: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_wakes_per_hour = number;
             }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);

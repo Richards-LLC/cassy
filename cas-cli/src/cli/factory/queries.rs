@@ -770,19 +770,13 @@ pub(super) fn execute_message(
         target.to_string()
     };
 
-    let queue = open_prompt_queue_store(&cas_root)?;
-    let payload = if no_wrap {
-        message.to_string()
-    } else {
-        let response_hint = crate::ui::factory::external_response_hint(&cas_root, from);
-        format!("{}\n\n{}", message.trim_end(), response_hint)
-    };
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let message_id = if let Some(ref session) = factory_session {
-        queue.enqueue_with_session(from, &resolved_target, &payload, session)?
-    } else {
-        queue.enqueue(from, &resolved_target, &payload)?
-    };
+    let message_id = crate::ui::factory::enqueue_external_message(
+        &cas_root,
+        from,
+        &resolved_target,
+        message,
+        no_wrap,
+    )?;
 
     let mut ack_event_id: Option<i64> = None;
     if wait_ack {

@@ -1,3 +1,4 @@
+use super::audit;
 use crate::mcp::tools::core::imports::*;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::worktree::GitOperations;
@@ -49,6 +50,7 @@ impl TaskLifecycleGateError {
 
 pub(crate) mod close_ops;
 mod epic_lane;
+mod epic_overlap;
 pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
@@ -162,6 +164,22 @@ fn publish_parked_delivery_branch(
     )
 }
 
+/// The declared target eligible for a first-start branch reset. Assignment
+/// passes its proposed final status; start passes the persisted status, so a
+/// batched ownership/status update cannot promise a reset that start will skip.
+pub(crate) fn initial_factory_branch_reset_target(
+    task: &Task,
+    status: TaskStatus,
+) -> Option<&cas_types::WorkTarget> {
+    if status != TaskStatus::Open
+        || task.deliverables.factory_branch_anchor.is_some()
+        || !task.deliverables.historical_factory_branch_anchors.is_empty()
+    {
+        return None;
+    }
+    task.deliverables.work_target.as_ref()
+}
+
 /// Keep a reused worker branch from silently carrying a prior task into a new
 /// target. A branch whose old tip is already reachable from the target is safe
 /// to reset; an unrelated tip is refused with the exact repair command.
@@ -179,9 +197,6 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
     let git = GitOperations::new(repo_root);
-    let target_tip = git.ref_sha(target_branch).map_err(|error| {
-        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
-    })?;
     let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
@@ -208,12 +223,22 @@ fn reconcile_reused_factory_branch(
         ));
     }
 
+    // cas-21db: another merge can land after assignment or the worker's
+    // manual sync. Resolve the current target here, after the dirty check,
+    // using the existing bounded fetch and local-only/offline fallback.
+    let target = git.resolve_fresh_base(target_branch).map_err(|error| {
+        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
+    })?;
+    let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
+        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
+    })?;
+
     if target_tip == factory_tip {
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
-        git.reset_hard_in_dir(worktree_path, target_branch)
+        git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
                     "Cannot reset reused factory branch {expected_branch} to `{target_branch}`: {error}"
@@ -238,7 +263,7 @@ fn reconcile_reused_factory_branch(
                 String::from_utf8_lossy(&kept.stderr).trim()
             ));
         }
-        git.reset_hard_in_dir(worktree_path, target_branch)
+        git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
                     "Cannot move parked factory branch {expected_branch} to `{target_branch}`: {error}"
@@ -712,11 +737,14 @@ struct OpenTaskOverlap {
 /// A child created with `epic=X` naturally repeats X's identifiers, so X is
 /// never a duplicate candidate for its own child. X's other children are still
 /// compared, but a match among them only warns.
+/// Epic creates exclude epic candidates here: the project-wide epic matcher
+/// already owns those, while feature/task/bug candidates still need this gate.
 fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
     description: &str,
     epic_id: Option<&str>,
+    exclude_epics: bool,
 ) -> Result<OpenTaskOverlap, String> {
     let siblings: std::collections::HashSet<String> = match epic_id {
         Some(epic) => task_store
@@ -732,6 +760,7 @@ fn open_task_similarity(
     for task in task_store.list(None).map_err(|error| error.to_string())? {
         if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
             || epic_id == Some(task.id.as_str())
+            || (exclude_epics && task.task_type == TaskType::Epic)
         {
             continue;
         }
@@ -939,6 +968,17 @@ impl CasCore {
         confirm_warning: bool,
         delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = [req.notes.as_deref(), req.reason.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(super::caller_note_marker_rejection)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         let task_store = self.open_task_store()?;
 
         let id = task_store.generate_id().map_err(|e| McpError {
@@ -1019,6 +1059,19 @@ impl CasCore {
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
         if !confirm_warning {
+            let mut blocking_warnings = Vec::new();
+            if task_type == TaskType::Epic {
+                let warning = epic_overlap::warning(
+                    self, task_store.as_ref(), &req.title,
+                    req.description.as_deref().unwrap_or_default(),
+                ).await.map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message), data: None,
+                })?;
+                if let Some(message) = warning {
+                    blocking_warnings.push(message);
+                }
+            }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
@@ -1042,11 +1095,14 @@ impl CasCore {
                 }
             }
 
+            // Epic admission owns epic-to-epic comparisons. Keep checking
+            // features, tasks and bugs for every create, including epics.
             let overlap = open_task_similarity(
                 task_store.as_ref(),
                 &req.title,
                 req.description.as_deref().unwrap_or_default(),
                 epic_id.as_deref(),
+                task_type == TaskType::Epic,
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -1066,13 +1122,16 @@ impl CasCore {
             if let Some(existing) = &overlap.blocking {
                 let (existing_id, existing_title, score, _) = existing;
                 let (identifier_note, overlap_subject) = overlap_description(existing);
+                blocking_warnings.push(format!(
+                    "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
+                     at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                    score * 100.0,
+                ));
+            }
+            if !blocking_warnings.is_empty() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
-                         at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
-                        score * 100.0,
-                    )),
+                    message: Cow::from(blocking_warnings.join("\n\n")),
                     data: None,
                 });
             }
@@ -1624,17 +1683,17 @@ impl CasCore {
             })?
         };
 
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             tasks
                 .iter()
-                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|task| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            tasks.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+            tasks.retain(|task| project_scope.shows(task));
         }
 
         // Apply sorting. cas-06f9 (GH #104): unspecified means priority order
@@ -1818,20 +1877,9 @@ impl CasCore {
             }
 
             let now = chrono::Utc::now();
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let parked_branch = task
-                .deliverables
-                .parked_branch
-                .as_deref()
+            let parked_branch = task.deliverables.parked_branch.as_deref()
                 .unwrap_or("the parked factory branch");
-            let audit = format!(
-                "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
-                 {parked_branch} was flagged with a merge conflict or its conflict \
-                 preflight could not be evaluated, so the task is back in_progress for \
-                 the assigned worker to inspect from inside the worker worktree. Rebase \
-                 {parked_branch} onto the current integration target tip, push the \
-                 rebased factory branch, and re-park it with merge_request=true."
-            );
+            let audit = audit::merge_recovery_note(now, parked_branch);
             task.notes = if task.notes.is_empty() {
                 audit
             } else {
@@ -1864,12 +1912,7 @@ impl CasCore {
             .unwrap_or(false);
 
         let reused_factory_branch_reset = if is_worker
-            && task.status == TaskStatus::Open
-            && task.deliverables.factory_branch_anchor.is_none()
-            && task
-                .deliverables
-                .historical_factory_branch_anchors
-                .is_empty()
+            && initial_factory_branch_reset_target(&task, task.status).is_some()
         {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
@@ -1879,10 +1922,31 @@ impl CasCore {
                 if let Some(context) = declared_repo_context.as_ref() {
                     let target_repo_root = &context.repo_root;
                     let target_branch = &context.target_branch;
+                    let worker_checkout = worker
+                        .metadata
+                        .get("clone_path")
+                        .map(std::path::Path::new)
+                        .unwrap_or(target_repo_root);
+                    let (worker_repo_root, _) = super::repo_context::git_layout(worker_checkout)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INVALID_PARAMS,
+                                format!("Cannot inspect worker checkout before task start: {error}"),
+                            )
+                        })?;
+                    if !super::repo_context::repo_answers_to(
+                        &worker_repo_root,
+                        &context.repo_selector,
+                    ) {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            "Cannot start task: worker checkout belongs to another repository",
+                        ));
+                    }
                     let worker_branch =
                         crate::factory_isolation::expected_worker_branch(&worker.name);
                     match reconcile_reused_factory_branch(
-                        target_repo_root,
+                        worker_checkout,
                         &worker_branch,
                         &target_branch,
                         |tip| {
@@ -1907,7 +1971,7 @@ impl CasCore {
                              {worker_branch} was reset to `{target_branch}` for this task. \
                              Don't force-push {worker_branch} while a PR is open on it.{}",
                             publish_parked_delivery_branch(
-                                target_repo_root,
+                                worker_checkout,
                                 &task_id,
                                 delivery_branch.as_deref(),
                             ),
@@ -4200,6 +4264,149 @@ mod related_recall_response_tests {
             format!("Created task: {} - Unique no-match epic (P2)", task.id),
             "no-match receipt must remain byte-identical to the legacy response"
         );
+    }
+
+    /// GH #1316: the reworded cas-04f4 plan must see the peer's cas-e88d
+    /// before any local task is written, even when the epic is only in Cloud.
+    #[tokio::test]
+    async fn reworded_epic_warns_before_write_for_cloud_peer_scope_cas_dea7() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_SESSION_ID", Some("proud-cheetah-76")),
+            ("CAS_AGENT_NAME", Some("proud-cheetah-76")),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        let scope = "Map the live product and retire superseded legacy flows flags and code paths using 38 removal decisions from the live-product map.";
+        let title = "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them";
+        let mut epic = Task::new("cas-e88d".into(), "EPIC: Live-product cleanup — 10 live problems + removal decisions from the live-product map".into());
+        epic.task_type = TaskType::Epic;
+        epic.origin_project = Some("gabber-studio".into());
+        epic.description = scope.into();
+        epic.epic_verification_owner = Some("patient-badger-31".into());
+        let mut child = Task::new("cas-open-child".into(), "Retire superseded legacy routes".into());
+        child.origin_project = Some("gabber-studio".into());
+        let mut closed = child.clone();
+        closed.id = "cas-closed-child".into();
+        closed.status = TaskStatus::Closed;
+        let mut completed = epic.clone();
+        completed.id = "cas-completed-plan".into();
+        completed.title = title.into();
+        completed.status = TaskStatus::Closed;
+        let mut foreign = epic.clone();
+        foreign.id = "cas-foreign-plan".into();
+        foreign.title = title.into();
+        foreign.origin_project = Some("another-project".into());
+        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone(), completed.clone(), foreign.clone()].into_iter().map(|task| {
+            let mut raw = serde_json::to_value(task).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
+        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id| {
+            let edge = crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild);
+            let mut raw = serde_json::to_value(edge).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
+        for (collection, rows) in [("tasks", serde_json::json!(tasks)), ("task_dependencies", serde_json::json!(edges))] {
+            Mock::given(method("GET")).and(path("/api/teams/team-1/sync/pull"))
+                .and(query_param("project_id", "gabber-studio")).and(query_param("types", collection))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({(collection):rows})))
+                .expect(1)
+                .mount(&server).await;
+        }
+        let request = epic_request(
+            title,
+            &format!("The current flow is the product. {scope}"),
+        );
+        let warning = core.cas_task_create(Parameters(request.clone())).await
+            .expect_err("the peer's reworded open epic must warn before writing");
+        for required in ["EPIC", "cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
+        assert!(store.list(None).unwrap().is_empty(), "warning must not persist the new epic or pulled inventory");
+        // The same check also works offline against the local inventory.
+        crate::cloud::CloudConfig::default().save_to_cas_dir(root).unwrap();
+        for task in [&epic, &child, &closed, &completed, &foreign] {
+            store.add(task).unwrap();
+        }
+        store.add_dependency(&crate::types::Dependency::new(child.id.clone(), epic.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        let local_warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        assert!(local_warning.message.contains("cas-e88d") && local_warning.message.contains("cas-open-child"), "{local_warning:?}");
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 6, "explicit confirmation permits the intentional epic");
+        // Terminal plans and foreign scopes do not block a new plan.
+        for mut task in store.list(None).unwrap() {
+            if task.id != foreign.id {
+                task.status = TaskStatus::Closed;
+                store.update(&task).unwrap();
+            }
+        }
+        core.cas_task_create(Parameters(epic_request(title, scope))).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn epic_create_preserves_open_feature_duplicate_warning_cas_dea7() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let scope = "Migrate refund readers in payments.service.ts:412 and refunds.controller.ts:88 to read paymentIntentId from the payments table";
+        let mut feature = described_task_request("Consolidate paymentIntentId refund readers", scope);
+        feature.task_type = "feature".into();
+        core.cas_task_create(Parameters(feature)).await.unwrap();
+        let warning = core.cas_task_create(Parameters(epic_request(
+            "EPIC: unify refund payment lookup", scope,
+        ))).await.expect_err("epic creation must still check open features");
+        assert!(warning.message.contains("DUPLICATE TASK WARNING") && warning.message.contains("Consolidate paymentIntentId refund readers"), "{warning:?}");
+        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), 1, "refusal must not create the epic");
+    }
+
+    #[tokio::test]
+    async fn epic_create_requires_confirmation_when_cloud_inventory_is_unavailable_cas_dea7() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut local = Task::new("cas-local-search".into(), "Restore the product search index".into());
+        local.task_type = TaskType::Epic;
+        local.epic_verification_owner = Some("search-supervisor".into());
+        store.add(&local).unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
+            .expect(1).mount(&server).await;
+        let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
+        let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert_eq!(store.list(None).unwrap().len(), 1, "outage and local overlap must both be reported before writing");
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 2);
     }
 
     #[tokio::test]

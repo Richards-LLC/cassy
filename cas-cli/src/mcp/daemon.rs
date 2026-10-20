@@ -304,7 +304,58 @@ pub(crate) fn register_session_start_agent(
         persisted.registered_at = Utc::now();
         store.update(&persisted)?;
     }
+    recover_supervisor_verification_dispatches(cas_root, store, &persisted);
     Ok((persisted, reused))
+}
+
+/// Both trusted hook registration and native MCP bootstrap use this path.
+/// Public registration never grants dispatch recovery authority.
+pub(crate) fn recover_supervisor_verification_dispatches(
+    cas_root: &std::path::Path,
+    store: &dyn crate::store::AgentStore,
+    supervisor: &Agent,
+) {
+    if supervisor.role != AgentRole::Supervisor {
+        return;
+    }
+    let local_machine = Agent::get_or_generate_machine_id();
+    if supervisor.machine_id.as_deref() != Some(local_machine.as_str())
+        || supervisor
+            .factory_session
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+    {
+        return;
+    }
+    let recover = || -> crate::store::Result<()> {
+        let dead_owners: Vec<_> = store
+            .list(None)?
+            .into_iter()
+            .filter(|prior| {
+                prior.id != supervisor.id
+                    && prior.role == AgentRole::Supervisor
+                    // A remote PID has no meaning in this host's process table.
+                    // Scope must be established before any liveness probe.
+                    && prior.machine_id.as_deref() == Some(local_machine.as_str())
+                    && prior.factory_session == supervisor.factory_session
+                    && (prior.status == AgentStatus::Shutdown
+                        || matches!(
+                            evaluate_liveness(prior, pid_alive, pid_matches_fingerprint),
+                            LivenessOutcome::Dead { .. }
+                        ))
+            })
+            .collect();
+        cas_store::adopt_orphaned_verification_dispatches(
+            cas_root,
+            &supervisor.id,
+            &dead_owners,
+            Utc::now() + chrono::Duration::minutes(10),
+        )?;
+        Ok(())
+    };
+    if let Err(error) = recover() {
+        tracing::warn!(supervisor_id = %supervisor.id, %error, "orphaned verification recovery failed; registration continues");
+    }
 }
 
 /// Extension trait for EmbeddedDaemonConfig to convert to DaemonConfig

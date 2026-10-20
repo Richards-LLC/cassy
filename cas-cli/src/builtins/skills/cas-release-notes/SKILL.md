@@ -1,6 +1,6 @@
 ---
 name: cas-release-notes
-description: Use when a merge reaches staging or main, or when the user asks to draft or post release notes, Slack updates, or a release-notes rubric.
+description: Use when a merge reaches staging or main, or when asked to draft or post release notes for the team or for customers, Slack updates or a release-notes rubric.
 metadata:
   managed_by: cas
 ---
@@ -17,7 +17,10 @@ Use the project's release rubric as the contract. The procedure is:
 2. **Gather the merge.** Read the merged change set, for example
    `gh pr view <n> --json title,body,commits,files`. Describe what changed for
    the person on the other side of the screen, not an inventory of touched
-   files.
+   files. For each user-facing delivery, read its
+   `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/pairs.json` when it
+   exists. The template's before/after screenshots rule decides which images
+   go out, including for a project rubric copied before that rule existed.
 3. **Draft the messages from the rubric.** Follow its deploy-target label,
    audience labels, Was → Now format, thread count, reply count and Slack
    mrkdwn shape. Put one punch in each top-level message and the supporting

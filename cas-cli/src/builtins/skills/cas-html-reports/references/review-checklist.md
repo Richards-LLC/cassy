@@ -31,6 +31,8 @@ markdown says exactly what the HTML says.**
 
 - [ ] Every section, finding, number, and caveat in the markdown appears in the HTML.
 - [ ] No conclusion was softened, sharpened, or invented during rendering.
+- [ ] Every Was → Now change with a complete before/after pair shows it, labelled Before and After;
+      no change shows a lone, one-sided or mocked screenshot.
 - [ ] The HTML links to its markdown source by relative path.
 - [ ] Both files are staged in the same commit.
 

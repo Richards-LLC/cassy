@@ -7,9 +7,14 @@ metadata:
 
 # Factory Worker
 
-Each assignment authorizes and requires the fewest affected tests ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)); `CONTRIBUTING` names the commands.
-Workers close their own tasks; never ask the supervisor to close for you.
-Docs-only and no-code tasks prove their acceptance check; don't add code tests.
+Factory workers run the targeted tests for their change themselves. Every task
+assignment authorizes and requires the fewest tests that fail without the change,
+a few that each prove one behaviour
+([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)), and running its affected
+targeted tests. A case added to an existing test file satisfies `test-first`. Workers close their own tasks; never ask the supervisor to close
+your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
+acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
+artifact); don't add code tests to them.
 
 Execute one assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
@@ -61,7 +66,7 @@ use assigned work; `ready` and `available` are backlog
   and handoffs to `target=supervisor`.
 - Use `kind=status` for actionable updates that allow work to continue, or
   `kind=ready` for completed work awaiting coordination: these request a typed action wake.
-  Ordinary updates stay inbox-only.
+  Send receipts with `kind=receipt`, or use `wake=false` for an FYI that can wait.
 - Never block the pane: run long commands in the background with a log.
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
@@ -127,5 +132,6 @@ need: <what the supervisor must do, one line, or none>
 ```
 
 Coordination uses the literal string `supervisor` and both `summary` and `message`.
-Authenticated typed blocker, merge, status/ready, verification or lifecycle
-events may wake an idle supervisor. Text alone stays inbox-only; proof stays in notes.
+Directed messages wake an idle supervisor after debounce and pair rate limits.
+Receipts, pure acknowledgements, broadcasts and `wake=false` wait in the inbox
+on the next turn; proof stays in notes.

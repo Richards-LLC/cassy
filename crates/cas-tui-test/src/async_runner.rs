@@ -556,11 +556,22 @@ mod tests {
     async fn test_async_wait_stable() {
         let mut runner = AsyncPtyRunner::new();
         runner
-            .spawn("echo", &["quick output"])
+            // Hold startup output until explicitly released, so a quiet
+            // initial PTY cannot accidentally stand in for output readiness.
+            .spawn(
+                "sh",
+                &["-c", "read -r signal; echo 'quick output'; read -r signal"],
+            )
             .await
             .expect("spawn failed");
 
-        // Wait for output to stabilize
+        runner.send_input("\n").await.expect("release output failed");
+        // Silence before the child starts is stable too. Wait for the
+        // expected output before testing stability, independent of scheduling.
+        runner
+            .wait_for_text("quick output", Duration::from_secs(5))
+            .await
+            .expect("output readiness failed");
         runner
             .wait_stable(Duration::from_millis(200))
             .await
@@ -568,6 +579,8 @@ mod tests {
 
         let output = runner.get_output();
         assert!(output.contains("quick output"));
+        assert!(runner.is_running(), "stability must not depend on child exit");
+        runner.kill().await.expect("cleanup failed");
     }
 
     #[tokio::test]

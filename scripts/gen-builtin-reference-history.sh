@@ -20,16 +20,39 @@
 #
 # Output: cas-cli/src/builtins/reference-history.json (committed, embedded via
 # include_str!).
+#
+# cas-2ea6: `--rev <revision> --output <file>` computes the ledger a fresh run
+# would commit at <revision> (its history and tree, not the checkout) into
+# <file>, read-only: no projection is rewritten. Repeat `--only <ledger key>`
+# (for example skills/violet/SKILL.md) to compute only those keys' entries,
+# which reads only their history. The close gate uses this to accept a target
+# ledger whose dropped keys equal a fresh run.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 out="cas-cli/src/builtins/reference-history.json"
+rev=""
+only=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rev) rev=${2:?--rev needs a revision}; shift 2 ;;
+    --output) out=${2:?--output needs a file}; shift 2 ;;
+    --only) only+="${2:?--only needs a ledger key}"$'\n'; shift 2 ;;
+    *) echo "usage: $0 [--rev <revision> --output <file> [--only <ledger key>]...]" >&2; exit 2 ;;
+  esac
+done
+if [ -n "$only" ] && [ -z "$rev" ]; then
+  echo "--only needs --rev and --output" >&2; exit 2
+fi
+if [ -n "$rev" ]; then
+  git rev-parse --verify --quiet "$rev^{commit}" >/dev/null || { echo "unknown revision: $rev" >&2; exit 2; }
+fi
 
 # Keep the native Codex projection generated from the same verifier body as
 # Claude/Grok. Role metadata never overrides the parent's security or account.
-python3 - <<'PY'
+[ -n "$rev" ] || python3 - <<'PY'
 from pathlib import Path
 import tomllib
 
@@ -76,7 +99,7 @@ PY
 #      about 4x the runtime (the release gate runs this script) and a copy under
 #      a file's old name is installed at the old path, which pass 1 covers.
 # Blobs are hashed through one `git cat-file --batch`.
-python3 - "$out" <<'PY'
+python3 - "$out" "$rev" "$only" <<'PY'
 import hashlib
 import json
 import re
@@ -84,6 +107,8 @@ import subprocess
 import sys
 
 ROOT = "cas-cli/src/builtins/"
+REV = [sys.argv[2]] if len(sys.argv) > 2 and sys.argv[2] else []
+ONLY = set(filter(None, sys.argv[3].split("\n"))) if len(sys.argv) > 3 else set()
 OWNED = re.compile(r"^(?:skills/[^/]+/.+|agents/task-verifier\.toml)$")
 FLAT_BODY = re.compile(r"^skills/[^/]+\.md$")
 
@@ -117,20 +142,31 @@ def post_image_blobs(raw_log):
             yield path, blob
 
 
+def sources(ledger_key):
+    """Every source path whose key() is ledger_key, in each harness flavour."""
+    paths = [ledger_key]
+    flat = re.fullmatch(r"(skills/[^/]+)/SKILL\.md", ledger_key)
+    if flat:
+        paths.append(flat.group(1) + ".md")
+    return [ROOT + flavour + path for path in paths for flavour in ("", "codex/", "grok/")]
+
+
+pathspecs = [path for ledger_key in sorted(ONLY) for path in sources(ledger_key)] if ONLY else [ROOT]
 pairs = set()
 for path, blob in post_image_blobs(
-    git("log", "-m", "--no-renames", "--raw", "--no-abbrev", "--format=", "--", ROOT)
+    git("log", "-m", "--no-renames", "--raw", "--no-abbrev", "--format=", *REV, "--", *pathspecs)
 ):
     builtin_path = key(path)
     if builtin_path:
         pairs.add((builtin_path, blob))
 
-for source_path in git("ls-files", "--", ROOT).splitlines():
+tracked = git("ls-tree", "-r", "--name-only", REV[0], "--", ROOT) if REV else git("ls-files", "--", ROOT)
+for source_path in tracked.splitlines():
     builtin_path = key(source_path)
-    if not builtin_path:
+    if not builtin_path or ONLY and builtin_path not in ONLY:
         continue
     for _, blob in post_image_blobs(
-        git("log", "--follow", "--raw", "--no-abbrev", "--format=", "--", source_path)
+        git("log", "--follow", "--raw", "--no-abbrev", "--format=", *REV, "--", source_path)
     ):
         pairs.add((builtin_path, blob))
 

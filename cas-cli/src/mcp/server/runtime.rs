@@ -366,17 +366,28 @@ async fn run_server_impl() -> anyhow::Result<()> {
     #[cfg(feature = "mcp-proxy")]
     let project_proxy_path = cas_root.join("proxy.toml");
 
-    // Refresh the credential-free, user-scoped Viktor default before loading
-    // proxy configuration. An explicit project .cas/proxy.toml is an opt-out:
-    // loading it still inherits user server definitions, so refreshing the
-    // managed default here would otherwise make a project-selected proxy
-    // surface connect to Viktor unexpectedly.
+    // Reconcile the credential-free, user-scoped Viktor default before loading
+    // proxy configuration. The machine setting persists an opt-out across
+    // serves; an explicit project .cas/proxy.toml still opts out of first-time
+    // provisioning while Viktor remains enabled.
     #[cfg(feature = "mcp-proxy")]
-    if !project_proxy_path.exists()
-        && let Ok(path) = cmcp_core::config::Scope::User.config_path()
-        && let Err(error) = cmcp_core::config::Config::refresh_viktor_managed_default(&path)
     {
-        eprintln!("[Cassy] Failed to refresh managed Viktor proxy config: {error}");
+        let viktor_enabled = match crate::config::Config::load(&crate::config::host_config_dir()) {
+            Ok(config) => config.viktor_enabled(),
+            Err(error) => {
+                eprintln!("[Cassy] Failed to read managed Viktor setting: {error}");
+                true
+            }
+        };
+        if (!project_proxy_path.exists() || !viktor_enabled)
+            && let Ok(path) = cmcp_core::config::Scope::User.config_path()
+            && let Err(error) = cmcp_core::config::Config::reconcile_viktor_managed_default(
+                &path,
+                viktor_enabled,
+            )
+        {
+            eprintln!("[Cassy] Failed to reconcile managed Viktor proxy config: {error}");
+        }
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -426,6 +437,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
+                        crate::coordination::stakeholder_contacts::install(&engine, &cas_root).await;
                         engine
                             .set_call_observer(std::sync::Arc::new(
                                 crate::mcp::viktor_watch::ViktorWatchRecorder::new(

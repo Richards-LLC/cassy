@@ -1458,6 +1458,7 @@ mod worker_attention_tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("worker-id".into(), "gold-fox".into())]
@@ -1553,8 +1554,8 @@ mod worker_attention_tests {
         assert_ne!(attention_episode_key("a:b", "c", start), attention_episode_key("a", "b:c", start));
     }
 
-    fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
-        use super::super::queue_and_events::{PaneWakeState, ToolCallEvidence, WakeSender};
+    fn assert_recovery_class_requires_daemon(row: &cas_store::QueuedPrompt) {
+        use super::super::queue_and_events::{PaneWakeState, SupervisorWakeClass, ToolCallEvidence, WakeSender};
         use crate::ui::factory::director::{AgentSummary, DirectorData};
         let now = chrono::Utc::now();
         let data = DirectorData {
@@ -1574,6 +1575,7 @@ mod worker_attention_tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: HashMap::new(),
@@ -1605,6 +1607,10 @@ mod worker_attention_tests {
             "emitted recovery must wake: {} ({})",
             row.prompt, decision.reason
         );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(&sender, "supervisor", &row.source, &row.prompt),
+            Some(SupervisorWakeClass::Lifecycle),
+        );
         for sender in [
             WakeSender::Unstamped,
             WakeSender::Unattributed,
@@ -1624,10 +1630,16 @@ mod worker_attention_tests {
                 pane,
                 now,
             );
-            assert!(
-                !decision.allowed,
-                "forged recovery must not wake: {sender:?}"
+            // An authenticated worker can send an ordinary directed message,
+            // but quoting the relay cannot acquire the daemon's Lifecycle class.
+            let expected = if matches!(sender, WakeSender::Registered { .. }) {
+                Some(SupervisorWakeClass::DirectedMessage)
+            } else { None };
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(&sender, "supervisor", &row.source, &row.prompt),
+                expected, "relay authority must follow the authenticated sender: {sender:?}",
             );
+            assert_eq!(decision.allowed, expected.is_some(), "{sender:?}: {}", decision.reason);
         }
         for prompt in [
             format!("quoted text {}", row.prompt),
@@ -2650,7 +2662,7 @@ mod worker_attention_tests {
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
                 &row.prompt
             ));
-            assert_recovery_wake_requires_daemon(row);
+            assert_recovery_class_requires_daemon(row);
             let notifications = crate::store::open_supervisor_queue_store(&cas_dir)
                 .unwrap()
                 .peek("supervisor-id", 10)
@@ -2981,7 +2993,7 @@ mod worker_attention_tests {
         assert!(rows[0].prompt.contains("cas-pr-lane"));
         assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
         assert!(rows[0].prompt.contains("33436155392"));
-        assert_recovery_wake_requires_daemon(&rows[0]);
+        assert_recovery_class_requires_daemon(&rows[0]);
     }
 
     #[test]
@@ -4159,22 +4171,9 @@ impl FactoryDaemon {
         // dropped at shutdown. Finished re-checks are delivered as decided;
         // ones that never reported are re-checked here, as the inject loop
         // did before cas-223f.
-        let (rechecked, unchecked) = director_refresh
-            .drain_deliverability(&mut self.queue_jobs, Duration::from_secs(2))
-            .await;
-        for batch in rechecked {
-            self.inject_rechecked_batch(batch, store_worker).await;
-        }
-        for pending in unchecked {
-            for prompt in pending.prompts {
-                if !self.app.prompt_is_still_deliverable(&prompt) {
-                    log_dropped_stale_prompt(&prompt);
-                    continue;
-                }
-                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker, None)
-                    .await;
-            }
-        }
+        self.drain_director_deliveries_for_shutdown(
+            &mut director_refresh, store_worker, Duration::from_secs(10),
+        ).await;
         drop(director_refresh);
         self.finish_shutdown_writes(store_worker, Duration::from_secs(5));
 
@@ -4258,6 +4257,10 @@ impl FactoryDaemon {
         for pgid in worker_process_groups {
             self.app.untrack_worker_process_group_if_gone(pgid).await;
         }
+
+        // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
+        // reminders before their agents are unregistered.
+        self.app.rearm_held_reminders_at_shutdown(&self.session_name);
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
@@ -4350,6 +4353,9 @@ impl FactoryDaemon {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
         let cas_dir = self.app.cas_dir().to_path_buf();
+        for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
+            self.finish_merge_alert_inbox(completed).await;
+        }
         self.relay_jobs.submit_external_work_reconciliation(
             &mut self.queue_jobs,
             move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),
@@ -4696,6 +4702,46 @@ impl FactoryDaemon {
         }
     }
 
+    /// Keep the result owner alive through native completions and fallback
+    /// rechecks before closing the external lane and draining store writes.
+    pub(super) async fn drain_director_deliveries_for_shutdown(
+        &mut self,
+        refresh: &mut super::director_refresh::DirectorRefresh,
+        store_worker: &super::store_worker::StoreWorker,
+        timeout: Duration,
+    ) {
+        let (rechecked, unchecked) = refresh
+            .drain_deliverability(&mut self.queue_jobs, timeout.min(Duration::from_secs(2)))
+            .await;
+        for batch in rechecked {
+            self.inject_rechecked_batch(batch, store_worker).await;
+        }
+        for pending in unchecked {
+            for prompt in pending.prompts {
+                if !self.app.prompt_is_still_deliverable(&prompt) {
+                    log_dropped_stale_prompt(&prompt);
+                    continue;
+                }
+                self.inject_director_prompt(prompt, &pending.events, pending.refresh_started, store_worker, None)
+                    .await;
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
+                self.finish_merge_alert_inbox(completed).await;
+            }
+            if !self.queue_jobs.external_kind_pending(super::factory_jobs::MERGE_ALERT_INBOX) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("merge alert jobs still pending at shutdown deadline");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     /// Shutdown: hand off the last deferred session-metadata write, then let
     /// every queued store write land, each step bounded by `timeout` so a
     /// wedged write cannot hang shutdown (cas-54a2). Returns whether the
@@ -4854,6 +4900,9 @@ impl FactoryDaemon {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
             return;
         }
+        if self.submit_merge_alert_inbox(&prompt, refresh_started) {
+            return;
+        }
         // cas-f9e8 telemetry: measure director prompt
         // injection latency from the start of this refresh
         // tick to the completion of the inbox write. This
@@ -4888,8 +4937,6 @@ impl FactoryDaemon {
                 prompt.retract_epic.as_deref(),
             )
             .await;
-        let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
-        let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
         // cas-ae6d: a durable prompt that did not actually land
         // (transport error, or a composer-dirty deferral this
         // lane cannot retry) is re-queued rather than lost. An
@@ -4903,34 +4950,7 @@ impl FactoryDaemon {
         {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_requeued");
         }
-        match inject_result {
-            Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
-                target: "cas::coordination",
-                stage = "delivered",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                refresh_to_deliver_ms = total_ms,
-                "director prompt delivered to inbox"
-            ),
-            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
-                target: "cas::coordination",
-                stage = "composer_inject_deferred",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                "director prompt deferred before any PTY write because the operator composer is dirty"
-            ),
-            Err(e) => tracing::warn!(
-                target: "cas::coordination",
-                stage = "deliver_failed",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                error = %e,
-                "director prompt inject failed"
-            ),
-        }
+        super::delivery::log_director_delivery(&prompt, &inject_result, inject_started, refresh_started);
     }
 }
 

@@ -96,6 +96,13 @@ and prints each line that holds a ticket label, a PR number, a branch, commit,
 agent, worker, supervisor, epic, sprint or ticket word, a local or preview
 URL, `TODO` or placeholder text.
 
+The checker accepts common identifier families by default: COVID-19, SHA
+hash names, UTF encodings, ISO standard numbers, GPT model numbers, and
+four-digit Q1–Q4, H1–H2 or FY periods. CAS IDs and known PROJ/ENG tracker
+prefixes are checked in either case; other numeric tracker prefixes use their
+canonical uppercase form. A standard identifier on a line does not exempt a
+tracker label elsewhere on that line.
+
 If a hit is the client's own word (a product genuinely named "Epic"), pass
 `--allow Epic` and record the reason in the brief. Other forbidden content:
 

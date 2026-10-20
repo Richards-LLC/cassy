@@ -733,8 +733,13 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
             // GH #1319: it heartbeats, but nothing it receives is read.
+            // Wrapped, never cut: the reason is the point of the line.
             if let Some(failure) = peer.harness_auth_failed.as_deref() {
-                line(format!("  Harness logged out: \"{failure}\"; messages to it are refused"));
+                let text =
+                    format!("Harness logged out: \"{}\"; messages to it are refused", clean(failure));
+                for piece in wrap_words(&text, width, "  ", "    ") {
+                    line(piece);
+                }
             }
             if !report.detail {
                 continue;
@@ -892,6 +897,31 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         out.push_str("--json for untruncated values (MCP: json=true)\n");
     }
     out
+}
+
+/// Greedy word wrap to `width` display columns: `first` prefixes the first
+/// line and `rest` each continuation. A single word wider than a line is
+/// left whole, for the caller's own bound to cut.
+fn wrap_words(text: &str, width: usize, first: &str, rest: &str) -> Vec<String> {
+    let columns = |value: &str| ratatui::text::Line::raw(value).width();
+    let mut lines = Vec::new();
+    let mut current = first.to_string();
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && columns(&current) + 1 + columns(word) > width {
+            lines.push(std::mem::replace(&mut current, rest.to_string()));
+            empty = true;
+        }
+        if !empty {
+            current.push(' ');
+        }
+        current.push_str(word);
+        empty = false;
+    }
+    if !empty {
+        lines.push(current);
+    }
+    lines
 }
 
 /// A peer's headline state. A supervisor whose harness is logged out

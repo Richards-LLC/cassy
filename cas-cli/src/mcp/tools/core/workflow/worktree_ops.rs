@@ -3181,6 +3181,15 @@ impl CasCore {
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+        if let Some(message) = reason
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: std::borrow::Cow::from(message),
+                data: None,
+            });
+        }
         let cas_root = self.cas_root.clone();
         let inferred_task_id = if task_id.is_none() {
             per_task_merge_identity(id).and_then(|(worker, suffix)| {

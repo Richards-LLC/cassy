@@ -558,7 +558,7 @@ pub fn propose(
         ));
     }
 
-    let peer = match discover_peers(cas_root, Some(&caller.id)) {
+    let (peer, redirect) = match discover_peers(cas_root, Some(&caller.id)) {
         Ok(PeerDiscovery::Found { peers, ended, .. }) => {
             // GH #1319: an offer to a supervisor that ended, or whose harness
             // is logged out, goes to its successor or is refused by name.
@@ -574,8 +574,9 @@ pub fn propose(
                 ),
             };
             match crate::cloud::peers::slot_holder(&peers, &addressed, was_ended) {
-                crate::cloud::peers::SlotHolder::Addressed => addressed,
-                crate::cloud::peers::SlotHolder::Successor { peer, .. } => peer.clone(),
+                crate::cloud::peers::SlotHolder::Addressed => (addressed, None),
+                // cas-2db0: the proposer is told who received it instead.
+                crate::cloud::peers::SlotHolder::Successor { peer, note } => (peer.clone(), Some(note)),
                 crate::cloud::peers::SlotHolder::Refused(reason) => return Err(reason),
             }
         }
@@ -681,6 +682,9 @@ pub fn propose(
         theirs.join(", "),
         split.expires_at.format("%H:%M UTC"),
     );
+    if let Some(note) = redirect {
+        out.push_str(&format!("\n{note}"));
+    }
     for warning in warnings {
         out.push_str(&format!("\n⚠️  {warning}"));
     }

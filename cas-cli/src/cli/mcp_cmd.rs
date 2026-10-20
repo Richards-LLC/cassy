@@ -1356,8 +1356,8 @@ mod tests {
 
     #[tokio::test]
     async fn removing_user_viktor_persists_machine_opt_out_cas_1312() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let home = env.home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
         let project_root = home.join("project/.cas");
         std::fs::create_dir_all(&project_root).unwrap();
 
@@ -1490,7 +1490,7 @@ mod tests {
         let add_args = [
             "--scope".to_string(),
             "user".to_string(),
-            "viktor".to_string(),
+            "Viktor".to_string(),
             "https://operator.example.invalid/mcp".to_string(),
         ];
         execute_add(&add_args, &cli, &project_root).unwrap();
@@ -1507,9 +1507,86 @@ mod tests {
         )
         .unwrap();
         let user_config = Config::load_from(&user_path).unwrap();
+        assert!(user_config.servers.contains_key("viktor"));
+        assert_eq!(
+            user_config
+                .servers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("viktor"))
+                .count(),
+            1,
+            "adding Viktor with different casing must keep one canonical server entry"
+        );
         assert!(matches!(
             user_config.servers.get("viktor"),
             Some(ServerConfig::Http { url, .. }) if url == "https://operator.example.invalid/mcp"
+        ));
+
+        let mut legacy_user_config = Config::load_from(&user_path).unwrap();
+        let operator_server = legacy_user_config.servers.remove("viktor").unwrap();
+        legacy_user_config
+            .servers
+            .insert("Viktor".into(), operator_server);
+        for route in &mut legacy_user_config.allowlist {
+            if route.server == "viktor" {
+                route.server = "Viktor".into();
+            }
+        }
+        legacy_user_config.save_to(&user_path).unwrap();
+
+        execute_remove("VIKTOR", "user", &cli, &project_root).unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("false"));
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(
+            user_config
+                .servers
+                .keys()
+                .all(|name| !name.eq_ignore_ascii_case("viktor")),
+            "opting out must remove Viktor entries regardless of stored casing"
+        );
+
+        let project_path = project_root.join("proxy.toml");
+        let mut project_config = Config::load_from(&project_path).unwrap();
+        project_config.remove_server("viktor");
+        project_config.save_to(&project_path).unwrap();
+        env.set_current_dir(home.join("project"));
+        let claude_config = serde_json::json!({
+            "mcpServers": {
+                "Viktor": {
+                    "type": "http",
+                    "url": "https://imported.example.invalid/mcp"
+                }
+            }
+        });
+        std::fs::write(
+            home.join(".claude.json"),
+            serde_json::to_vec(&claude_config).unwrap(),
+        )
+        .unwrap();
+
+        execute_import(Some("claude"), false, false, &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("true"),
+            "importing a user-scope Viktor server must re-enable managed Viktor"
+        );
+        let project_config = Config::load_from(&project_path).unwrap();
+        assert!(project_config.servers.contains_key("viktor"));
+        assert_eq!(
+            project_config
+                .servers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("viktor"))
+                .count(),
+            1,
+            "importing Viktor with different casing must use the canonical name"
+        );
+        assert!(matches!(
+            project_config.servers.get("viktor"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://imported.example.invalid/mcp"
         ));
     }
 }

@@ -169,8 +169,6 @@ fn exactly_one_mebibyte_goes_inline_in_one_call() {
             "cas-internal",
             "--file",
             path.to_str().unwrap(),
-            "--request-id",
-            "10000000-0000-4000-8000-000000000001",
         ],
         &hub,
         false,
@@ -184,7 +182,7 @@ fn exactly_one_mebibyte_goes_inline_in_one_call() {
     let (tool, args) = &calls[0];
     assert_eq!(tool, "violet_post");
     assert_eq!(args["kind"], "file");
-    assert_eq!(args["request_id"], "10000000-0000-4000-8000-000000000001");
+    assert!(args.get("request_id").is_none());
     assert_eq!(args["file"]["content_encoding"], "text");
     assert_eq!(args["file"]["size_bytes"], INLINE_LIMIT);
     assert_eq!(args["file"]["sha256"], sha(&bytes));

@@ -81,14 +81,20 @@ impl StakeholderContacts {
         let Some(args) = prepared.arguments.as_mut() else {
             return Ok(prepared);
         };
+        let Some(text) = root_text(args).filter(|text| mentioned_users(text).next().is_some())
+        else {
+            return Ok(prepared);
+        };
         let policies = match self.policies() {
-            Ok(policies) => mentioned_policies(args, policies),
-            Err(error) => {
-                prepared.response = Some(refusal(
-                    "invalid_contact_configuration",
-                    &error,
-                    Value::Null,
-                ));
+            Ok(policies) => mentioned_policies(text, policies),
+            Err(_) => {
+                // A local configuration failure is not shared admission.
+                // Do not copy config parse diagnostics (potentially secrets)
+                // into an upstream result or turn unrelated posts into refusals.
+                prepared.warning = Some(
+                    "Stakeholder contact: configuration unavailable; post permitted.\nShared admission and last contact are unknown. Check slack.stakeholder_contacts."
+                        .into(),
+                );
                 return Ok(prepared);
             }
         };
@@ -244,21 +250,15 @@ impl StakeholderContacts {
     }
 
     /// No successful local observation can grant cross-machine authority.
-    fn record_local_receipt(&self, event: ProxyCallEvent<'_>) {
-        if event.server != cmcp_core::config::VIOLET_SERVER || event.tool != "violet_post" {
-            return;
-        }
-        let Some(args) = event.arguments.as_ref() else {
-            return;
-        };
+    fn record_local_receipt(&self, caller: &str, text: &str, result: &Value) {
         let Ok(policies) = self.policies() else {
             return;
         };
-        let policies = mentioned_policies(args, policies);
+        let policies = mentioned_policies(text, policies);
         if policies.is_empty() {
             return;
         }
-        let Some(receipt) = receipt_payload(event.result) else {
+        let Some(receipt) = receipt_payload(result) else {
             return;
         };
         // A thread root counts even if a later reply failed. An upload begin,
@@ -294,10 +294,10 @@ impl StakeholderContacts {
             return;
         };
         let id = format!("stakeholder-contact:{}", uuid::Uuid::new_v4());
-        let input = json!({"policies": policies, "poster": event.caller.agent_id});
+        let input = json!({"policies": policies, "poster": caller});
         if journal.prepare(&id, "stakeholder_contact", &input).is_ok() {
             let evidence = json!({"code":"completed", "policies":policies,
-                "last_contact_at":at.to_rfc3339(), "last_poster":event.caller.agent_id,
+                "last_contact_at":at.to_rfc3339(), "last_poster":caller,
                 "permalink":permalink, "message_id":message_id});
             if let Err(error) = journal.record_result(&id, &evidence, None) {
                 tracing::warn!(%error, "could not retain local stakeholder contact evidence");
@@ -358,8 +358,37 @@ impl ProxyCallInterceptor for StakeholderContacts {
             tokio::task::spawn_blocking(move || service.prepare_post(&caller, arguments)).await?
         })
     }
-    fn call_succeeded(&self, event: ProxyCallEvent<'_>) {
-        self.record_local_receipt(event);
+    fn observes_result(&self, server: &str, tool: &str) -> bool {
+        server == cmcp_core::config::VIOLET_SERVER && tool == "violet_post"
+    }
+
+    fn call_succeeded<'a>(
+        &'a self,
+        event: ProxyCallEvent<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(text) = event
+                .arguments
+                .as_ref()
+                .and_then(root_text)
+                .filter(|text| mentioned_users(text).next().is_some())
+            else {
+                return;
+            };
+            let service = self.clone();
+            let caller = event.caller.agent_id.clone();
+            let text = text.to_owned();
+            let result = event.result.clone();
+            // Await readback consistency, but keep config and SQLite I/O off
+            // the executor. A failed local stamp cannot undo an upstream post.
+            if let Err(error) = tokio::task::spawn_blocking(move || {
+                service.record_local_receipt(&caller, &text, &result);
+            })
+            .await
+            {
+                tracing::warn!(%error, "could not retain local stakeholder contact evidence");
+            }
+        })
     }
 }
 
@@ -391,22 +420,24 @@ fn root_text(args: &serde_json::Map<String, Value>) -> Option<&str> {
     }
 }
 
+fn mentioned_users(text: &str) -> impl Iterator<Item = &str> {
+    text.split("<@").skip(1).filter_map(|mention| {
+        let (mention, _) = mention.split_once('>')?;
+        let id = mention.split('|').next()?;
+        (id.len() > 1
+            && matches!(id.as_bytes()[0], b'U' | b'W')
+            && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then_some(id)
+    })
+}
+
 fn mentioned_policies(
-    args: &serde_json::Map<String, Value>,
+    text: &str,
     policies: Vec<StakeholderContactPolicy>,
 ) -> Vec<StakeholderContactPolicy> {
-    let Some(text) = root_text(args) else {
-        return Vec::new();
-    };
     policies
         .into_iter()
-        .filter(|policy| {
-            text.split("<@").skip(1).any(|mention| {
-                mention.split_once('>').is_some_and(|(mention, _)| {
-                    mention.split('|').next() == Some(policy.user_id.as_str())
-                })
-            })
-        })
+        .filter(|policy| mentioned_users(text).any(|user| user == policy.user_id))
         .collect()
 }
 

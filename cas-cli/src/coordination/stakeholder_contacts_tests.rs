@@ -312,20 +312,41 @@ for line in sys.stdin:
 #[tokio::test]
 async fn stakeholder_broken_config_does_not_refuse_posts_or_replies() {
     let root = tempfile::tempdir().unwrap();
-    let service = StakeholderContacts { root:root.path().into(), cloud:None, project_id:None };
+    let service = StakeholderContacts {
+        root: root.path().into(),
+        cloud: None,
+        project_id: None,
+    };
     let who = caller("supervisor");
-    for config in ["[slack", "[[slack.stakeholder_contacts]]\nworkspace_id='T123'\nuser_id='U123'\nminimum_interval_secs=0\n"] {
+    for config in [
+        "[slack",
+        "[[slack.stakeholder_contacts]]\nworkspace_id='T123'\nuser_id='U123'\nminimum_interval_secs=0\n",
+    ] {
         std::fs::write(root.path().join("config.toml"), config).unwrap();
         for (args, warning) in [
-            (json!({"kind":"message","channel":"dev","text":"ordinary update"}), false),
-            (json!({"kind":"message","channel":"dev","text":"<@U123> reply","reply_to":"1792513000.000001"}), false),
-            (json!({"kind":"message","channel":"dev","text":"<@U123> root"}), true),
+            (
+                json!({"kind":"message","channel":"dev","text":"ordinary update"}),
+                false,
+            ),
+            (
+                json!({"kind":"message","channel":"dev","text":"<@U123> reply","reply_to":"1792513000.000001"}),
+                false,
+            ),
+            (
+                json!({"kind":"message","channel":"dev","text":"<@U123> root"}),
+                true,
+            ),
         ] {
-            let prepared = service.prepare(&who, "violet", "violet_post", args.as_object().cloned()).await.unwrap();
+            let prepared = service
+                .prepare(&who, "violet", "violet_post", args.as_object().cloned())
+                .await
+                .unwrap();
             assert!(prepared.response.is_none(), "config error blocked {args}");
             assert_eq!(prepared.arguments.as_ref(), args.as_object());
             assert_eq!(prepared.warning.is_some(), warning, "{args}");
-            if let Some(warning) = prepared.warning { assert!(warning.contains("configuration") && warning.contains("unknown")); }
+            if let Some(warning) = prepared.warning {
+                assert!(warning.contains("configuration") && warning.contains("unknown"));
+            }
         }
     }
 }

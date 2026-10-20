@@ -94,8 +94,20 @@ pub trait ProxyCallInterceptor: Send + Sync {
         arguments: Option<serde_json::Map<String, Value>>,
     ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>>;
 
-    /// Non-authoritative local evidence only; a remote gateway owns effects.
-    fn call_succeeded(&self, _event: ProxyCallEvent<'_>) {}
+    /// Opt in by route before the transport converts a result to JSON.
+    /// Preparation-only interceptors never pay for result conversion.
+    fn observes_result(&self, _server: &str, _tool: &str) -> bool {
+        false
+    }
+
+    /// Await non-authoritative evidence without blocking the async executor.
+    /// Recording failures must not turn an accepted upstream call into a retry.
+    fn call_succeeded<'a>(
+        &'a self,
+        _event: ProxyCallEvent<'a>,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 pub struct PreparedProxyCall {
@@ -1455,12 +1467,14 @@ impl ProxyEngine {
             None => result?,
         };
 
-        if let Some(interceptor) = interceptor {
+        if let Some(interceptor) = interceptor
+            .filter(|interceptor| interceptor.observes_result(server_name, tool_name))
+        {
             let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
             interceptor.call_succeeded(ProxyCallEvent {
                 caller, server: server_name, tool: tool_name,
                 arguments: &arguments, result: &serialized,
-            });
+            }).await;
         }
         if let Some(warning) = prepared.warning {
             // Keep warnings in JSON receipts too: CLI and artifact callers
@@ -2897,7 +2911,7 @@ mod tests {
             ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>> {
                 Box::pin(async move { Ok(PreparedProxyCall::forward(arguments)) })
             }
-            fn call_succeeded(&self, _: ProxyCallEvent<'_>) {
+            fn call_succeeded<'a>(&'a self, _: ProxyCallEvent<'a>) -> futures::future::BoxFuture<'a, ()> {
                 panic!("unrelated result must not reach the interceptor's result conversion");
             }
         }
@@ -3374,8 +3388,9 @@ for line in sys.stdin:
             os._exit(0)
         if name == "hang":
             time.sleep(30)
-        send({"jsonrpc": "2.0", "id": ident, "result": {
-            "content": [{"type": "text", "text": "ok"}], "isError": False} if not message["params"].get("arguments", {}).get("result") else message["params"]["arguments"]["result"]})
+        result = message["params"].get("arguments", {}).get("result", {
+            "content": [{"type": "text", "text": "ok"}], "isError": False})
+        send({"jsonrpc": "2.0", "id": ident, "result": result})
     elif ident is not None:
         send({"jsonrpc": "2.0", "id": ident, "result": {}})
 "#,

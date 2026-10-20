@@ -36,6 +36,13 @@ fn denial(output: HookOutput) -> Option<String> {
     })
 }
 
+fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
+    let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
+    assert!(reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"), "{reason}");
+    assert!(reason.contains("blocker=true"), "{reason}");
+    assert!(reason.contains("target=supervisor"), "{reason}");
+}
+
 fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
     let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().unwrap();
@@ -201,20 +208,13 @@ fn worker_read_of_operator_neonctl_credentials_is_refused_cas_da9a() {
             .display()
             .to_string(),
     ] {
-        let reason = denial(
+        let output =
             handle_pre_tool_use(
                 &input("Read", json!({"file_path": path}), cwd.path()),
                 Some(&cas_root),
             )
-            .unwrap(),
-        )
-        .expect("worker Read of the operator Neon store must be refused");
-        assert!(
-            reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"),
-            "{reason}"
-        );
-        assert!(reason.contains("blocker=true"), "{reason}");
-        assert!(reason.contains("target=supervisor"), "{reason}");
+            .unwrap();
+        assert_operator_credential_refusal(output, &path);
     }
 }
 
@@ -226,24 +226,18 @@ fn worker_read_of_operator_vercel_auth_is_refused_cas_da9a() {
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     for path in [
         "~/.local/share/com.vercel.cli/auth.json".to_string(),
+        "~/Library/Application Support/com.vercel.cli/auth.json".to_string(),
         home.join(".local/share/com.vercel.cli/auth.json")
             .display()
             .to_string(),
     ] {
-        let reason = denial(
+        let output =
             handle_pre_tool_use(
                 &input("Read", json!({"file_path": path}), cwd.path()),
                 Some(&cas_root),
             )
-            .unwrap(),
-        )
-        .expect("worker Read of the operator Vercel auth file must be refused");
-        assert!(
-            reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"),
-            "{reason}"
-        );
-        assert!(reason.contains("blocker=true"), "{reason}");
-        assert!(reason.contains("target=supervisor"), "{reason}");
+            .unwrap();
+        assert_operator_credential_refusal(output, &path);
     }
 }
 
@@ -257,15 +251,8 @@ fn worker_shell_cat_cp_and_head_of_operator_credentials_are_refused_cas_da9a() {
         "cp \"$HOME/.config/neonctl/credentials.json\" /tmp/copied-token",
         "head -n 1 \"$HOME/.local/share/com.vercel.cli/auth.json\"",
     ] {
-        let reason =
-            denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap())
-                .unwrap_or_else(|| panic!("worker shell access was allowed: {command}"));
-        assert!(
-            reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"),
-            "{reason}"
-        );
-        assert!(reason.contains("blocker=true"), "{reason}");
-        assert!(reason.contains("target=supervisor"), "{reason}");
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
     }
 }
 
@@ -278,15 +265,8 @@ fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
         "python3 -c 'from pathlib import Path; print((Path.home() / \".config\" / \"neonctl\" / \"credentials.json\").read_text())'",
         "node -e 'require(\"fs\").readFileSync(process.env.HOME + \"/.local/share/com.vercel.cli/auth.json\")'",
     ] {
-        let reason =
-            denial(handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap())
-                .unwrap_or_else(|| panic!("worker inline script access was allowed: {command}"));
-        assert!(
-            reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"),
-            "{reason}"
-        );
-        assert!(reason.contains("blocker=true"), "{reason}");
-        assert!(reason.contains("target=supervisor"), "{reason}");
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
     }
 }
 

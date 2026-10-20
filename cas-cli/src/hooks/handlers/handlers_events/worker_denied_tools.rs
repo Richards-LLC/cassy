@@ -73,6 +73,11 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
     if !crate::harness_policy::is_factory_agent(input) || !crate::harness_policy::is_worker(input) {
         return None;
     }
+    if credential_store_reference_for_tool(input, tool)
+        .is_some_and(is_operator_credential_reference)
+    {
+        return Some(operator_credential_refusal());
+    }
     let policy = worker_policy(cas_root);
     let tool_input = input.tool_input.as_ref();
     if tool == "Bash" {
@@ -80,6 +85,178 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
         return denied_cli(&policy, command).map(|cli| cli_refusal(&cli));
     }
     denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| tool_refusal(&name, &pattern))
+}
+
+/// Returns a textual path surface through which a tool could read a file.
+/// Shell commands are scanned whole so inline and heredoc scripts are covered;
+/// direct file tools contribute only their path fields, not their content.
+fn credential_store_reference_for_tool<'a>(input: &'a HookInput, tool: &str) -> Option<&'a str> {
+    let tool_input = input.tool_input.as_ref()?;
+    if tool.eq_ignore_ascii_case("Bash") {
+        return tool_input.get("command").and_then(Value::as_str);
+    }
+    if ![
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "MultiEdit",
+        "NotebookRead",
+        "NotebookEdit",
+    ]
+    .iter()
+    .any(|name| tool.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
+    ["file_path", "path", "notebook_path"]
+        .iter()
+        .find_map(|key| tool_input.get(*key).and_then(Value::as_str))
+}
+
+const OPERATOR_CREDENTIAL_STORE_SUFFIXES: &[&str] = &[
+    ".config/neonctl",
+    ".local/share/com.vercel.cli",
+    "Library/Application Support/com.vercel.cli",
+    ".config/com.vercel.cli",
+];
+
+/// Whether a textual path names one of the operator's Neon or Vercel stores.
+/// This is intentionally lexical: the PreToolUse hook never opens the file.
+pub(super) fn is_operator_credential_reference(reference: &str) -> bool {
+    let normalized = normalize_credential_reference(reference);
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home);
+        if OPERATOR_CREDENTIAL_STORE_SUFFIXES.iter().any(|suffix| {
+            contains_path_root_text(
+                &normalized,
+                &normalize_credential_reference(&home.join(suffix).to_string_lossy()),
+            )
+        }) {
+            return true;
+        }
+    }
+
+    for (variable, suffix) in [
+        ("XDG_CONFIG_HOME", "neonctl"),
+        ("XDG_CONFIG_HOME", "com.vercel.cli"),
+        ("XDG_DATA_HOME", "com.vercel.cli"),
+        ("VERCEL_CONFIG_DIR", ""),
+    ] {
+        if let Some(base) = std::env::var_os(variable) {
+            let root = if suffix.is_empty() {
+                Path::new(&base).to_path_buf()
+            } else {
+                Path::new(&base).join(suffix)
+            };
+            if contains_path_root_text(
+                &normalized,
+                &normalize_credential_reference(&root.to_string_lossy()),
+            ) {
+                return true;
+            }
+        }
+        let aliases = [format!("${variable}"), format!("${{{variable}}}")];
+        let config_file_mentioned = if suffix.is_empty() {
+            contains_path_suffix(&normalized, "auth.json")
+        } else {
+            contains_path_suffix(&normalized, suffix)
+        };
+        if aliases.iter().any(|alias| normalized.contains(alias)) && config_file_mentioned {
+            return true;
+        }
+    }
+
+    // Cover shell and script expressions which construct a path from the
+    // operator's home (`$HOME`, Path.home(), process.env.HOME, etc.) instead
+    // of spelling the absolute path in one token.
+    let home_aliases = [
+        "~",
+        "$HOME",
+        "${HOME}",
+        "Path.home()",
+        "process.env.HOME",
+        "os.environ[HOME]",
+        "os.environ.get(HOME)",
+    ];
+    if home_aliases.iter().any(|alias| normalized.contains(alias))
+        && OPERATOR_CREDENTIAL_STORE_SUFFIXES
+            .iter()
+            .any(|suffix| contains_path_suffix(&normalized, suffix))
+    {
+        return true;
+    }
+
+    false
+}
+
+fn contains_path_root_text(text: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return false;
+    }
+    text.match_indices(root).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + root.len()..].chars().next();
+        let path_boundary = |ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '=' | ':' | ';' | ',' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`'
+                )
+        };
+        before.is_none_or(path_boundary) && after.is_none_or(|ch| ch == '/' || path_boundary(ch))
+    })
+}
+
+fn contains_path_suffix(text: &str, suffix: &str) -> bool {
+    let suffix = suffix.trim_start_matches('/');
+    text.match_indices(&suffix).any(|(start, _)| {
+        text[start + suffix.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| {
+                ch == '/' || ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | ',' | ';')
+            })
+    })
+}
+
+fn normalize_credential_reference(reference: &str) -> String {
+    let without_quotes: String = reference
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '`'))
+        .map(|ch| if ch == '\\' { '/' } else { ch })
+        .collect();
+    let chars: Vec<char> = without_quotes.chars().collect();
+    let mut normalized = String::with_capacity(without_quotes.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            let start = index;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            let follows_slash = chars.get(index) == Some(&'/');
+            if normalized.ends_with('/') || follows_slash {
+                continue;
+            }
+            normalized.extend(chars[start..index].iter());
+        } else {
+            let ch = chars[index];
+            index += 1;
+            normalized.push(ch);
+        }
+    }
+    normalized
+}
+
+fn operator_credential_refusal() -> String {
+    let prefix = crate::harness_policy::own_tool_prefix();
+    format!(
+        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read the operator's Neon or Vercel authentication stores. Ask the supervisor via blocker=true: \
+         `{prefix}coordination action=message target=supervisor blocker=true summary=\"need operator credential access\" \
+         message=\"<what you need and why>\"`, then wait."
+    )
 }
 
 /// The project's factory denials, else the global ones, else the defaults.

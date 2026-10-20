@@ -963,6 +963,12 @@ fn handle_pre_tool_use_inner(
 
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
+    // `credentials.json` is a generic filename rule, but these two operator
+    // stores remain supervisor-readable. The worker-only path gate above is
+    // authoritative for them; retain every other configured protection.
+    let supervisor_operator_credential_read = crate::harness_policy::is_supervisor(input)
+        && matches!(tool_name, "Read" | "Grep")
+        && file_path.is_some_and(super::worker_denied_tools::is_operator_credential_reference);
 
     if protection.enabled {
         // Bash has no file_path. Reuse the structural destination recognizer
@@ -1003,6 +1009,9 @@ fn handle_pre_tool_use_inner(
 
             // Block access to credential files
             for pattern in &protection.patterns {
+                if supervisor_operator_credential_read && pattern == "credentials.json" {
+                    continue;
+                }
                 if path.ends_with(pattern) || path.contains(pattern) {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",

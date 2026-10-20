@@ -6638,9 +6638,9 @@ impl CasCore {
             !git_commit_is_ancestor(repo_path, recorded, factory_branch_anchor)
                 && rebased_delivery_has_same_patches(repo_path, recorded, factory_branch_anchor, &target, &task.id)
         });
-        // A worker can have an explicitly parked task while doing a later
-        // task on the same mutable factory branch. Query task ownership, not
-        // the caller's lease: a supervisor may be the one retrying A's close.
+        // A worker can have a parked task while doing a later task. Changed
+        // continuations still require exclusive ownership; a proven identical
+        // rebase preserves the earlier delivery even after that handoff.
         let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
             return;
         };
@@ -6666,8 +6666,8 @@ impl CasCore {
         }) {
             return;
         }
-        // cas-ba4a: a tip that does not descend from the parked anchor, or
-        // that carries another task's commits, never replaces it.
+        // cas-ba4a: retain attribution checks for changed continuations. A
+        // rewritten delivery additionally needs positive patch equivalence.
         let Some(factory_branch_anchor) = self.eligible_awaiting_merge_advance(
             task_store,
             task,

@@ -6151,7 +6151,7 @@ mod cas_7ce6_parked_merge_source_tests {
     fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        for shape in ["earlier-changed", "extra", "dropped", "whitespace", "empty"] {
+        for shape in ["earlier-changed", "extra", "dropped", "whitespace", "empty", "foreign-owner"] {
             let (repo, task, tip) = rebased_lane();
             match shape {
                 "earlier-changed" | "whitespace" => {
@@ -6167,6 +6167,9 @@ mod cas_7ce6_parked_merge_source_tests {
                 "empty" => {
                     git(repo.path(), &["reset", "--hard", "main"]);
                     git(repo.path(), &["commit", "--allow-empty", "-qm", "empty delivery"]);
+                }
+                "foreign-owner" => {
+                    git(repo.path(), &["commit", "--amend", "-qm", "fix(cas-b0b0): another task"]);
                 }
                 _ => unreachable!(),
             }

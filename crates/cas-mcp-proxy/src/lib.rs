@@ -1609,10 +1609,7 @@ impl ProxyEngine {
                 let timed_out = matches!(error, rmcp::service::ServiceError::Timeout { .. });
                 let error = anyhow::Error::from(error);
                 let error = if timed_out {
-                    error.context(format!(
-                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and {RECONNECTING_UPSTREAM_MARKER}",
-                        timeout.as_secs_f64()
-                    ))
+                    error.context(client_timeout_message(&resolved_public_tool, &resolved_public, timeout))
                 } else {
                     error.context(format!(
                         "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
@@ -1864,6 +1861,14 @@ fn classify_error(error: &anyhow::Error) -> String {
 /// cas-8ccd (GH #1292): the phrase every "dropped and reconnecting" upstream
 /// error carries, so callers can recognise it without matching free text.
 pub const RECONNECTING_UPSTREAM_MARKER: &str = "reconnects with backoff";
+
+/// The context for a call the proxy timed out and dropped (cas-85c1).
+fn client_timeout_message(tool: &str, public: &str, timeout: std::time::Duration) -> String {
+    format!(
+        "tool call '{tool}' on '{public}' timed out after {}s (client timeout); the connection was dropped and {RECONNECTING_UPSTREAM_MARKER}",
+        timeout.as_secs_f64()
+    )
+}
 
 /// The absent-upstream text for a connection in reconnect backoff.
 fn reconnecting_absent_message(public: &str, code: &str, wait_secs: u64) -> String {
@@ -3960,6 +3965,11 @@ for line in sys.stdin:
         ))
         .context("tool call 'violet_read' on 'violet' failed");
         assert!(!upstream_call_is_reconnectable(&application));
+        // cas-85c1: the proxy's own client timeout drops and reconnects too.
+        let timeout = std::time::Duration::from_secs(30);
+        let timed_out = anyhow::Error::from(rmcp::service::ServiceError::Timeout { timeout })
+            .context(client_timeout_message("violet_read", "violet", timeout));
+        assert!(upstream_call_is_reconnectable(&timed_out));
         let credential = anyhow::anyhow!(
             "MCP upstream 'violet' is absent: its credential is unavailable or was rejected (authentication_required); restore its credential, then retry"
         );

@@ -84,40 +84,38 @@ pub fn prepare_note(
             }
         }
     }
-    if warn_local_paths {
-        for (index, segment) in note.split('`').enumerate() {
-            let tokens = if index % 2 == 1 {
-                vec![segment]
-            } else {
-                segment.split_whitespace().collect()
-            };
-            for token in tokens {
-                let token = token.trim_matches(|c: char| {
-                    matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\'' | '.')
+    for (index, segment) in note.split('`').enumerate() {
+        let tokens = if index % 2 == 1 {
+            vec![segment]
+        } else {
+            segment.split_whitespace().collect()
+        };
+        for token in tokens {
+            let token = token.trim_matches(|c: char| {
+                matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '"' | '\'' | '.')
+            });
+            let token = token.split_once('=').map_or(token, |(_, value)| value);
+            let expanded = crate::qa_evidence::expand_home(token);
+            let path = expanded.as_path();
+            let machine_local = path.starts_with(artifacts_base)
+                || token.starts_with("~/.cas/artifacts/")
+                || token.contains("/.cas/artifacts/");
+            if !machine_local {
+                continue;
+            }
+            let published = std::fs::metadata(path)
+                .ok()
+                .filter(|m| m.is_file() && m.len() <= cas_types::ARTIFACT_MAX_BYTES)
+                .and_then(|_| digest_file(path).ok())
+                .and_then(|(sha, size)| {
+                    records.iter().find(|a| {
+                        a.sha256 == sha && a.size_bytes == size && validate(a, task_id).is_ok()
+                    })
                 });
-                let token = token.split_once('=').map_or(token, |(_, value)| value);
-                let expanded = crate::qa_evidence::expand_home(token);
-                let path = expanded.as_path();
-                let machine_local = path.starts_with(artifacts_base)
-                    || token.starts_with("~/.cas/artifacts/")
-                    || token.contains("/.cas/artifacts/");
-                if !machine_local {
-                    continue;
-                }
-                let published = std::fs::metadata(path)
-                    .ok()
-                    .filter(|m| m.is_file() && m.len() <= cas_types::ARTIFACT_MAX_BYTES)
-                    .and_then(|_| digest_file(path).ok())
-                    .and_then(|(sha, size)| {
-                        records.iter().find(|a| {
-                            a.sha256 == sha && a.size_bytes == size && validate(a, task_id).is_ok()
-                        })
-                    });
-                if let Some(record) = published {
-                    attached.insert(record.id.clone(), record.clone());
-                } else {
-                    warnings.push(format!("{token} is machine-local and unpublished; use artifact action=publish task_id={task_id} path=<log> note_type=platform_proof notes=<receipt>"));
-                }
+            if let Some(record) = published {
+                attached.insert(record.id.clone(), record.clone());
+            } else if warn_local_paths {
+                warnings.push(format!("{token} is machine-local and unpublished; use artifact action=publish task_id={task_id} path=<log> note_type=platform_proof notes=<receipt>"));
             }
         }
     }

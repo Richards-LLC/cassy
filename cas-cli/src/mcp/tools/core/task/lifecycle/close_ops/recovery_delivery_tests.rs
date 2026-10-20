@@ -1033,8 +1033,13 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
     supervisor.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-        "task_id":TASK,"dispatch_id":dispatch.id,"status":"rejected","summary":"The merged delivery lost its source; correction required"
+        "task_id":TASK,"dispatch_id":dispatch.id,"status":"approved","summary":"Independent review recorded; integration proof remains a separate close obligation"
     })).unwrap())).await.expect("the legitimate independent verdict must be recordable");
+    let after_verdict = close_output(&f).await;
+    assert!(
+        after_verdict.contains("DELIVERY CONTENT DROPPED"),
+        "{after_verdict}"
+    );
     assert_ne!(
         open_task_store(&cas_dir).unwrap().get(TASK).unwrap().status,
         TaskStatus::Closed,

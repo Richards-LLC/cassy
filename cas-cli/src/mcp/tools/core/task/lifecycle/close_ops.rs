@@ -7349,6 +7349,20 @@ impl CasCore {
                             "retired a drifted verification dispatch; minting a fresh cycle"
                         );
                     } else {
+                        // A dispatch prepared before a merged-content refusal
+                        // must not hide that refusal on the next close. Reuse
+                        // the read-only integration gate; passing it still
+                        // requires this exact dispatch's independent verdict.
+                        if close_disposition.requires_delivery_gates()
+                            && task.status == TaskStatus::AwaitingMerge
+                            && let Err(message) = self.guard_direct_update_close_merge_state(
+                                task_store.as_ref(),
+                                &task,
+                                None,
+                            )
+                        {
+                            return Ok(Self::tool_error(message.to_string()));
+                        }
                         let sup_ver = format!("{}verification", crate::mcp::tools::core::guidance::supervisor_prefix());
                         let bound_head = dispatch
                             .repository

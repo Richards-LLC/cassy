@@ -12,6 +12,7 @@ use std::{
 };
 
 pub(crate) const QUIET: &str = "<cas-message-quiet/>";
+const DEBOUNCE_DETAIL: &str = "directed supervisor message burst debounce";
 
 /// Conservative acknowledgement vocabulary. Any substantive word or question
 /// retains the wake. Replies are not acknowledgements merely because they reply.
@@ -171,23 +172,51 @@ pub(crate) fn schedule(
     let debounce =
         chrono::Duration::seconds(config.supervisor_message_debounce_secs.min(300) as i64);
     let cap = config.supervisor_message_wakes_per_hour.max(1);
+    let queue =
+        crate::ui::factory::daemon::runtime::prompt_queue_jobs::job_thread_prompt_queue(cas)?;
     let db = db(cas)?;
     let conn = db
         .lock()
         .map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
     let mut capped = HashMap::new();
-    for (_, sender) in &candidates {
-        if capped.contains_key(sender) {
-            continue;
+    let mut pair_capped = |sender: &str| -> anyhow::Result<bool> {
+        if let Some(capped) = capped.get(sender) {
+            return Ok(*capped);
         }
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
             WHERE p.sender=?1 AND p.recipient=?2 AND w.injected_at>?3",
             params![sender, supervisor, (now-chrono::Duration::hours(1)).to_rfc3339()], |row| row.get(0))?;
-        capped.insert(sender.clone(), count >= cap.min(i64::MAX as u64) as i64);
+        let held = count >= cap.min(i64::MAX as u64) as i64;
+        capped.insert(sender.to_string(), held);
+        Ok(held)
+    };
+    for (_, sender) in &candidates {
+        pair_capped(sender)?;
+    }
+    // A parked leader is invisible to normal QueueSelect until its deadline.
+    // New arrivals join that deadline, without draining/claiming the leader or
+    // scanning other sessions. Validate origin and pair cap as for fresh rows.
+    let waiting: Vec<(i64, String)> = conn.prepare(
+        "SELECT q.id,q.next_attempt_at FROM prompt_queue q
+         WHERE q.processed_at IS NULL AND q.acked_at IS NULL
+           AND q.last_pending_detail=?1 AND q.next_attempt_at>?4
+           AND (q.factory_session=?2 OR q.factory_session IS NULL)
+           AND q.target IN ('supervisor',?3)
+           AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+               WHERE seen.prompt_id=q.id AND seen.recipient=q.target)
+         ORDER BY q.next_attempt_at,q.id LIMIT 64"
+    )?.query_map(params![DEBOUNCE_DETAIL,session,supervisor,now.to_rfc3339()],
+        |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<Result<_,_>>()?;
+    let mut inherited_deadline: Option<DateTime<Utc>> = None;
+    for (id, deadline) in waiting {
+        let Some(row) = queue.queued_prompt(id)? else { continue };
+        let Some(sender) = sender(&row, supervisor, agents) else { continue };
+        if wants_wake(&row) && !pair_capped(&sender)? {
+            let deadline = DateTime::parse_from_rfc3339(&deadline)?.with_timezone(&Utc);
+            inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
+        }
     }
     drop(conn);
-    let queue =
-        crate::ui::factory::daemon::runtime::prompt_queue_jobs::job_thread_prompt_queue(cas)?;
     for (row, sender) in &candidates {
         if capped[sender] && wants_wake(row) {
             let notice = format!(
@@ -213,8 +242,9 @@ pub(crate) fn schedule(
         .iter()
         .filter(|(row, sender)| wants_wake(row) && !capped[sender])
         .collect();
-    let oldest = wakers.iter().map(|(row, _)| row.created_at).min();
-    let due = oldest.is_some_and(|created| now >= created + debounce);
+    let deadline = wakers.iter().map(|(row, _)| row.created_at + debounce)
+        .chain(inherited_deadline).min();
+    let due = deadline.is_some_and(|deadline| now >= deadline);
     let ids: HashSet<_> = candidates.iter().map(|(row, _)| row.id).collect();
     rows.retain(|row| !ids.contains(&row.id));
     if !due {
@@ -226,8 +256,8 @@ pub(crate) fn schedule(
                 )
             } else if wants_wake(row) {
                 (
-                    "directed supervisor message burst debounce",
-                    oldest.unwrap_or(row.created_at) + debounce,
+                    DEBOUNCE_DETAIL,
+                    deadline.unwrap_or(row.created_at + debounce),
                 )
             } else {
                 (
@@ -630,7 +660,8 @@ mod tests {
                 "park" => {
                     rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute_batch(&format!(
                         "CREATE TRIGGER fail_wake_park BEFORE UPDATE OF next_attempt_at ON prompt_queue
-                         WHEN NEW.id={ordinary} BEGIN SELECT RAISE(FAIL,'wake park unavailable'); END;"
+                         WHEN NEW.id={ordinary} AND NEW.next_attempt_at IS NOT NULL
+                         BEGIN SELECT RAISE(FAIL,'wake park unavailable'); END;"
                     )).unwrap();
                 }
                 _ => unreachable!(),

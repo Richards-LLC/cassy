@@ -18790,8 +18790,8 @@ fn reanchored_delivery_content_in_parent(
 /// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
 /// task-specific and remains stable when a worker later reuses the same
 /// factory branch for another epic. When that anchor is absent or no longer
-/// resolves, an existing per-task branch (local or origin) is measured alone;
-/// the shared worker branch can carry other tasks' history. Without a per-task
+/// resolves, all existing per-task branches (local or origin) are measured,
+/// excluding shared worker branches that can carry other tasks' history. Without a per-task
 /// branch, both the historical `parked_branch` and a distinct current
 /// assignee-derived live branch are checked. Taking the maximum unmerged count
 /// avoids double-counting shared history while ensuring reassignment cannot
@@ -18939,17 +18939,21 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // reused bare branch. Resolve against the same local/origin snapshot
         // as measurement, including a parked task lane after reassignment.
         let task_branch_suffix = format!("-{}", t.id);
-        let per_task_branch = has_delivery.then(|| {
-            task_delivery_branch_candidates(t).into_iter().find(|branch| {
-                branch.starts_with("factory/")
-                    && branch.ends_with(&task_branch_suffix)
-                    && git_snapshot.read_ref(branch).read_ref().is_some()
-            })
-        }).flatten();
-        let mut fallback_branches = Vec::new();
-        if let Some(branch) = per_task_branch {
-            fallback_branches.push(branch);
+        let mut fallback_branches = if has_delivery {
+            task_delivery_branch_candidates(t)
+                .into_iter()
+                .filter(|branch| {
+                    branch.starts_with("factory/")
+                        && branch.ends_with(&task_branch_suffix)
+                        && git_snapshot.read_ref(branch).read_ref().is_some()
+                })
+                .collect::<Vec<_>>()
         } else {
+            Vec::new()
+        };
+        // cas-b28c: reassignment can leave work on multiple task lanes.
+        // Measure them all; the loop below takes the highest unmerged count.
+        if fallback_branches.is_empty() {
             if let Some(branch) = parked_branch.as_ref() {
                 fallback_branches.push(branch.clone());
             }
@@ -37110,6 +37114,73 @@ mod epic_status_gate_tests {
         let children = [delivered];
         let statuses = collect_epic_branch_statuses(&children, "main", p);
         assert_eq!(statuses[0].unmerged_count, 1, "{statuses:?}");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    #[test]
+    fn prior_holders_unmerged_task_lane_blocks_epic_close_cas_b28c() {
+        let dir = init_epic_repo(&[("current", 2), ("previous", 3)]);
+        let p = dir.path();
+        let current = "factory/current-cas-b28c";
+        let previous = "factory/previous-cas-b28c";
+        git(p, &["branch", current, "main"]);
+        git(p, &["checkout", "-q", "-b", previous, "main"]);
+        commit_returning_sha(p, "undelivered.rs", "fn undelivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        let mut reassigned = child("cas-b28c", TaskStatus::Closed, Some("current"));
+        reassigned.deliverables.parked_branch = Some(previous.to_string());
+        let children = [reassigned];
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        let row = &statuses[0];
+        assert_eq!(row.unmerged_count, 1, "prior holder's work must remain visible: {row:?}");
+        assert_eq!(row.factory_branch.as_deref(), Some(current));
+        assert_eq!(row.additional_factory_branches, [previous]);
+        assert_eq!(row.checked_ref_reads.len(), 2);
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    /// cas-dbbf fallback: without a per-task ref, only commits attributable to
+    /// this child (or with unknown ownership) strand the reused bare lane.
+    #[test]
+    fn bare_lane_foreign_task_attribution_without_task_refs_cas_b28c() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let branch = "factory/worker";
+        git(p, &["checkout", "-q", "-b", branch, "main"]);
+        commit_returning_sha(p, "delivered.rs", "fn delivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "-m", "land task", branch]);
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task (cas-0be7)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let children = [child("cas-b28c", TaskStatus::Closed, Some("worker"))];
+        assert!(!git_ref_exists(p, "factory/worker-cas-b28c"));
+        assert_eq!(count_unmerged_factory_commits(p, branch, "main"), 1);
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert_eq!(statuses[0].unmerged_count, 0, "foreign-task residue must clear");
+        assert_eq!(statuses[0].factory_branch.as_deref(), Some(branch));
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)), "{out:?}");
+
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("follow-up.rs"), "fn follow_up() {}\n").unwrap();
+        git(p, &["add", "follow-up.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: own follow-up (cas-b28c)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert!(statuses[0].unmerged_count > 0, "own work must still strand bare lane");
         let out = run_epic_close_merge_gate(
             &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
         );

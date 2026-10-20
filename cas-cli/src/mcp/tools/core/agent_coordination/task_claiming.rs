@@ -923,6 +923,17 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskTransferRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = req
+            .note
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         let agent_store = self.open_agent_store()?;
         let task_store = self.open_task_store()?;
 

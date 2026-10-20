@@ -2701,7 +2701,12 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
             &mut skipped_by_path,
         );
     }
-    let home = dirs::home_dir();
+    let home = dirs::home_dir().map(|home| {
+        inspector
+            .observe(&home)
+            .map(|root| root.root)
+            .unwrap_or(home)
+    });
     let mut projects = registered.clone();
     let mut unregistered = BTreeSet::new();
     for candidate in scanned {
@@ -2741,10 +2746,7 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
             }
         }
     }
-    if let Some(home) = home
-        .and_then(|home| inspector.observe(&home))
-        .map(|root| root.root)
-    {
+    if let Some(home) = home {
         projects.remove(&home);
         unregistered.remove(&home);
     }

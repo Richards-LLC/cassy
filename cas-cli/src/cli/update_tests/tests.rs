@@ -791,6 +791,40 @@ fn discovery_skips_a_stalled_known_config_and_keeps_healthy_roots_cas_1514() {
             "fresh exclusion: {:?}",
             second.projects
         );
+        // Complete the native refresh path too: after excluding these roots
+        // it must reach the host phase and write its normal JSON receipt.
+        let mut args = update_test_args();
+        args.all_projects = true;
+        args.dry_run = true;
+        args.refresh_receipt = Some(root.join("refresh.json"));
+        let mut host_phase_ran = false;
+        let started = Instant::now();
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(true),
+            None,
+            None,
+            None,
+            None,
+            || {
+                host_phase_ran = true;
+                ProjectPhase::Skipped("fixture host phase".into())
+            },
+        )
+        .unwrap();
+        eprintln!("cas-1514 native refresh: {:?}", started.elapsed());
+        assert!(host_phase_ran);
+        let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["refresh_status"], "complete");
+        assert!(receipt["projects"].as_array().unwrap().is_empty());
+        assert!(
+            receipt["skipped_unregistered"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skip| skip["project"] == blocked.to_string_lossy().as_ref()
+                    && skip["reason"].as_str().unwrap().contains("timed out"))
+        );
         return;
     }
 

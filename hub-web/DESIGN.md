@@ -1,405 +1,280 @@
 ---
-source: [hub-web/src/tokens.css, docs/design/design-tokens.json]
+version: alpha
+name: Cassy Commander
+description: Glass, the one look of Cassy Commander, the hub web client; frosted panels over a still violet-to-teal aurora, light and dark.
+source: [hub-web/src/tokens.css, hub-web/src/glass.css, hub-web/public/cassy-tokens.css]
 inherits: petrastella
-theme: dual
 colors:
-  bg: "--bg-root #F7F4EE / #12141A"
-  surface: "--bg-panel #FFFFFF / #191C24"
-  surface-raised: "--bg-raised color-mix(in srgb, var(--bg-root) 92%, var(--text-hi)) / color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))"
-  border: "--line-subtle #DAD3C7 / #2B3040"
-  border-strong: "--line-strong #8F8371 / #6B7390"
-  text: "--text-hi #1B1D24 / #E9E6E0"
-  text-muted: "--text-mid #5A5F6E / #A3A7B4"
-  primary: "--color-action #2E3A9F / #A9B3FF"
-  accent: "--color-verdict #2E3A9F / #A9B3FF"
-  focus: "--color-focus #2E3A9F / #A9B3FF"
-  success: "--state-ok #226845 / #5FC492"
-  warning: "--state-warn #7F5504 / #E2B14D"
-  danger: "--state-crit #B3261E / #EF7B72"
-  idle-mark: "--color-series-neutral #6B7280 / #9AA1AF"
-  terminal: "--bg-terminal #0C0E13 / #0C0E13"
-pebble:
-  canvas: "--canvas #F7F4EE / #12141A"
-  panel: "--panel #FFFFFF / #191C24"
-  sheet: "--sheet-bg #FFFFFF / #1F232D"
-  fold: "--fold #EAE5DB / #262B35"
-  ink: "--ink #1B1D24 / #E9E6E0"
-  ink-mid: "--ink-mid #5A5F6E / #A3A7B4"
-  ink-soft: "--ink-soft #494E5C / #B4B8C4"
-  you: "--you-bg #2E3A9F / #A9B3FF"
-  you-text: "--you-fg #FFFFFF / #12141A"
-  accent-default: "--accent #2E3A9F / #A9B3FF"
-  accent-soft-default: "--accent-soft #DDE1F7 / #232838"
-  accent-text: "--accent-fg #FFFFFF / #12141A"
-  supervisor-default: "--sup-bg #E7EAF7 / #262B38"
-  supervisor-text: "--sup-fg #1B1D24 / #E9E6E0"
-  ask: "--ask-bg #E2B14D / #E2B14D"
-  ask-text: "--ask-fg #1B1D24 / #12141A"
-  ask-tray: "--ask-deep #7F5504 / #6E551C"
-  warn-text: "--warn-text #7F5504 / #E2B14D"
-  crit: "--crit-bg #B3261E / #EF7B72"
-  crit-text: "--crit-fg #FFFFFF / #12141A"
-  you-bubble: "--you-bubble-bg #2E3A9F / #3A46B0"
-  you-bubble-text: "--you-bubble-fg #FFFFFF / #FFFFFF"
-  ask-tint: "--ask-tint #E2B14D / #3A3020"
-  ask-tint-text: "--ask-tint-fg #1B1D24 / #E9E6E0"
-  ask-tint-tray: "--ask-tint-deep #7F5504 / #2B2418"
-  ask-edge: "--ask-edge transparent / #E2B14D"
-  tray-chip: "--tray-chip-bg #FFFFFF / transparent"
-  tray-chip-text: "--tray-chip-fg #1B1D24 / #E9E6E0"
-  tray-chip-line: "--tray-chip-line transparent / #E2B14D"
-  pin-chip: "--pin-chip-bg #FFFFFF / #E2B14D"
-  pin-chip-text: "--pin-chip-fg #1B1D24 / #12141A"
-  pin-chip-hover: "--pin-chip-hover var(--bg-hover) / #EDC169"
-  tray-focus: "--tray-focus #FFFFFF / #E2B14D"
-  crit-tint: "--crit-tint #B3261E / #3A1F1E"
-  crit-tint-text: "--crit-tint-fg #FFFFFF / #E9E6E0"
-  crit-edge: "--crit-edge transparent / #EF7B72"
-  lift: "--lift 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06) / 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34)"
-  lift-strong: "--lift-strong 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10) / 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)"
-  lift-edge: "--lift-edge 10px 0 30px -18px rgba(18,20,26,0.22) / 10px 0 30px -18px rgba(0,0,0,0.60)"
-  lift-head: "--lift-head 0 8px 20px -14px rgba(18,20,26,0.30) / 0 8px 20px -14px rgba(0,0,0,0.70)"
-glass:
-  source: "hub-web/src/glass.css overrides these generated roles; values are light, dark"
-  root: "light #EFECFB, dark #0E0C20 (role --bg-root)"
-  raised: "light #F7F5FF, dark #23203E (role --bg-raised)"
-  material: "light rgba(255,255,255,0.6), dark rgba(22,20,44,0.54) (role --look-glass)"
-  material-strong: "light rgba(255,255,255,0.78), dark rgba(26,23,52,0.74) (role --look-glass-strong)"
-  row-open: "light rgba(91,63,224,0.14), dark rgba(168,151,255,0.16) with a 2px --color-action inset edge (role --look-row-open)"
-  blur: "blur(16px) saturate(160%) for the four chrome panels and dialogs only, never per message; 26px and stacked shadows measurably slowed timing-sensitive journeys (role --look-blur)"
-  ink: "light #1A1830, dark #EEEBFF (role --ink)"
-  ink-mid: "light #4A4762, dark #B8B3D9 (role --ink-mid)"
-  action: "light #5B3FE0, dark #A897FF (role --color-action)"
-  send: "#7656FA to #5B3FE0 to #3E5BEA with white text (role --look-send); hover #6847F2 to #4E33D2 to #3550DC (role --look-send-hover)"
-  you-bubble: "light #6C4DF5 to #3651D8, dark #7656FA to #4766E6, white text (role --look-you)"
-  ask: "light #FFD983 to #FFA184, dark #FFCF73 to #FF8F6E, text #2A1A05 (role --look-ask)"
-  ask-tray: "light #A8471D to #9B3A2C, dark #7A3410 to #6E2A22 (role --look-ask-tray); hovered answer pill #F3EEFF (role --tray-chip-hover)"
-  aurora: "violet, teal, pink and blue corners over a pale (light) or near-black (dark) field; source gradients --look-aurora-source, painted as a rendered 320x200 image (role --look-aurora)"
-  rail: "382px on desktop, so the 8px-inset floating list keeps 374px of content; 374px on a phone (role --conversation-rail-width)"
+  primary: "#5B3FE0"
+  primary-dark: "#A897FF"
+  on-primary: "#FFFFFF"
+  on-primary-dark: "#120E2A"
+  bg: "#EFECFB"
+  bg-dark: "#0E0C20"
+  surface: "#FFFFFF"
+  surface-dark: "#1A1830"
+  surface-raised: "#F7F5FF"
+  surface-raised-dark: "#23203E"
+  glass: "rgba(255, 255, 255, 0.6)"
+  glass-dark: "rgba(22, 20, 44, 0.54)"
+  glass-strong: "rgba(255, 255, 255, 0.78)"
+  glass-strong-dark: "rgba(26, 23, 52, 0.74)"
+  line: "rgba(76, 61, 160, 0.16)"
+  line-dark: "rgba(190, 180, 255, 0.14)"
+  line-strong: "rgba(60, 48, 130, 0.42)"
+  line-strong-dark: "rgba(200, 190, 255, 0.4)"
+  ink: "#1A1830"
+  ink-dark: "#EEEBFF"
+  ink-muted: "#4A4762"
+  ink-muted-dark: "#B8B3D9"
+  evidence: "#4A4762"
+  evidence-dark: "#B8B3D9"
+  verdict: "#5B3FE0"
+  verdict-dark: "#A897FF"
+  verdict-soft: "rgba(91, 63, 224, 0.14)"
+  verdict-soft-dark: "rgba(180, 165, 255, 0.18)"
+  action: "#5B3FE0"
+  action-dark: "#A897FF"
+  focus: "#5B3FE0"
+  focus-dark: "#B9ABFF"
+  good: "#226845"
+  good-dark: "#5FC492"
+  warning: "#7F5504"
+  warning-dark: "#E2B14D"
+  danger: "#B3261E"
+  danger-dark: "#EF7B72"
+  idle: "#6B7280"
+  idle-dark: "#9AA1AF"
+  supervisor: "rgba(255, 255, 255, 0.9)"
+  supervisor-dark: "rgba(36, 33, 70, 0.92)"
+  on-supervisor: "#1A1830"
+  on-supervisor-dark: "#EEEBFF"
+  you: "#5B3FE0"
+  you-dark: "#6A4FF0"
+  on-you: "#FFFFFF"
+  on-you-dark: "#FFFFFF"
+  ask: "#FFC46E"
+  ask-dark: "#FFC46E"
+  on-ask: "#2A1A05"
+  on-ask-dark: "#2A1A05"
+  ask-deep: "#A1401F"
+  ask-deep-dark: "#7A3410"
+  crit: "#B3261E"
+  crit-dark: "#EF7B72"
+  on-crit: "#FFFFFF"
+  on-crit-dark: "#12141A"
+  crit-tint: "#B3261E"
+  crit-tint-dark: "#3A1F1E"
+  terminal: "#0C0E13"
+  terminal-dark: "#0C0E13"
 typography:
-  families:
-    display: "--font-display \"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\", Georgia, \"Times New Roman\", serif"
-    body: "--font-ui Inter, ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif"
-    mono: "--font-mono \"JetBrains Mono\", \"IBM Plex Mono\", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-  scale:
-    eyebrow: "--fs-xs 12px / 16px / 600"
-    meta: "--fs-meta 13px / 18px / 400"
-    caption: "--fs-base 14px / 20px / 400"
-    ledger: "--fs-md 15px / 22px / 400"
-    lede: "--fs-lg 21px / 30px / 400"
-    verdict: "--fs-verdict clamp(24px, 3vw, 34px) / 1.1 / 400"
-    terminal: "--fs-terminal 13px / 1.35 / 400"
-  weights: "--weight-regular 400, --weight-medium 500, --weight-semibold 600"
-  tracking: "--tracking-label 0.08em"
-  control-line-height: "--line-ui 1.43"
+  brand:
+    fontFamily: '"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif'
+    fontSize: 21px
+    fontWeight: 500
+  title-md:
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    fontSize: 15px
+    fontWeight: 600
+  body-md:
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    fontSize: 14px
+    fontWeight: 400
+    lineHeight: 1.43
+  label-md:
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    fontSize: 13px
+    fontWeight: 400
+  eyebrow:
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    fontSize: 12px
+    fontWeight: 600
+    letterSpacing: 0.08em
+  mono-xs:
+    fontFamily: '"JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+    fontSize: 12px
+    fontWeight: 400
+  terminal:
+    fontFamily: '"JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+    fontSize: 13px
+    fontWeight: 400
+    lineHeight: 1.35
+rounded:
+  card: 4px
+  pane: 8px
+  glass: 22px
+  full: 999px
 spacing:
-  base: "4px"
-  steps: "--space-1 4px, --space-2 8px, --space-3 12px, --space-4 16px, --space-6 24px, --space-8 32px, --space-12 48px, --space-16 64px"
-radius:
-  control: "--radius-card 4px"
-  panel: "--radius-pane 8px"
-  dot: "--radius-pill 999px"
-elevation:
-  overlay: "--shadow-overlay 0 24px 80px rgba(18,20,26,0.40)"
-geometry:
-  rail: "--machine-rail-width 48px"
-  conversation-rail: "--conversation-rail-width 374px"
-  button: "--button-height 40px"
-  dialog: "--dialog-width 520px"
-  phone-rail-target: "--rail-item-min 44px"
-breakpoints:
-  phone: "(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"
-  landscape-phone: "(max-height: 30rem) and (pointer: coarse)"
-  compact: "(max-width: 53rem)"
-  narrow: "(max-width: 500px)"
+  space-1: 4px
+  space-2: 8px
+  space-3: 12px
+  space-4: 16px
+  space-6: 24px
+  space-8: 32px
+  space-12: 48px
+  space-16: 64px
+components:
+  canvas: { backgroundColor: "{colors.bg}", textColor: "{colors.ink}" }
+  glass-panel: { backgroundColor: "{colors.glass}", rounded: "{rounded.glass}", padding: 8px }
+  dialog: { backgroundColor: "{colors.glass-strong}", textColor: "{colors.ink}", rounded: 24px }
+  card: { backgroundColor: "{colors.surface-raised}", textColor: "{colors.ink}", rounded: "{rounded.pane}" }
+  button-primary: { backgroundColor: "{colors.primary}", textColor: "{colors.on-primary}", rounded: "{rounded.full}", height: 40px }
+  project-badge: { backgroundColor: "{colors.verdict-soft}", typography: "{typography.title-md}", rounded: "{rounded.card}" }
+  bubble-supervisor: { backgroundColor: "{colors.supervisor}", textColor: "{colors.on-supervisor}" }
+  bubble-operator: { backgroundColor: "{colors.you}", textColor: "{colors.on-you}" }
+  ask-card: { backgroundColor: "{colors.ask}", textColor: "{colors.on-ask}" }
+  ask-tray: { backgroundColor: "{colors.ask-deep}" }
+  blocker-card: { backgroundColor: "{colors.crit}", textColor: "{colors.on-crit}" }
+  blocker-tint: { backgroundColor: "{colors.crit-tint}", textColor: "{colors.on-crit}" }
+  meta-text: { textColor: "{colors.ink-muted}", typography: "{typography.label-md}" }
+  evidence-note: { textColor: "{colors.evidence}", typography: "{typography.mono-xs}" }
+  link: { textColor: "{colors.action}" }
+  verdict-rule: { backgroundColor: "{colors.verdict}", height: 3px }
+  focus-ring: { backgroundColor: "{colors.focus}", width: 2px }
+  hairline: { backgroundColor: "{colors.line}", height: 1px }
+  rule-strong: { backgroundColor: "{colors.line-strong}", height: 1px }
+  status-ok: { backgroundColor: "{colors.good}", rounded: "{rounded.full}" }
+  status-warn: { backgroundColor: "{colors.warning}", rounded: "{rounded.full}" }
+  status-crit: { backgroundColor: "{colors.danger}", rounded: "{rounded.full}" }
+  status-idle: { backgroundColor: "{colors.idle}", rounded: "{rounded.full}" }
+  raw-output: { backgroundColor: "{colors.terminal}", typography: "{typography.terminal}" }
+maps:
+  primary: "--color-action"
+  on-primary: "--accent-fg"
+  bg: "--bg-root"
+  surface: "--bg-panel"
+  surface-raised: "--bg-raised"
+  glass: "--look-glass"
+  glass-strong: "--look-glass-strong"
+  line: "--line-subtle"
+  line-strong: "--line-strong"
+  ink: "--ink"
+  ink-muted: "--ink-mid"
+  evidence: "--ink-mid"
+  verdict: "--color-verdict"
+  verdict-soft: "--bg-active"
+  action: "--color-action"
+  focus: "--color-focus"
+  good: "--state-ok"
+  warning: "--state-warn"
+  danger: "--state-crit"
+  idle: "--state-idle"
+  supervisor: "--sup-bg"
+  on-supervisor: "--sup-fg"
+  you: "--you-bubble-bg"
+  on-you: "--you-bubble-fg"
+  ask: "--ask-bg"
+  on-ask: "--ask-fg"
+  ask-deep: "--ask-deep"
+  crit: "--crit-bg"
+  on-crit: "--crit-fg"
+  crit-tint: "--crit-tint"
+  terminal: "--bg-terminal"
+  typography.brand: "fontFamily --font-display, fontSize --fs-lg, fontWeight --weight-medium"
+  typography.title-md: "fontFamily --font-ui, fontSize --fs-md, fontWeight --weight-semibold"
+  typography.body-md: "fontFamily --font-ui, fontSize --fs-base, fontWeight --weight-regular, lineHeight --line-ui"
+  typography.label-md: "fontFamily --font-ui, fontSize --fs-meta, fontWeight --weight-regular"
+  typography.eyebrow: "fontFamily --font-ui, fontSize --fs-xs, fontWeight --weight-semibold, letterSpacing --tracking-label"
+  typography.mono-xs: "fontFamily --font-mono, fontSize --fs-xs, fontWeight --weight-regular"
+  typography.terminal: "fontFamily --font-mono, fontSize --fs-terminal, fontWeight --weight-regular, lineHeight --line-terminal"
+  rounded.card: "--radius-card"
+  rounded.pane: "--radius-pane"
+  rounded.glass: "--glass-radius"
+  rounded.full: "--radius-pill"
 ---
 ## Overview
 
-Cassy Commander is a plain TypeScript client whose only surface is Conversations: a list, thread and context rail in the **Glass** look (light and dark). The supervisor's raw terminal output is available read-only, on request, in a dark Raw output drawer.
-Glass (`hub-web/src/glass.css`, imported after `styles.css`) is the only look; there is no look switch. It re-colours the generated roles and adds depth to existing surfaces; it changes no markup. `hub-web/src/tokens.css` is generated from `docs/design/design-tokens.json` by `hub-web/scripts/generate-tokens.mjs`; `docs/design/hub-web/token-map.md` records each mapping and retained console measurement.
-The scheme follows the OS with light as the fallback; `commander.scheme` stores `system`, `light` or `dark`, and `hub-web/src/scheme.ts` applies `html[data-scheme]`.
-This document records the token foundation and the conversation surface built on it; Conversations is the only surface.
-Raw output's reading colours live in `hub-web/src/raw-output.ts` (`RAW_OUTPUT_THEME`); the daemon's style runs carry each row's ANSI colours. They are independent of the application palette. Commander runs no terminal emulator (cas-f285).
-
-## Brand
-
-The Hub's product name is **Cassy Cloud**. `public/favicon.svg` is the single
-brand asset: the canonical three interlocking Cassy ribbons traced from
-`docs/assets/cassy-logo.png`, white, pale aurora blue (#E6ECFF to #A9C2FF) and
-aurora teal (#B8F5EA to #6FE0D0), on a 512px rounded tile (radius 114) filled
-with the `--look-send` violet gradient (#7656FA to #5B3FE0 to #3E5BEA) under a
-soft white sheen. The tile is the same in light and dark. The white ribbon
-measures 4.7–6.5:1 on the tile; the tile measures 4.0–5.6:1 on the light glass
-field (#EFECFB) and 3.0–4.1:1 on the dark one (#0E0C20). The old mark was a
-flat ink, pale #A9B3FF in dark: high luminance contrast but almost no chroma,
-which is what read as washed out on the violet aurora.
-`hub-web/src/cloud-brand.ts` renders that file as a 32px `<img>` (a data URI,
-so each copy keeps its gradient ids private) beside the serif wordmark in
-`--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation.
-`hub-web/scripts/render-brand-icons.mjs` paints the PNGs from the same file:
-`favicon-16.png` and `favicon-32.png`, `icon-192.png` and `icon-512.png`
-(rounded tile), `apple-touch-icon.png` (180, full-bleed square; iOS rounds it)
-and `icon-maskable-192.png`/`icon-maskable-512.png` (full-bleed, ribbons at
-scale 0.95 inside the 80% safe circle). `index.html` links them and
-`public/manifest.webmanifest`; the hub embeds every one (`server.rs`). Rerun
-the script after changing `favicon.svg`. No downloaded font is required.
-
-Installed app: the manifest names the app **Cassy** (`name` and `short_name`),
-`display: standalone`, `start_url` and `scope` `./` (the `/commander/` base),
-`background_color` #0E0C20 (Glass dark `--bg-root`, the splash behind the
-icon) and `theme_color` #5B3FE0 (Glass light `--color-action`); `scheme.ts`
-still sets the live `theme-color` meta per scheme. iOS reads
-`apple-touch-icon.png` and the `apple-mobile-web-app-*` meta (title Cassy,
-capable, `black-translucent` status bar). Installed that way the page draws
-under the status bar (`env(safe-area-inset-top)` about 47px) and, in
-landscape, beside the notch. Every top-anchored surface adds the insets to its
-own padding, so its background fills the bar and its controls start below it:
-the list heading, the conversation heading (whose phone height grows by the
-inset; `#toast` already offsets by it), the full-screen Attention and launch
-sheets, and the desktop Raw output drawer. In a browser tab the insets are 0
-and nothing moves. `e2e/installed-safe-area.spec.ts` emulates a 47px status
-bar and a 44px landscape notch and fails if any control sits under either.
-A phone on its side gets both side insets in a Safari tab too
-(`viewport-fit=cover`), so the phone body adds them to its own edge spacing:
-the conversation rows, Write to a supervisor, the footer, the thread, the
-Waiting-on-you strip, the composer (glass margin and base padding) and the
-Raw output bottom sheet (cas-5072); the wider side drawer pads only its right
-edge. HUB-J9's sideways parts in `phone.journey.ts` check every control at
-844×390 and 932×430 with 44px side insets.
-
-Rules:
-
-- Never recolour the mark with `--color-action` or `currentColor`, or draw it
-  as flat ink; the tile and its three ribbon fills are the brand.
-- The tile never sits on another violet fill (a `.primary` control, the
-  `--look-you` bubble); on glass, on either field and on launcher backgrounds
-  it needs no plate or outline.
-- Minimum sizes: 16px (tab), 32px (sidebar lockup and pairing dialog), 180px
-  apple-touch, 192px and 512px install icons. Never render the mark below 16px.
-- Maskable icons keep every ribbon inside the centred 80% safe circle; check a
-  circle crop after any geometry change.
-
-Place the complete brand at the top of the thread list on phone and desktop;
-the list screen is the only place the phone shows the lockup. The phone
-conversation header omits it so the header stays one row (about 56px): a 40px
-"‹" back target, a 36px avatar, the supervisor codename (ellipsised) beside a
-13px project badge, the host line beneath, then Interrupt (the word, no icon)
-and an icon-only Raw output. The buttons keep their full accessible names
-("‹ Conversations", "Interrupt the <project> supervisor", "Raw output").
-The desktop context rail repeats a quiet 14px wordmark with a 24px mark.
-The main wordmark is 21px with a 32px mark; compact minimums are 14px / 24px.
-Reserve 8px around the mark. The vector is decorative beside readable text,
-never an unlabeled navigation control. A project badge names the work, not the
-product: use `--bg-active` and `--color-action`, 15px semibold, allow wrapping,
-and derive its name from catalog `project_dir` with an honest missing state.
-
-Conversations are the default presentation at every width. Desktop places a
-floating 382px glass list and the glass context rail around a flexible reading column. Phone and
-short-axis touch layouts use list → full-width thread with an always addressed
-composer. `conversation-shell.ts`, `conversation-list.ts`, `conversation-view.ts`
-and `conversation-history.ts` separate layout, catalog rows, the real pane,
-and correlated channel events. There is no other presentation.
-
-The conversation header carries the session controls. **Interrupt**
-(`#conversation-interrupt`, `--state-crit` outline) sends `InterruptPane` to the
-supervisor pane, taking the session's lease implicitly the way a send does; when
-another device held control the toast says "Took control from <device>", so the
-takeover is never silent. When it cannot act (outage, not yet connected, no
-`pane-interrupt` permission, no supervisor pane) it stays visible with
-`aria-disabled` and its reason in `#conversation-interrupt-reason`. **Raw output**
-(`#conversation-raw-output`) opens `dialog#raw-output`: a read-only
-`TranscriptView` of the supervisor pane on `--bg-terminal`, a 640px right sheet
-on desktop and a bottom sheet on a phone, following the tail; Escape or Close
-returns focus to the button. It takes no lease and sends no input.
-
-The conversation mounts into `#pane-grid`, which holds two siblings: the visible
-`.conversation-thread-slot` and `.pane-host`, the supervisor pane's emulator
-surface. `.pane-host` is `hidden`, `inert`, `aria-hidden` and `display: none
-!important`: it paints nothing, takes no pointer or focus, and the thread is never
-inside or behind it (`conversation-stage.test.ts`). It exists only so the
-attach keeps the pane's text for Raw output and its activity for the working
-line.
-The generated dark-well selector excludes `.conversation-active` so reading
-inherits the chosen page scheme; code scrolls locally without clipping prose.
-
-## App switcher
-
-Cassy Cloud is one system with two apps: **Commander** (this client, the
-conversations with your supervisors) and **Explorer** (the cloud's tasks,
-issues and project health). Both carry the same switcher so either one is a
-tap away; Explorer mirrors this spec (Richards-LLC/petra-stella-cloud#148).
-
-- **Position.** The lockup at the top of the conversation list is the switch:
-  `button#app-switcher-toggle` holds the mark, the "Cassy Cloud" wordmark and
-  a small `--ink-mid` chevron, is named "Cassy Cloud apps", and gets the
-  `--bg-hover` wash on hover and while open. That puts it in the same place on
-  desktop, phone and landscape at no cost in height or width: the phone list
-  still shows six conversations (HUB-J16), a desktop shows a project's
-  sessions whole (HUB-J14), and the header row fits down to 320px: below
-  380px the switch shows the mark and chevron only (the wordmark stays in its
-  name). The
-  dialogs' lockups stay plain. Explorer makes its own header lockup the same
-  switch. An open conversation whose project has a cloud identity also offers
-  **All tasks in Explorer ↗** under its Tasks & progress heading, so a phone
-  reaches the project's tasks without leaving the thread.
-- **Shape.** The lockup opens `nav#app-switcher` (`aria-label="Cassy Cloud
-  apps"`), a native `popover` anchored under it (CSS anchor positioning,
-  with a fixed top-right fallback). It is an opaque `--bg-panel` card,
-  `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide. It lists
-  two items in this order in both apps: **Commander** ("Conversations with
-  your supervisors") and **Explorer** ("Tasks, issues and project health").
-  Names are 15px semibold and hints 13px `--ink-mid`; each item is at least
-  44px tall. Escape and an outside tap close it, and focus returns to the
-  button.
-- **Current app.** A `span` with `aria-current="page"`: `--bg-active` with a
-  2px `--color-action` outline drawn inside it, like the open conversation's
-  edge. It is never the Send gradient, because it marks a place, not an action.
-  Under forced colours the outline is `CanvasText`.
-- **Other app.** An `a` that opens the other app in a named tab
-  (`target="cassy-explorer"` here and `target="cassy-commander"` in Explorer),
-  so repeated switches reuse one tab and neither app's live state is lost.
-  It shows a quiet `↗`, its accessible name adds "(opens in a new tab)", and
-  it carries `rel="noopener noreferrer"` with `referrerpolicy="no-referrer"`.
-  When the deployment names no cloud origin, the segment is a disabled `span`
-  that says why.
-- **Where Explorer opens.** `<cloud origin>/explorer/tasks?project_id=<id>`,
-  the open conversation's project, where `<id>` is the session's
-  `cloud_project_id`. That is the same canonical identity sync pushes under
-  (config pin, git remote, then folder name), and the hub reports it on
-  `/v1/sessions`. With no conversation open, or no identity,
-  `<cloud origin>/explorer`. The cloud origin is the operator inbox's
-  reviewed `meta[name="cas-operator-inbox-origin"]`: Explorer is served from
-  the same Cassy Cloud, so the embedded page names no new external origin
-  (the hub's `h4_csp_03` allows only the pairing relay and the inbox) and the
-  link is a plain top-level navigation, with no fetch and no `connect-src`
-  change. Explorer links back to Commander's origin
-  (`https://hub.petrastella.io/commander/`).
-- **No credentials in URLs.** The link holds only the origin, the path and
-  `project_id`: never a device key, pairing code or fragment, session or
-  machine name, or token. The two apps keep separate sign-ins. Commander is
-  paired per machine, and Explorer uses the cloud session; switching
-  authenticates neither. `app-switcher.test.ts` pins the URL shape and
-  rejects a malformed project id.
-
-## Shared tokens
-
-`docs/design/design-tokens.json` is the single source for both apps.
-`scripts/generate-tokens.mjs` turns it into `src/tokens.css` (house roles),
-`src/glass.css` re-colours those roles for Glass, and
-`scripts/build-cassy-tokens.mjs` (run by `npm run tokens` and the build)
-writes **`public/cassy-tokens.css`**. That file keeps only the
-custom-property blocks of both: scheme selectors and their media queries,
-with no component rules, machine accents or dark wells. The hub serves it at
-`/commander/cassy-tokens.css`, so the published copy is
-`https://hub.petrastella.io/commander/cassy-tokens.css`.
-
-- **Versioning.** The header's `cassy-tokens-sha256:` is the SHA-256 of the
-  body. A copy proves it is unedited, and two copies are the same version
-  exactly when the hashes match.
-- **Schemes.** Light by default and dark under
-  `prefers-color-scheme: dark`. `html[data-scheme="light"|"dark"]` forces
-  one, as Commander's Appearance setting does. More contrast and reduced
-  transparency are included.
-- **Sync for Explorer.** `node hub-web/scripts/sync-cassy-tokens.mjs --to
-  app/cassy-tokens.css` vendors the published copy (Node 18+, no
-  dependencies; `--from <path or https URL>` picks another source). CI runs
-  the same command with `--check`. It exits 1 when the copy was edited by
-  hand or is behind the source, and 2 when the source's own hash is broken.
-- **Checks here.** `npm test` runs `build-cassy-tokens.mjs --check`, and
-  `cassy-tokens.test.ts` pins that the file is current, holds only token
-  blocks under an intact hash, and that the sync flags an edit or drift.
-  Change a token in `design-tokens.json` or `glass.css`, then run
-  `npm run tokens`, never edit the artifact.
+Commander (hub-web) is a plain TypeScript client with one surface, Conversations: a list, a thread and a context rail, in the **Glass** look. Glass is the only look; there is no look switch.
+A still violet-to-teal aurora fills the window and the chrome floats over it as frosted glass: the conversation list, the conversation heading, the context rail and the composer. Reading surfaces (bubbles, cards, dialogs) stay nearly opaque. Send glows violet, and an open question is the warmest thing on screen, an amber-to-coral card.
+Light and dark both ship. The scheme follows the OS with light as the fallback; Appearance stores `system`, `light` or `dark` in `commander.scheme`, and `hub-web/src/scheme.ts` sets `html[data-scheme]`.
+Token sources, in cascade order: `hub-web/src/tokens.css` (generated from `docs/design/design-tokens.json` by `hub-web/scripts/generate-tokens.mjs`; the house roles), then `hub-web/src/glass.css` (imported after `styles.css`), whose token blocks re-colour most of them. The frontmatter records the value that wins in each scheme; `maps` names the variable that carries each role (a `spacing` step `space-N` is `--space-N`), and `hub-web/src/tokens.test.ts` fails when either drifts.
+Petrastella roles kept: the type pairing (display serif, Inter, JetBrains Mono), the 4px grid, `good`/`warning`/`danger` and the dark terminal well. Overridden: the warm-stone paper and Stella indigo become the Glass field and violet (`bg`, `verdict`, `action`). Not used: `surface-hero` (the aurora takes the hero's place; there is no sandstone surface) and `--fs-verdict` (a `clamp()`, which the format's dimension type cannot hold; only the connection title uses it).
+Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaining warnings are `orphaned-tokens`, one per `-dark` colour: the format has no scheme axis, so a component references the light value and the same component paints the `-dark` value in dark.
 
 ## Colors
 
-- Glass overrides `--bg-root` with its own field (light #EFECFB, dark #0E0C20) under the aurora; `--bg-panel` is opaque white (light) or #1A1830 (dark) and is the opaque fallback for every glass panel under more contrast, reduced transparency or forced colours.
-- The house `--bg-raised`/`--bg-hover` derivations are overridden by Glass: `--bg-raised` is an opaque lavender-white (#F7F5FF) or deep indigo (#23203E) card, so worker cards, the paired-machines row and dialog footers never read as grey slabs on glass; `--bg-hover`/`--bg-active` are violet washes. Header controls (‹ Conversations, Raw output, Pair a machine in the list header) are text buttons: transparent, `--ink`, `--bg-hover` on hover. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
-- `--text-hi` inherits `ink`; `--text-mid` inherits `ink-muted`. There is no tertiary text token; timestamps and pane roles use the readable muted value.
-- `--color-action` is for controls and links; `--color-verdict` is for the decisive figure mark. Both inherit the house accent; neither is a running-status colour.
-- `--color-focus` supplies the sole focus outline. `--state-ok`, `--state-warn` and `--state-crit` inherit `good`, `warning` and `danger`; info text is muted evidence.
-- `--state-idle` and `--color-series-neutral` inherit `color.series-neutral`; idle text uses `--text-mid`, while dots use the neutral mark value.
-- `--tint-warn` and `--tint-crit` inherit the corresponding house tints for actionable warnings and critical events. `.danger` actions remain text on a normal control surface.
-- Message delivery states (cas-ca7f): a message known **not sent** is critical (`--crit-bg` outline, glyph and label); a message only **not confirmed** — it may well have arrived — is caution (`--warn-text`), in the thread and on the dismissed-messages chip alike. The chip turns critical as soon as it counts any message known not sent; a settled record (the supervisor replied since) drops to `--ink-mid`.
-- Reply receipt facts (cas-e6d2): **Forwarded · not stored on this device** means this browser received the reply but has not committed it to its IndexedDB journal. **Stored on this device** follows the durable commit and authorizes the authenticated application receipt. Neither label asserts that the operator read the reply. Shared read state and cloud replay cursors remain separate contracts.
-- Kept commands use per-item IndexedDB transactions, scoped to the exact hub URL, installation device and session. Tabs claim a client reference before its socket write; a sending or unconfirmed claim has no automatic expiry/reclaim that could execute it twice. Held messages retain the existing two-minute wait and explicit cancellation. Reload restores waiting and uncertain states. A storage failure keeps the existing recovery copy and grants no application ACK.
-- The direct delivery journal supports legacy or explicitly un-enrolled installations only. Future account enrollment fails closed until authenticated account/feed identity and projection clearing are implemented. Local reply payloads expire after 90 days, including on a quiet reopen; the reply cap is 400 and kept-send scopes/count/bytes stay bounded. Remove/revocation deletes private payloads and fences stale writers.
-- `--bg-terminal` stays #0C0E13 in both schemes. The generated dark-well scope supplies `color.dark.*` and `color.series-neutral.dark` to the Raw output transcript, search/dialog inputs, pairing code and log/payload `pre` elements.
-- Dark-well descendants inherit matching dark control surfaces, lines and foregrounds; the generated scope repeats the derived surface expressions so they resolve against its own dark roles.
-- `--overlay-backdrop` derives from page `bg`; `--overlay-shadow-color` is extracted from `elevation.overlay`. Neither borrows an ANSI colour.
+- **Field and glass.** `--bg-root` is the field under the aurora (#EFECFB light, #0E0C20 dark). Chrome panels are `--look-glass` (white 0.6 / indigo 0.54) with `--look-blur`; search fields and dialogs are `--look-glass-strong`. `--bg-panel` is the opaque fallback for every glass surface under more contrast, reduced transparency or forced colours.
+- **Cards.** `--bg-raised` is an opaque lavender-white (#F7F5FF) or deep indigo (#23203E): worker cards, the paired-machines row and dialog footers never read as grey slabs on glass. `--bg-hover` and `--bg-active` are violet washes, never grey.
+- **Ink.** `--ink`/`--text-hi` (#1A1830 / #EEEBFF) and `--ink-mid`/`--text-mid` (#4A4762 / #B8B3D9). There is no tertiary text step; timestamps and meta use `--ink-mid`.
+- **Violet is the one action colour.** `--color-action`, `--color-verdict` and `--color-focus` are the same violet (#5B3FE0 light; #A897FF and a lighter #B9ABFF focus in dark). Send, the compose button and every `.primary` carry the `--look-send` gradient (#7656FA → #5B3FE0 → #3E5BEA) with white text. Violet never marks status.
+- **Status.** `--state-ok`, `--state-warn`, `--state-crit` and `--state-idle` are the house values; Glass leaves them alone. A message known **not sent** is critical (`--crit-bg` outline, glyph and label); one only **not confirmed** is caution (`--warn-text`), in the thread and on the dismissed-messages chip; a settled record drops to `--ink-mid`.
+- **Ask and blocker.** An open question is `--look-ask` (light #FFD983 → #FFA184) in `--ask-fg` #2A1A05 over an ember `--look-ask-tray`, in both schemes; its answer chips are opaque and stay opaque on hover (`--tray-chip-hover`). A blocker is a `--crit-bg` flood in light and, in dark, a `--crit-tint` #3A1F1E card in ink with a 4px salmon `--crit-edge`.
+- **Bubbles.** Supervisor bubbles are `--sup-bg` (0.9 alpha, no blur). The operator's bubble is the `--look-you` gradient; under more contrast it is the flat `--you-bubble-bg`.
+- **Machine accents.** `.machine-accent-0…4` (indigo, green, violet, teal, rose; `hub-web/src/machine-accent.ts`, append only) colour only each machine's avatar. Glass resets their `--sup-bg`, `--accent-soft` and `--lift-sup`, so they never tint bubbles or the selected row.
+- **Dark wells.** `--bg-terminal` #0C0E13 in both schemes. The generated dark-well scope (Raw output transcript, search and log `pre`, attention payloads) supplies dark ink so light ink never lands on the terminal colour.
+
+### Shared tokens
+
+`hub-web/scripts/build-cassy-tokens.mjs` (run by `npm run tokens` and the build) writes `hub-web/public/cassy-tokens.css`: the custom-property blocks of `tokens.css` and `glass.css`, with no component rules, machine accents or dark wells, under a `cassy-tokens-sha256:` header. The hub serves it at `/commander/cassy-tokens.css`. Explorer vendors it with `node hub-web/scripts/sync-cassy-tokens.mjs --to app/cassy-tokens.css` (`--check` in CI: exit 1 when edited or behind, 2 when the source hash is broken). It is also the palette every report and HTML document in this repo pastes (root `DESIGN.md`). `cassy-tokens.test.ts` pins that it is current, token-only and hash-intact. Change a token in `design-tokens.json` or `glass.css`, then run `npm run tokens`; never edit the artifact.
 
 ## Typography
 
-- Display (`--font-display`) inherits the Iowan/Palatino/Georgia house serif for the connection verdict sentences; body (`--font-ui`) inherits Inter/system sans; identifiers (`--font-mono`) inherit JetBrains/IBM Plex/system mono.
-- Commander bundles Inter and JetBrains Mono (`src/fonts.css`; latin subsets of the variable fonts, OFL 1.1, `src/fonts/LICENSE.*.txt`, served as `/commander/inter.woff2` and `/commander/jetbrains-mono.woff2`), so every host renders the designed body and mono faces. `font-display: swap` shows the system fallback until a face loads. The display serif is not bundled.
-- `--fs-xs` is the house 12px eyebrow, `--fs-base` the 14px caption, `--fs-md` the 15px ledger and `--fs-lg` the 21px lede. Pane/session metadata uses the retained 13px `--fs-meta` console step.
-- `--fs-verdict` clamps the house title to 24px–34px at 3vw; the brief gives that slot 1.1 line-height and −.015em tracking. It is available for the screen units; existing headings still consume `--fs-lg` or `--fs-md`.
-- `--tracking-label` inherits the house .08em eyebrow tracking. Weights are 400/500/600; the 500 hero-number weight is available for pairing code; ordinary copy stays 400 and headings top out at 600.
-- `--line-ui` is caption line-height divided by size (20/14 → 1.43). Ghostty keeps `--fs-terminal` 13px, `--line-terminal` 1.35 and its 12–16px runtime clamp.
-- Codenames, IDs, paths, timestamps, phases, scope names and JSON use mono even inside prose. Session codenames are never uppercased.
+- Three families. Display `--font-display` (Iowan Old Style, Palatino, Georgia; not bundled) sets the "Cassy Cloud" wordmark (500, 21px) and the connection verdict (`--fs-verdict`, 400, −.015em). Body `--font-ui` is Inter. Identifiers `--font-mono` is JetBrains Mono.
+- Inter and JetBrains Mono ship as latin variable subsets (`hub-web/src/fonts.css`, OFL 1.1, `font-display: swap`), served as `/commander/inter.woff2` and `/commander/jetbrains-mono.woff2`.
+- Scale: `--fs-xs` 12px (eyebrows, mono codenames, day labels), `--fs-meta` 13px (meta, the most used step), `--fs-base` 14px body with `--line-ui` 1.43, `--fs-md` 15px (project names, the project badge, app names), `--fs-lg` 21px (wordmark). The list title "Conversations" is a hand-set 22px/1.2 semibold with −.015em.
+- Weights 400/500/600 only; headings top out at 600. Eyebrows are 600 uppercase with `--tracking-label` .08em.
+- Codenames, IDs, paths, timestamps and JSON are mono even inside prose; session codenames are never uppercased. Raw output keeps `--fs-terminal` 13px with `--line-terminal` 1.35.
 
 ## Layout
 
-- Spacing inherits the house 4px grid: 4/8/12/16/24/32/48/64px. Retired 20px gaps move to 24px; retired 40px control dimensions use `--button-height` so touch geometry stays 40px.
-- Desktop is the conversation shell: the floating 382px glass list, a flexible reading column open to the aurora, and the glass context rail (collapsing to its 48px track).
-- The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in both CSS and `hub-web/src/viewport.ts`; landscape uses the same short-axis query so rotation keeps the phone layout.
-- A phone shows list → full-width thread; every touch target uses `--rail-item-min` 44px. Tasks & progress and Waiting on you open as sheets; Raw output is a bottom sheet.
-- Interior regions scroll within the shell's `100dvh`; the Raw output transcript scrolls inside its sheet.
+- 4px grid: 4/8/12/16/24/32/48/64px (`--space-*`). Controls are `--button-height` 40px, compact pane controls 28px.
+- Desktop: a floating 382px glass list (`--conversation-rail-width`; 374px of content inside an 8px `--glass-inset`), a reading column open to the aurora, and the glass context rail, which collapses to its 48px track.
+- The phone query is `(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)` in CSS and in `hub-web/src/viewport.ts`; landscape uses the same short-axis query, so rotation keeps the phone layout.
+- Phone: list → full-width thread with an always-addressed composer. The list is full-bleed glass, the heading hangs from the top edge with rounded lower corners, every touch target is at least `--rail-item-min` 44px, and Tasks & progress, Waiting on you and Raw output open as sheets.
+- Installed (standalone) and sideways phones: every top-anchored surface adds `env(safe-area-inset-*)` to its own padding; `e2e/installed-safe-area.spec.ts` and HUB-J9 in `phone.journey.ts` fail when a control sits under a status bar or notch. Interior regions scroll inside the shell's `100dvh`.
 
 ## Elevation & Depth
 
-- **Glass materials.** One aurora (`--look-aurora`) sits behind the whole shell on a fixed layer and never moves: any animation behind glass makes every frosted panel re-blur each frame, which measured 30 fps instead of 59 and timed out journeys. Its colours are defined once as gradients (`--look-aurora-source`), but it is painted from a 320×200 JPEG that `hub-web/scripts/render-glass-aurora.mjs` renders from them into `--look-aurora`. Live gradients behind see-through panels repainted on every update inside a panel and timed out the event-flood and session journeys; the stretched image is indistinguishable and cheap. Rerun the script after changing a source gradient. The conversation list, conversation heading, context panel and composer float over it as frosted panels: `--look-glass` with `--look-blur`, a 1px `--look-glass-edge` drawn as an inset shadow (never a border, so geometry matches the panels underneath), `--look-shadow-float`, 20–26px radii and an 8px inset from the window edge (the desktop rail is 382px so its content keeps 374px). On a phone the list is full-bleed glass and the conversation heading hangs from the top edge with rounded lower corners, keeping the 56px phone header. The middle column is open to the aurora. Reading surfaces stay nearly opaque: supervisor bubbles are `--sup-bg` (0.9) with no blur of their own (a blur per bubble cost a quarter of a long thread's frame rate), the operator's bubble is the `--look-you` gradient (a refused or unconfirmed message never takes it: it keeps the base's dashed, unfilled record in `--ink` on `--look-glass-strong`), and dialogs are `--look-glass-strong` over a blurred `--look-scrim`. The open conversation's row carries a violet `--look-row-open` wash and a 2px `--color-action` edge all round (5.7:1 light, 7.5:1 dark against the list), never a left bar; a hovered row gets only the faint `--bg-hover` wash with no edge, so hover can never look open. `glass.test.ts` pins the edge contrast and that hover draws no edge.
-- **Colour, used sparingly.** Violet is the one action colour: Send, the compose button and every `.primary` action carry the `--look-send` gradient and its glow; on hover they deepen to `--look-send-hover` and are never brightened (a `brightness(1.08)` filter put white under 4.5:1). An open question is the warmest object on screen, an amber-to-coral `--look-ask` card over an ember `--look-ask-tray`; its answers are opaque pills that stay opaque on hover (`--tray-chip-hover`), because the translucent `--bg-hover` wash lets the ember through. Every interaction state of a control on a gradient or the tray is measured in `glass.test.ts`, which resolves the winning background, colour and filter from both stylesheets. Machine accents keep each avatar's hue but no longer tint bubbles or the selected row.
-- **Sheets, actions and confirmations.** A dialog's sticky action bar is a light frost (`--look-glass-bar`) with a hairline above and a 12px gap before it; the installations sheet keeps its bar as a footer outside the scroller (transparent, hairline only), so its last Revoke shows whole in the default view at 390; its plain buttons (Close, Back) are outlined pills. Full-screen phone sheets (the launch sheet and the Attention sheet) are opaque `--bg-panel` and square, so the page never ghosts through. In Paired machines, Browser installations and Remove sit 8px apart and Remove is a `--crit-bg` outlined pill. The toast is a solid `--bg-panel` card that appears at once (it still slides, but never fades through the page). The operator's delivery line (Sending…, ✓ Delivered) is full white on the violet bubble, and under more contrast the bubble is the flat `--you-bubble-bg`.
-- **Text on glass.** Text sits on a known colour: opaque cards, ≥ 0.6-alpha panels, or (timestamps and meta lines only) the aurora's pale middle in light and its near-black field in dark. The vivid corners lie under the panels. `glass.test.ts` measures every token pair, composited over the aurora's stops, at ≥ 4.5:1; each delivery also measures real rendered pixels.
-- **Accessibility.** Forced colours: all Glass decoration sits inside `@media (forced-colors: none)`, so the system palette and the forced-colours rules in `styles.css` apply untouched. `prefers-contrast: more`, `prefers-reduced-transparency: reduce` or forced colours: panels, bubbles and sheets become opaque `--bg-panel` with no blur and `--line-strong` edges. More contrast also darkens `--ink-mid` toward `--ink`, makes subtle lines strong, and replaces the aurora with flat `--bg-root`. Motion: Glass adds none, so `prefers-reduced-motion` needs no Glass override; the house motion rules apply.
-- `#toast` in `hub-web/src/styles.css` consumes house `elevation.overlay` through `--shadow-overlay`, identical in both schemes; Glass dialogs use `--look-shadow-float` instead. Phone drawer and attention sheets stay shadowless.
-- The Pebble conversation surface (EPIC cas-cac1, `docs/design/hub-messaging/round-3/`) uses elevation instead of hairlines: the rail edge is `--lift-edge`, the selected row and calm bubbles are `--lift`, attention objects and the compose FAB are `--lift-strong`, the thread header is `--lift-head`. All four are generated per scheme (ink-cast in light, black-cast in dark); `invariants.test.ts` pins every `box-shadow` to a token.
-- Pebble tokens live under `pebble:` above and are the contract every Pebble child consumes: `--canvas`/`--panel`/`--sheet-bg` surfaces, the `--ink` ramp, the constant operator pair `--you-bg`/`--you-fg`, the ask and blocker pairs, and the per-machine set `--accent`, `--accent-soft`, `--accent-fg`, `--sup-bg`, `--sup-fg`. The machine set is generated as `.machine-accent-N` (indigo, green, violet) and assigned by `hub-web/src/machine-accent.ts` from the machine id — FNV-1a into a jump consistent hash, so a fourth accent appended to `generate-tokens.mjs` recolours no existing machine. `machine-accent.test.ts` measures every rendered pair at ≥ 4.5:1 in both schemes.
-- Dark tints, never floods (P9): in dark an in-thread ask is `--ask-tint` #3A3020 in ink with a 4px `--ask-edge` gold edge and outlined tray chips; a blocker is `--crit-tint` #3A1F1E in ink with a 4px salmon `--crit-edge`; the operator's bubble is `--you-bubble-bg` #3A46B0 with white text. A compact waiting bookmark points to the single in-thread question; it has no duplicate gold card or reply chips. Send keeps the bright accent. `--you-bg` stays the operator's action colour (FAB, focus fallbacks); the bubble has its own pair. In light every tint token resolves to the flood it replaced, and the edges are transparent, so paper is unchanged. `machine-accent.test.ts` pins the pairs (text ≥ 4.5:1, edges and chip outlines ≥ 3:1).
+- **Aurora (level 0).** One still image behind the shell on a fixed layer: `--look-aurora`, a 320×200 JPEG that `hub-web/scripts/render-glass-aurora.mjs` paints from the `--look-aurora-source` gradients. It never moves; an animated backdrop re-blurs every frosted panel each frame (measured 30 fps instead of 59).
+- **Glass (level 1).** List, heading, context rail and composer: `--look-glass`, `--look-blur` (16px, saturate 160%; 26px measurably slowed timing journeys), a 1px `--look-glass-edge` drawn as an inset shadow (never a border, so geometry matches the base) and `--look-shadow-float`.
+- **Reading (level 2).** Bubbles and cards are nearly opaque and never blurred individually (a blur per bubble cost a quarter of a long thread's frame rate). Cards carry `--lift`; attention objects carry `--lift-strong`.
+- **Overlay (level 3).** Dialogs are `--look-glass-strong` with `--look-shadow-float` over a blurred `--look-scrim`; the toast is a solid `--bg-panel` with `--shadow-overlay`. Full-screen phone sheets are opaque and square.
+- Glass sets `--lift-edge` and `--lift-head` to `none`: the rail edge and thread header are separated by the glass itself, not a shadow.
+- Text sits only on a known colour: opaque cards, ≥ 0.6-alpha panels, or (timestamps and meta only) the aurora's pale middle in light and its near-black field in dark. `glass.test.ts` measures each pair at ≥ 4.5:1 composited over the aurora's stops.
+- Accessibility: all Glass decoration sits inside `@media (forced-colors: none)`. More contrast, reduced transparency or forced colours make every panel opaque `--bg-panel`, unblurred, with `--line-strong` edges; more contrast also darkens `--ink-mid` and drops the aurora. Glass adds no motion.
 
 ## Shapes
 
-- `--radius-card` now inherits house chip radius 4px for controls; `--radius-pane` inherits panel radius 8px for panes/dialogs. Current rows still consume these until their screen units introduce ruled ledgers.
-- `--radius-pill` stays 999px for dots and existing count/chip shapes; it is a console exception, not a new house radius.
-- Hairlines use house `chart.hairline` through `--line-width` 1px. Critical rules stay 2px; `--rule-verdict` inherits `chart.mark-decisive` 2.5px and `--rule-hero` is the brief's 3px verdict rule.
-- Focus uses `--focus-ring-width` 2px and `--color-focus`. Motion is house chrome 120ms/reveal 200ms with `--motion-easing`; the retired connection spin duration and animation declaration are gone.
+- Radii: `--radius-card` 4px (controls, project badge), `--radius-pane` 8px (panes), `--glass-radius` 22px (list and context rail), 20px (conversation heading), 24px (dialogs), 26px (composer), 16px (conversation rows, search, app-switcher card), `--radius-pill` 999px (dots, chips, outlined dialog buttons).
+- Bubbles are asymmetric: supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px.
+- Lines: `--line-width` 1px hairlines, `--state-rule-width` 2px critical rules, `--rule-verdict` 2.5px and `--rule-hero` 3px (launch progress). The open conversation row has a 2px `--color-action` edge all round, never a left bar.
+- Focus: `--focus-ring-width` 2px in `--color-focus`.
 
 ## Components
 
-- Shell: `render()` in `hub-web/src/main.ts` builds the conversation shell (`hub-web/src/conversation-shell.ts`) plus the palette and pairing dialogs. `setScheme()` serves the command-palette Appearance entry.
-- Conversation header: Interrupt and Raw output (`conversationActionsMarkup`, `syncConversationActions`); see Brand above.
-- Raw output: `dialog#raw-output` in `hub-web/src/conversation-shell.ts` with `hub-web/src/transcript-view.ts`; the transcript is a dark well and its controls inherit dark control roles.
-- Connection surface: `hub-web/src/connection-state-view.ts`; existing connecting/failed/retry markup remains. Its log `pre` is a dark well; the screen unit owns the outcome sentence and attempt timeline.
-- Attention: `hub-web/src/attention-view.ts` renders the conversation's own Attention section; critical/warning cards use semantic tints, info uses muted evidence, and payload `pre` remains dark. Only asks and blockers are "waiting on you" (`waitingOnOperator()` in `hub-web/src/context-rail.ts`); awaiting-merge and lifecycle events never count as needing the operator.
-- Workers/tasks and composer: Tasks & progress in the context rail (`renderStatus` in `hub-web/src/main.ts`, `hub-web/src/fleet-ops-view.ts`); mono identifiers, muted supporting copy and green in-progress status use the new roles; Send stays explicit.
-- Pairing dialog: `pairDialogMarkup()` in `hub-web/src/main.ts` and cancel semantics in `hub-web/src/pairing-dialog.ts`; inputs and code wells get dark foregrounds, while the dialog and detail terms follow the page scheme.
-- Buttons and inputs: `hub-web/src/styles.css`; full controls retain 40px height and compact pane controls 28px. Keyboard focus uses the house focus role; disabled copy uses muted text.
-- Toast: body-level `#toast` in `hub-web/src/main.ts`; raised surface and the house overlay shadow, above the phone composer.
-- New session: body-level `#launch-dialog` owned by `LaunchSheet` in `hub-web/src/launch-session.ts`, outside `#app` so a shell rebuild never replaces it mid-choice. On a wide screen (≥62rem) and a landscape phone the form is two columns: projects with Workers under them on the left, Supervisor and Account on the right, and the summary with Cancel/Start as one sticky row across the foot; the whole form fits above Start at 1280×800 with four accounts. A 600px sheet between 40rem and 62rem puts Workers beside Supervisor with Account under both; a phone is one full-screen column (Supervisor, Account, Workers). Only the supervisors POST /v1/sessions accepts are offered: Claude, Codex, Grok. The Account step (cas-9666) lists every account for Claude or Codex from GET /v1/launch/profiles, the machine default preselected with a "Default" pill; a logged-out account is shown disabled with its `cas <cli> login <name>` command and Copy; names wrap anywhere; Grok and a CLI that is not installed have no step; a failed check says so with Try again and the launch falls back to the default account. Every open resets supervisor, account, workers and filter to the machine defaults, and the summary names the account and any workers. Rows are `--panel` on the raised dialog; the chosen project and supervisor carry `--bg-active` with a `--color-action` edge (an `.is-checked` class, not `:has()` alone); Attach and Start are the only `.primary` controls. Progress is a `--rule-hero` verdict rule with a quiet elapsed count, never a spinner; a refusal is a `--state-crit` edge with the machine's own words in a disclosure. The list header shows "New session" beside Pair a machine only when a machine grants `session-launch`; otherwise "Allow new sessions" opens the grant path.
+- **Shell.** `render()` in `hub-web/src/main.ts` builds the shell from `hub-web/src/conversation-shell.ts`; rows from `conversation-list.ts`, the thread from `conversation-view.ts` and `conversation-history.ts`.
+- **Conversation row** (`conversation-list.ts`). Open: `--look-row-open` wash plus the 2px `--color-action` edge (5.7:1 light, 7.5:1 dark against the list). Hover is a faint `--bg-hover` wash with no edge, so hover can never look open.
+- **Primary button** (`styles.css`, `glass.css`). `--look-send` with `--look-send-glow`; hover deepens to `--look-send-hover` and never brightens.
+- **Dialog** (`glass.css`). Glass-strong sheet; its sticky action bar is a light `--look-glass-bar` frost with a hairline and a 12px gap; plain buttons (Close, Back) are outlined pills; a destructive Remove is a `--crit-bg` outlined pill.
+- **Ask card and pinned ask** (`attention-view.ts`, `context-rail.ts`). The full stepped question lives once, in the thread; the "Waiting on you" bookmark points to it. Only asks and blockers count as waiting on the operator.
+- **Conversation header.** Interrupt (`#conversation-interrupt`, `--state-crit` outline, `aria-disabled` with its reason when it cannot act) and Raw output (`dialog#raw-output`, a read-only `transcript-view.ts` on `--bg-terminal`: a 640px right sheet on desktop, a bottom sheet on a phone).
+- **Project badge.** `--bg-active` fill, `--color-action` text, 15px semibold, wraps; named from the catalog `project_dir` with an honest missing state.
+- **New session** (`#launch-dialog`, `launch-session.ts`). Chosen rows carry `--bg-active` and a `--color-action` edge (`.is-checked`); Attach and Start are its only `.primary`; progress is a `--rule-hero` rule with a quiet elapsed count, never a spinner.
+- **Toast** (`#toast`, `main.ts`). Solid `--bg-panel`; slides but never fades through the page.
 
-### Operator questions and progress (cas-6e3a)
+### Brand
 
-The full stepped ask lives once in the conversation thread. Quick replies are only the options declared by that ask; absent or empty options leave free-text reply to the composer. The waiting bookmark jumps to the thread question instead of repeating an expanded card above the composer. Excerpts use the safe Markdown renderer's plain text before truncating, so preview punctuation never leaks formatting markers.
+`hub-web/public/favicon.svg` is the one brand asset: three interlocking ribbons (white, aurora blue #E6ECFF → #A9C2FF, aurora teal #B8F5EA → #6FE0D0) on a 512px tile (radius 114) filled with the `--look-send` gradient, the same in both schemes. `hub-web/src/cloud-brand.ts` renders it as a 32px `<img>` beside the "Cassy Cloud" wordmark (`--font-display`, 500, 21px, `--space-2` gap); the context rail repeats a 14px wordmark with a 24px mark. `hub-web/scripts/render-brand-icons.mjs` paints the favicons, the 180px apple-touch icon and the 192/512 install and maskable icons from it. The manifest names the app **Cassy** (`theme_color` #5B3FE0, `background_color` #0E0C20). The list screen is the only place the phone shows the lockup; the phone conversation header stays one row (about 56px).
 
-The context progress rail uses human labels such as “In progress” and “Awaiting merge”, wraps long names and task titles within its width, and lists the selected session's actual worker roster. Each worker shows its reported current task/title; absent details remain unreported. Raw last task notes are not current work. Worker controls still require reported capability and generation, never synthesized from catalog names. Task lifecycle notices do not become operator questions. Implementation/evidence contract: `src/conversation-polish.brief.md`.
+- ❌ Never recolour the mark with `--color-action` or `currentColor`, draw it as flat ink, put the tile on another violet fill, or render it below 16px. Maskable icons keep every ribbon inside the centred 80% circle.
+
+### App switcher
+
+The lockup at the top of the list is `button#app-switcher-toggle` ("Cassy Cloud apps"); below 380px it shows the mark and chevron only. It opens `nav#app-switcher`, a native popover: an opaque `--bg-panel` card, `--line-strong` edge, `--lift-strong`, 16px radius, 18rem wide, listing **Commander** then **Explorer** (15px semibold names, 13px `--ink-mid` hints, 44px rows). The current app is a `span[aria-current="page"]` with `--bg-active` and an inner 2px `--color-action` outline, never the Send gradient. The other app is a link to a named tab (`cassy-explorer` / `cassy-commander`) with `rel="noopener noreferrer"`, opening `<cloud origin>/explorer/tasks?project_id=<id>`. The URL carries only the origin, the path and `project_id`, never a key, code, session name or token (`app-switcher.test.ts`).
 
 ## Do's & Don'ts
 
-- ✅ Change house values in `docs/design/design-tokens.json`, update the mapping in `hub-web/scripts/generate-tokens.mjs`, and run `npm run tokens`; commit the generated CSS.
-- ❌ Never hand-edit `tokens.css`, add a handwritten `:root` palette to `styles.css`, or restore the retired token aliases; `tokens.test.ts` checks drift and every CSS/TypeScript consumer.
-- ✅ Glass values live only in `glass.css`'s token blocks (`:root, html[data-scheme="light"]` plus the dark media block and `html[data-scheme="dark"]`, which must stay identical). Glass surface rules consume those tokens; `glass.test.ts` pins the pairs and the accessibility media rules.
-- ❌ Never put a gradient, blur or animation outside `@media (forced-colors: none)` in `glass.css`, animate anything behind glass (the aurora included), or reintroduce a look switch (`data-look`, `?look=`).
-- ✅ Add a generated dark-well scope when retaining a dark background beneath a light shell; source foregrounds from `color.dark.*`.
-- ❌ Never combine light-scheme ink with `--bg-terminal` or wire Ghostty ANSI entries to application state tokens.
-- ✅ Use `applyScheme()` at boot and `setScheme(system|light|dark)` for Appearance; storage denial still permits a page-local choice.
-- ❌ Never put scheme state in `shellSignature()` or remount the hidden pane surface merely to change chrome colours.
-- ❌ Never render conversation content inside `.pane-host`, give the host a visible size, or reintroduce a second presentation beside Conversations.
-- ✅ Keep machine text mono, focus outlines visible and every shadow a token consumer (`--shadow-overlay` for overlays, `--lift*` for Pebble objects).
-- ❌ Never redefine a Pebble contract token in a component or put a machine accent on the compose FAB: compose is the operator's action and stays `--you-bg` at `:root`.
-- ❌ Never use accent as an info status, add a looping connection animation, or restore a low-contrast tertiary text step.
-- ✅ Let the integration owner rebuild `hub-web/dist` once; validate lane builds with a separate worktree output directory.
-- ❌ Never hand-edit or commit generated `hub-web/dist` output from a factory lane.
+- ✅ Change house values in `docs/design/design-tokens.json` and Glass values in `glass.css`'s token blocks, run `npm run tokens`, and update this frontmatter in the same commit; `tokens.test.ts` fails on any drift.
+- ❌ Never hand-edit `tokens.css` or `public/cassy-tokens.css`, add a `:root` palette to `styles.css`, or restore retired aliases (`--text-lo`, `--fs-sm`, `--space-5`, …).
+- ✅ Keep Glass's light block and its two dark blocks (the media block and `html[data-scheme="dark"]`) identical in shape; `glass.test.ts` pins pairs and the accessibility media rules.
+- ❌ Never put a gradient, blur or animation outside `@media (forced-colors: none)`, animate anything behind glass, or reintroduce a look switch (`data-look`, `?look=`).
+- ✅ Use violet only for actions, the selection edge and focus.
+- ❌ Never use violet, a machine accent or `--bg-hover` to mean status, and never brighten a control on a gradient on hover (white fell to 4.27:1).
+- ✅ Keep text on opaque or ≥ 0.6-alpha surfaces; give a new dark background a generated dark-well scope with `color.dark.*` foregrounds.
+- ❌ Never put light-scheme ink on `--bg-terminal` or wire ANSI colours to application tokens.
+- ✅ Make every `box-shadow` a token (`--lift*`, `--look-shadow-float`, `--shadow-overlay`); `invariants.test.ts` checks it.
+- ❌ Never render conversation content inside `.pane-host`, give it a visible size, or add a second presentation beside Conversations.
+- ❌ Never hand-edit or commit generated `hub-web/dist` from a factory lane; the integration owner rebuilds it once.
 
 ## Behavioural constraints
 <!-- keep -->
@@ -419,11 +294,6 @@ Re-pairing proves the retained origin-local signing key and updates the same ins
 **Phone layout invariants.** The phone rule keys on the short axis and pointer, not width alone (D5); only the supervisor pane is attached, and its host never paints; the header keeps one row with Interrupt and Raw output reachable, and there is exactly one bottom bar (the composer) — never stacked bars; severity is carried by text colour and the dot, never by a fill only some severities receive (D8).
 <!-- /keep -->
 
-
-## Connection evidence and stable Details
-
-An open Connection log shows the measured machine cause while that machine is Unsteady, including when its session attachment remains live. Session-specific causes lead when the machine is healthy. Retry and last-success evidence use the connection's measured state.
-
-NetworkInformation throughput, RTT and effective-type estimates do not count as a changed route. The four missed-heartbeat rule still owns half-open status; actual offline/online, wake and underlying transport-type changes retain their recovery behaviour.
-
-An Attention notice with unchanged identity and copied payload retains its open Details and Copy controls when the panel's outage explanation changes, including shell rebuilds within the same conversation and unchanged roster. The panel follows its view scope, so switching conversations never carries another conversation's panel forward. Its current Copy callback is refreshed. A changed payload or roster replaces the control and restores the corresponding notice's focus.
+- Delivery and evidence copy is part of the surface; tests pin the behaviour. Reply receipts: **Forwarded · not stored on this device** until the reply is committed to this browser's IndexedDB journal, then **Stored on this device**; neither claims the operator read it.
+- Kept commands use per-item IndexedDB transactions scoped to hub URL, installation and session; a sending or unconfirmed claim never expires into a second send; held messages keep the two-minute wait and explicit cancel. Local reply payloads expire after 90 days; remove or revocation deletes them.
+- The Connection log shows the measured machine cause while that machine is Unsteady; NetworkInformation estimates never count as a changed route. An Attention notice with unchanged identity and payload keeps its open Details and Copy across outage-copy changes and shell rebuilds.

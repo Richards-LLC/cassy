@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Headless screenshot capture for cas-sow-delivery-report.
+ * Headless screenshot capture for branded reports (evidence and before/after shots).
  *
  * Usage:
  *   npm exec --yes --package=playwright -- node capture.mjs \
@@ -11,11 +11,11 @@
  *
  * shots.json: an array of
  *   {
- *     "id": "R3-campaign-roster",       // file stem; reuse the same id across rounds
+ *     "id": "campaign-roster",          // file stem; reuse the same id across captures
  *     "path": "/campaigns/42",          // appended to --base
  *     "url": "file:///abs/report.html", // optional: absolute URL instead of --base + path
  *     "source": "env",                  // optional: env (default) | artifact, a file already
- *                                       //   delivered to the client; caption it with "delivered"
+ *                                       //   delivered to the reader; recorded in the manifest
  *     "delivered": "2026-09-30",        // optional: delivery date of an artifact source
  *     "allowRedirect": false,           // optional: accept a final path other than the requested one
  *     "viewport": [1440, 900],          // optional, default 1440x900
@@ -108,7 +108,7 @@ async function main() {
   const shots = JSON.parse(readFileSync(o.shots, 'utf8'));
   const only = o.only ? new Set(String(o.only).split(',')) : null;
   const quality = Number(o['jpeg-quality'] ?? 80);
-  // A neutral mask reads as redaction in a client report; Playwright's default is magenta.
+  // A neutral mask reads as redaction in a report; Playwright's default is magenta.
   const maskColor = o['mask-color'] ?? '#8F8371';
   const out = resolve(o.out);
   mkdirSync(out, { recursive: true });

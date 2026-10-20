@@ -2978,9 +2978,8 @@ pub(crate) fn run_queue_select(
             selection.rows = batched_rows;
             selection.facts = batched_facts;
         }
-        Err(error) => tracing::warn!(
-            target: "cas::coordination", stage = "supervisor_message_batching_failed", %error,
-            "supervisor message batching unavailable; continuing normal queue delivery"
+        Err(error) => crate::supervisor_message_wakes::warn_batching_failure(
+            &request.cas_dir, &error, std::time::Instant::now(),
         ),
     }
     selection.native_agents = native_agents;

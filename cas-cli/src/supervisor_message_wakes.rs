@@ -7,12 +7,39 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
 pub(crate) const QUIET: &str = "<cas-message-quiet/>";
 const DEBOUNCE_DETAIL: &str = "directed supervisor message burst debounce";
+
+// One warning per project per minute, shared across selection job threads.
+// Expired entries are removed on the next failure so retired projects do not
+// accumulate in a long-lived daemon. Suppression never changes delivery.
+const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
+static FAILURE_WARNINGS: LazyLock<Mutex<HashMap<PathBuf, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn warn_batching_failure(cas: &Path, error: &anyhow::Error, now: Instant) {
+    let emit = {
+        let mut warnings = FAILURE_WARNINGS.lock().unwrap_or_else(|error| error.into_inner());
+        warnings.retain(|_, last| now.saturating_duration_since(*last) < FAILURE_LOG_INTERVAL);
+        if warnings.contains_key(cas) {
+            false
+        } else {
+            warnings.insert(cas.to_path_buf(), now);
+            true
+        }
+    };
+    if emit {
+        tracing::warn!(
+            target: "cas::coordination", stage = "supervisor_message_batching_failed", %error,
+            "supervisor message batching unavailable; continuing normal queue delivery"
+        );
+    }
+}
 
 /// Conservative acknowledgement vocabulary. Any substantive word or question
 /// retains the wake. Replies are not acknowledgements merely because they reply.
@@ -61,15 +88,22 @@ pub(crate) fn quiet(text: &str) -> bool {
 
 /// Identity stays on the authenticated queue origin, never the sender's source label.
 fn sender(row: &QueuedPrompt, supervisor: &str, agents: &[cas_types::Agent]) -> Option<String> {
-    if crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(&row.prompt)
+    sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents)
+}
+
+fn sender_fields(
+    prompt: &str, target: &str, urgent: bool, origin: Option<&QueueOrigin>,
+    supervisor: &str, agents: &[cas_types::Agent],
+) -> Option<String> {
+    if crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(prompt)
         .is_some()
     {
         return None;
     }
-    if row.urgent || !matches!(row.target.as_str(), "supervisor") && row.target != supervisor {
+    if urgent || target != "supervisor" && target != supervisor {
         return None;
     }
-    match row.origin.as_ref()? {
+    match origin? {
         QueueOrigin::RegisteredAgent { agent_id } => agents
             .iter()
             .find(|agent| agent.id == *agent_id && !agent.name.eq_ignore_ascii_case(supervisor))
@@ -82,17 +116,21 @@ fn sender(row: &QueuedPrompt, supervisor: &str, agents: &[cas_types::Agent]) -> 
                 )
             })
             .map(|agent| agent.id.clone()),
-        QueueOrigin::Daemon => crate::cloud::peer_mailbox::parse_envelope(&row.prompt)
+        QueueOrigin::Daemon => crate::cloud::peer_mailbox::parse_envelope(prompt)
             .map(|peer| format!("cloud:{}:{}", peer.repo, peer.sender_agent_id)),
         _ => None,
     }
 }
 
 fn wants_wake(row: &QueuedPrompt) -> bool {
-    if let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(&row.prompt) {
+    wants_wake_text(&row.prompt)
+}
+
+fn wants_wake_text(prompt: &str) -> bool {
+    if let Some(peer) = crate::cloud::peer_mailbox::parse_envelope(prompt) {
         peer.wakes_idle()
     } else {
-        !quiet(&row.prompt)
+        !quiet(prompt)
     }
 }
 
@@ -196,8 +234,15 @@ pub(crate) fn schedule(
     // A parked leader is invisible to normal QueueSelect until its deadline.
     // New arrivals join that deadline, without draining/claiming the leader or
     // scanning other sessions. Validate origin and pair cap as for fresh rows.
-    let waiting: Vec<(i64, String)> = conn.prepare(
-        "SELECT q.id,q.next_attempt_at FROM prompt_queue q
+    struct WaitingMessage {
+        deadline: String,
+        prompt: String,
+        target: String,
+        urgent: bool,
+        origin: Option<QueueOrigin>,
+    }
+    let waiting: Vec<WaitingMessage> = conn.prepare(
+        "SELECT q.next_attempt_at,q.prompt,q.target,q.urgent,q.origin_agent_id,q.origin_kind FROM prompt_queue q
          WHERE q.processed_at IS NULL AND q.acked_at IS NULL
            AND q.last_pending_detail=?1 AND q.next_attempt_at>?4
            AND (q.factory_session=?2 OR q.factory_session IS NULL)
@@ -205,14 +250,20 @@ pub(crate) fn schedule(
            AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
                WHERE seen.prompt_id=q.id AND seen.recipient=q.target)
          ORDER BY q.next_attempt_at,q.id LIMIT 64"
-    )?.query_map(params![DEBOUNCE_DETAIL,session,supervisor,now.to_rfc3339()],
-        |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<Result<_,_>>()?;
+    )?.query_map(params![DEBOUNCE_DETAIL,session,supervisor,now.to_rfc3339()], |row| {
+        let kind: Option<String> = row.get(5)?;
+        Ok(WaitingMessage {
+            deadline: row.get(0)?, prompt: row.get(1)?, target: row.get(2)?, urgent: row.get(3)?,
+            origin: QueueOrigin::from_columns(row.get(4)?, kind.as_deref()),
+        })
+    })?.collect::<Result<_,_>>()?;
     let mut inherited_deadline: Option<DateTime<Utc>> = None;
-    for (id, deadline) in waiting {
-        let Some(row) = queue.queued_prompt(id)? else { continue };
-        let Some(sender) = sender(&row, supervisor, agents) else { continue };
-        if wants_wake(&row) && !pair_capped(&sender)? {
-            let deadline = DateTime::parse_from_rfc3339(&deadline)?.with_timezone(&Utc);
+    for row in waiting {
+        // One malformed historical deadline must not disable healthy batching.
+        let Ok(deadline) = DateTime::parse_from_rfc3339(&row.deadline) else { continue };
+        let deadline = deadline.with_timezone(&Utc);
+        let Some(sender) = sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents) else { continue };
+        if wants_wake_text(&row.prompt) && !pair_capped(&sender)? {
             inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
         }
     }
@@ -675,6 +726,12 @@ mod tests {
                 let selected = select(&cas);
                 select(&cas);
                 select(&cas);
+                let count = || String::from_utf8(logs.lock().unwrap().clone()).unwrap()
+                    .matches("supervisor_message_batching_failed").count();
+                assert_eq!(count(), 1, "{failure}: persistent failure logged every pass");
+                let later = Instant::now() + FAILURE_LOG_INTERVAL;
+                warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later);
+                warn_batching_failure(&cas, &anyhow::anyhow!("still unavailable"), later + Duration::from_secs(1));
                 selected
             });
             for id in [ordinary, lifecycle, blocker, merge] {
@@ -686,8 +743,8 @@ mod tests {
             // pin: this incident stage identifies the optional batching failure.
             assert!(log.contains("WARN") && log.contains("supervisor_message_batching_failed"),
                 "{failure}: unavailable batching must be visible: {log}");
-            assert_eq!(log.matches("supervisor_message_batching_failed").count(), 1,
-                "{failure}: a persistent error must not log on every queue pass: {log}");
+            assert_eq!(log.matches("supervisor_message_batching_failed").count(), 2,
+                "{failure}: log once initially and once after the interval, not on every pass: {log}");
         }
     }
     #[test]
@@ -715,7 +772,7 @@ mod tests {
             let mut rows = vec![row];
             let mut facts = HashMap::from([(fresh, RowFacts::default())]);
             schedule(&cas, "wake-session", "wake-sup", &[peer], &mut rows, &mut facts, now)
-                .expect("one malformed parked timestamp must not disable batching");
+                .expect("malformed parked metadata must not disable healthy batching");
             assert!(rows.is_empty(), "the new report should still debounce");
             let actual: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [fresh], |row| row.get(0)).unwrap();
             assert_eq!(DateTime::parse_from_rfc3339(&actual).unwrap().with_timezone(&Utc), deadline,

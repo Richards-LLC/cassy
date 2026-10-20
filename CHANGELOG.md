@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.67.0] - 2026-10-20
+
 ### Fixed — messages arrive with an acknowledgement
 
 - **Receipt status** — Was: a successful transport handoff could leave the sender unsure whether the recipient saw the message. → Now: status opens with RECEIVED or PENDING based on evidence from the recipient's own session, and names deliveries that ended without receipt.
@@ -117,7 +119,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed — credential isolation design
 
 - **Linux isolation plan** — Was: changing HOME alone left absolute credential paths accessible. → Now: the tested Linux prototype recommends a mount boundary and explicit tool/auth grants; production enforcement and a macOS backend remain unimplemented.
-
 
 ## [3.66.0] - 2026-10-20
 

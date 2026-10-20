@@ -1247,12 +1247,22 @@ fn report(
     instructions: Option<&'static str>,
 ) -> Result<ServiceReport> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let hub_running = paths
+    use super::hub::HubDisplayState;
+    let display_state = paths
         .read_process_record()
         .ok()
-        .is_some_and(|record| {
-            super::hub::hub_display_state(&paths, &record) == super::hub::HubDisplayState::Running
-        });
+        .map(|record| super::hub::hub_display_state(&paths, &record))
+        .filter(|state| *state != HubDisplayState::Exited)
+        .or_else(|| paths.lock_holders().first().map(super::hub::lock_holder_display_state))
+        .unwrap_or(HubDisplayState::Exited);
+    let hub_running = display_state == HubDisplayState::Running;
+    let hub_state = match display_state {
+        HubDisplayState::Running => "running",
+        HubDisplayState::Starting { .. } => "starting",
+        HubDisplayState::Stopping { .. } => "stopping",
+        HubDisplayState::Unresponsive { .. } => "unresponsive",
+        HubDisplayState::Exited => "not_running",
+    };
     let (platform_name, supervision) = match platform {
         ServicePlatform::Launchd => ("macos", "launchd"),
         ServicePlatform::Systemd => ("linux", "systemd-user"),
@@ -1285,7 +1295,7 @@ fn report(
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
-        hub_state: if hub_running { "running" } else { "not_running" },
+        hub_state,
         launch_readiness: launch_readiness(),
         instructions,
     })
@@ -2147,7 +2157,7 @@ exit 0
     #[test]
     fn service_activation_reports_starting_until_ready_cas_94fb() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let report = report(
+        let activation = report(
             ServicePlatform::Launchd,
             true,
             Some(ManagerProbe::Observed(true)),
@@ -2156,11 +2166,33 @@ exit 0
         )
         .unwrap()
         .after_start();
-        assert!(!report.hub_running);
-        assert_eq!(report.hub_state, "starting");
-        let json = serde_json::to_value(report).unwrap();
+        assert!(!activation.hub_running);
+        assert_eq!(activation.hub_state, "starting");
+        let json = serde_json::to_value(activation).unwrap();
         assert_eq!(json["hub_state"], "starting");
         assert_eq!(json["hub_running"], false);
+        let paths = HubRuntimePaths::default_for_user().unwrap();
+        let mut lock = paths.acquire_instance_lock().unwrap();
+        let starting = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(starting.hub_state, "starting", "plain status before a process record exists");
+        let process: HubProcessRecord = serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(), "bind": "127.0.0.1", "port": 0,
+            "version": env!("CARGO_PKG_VERSION"), "started_at": chrono::Utc::now().to_rfc3339(),
+        })).unwrap();
+        paths.write_process_record(&process).unwrap();
+        let starting = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(starting.hub_state, "starting", "plain status with a startup record");
+        assert!(!starting.hub_running);
+        lock.set_phase("stopping").unwrap();
+        let stopping = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(true)), None, None).unwrap();
+        assert_eq!(stopping.hub_state, "stopping");
+        drop(lock);
+        // The fixture process stays alive; remove metadata as though that
+        // process had exited so the lock-owner fallback cannot still see it.
+        fs::remove_file(paths.lock_path()).unwrap();
+        paths.remove_process_record().unwrap();
+        let stopped = report(ServicePlatform::Launchd, true, Some(ManagerProbe::Observed(false)), None, None).unwrap();
+        assert_eq!(stopped.hub_state, "not_running");
     }
 
     #[test]

@@ -948,7 +948,7 @@ pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
     }
 }
 
-fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
+pub(super) fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
     lock_holder_display_state_with_timeout(holder, HUB_LAUNCH_TIMEOUT)
 }
 
@@ -1036,14 +1036,18 @@ fn render_status(
             record.version,
         )
     };
-    if let Some(warning) = version_warning(&record.version, binary_version) {
+    if let Some(warning) = version_warning(state, &record.version, binary_version) {
         rendered.push_str(&format!("\nWarning: {warning}"));
     }
     rendered
 }
 
-fn version_warning(running_version: &str, binary_version: &str) -> Option<String> {
-    (running_version != binary_version).then(|| {
+fn version_warning(
+    state: HubDisplayState,
+    running_version: &str,
+    binary_version: &str,
+) -> Option<String> {
+    (state == HubDisplayState::Running && running_version != binary_version).then(|| {
         format!(
             "hub version drift (running {running_version}, binary {binary_version})\n  Fix: cas hub service install"
         )
@@ -2374,7 +2378,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "state": hub_record_state_json(&record, state),
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
-                "version_warning": version_warning(&record.version, env!("CARGO_PKG_VERSION")),
+                "version_warning": version_warning(state, &record.version, env!("CARGO_PKG_VERSION")),
                 "tailscale_serve": transport,
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
@@ -3965,6 +3969,9 @@ mod tests {
         let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
         assert!(rendered.contains("last pid 42 exited"), "{rendered}");
+        assert!(rendered.contains("cas hub start"), "{rendered}");
+        assert!(!rendered.contains("version drift"), "{rendered}");
+        assert!(!rendered.contains("cas hub service install"), "{rendered}");
         assert!(
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"

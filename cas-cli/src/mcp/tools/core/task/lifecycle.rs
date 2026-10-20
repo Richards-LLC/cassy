@@ -49,6 +49,7 @@ impl TaskLifecycleGateError {
 
 pub(crate) mod close_ops;
 mod epic_lane;
+mod epic_overlap;
 pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
@@ -1019,6 +1020,21 @@ impl CasCore {
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
         if !confirm_warning {
+            if task_type == TaskType::Epic {
+                let warning = epic_overlap::warning(
+                    self, task_store.as_ref(), &req.title,
+                    req.description.as_deref().unwrap_or_default(),
+                ).await.map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message), data: None,
+                })?;
+                if let Some(message) = warning {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(message), data: None,
+                    });
+                }
+            }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
@@ -1042,39 +1058,43 @@ impl CasCore {
                 }
             }
 
-            let overlap = open_task_similarity(
-                task_store.as_ref(),
-                &req.title,
-                req.description.as_deref().unwrap_or_default(),
-                epic_id.as_deref(),
-            )
-            .map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
-                data: None,
-            })?;
-            if let Some(existing) = &overlap.sibling {
-                let (existing_id, existing_title, score, _) = existing;
-                let (identifier_note, overlap_subject) = overlap_description(existing);
-                sibling_warning = format!(
-                    "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
-                     overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
-                     the two do not duplicate each other's scope.",
-                    score * 100.0,
-                );
-            }
-            if let Some(existing) = &overlap.blocking {
-                let (existing_id, existing_title, score, _) = existing;
-                let (identifier_note, overlap_subject) = overlap_description(existing);
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
-                         at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
-                        score * 100.0,
-                    )),
+            // Epic admission already compared the complete project inventory.
+            // The task/sibling matcher has different prose and scope rules.
+            if task_type != TaskType::Epic {
+                let overlap = open_task_similarity(
+                    task_store.as_ref(),
+                    &req.title,
+                    req.description.as_deref().unwrap_or_default(),
+                    epic_id.as_deref(),
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
                     data: None,
-                });
+                })?;
+                if let Some(existing) = &overlap.sibling {
+                    let (existing_id, existing_title, score, _) = existing;
+                    let (identifier_note, overlap_subject) = overlap_description(existing);
+                    sibling_warning = format!(
+                        "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
+                         overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
+                         the two do not duplicate each other's scope.",
+                        score * 100.0,
+                    );
+                }
+                if let Some(existing) = &overlap.blocking {
+                    let (existing_id, existing_title, score, _) = existing;
+                    let (identifier_note, overlap_subject) = overlap_description(existing);
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
+                             at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
+                            score * 100.0,
+                        )),
+                        data: None,
+                    });
+                }
             }
         }
 
@@ -4225,6 +4245,7 @@ mod related_recall_response_tests {
             team_id: Some("team-1".into()), ..Default::default()
         }.save_to_cas_dir(root).unwrap();
         let scope = "Map the live product and retire superseded legacy flows flags and code paths using 38 removal decisions from the live-product map.";
+        let title = "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them";
         let mut epic = Task::new("cas-e88d".into(), "EPIC: Live-product cleanup — 10 live problems + removal decisions from the live-product map".into());
         epic.task_type = TaskType::Epic;
         epic.origin_project = Some("gabber-studio".into());
@@ -4235,22 +4256,34 @@ mod related_recall_response_tests {
         let mut closed = child.clone();
         closed.id = "cas-closed-child".into();
         closed.status = TaskStatus::Closed;
-        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone()].into_iter().map(|task| {
+        let mut completed = epic.clone();
+        completed.id = "cas-completed-plan".into();
+        completed.title = title.into();
+        completed.status = TaskStatus::Closed;
+        let mut foreign = epic.clone();
+        foreign.id = "cas-foreign-plan".into();
+        foreign.title = title.into();
+        foreign.origin_project = Some("another-project".into());
+        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone(), completed.clone(), foreign.clone()].into_iter().map(|task| {
             let mut raw = serde_json::to_value(task).unwrap();
             raw["project_id"] = serde_json::json!("gabber-studio");
             raw
         }).collect();
-        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id|
-            crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild)
-        ).collect();
+        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id| {
+            let edge = crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild);
+            let mut raw = serde_json::to_value(edge).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
         for (collection, rows) in [("tasks", serde_json::json!(tasks)), ("task_dependencies", serde_json::json!(edges))] {
             Mock::given(method("GET")).and(path("/api/teams/team-1/sync/pull"))
                 .and(query_param("project_id", "gabber-studio")).and(query_param("types", collection))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({collection:rows})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({(collection):rows})))
+                .expect(1)
                 .mount(&server).await;
         }
         let request = epic_request(
-            "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them",
+            title,
             &format!("The current flow is the product. {scope}"),
         );
         let warning = core.cas_task_create(Parameters(request.clone())).await
@@ -4260,8 +4293,52 @@ mod related_recall_response_tests {
         }
         assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
         assert!(store.list(None).unwrap().is_empty(), "warning must not persist the new epic or pulled inventory");
+        // The same check also works offline against the local inventory.
+        crate::cloud::CloudConfig::default().save_to_cas_dir(root).unwrap();
+        for task in [&epic, &child, &closed, &completed, &foreign] {
+            store.add(task).unwrap();
+        }
+        store.add_dependency(&crate::types::Dependency::new(child.id.clone(), epic.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
+        let local_warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        assert!(local_warning.message.contains("cas-e88d") && local_warning.message.contains("cas-open-child"), "{local_warning:?}");
         core.cas_task_create_with_target(request, None, None, true).await.unwrap();
-        assert_eq!(store.list(None).unwrap().len(), 1, "explicit confirmation permits the intentional epic");
+        assert_eq!(store.list(None).unwrap().len(), 6, "explicit confirmation permits the intentional epic");
+        // Terminal plans and foreign scopes do not block a new plan.
+        for mut task in store.list(None).unwrap() {
+            if task.id != foreign.id {
+                task.status = TaskStatus::Closed;
+                store.update(&task).unwrap();
+            }
+        }
+        core.cas_task_create(Parameters(epic_request(title, scope))).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn epic_create_requires_confirmation_when_cloud_inventory_is_unavailable_cas_dea7() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
+            .expect(1).mount(&server).await;
+        let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
+        let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
+        assert!(warning.message.contains("EPIC INVENTORY WARNING") && warning.message.contains("confirm_warning=true"), "{warning:?}");
+        assert!(store.list(None).unwrap().is_empty());
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 1);
     }
 
     #[tokio::test]

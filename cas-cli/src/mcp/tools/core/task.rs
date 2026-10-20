@@ -14,8 +14,18 @@ pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
     crate::cloud::resolve_canonical_id(cas_root)
 }
 
+/// An accepted cross-project proposal belongs to the project it was accepted
+/// into, while `origin_project` keeps naming the proposer (cas-3556); the
+/// server-attested provenance in its notes names that target.
 pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
-    project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
+    project_id.is_some_and(|project_id| {
+        task.origin_project.as_deref() == Some(project_id)
+            || crate::cloud::syncer::accepted_proposal_target_project(&task.id, &task.notes)
+                .is_some_and(|target| {
+                    crate::cloud::canonical_project_id(&target)
+                        == crate::cloud::canonical_project_id(project_id)
+                })
+    })
 }
 
 /// Task board reads retain legacy rows that have no origin attribution. Rows

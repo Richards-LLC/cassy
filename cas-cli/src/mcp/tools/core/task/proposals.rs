@@ -96,7 +96,12 @@ impl CasCore {
             ));
         }
         let local = self.explicit_local_project()?;
-        if requested != local {
+        // cas-3556: any spelling in this project's alias class names it.
+        let named = crate::cloud::canonical_project_id(requested).is_some_and(|requested| {
+            requested == local
+                || crate::cloud::project_aliases_from_config_toml(&self.cas_root).contains(&requested)
+        });
+        if !named {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -235,37 +240,7 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
 
         if let Some(origin_task_id) = blocks_origin_task_id {
-            let projection_store = ExternalTaskDependencyStore::open(&self.cas_root)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-            let projection = ExternalTaskDependencyProjection {
-                origin_task_id: origin_task_id.to_string(),
-                proposal_id: response.proposal_id.clone(),
-                target_project_canonical_id: target_project.to_string(),
-                target_task_id: response.target_task_id.clone(),
-                proposal_state: response.state.clone(),
-                target_task_status: None,
-                resolution_state: "unresolved".to_string(),
-                resolved_at: None,
-            };
-            projection_store
-                .upsert(&projection)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Proposal was created, but local external blocker projection failed: {error}")))?;
-            let task_store = self.open_task_store()?;
-            let mut origin = task_store
-                .get(origin_task_id)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-            if origin.status == TaskStatus::Open {
-                origin.status = TaskStatus::Blocked;
-                origin.updated_at = chrono::Utc::now();
-                task_store.update(&origin).map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!(
-                            "Proposal was created, but marking origin task blocked failed: {error}"
-                        ),
-                    )
-                })?;
-            }
+            self.record_origin_blocker(origin_task_id, &response)?;
         }
 
         let proposal = proposal_from_create(response.provenance, response.state);
@@ -273,6 +248,50 @@ impl CasCore {
             "Created cross-project task proposal. No foreign task was inserted locally.\n\n{}",
             render_proposal(&proposal)
         )))
+    }
+
+    /// Record the accepted-or-pending proposal as an external blocker of the
+    /// origin task, under the target identity the server attested (cas-3556:
+    /// the canonical id, even when the proposal was addressed by an alias).
+    fn record_origin_blocker(
+        &self,
+        origin_task_id: &str,
+        response: &crate::cloud::task_proposals::CreateTaskProposalResponse,
+    ) -> Result<(), McpError> {
+        let projection_store = ExternalTaskDependencyStore::open(&self.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let projection = ExternalTaskDependencyProjection {
+            origin_task_id: origin_task_id.to_string(),
+            proposal_id: response.proposal_id.clone(),
+            target_project_canonical_id: response
+                .provenance
+                .server_attested
+                .target_project_canonical_id
+                .clone(),
+            target_task_id: response.target_task_id.clone(),
+            proposal_state: response.state.clone(),
+            target_task_status: None,
+            resolution_state: "unresolved".to_string(),
+            resolved_at: None,
+        };
+        projection_store
+            .upsert(&projection)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Proposal was created, but local external blocker projection failed: {error}")))?;
+        let task_store = self.open_task_store()?;
+        let mut origin = task_store
+            .get(origin_task_id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        if origin.status == TaskStatus::Open {
+            origin.status = TaskStatus::Blocked;
+            origin.updated_at = chrono::Utc::now();
+            task_store.update(&origin).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Proposal was created, but marking origin task blocked failed: {error}"),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn cas_task_proposal_inbox(
@@ -1006,5 +1025,97 @@ mod tests {
         assert_eq!(task.priority, base.priority);
         assert_eq!(task.labels, base.labels);
         assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
+    }
+
+    /// cas-3556: a proposal addressed by repository URL to a project whose
+    /// canonical id is a short name. The origin matches the server's
+    /// canonical receipt and records its blocker edge; the target accepts it
+    /// under any alias spelling; a worker starts it with no origin_project fix.
+    #[tokio::test]
+    async fn a_proposal_addressed_by_an_alias_is_matched_on_both_sides_and_starts_unchanged() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let alias = "github.com/richards-llc/cassy";
+        let target_task_id = "cas-0123456789abcdef";
+        let provenance = serde_json::json!({
+            "server_attested": {
+                "proposal_id": "proposal-1", "target_task_id": target_task_id,
+                "creator_user_id": "user-1", "team_id": "team-1",
+                "origin_project_canonical_id": "violet_ps",
+                "target_project_canonical_id": "cas-src",
+                "received_at": "2026-10-20T14:00:00.000Z", "client_request_id": "request-1"
+            },
+            "client_asserted": {}
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/teams/team-1/task-proposals"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "proposal_id": "proposal-1", "target_task_id": target_task_id,
+                "state": "proposed", "provenance": provenance,
+            })))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "projects": [{ "canonical_id": "cas-src", "aliases": [alias] }]
+            })))
+            .mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/teams/team-1/task-proposals/proposal-1/accept"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "proposal_id": "proposal-1", "target_task_id": target_task_id,
+                "state": "accepted", "origin_project_canonical_id": "violet_ps",
+                "target_project_canonical_id": "cas-src", "task": { "title": "Port the lint" },
+                "provenance": provenance,
+            })))
+            .mount(&server).await;
+        let client = TaskProposalClient::new(server.uri(), "token", "team-1");
+
+        // Origin: the canonical receipt for an aliased target is accepted.
+        let (_origin_dir, origin) = core_with_role(cas_types::AgentRole::Supervisor);
+        let origin_task = cas_types::Task::new("cas-origin".into(), "Epic step".into());
+        origin.open_task_store().unwrap().add(&origin_task).unwrap();
+        let request = CreateTaskProposalRequest {
+            client_request_id: "request-1".into(),
+            origin_project_canonical_id: "violet_ps".into(),
+            target_project_canonical_id: alias.into(),
+            origin_session_id: "session-1".into(),
+            origin_agent_id: "agent-1".into(),
+            origin_agent_name: None,
+            origin_agent_role: "supervisor".into(),
+            client_version: "test".into(),
+            client_build: "test".into(),
+            task: serde_json::json!({ "title": "Port the lint" }),
+            blocks_origin_task_id: Some("cas-origin".into()),
+        };
+        let create_client = client.clone();
+        let response = tokio::task::spawn_blocking(move || create_client.create(&request))
+            .await
+            .unwrap()
+            .unwrap();
+        origin.record_origin_blocker("cas-origin", &response).unwrap();
+        let edges = ExternalTaskDependencyStore::open(&origin.cas_root)
+            .unwrap()
+            .list_blocking_for_task("cas-origin")
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_project_canonical_id, "cas-src");
+
+        // Target: the alias names this project, and a worker starts the task.
+        let (_target_dir, target) = core_with_role(cas_types::AgentRole::Worker);
+        let config = target.cas_root.join("config.toml");
+        let mut toml = std::fs::read_to_string(&config).unwrap_or_default();
+        toml.push_str(&format!("\n[project]\ncanonical_id = \"cas-src\"\naliases = [\"{alias}\"]\n"));
+        std::fs::write(&config, toml).unwrap();
+        assert_eq!(target.require_local_project(alias).unwrap(), "cas-src");
+        let accepted = tokio::task::spawn_blocking(move || client.accept("proposal-1", "cas-src"))
+            .await
+            .unwrap()
+            .unwrap();
+        let task = materialize_accepted_proposal(&accepted, "cas-src").unwrap();
+        assert_eq!(task.origin_project.as_deref(), Some("violet_ps"));
+        target.open_task_store().unwrap().add(&task).unwrap();
+        target
+            .cas_task_start(Parameters(IdRequest { id: target_task_id.into() }))
+            .await
+            .unwrap();
     }
 }

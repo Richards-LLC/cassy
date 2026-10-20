@@ -1620,11 +1620,12 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
         cas_store::QaPassOpen::Dispatched(pass) => pass.id,
         other => panic!("first QA round should dispatch: {other:?}"),
     };
-    claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.id, now).unwrap();
+    // qa_caller_identity supplies the registered name to qa_record.
+    claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.name, now).unwrap();
     let rejected = resolve_qa_pass(
         temp_dir.path(),
         &delivery.id,
-        &reviewer.id,
+        &reviewer.name,
         QaVerdict::Rejected,
         "fix needed",
         None,
@@ -1638,7 +1639,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
     let service = crate::mcp::CasService::new(core, None);
     #[cfg(not(feature = "mcp-proxy"))]
     let service = crate::mcp::CasService::new(core);
-    let routed = service.route_qa_rejection(&rejected, &reviewer.id, "fix needed");
+    let routed = service.route_qa_rejection(&rejected, &reviewer.name, "fix needed");
     let reopened = stores.task_store.get(&delivery.id).unwrap();
     assert_eq!(reopened.status, TaskStatus::Open, "{routed}");
     assert_eq!(reopened.assignee, delivery.assignee);

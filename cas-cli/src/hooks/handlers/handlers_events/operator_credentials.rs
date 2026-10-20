@@ -131,6 +131,11 @@ fn recursively_scans_paths(command: &str) -> bool {
 
 fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> bool {
     let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
+    let reference = reference
+        .split_once('=')
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(_, value)| value)
+        .unwrap_or(reference);
     if reference.is_empty() {
         return false;
     }
@@ -316,6 +321,18 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
     if !reads_home {
         return false;
     }
+    let path_text = source.replace('\\', "/");
+    if [
+        ".config/neonctl/credentials.json",
+        ".local/share/com.vercel.cli/auth.json",
+        "library/application support/com.vercel.cli/auth.json",
+        ".config/com.vercel.cli/auth.json",
+    ]
+    .iter()
+    .any(|suffix| path_text.contains(suffix))
+    {
+        return true;
+    }
     let components = strings.join("/").to_ascii_lowercase();
     [
         ".config/neonctl/credentials.json",
@@ -336,7 +353,11 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
 fn quoted_strings(source: &str) -> Vec<String> {
     let mut strings = Vec::new();
     let mut chars = source.chars().peekable();
-    while let Some(quote @ ('\'' | '"')) = chars.next() {
+    while let Some(ch) = chars.next() {
+        if !matches!(ch, '\'' | '"') {
+            continue;
+        }
+        let quote = ch;
         let mut value = String::new();
         let mut escaped = false;
         for ch in chars.by_ref() {

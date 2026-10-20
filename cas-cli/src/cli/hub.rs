@@ -434,6 +434,11 @@ fn host_tailscale_default() -> Result<bool> {
     Ok(host_transport_mode()?.publishes())
 }
 
+// A service must exit on failed publication so launchd KeepAlive retries boot startup.
+fn publication_failure_is_fatal(mode: HubTransportMode, _service_startup: bool) -> bool {
+    mode == HubTransportMode::Required
+}
+
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
     !explicit_off && (explicit_on || configured)
 }
@@ -1792,7 +1797,7 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if transport_mode == HubTransportMode::Required => {
+                Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
                     return Err(error).context("Hub transport required: Tailscale Serve startup failed");
                 }
                 Err(error) => {
@@ -4136,6 +4141,16 @@ mod tests {
         assert!(should_start_stopped_hub(true, false));
         assert!(should_start_stopped_hub(false, true));
         assert!(!should_start_stopped_hub(false, false));
+    }
+
+    #[test]
+    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
+        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
+            "launchd must retry Auto publication after bounded startup retries");
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
+            "interactive Auto may retain loopback with a visible warning");
+        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
     }
 
     #[test]

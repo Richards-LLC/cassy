@@ -6102,43 +6102,88 @@ mod cas_7ce6_parked_merge_source_tests {
     fn rebased_same_patch_delivery_rebinds_and_merges_without_reclose_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let (repo, task, tip) = rebased_lane();
-        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
-        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
-        assert_eq!(
-            core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task),
-            Ok(None),
-        );
-        let rebound = store.get(&task.id).unwrap();
-        assert_eq!(rebound.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
-        assert_eq!(rebound.deliverables.parked_branch, task.deliverables.parked_branch);
-        assert!(rebound.notes.contains(task.deliverables.factory_branch_anchor.as_deref().unwrap()));
-        git(repo.path(), &["checkout", "-q", "main"]);
-        git(repo.path(), &["merge", "--no-ff", "-m", "integrate", "factory/w"]);
-        assert!(repo.path().join("parked").is_file());
-        assert!(repo.path().join("parked-second").is_file());
-        assert!(repo.path().join("target-update").is_file());
+        for worker_on_next_task in [false, true] {
+            let (repo, task, tip) = rebased_lane();
+            let target = git(repo.path(), &["rev-parse", "main"]);
+            let base = git(repo.path(), &["rev-parse", "main^"]);
+            // Both local-ahead and origin-ahead targets exclude imported work.
+            git(repo.path(), &[
+                "update-ref", "refs/remotes/origin/main",
+                if worker_on_next_task { &target } else { &base },
+            ]);
+            if worker_on_next_task {
+                git(repo.path(), &["update-ref", "refs/heads/main", &base]);
+            }
+            let mut tasks = vec![task.clone()];
+            if worker_on_next_task {
+                let mut next = cas_types::Task::new("cas-next".into(), "next task".into());
+                next.status = cas_types::TaskStatus::InProgress;
+                next.assignee = task.assignee.clone();
+                tasks.push(next);
+            }
+            let store = crate::store::mock::MockTaskStore::with_tasks(tasks);
+            let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+            assert_eq!(
+                core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task),
+                Ok(None),
+            );
+            let rebound = store.get(&task.id).unwrap();
+            assert_eq!(rebound.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+            assert_eq!(rebound.deliverables.parked_branch, task.deliverables.parked_branch);
+            assert!(rebound.notes.contains(task.deliverables.factory_branch_anchor.as_deref().unwrap()));
+            assert_eq!(
+                core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &rebound),
+                Ok(None),
+            );
+            assert_eq!(store.get(&task.id).unwrap().notes, rebound.notes, "retry is idempotent");
+            if worker_on_next_task {
+                assert_eq!(store.get("cas-next").unwrap().status, cas_types::TaskStatus::InProgress);
+            }
+            git(repo.path(), &["checkout", "-q", "main"]);
+            git(repo.path(), &["merge", "--no-ff", "-m", "integrate", "factory/w"]);
+            assert!(repo.path().join("parked").is_file());
+            assert!(repo.path().join("parked-second").is_file());
+            assert!(repo.path().join("target-update").is_file());
+        }
     }
 
     #[test]
     fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        let (repo, task, _) = rebased_lane();
-        std::fs::write(repo.path().join("parked"), "changed after review").unwrap();
-        git(repo.path(), &["commit", "-qam", "changed delivery"]);
-        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
-        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
-        let before = git(repo.path(), &["rev-parse", "main"]);
-        let refusal = core
-            .parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task)
-            .expect_err("new content is not the parked delivery");
-        assert!(refusal.contains("PARKED DELIVERY NOT ON SOURCE"));
-        assert_eq!(
-            serde_json::to_value(store.get(&task.id).unwrap()).unwrap(),
-            serde_json::to_value(&task).unwrap(),
-        );
-        assert_eq!(git(repo.path(), &["rev-parse", "main"]), before);
+        for shape in ["earlier-changed", "extra", "dropped", "whitespace", "empty"] {
+            let (repo, task, tip) = rebased_lane();
+            match shape {
+                "earlier-changed" | "whitespace" => {
+                    git(repo.path(), &["reset", "--hard", &format!("{tip}~2")]);
+                    let content = if shape == "whitespace" { "parked \t" } else { "changed after review" };
+                    std::fs::write(repo.path().join("parked"), content).unwrap();
+                    git(repo.path(), &["add", "parked"]);
+                    git(repo.path(), &["commit", "-qm", "changed first patch"]);
+                    git(repo.path(), &["cherry-pick", &tip]); // Last patch still matches.
+                }
+                "extra" => { commit(repo.path(), "extra-work"); }
+                "dropped" => { git(repo.path(), &["reset", "--hard", "HEAD^"]); }
+                "empty" => {
+                    git(repo.path(), &["reset", "--hard", "main"]);
+                    git(repo.path(), &["commit", "--allow-empty", "-qm", "empty delivery"]);
+                }
+                _ => unreachable!(),
+            }
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+            let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+            let before = git(repo.path(), &["rev-parse", "main"]);
+            let refusal = core
+                .parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task)
+                .expect_err("changed content is not the parked delivery");
+            assert!(refusal.contains("PARKED DELIVERY NOT ON SOURCE"), "{shape}: {refusal}");
+            assert_eq!(
+                serde_json::to_value(store.get(&task.id).unwrap()).unwrap(),
+                serde_json::to_value(&task).unwrap(),
+                "{shape} must preserve the parked task",
+            );
+            assert_eq!(git(repo.path(), &["rev-parse", "main"]), before);
+        }
     }
 
     /// cas-7ce6 AC: after the worker moves its branch on to the next task, a

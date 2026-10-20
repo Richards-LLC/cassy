@@ -6629,6 +6629,15 @@ impl CasCore {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
             return;
         };
+        let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            parent_branch.to_string()
+        } else {
+            freshest_target_ref(repo_path, parent_branch)
+        };
+        let unchanged_rebase = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|recorded| {
+            !git_commit_is_ancestor(repo_path, recorded, factory_branch_anchor)
+                && rebased_delivery_has_same_patches(repo_path, recorded, factory_branch_anchor, &target, &task.id)
+        });
         // A worker can have an explicitly parked task while doing a later
         // task on the same mutable factory branch. Query task ownership, not
         // the caller's lease: a supervisor may be the one retrying A's close.
@@ -6644,7 +6653,7 @@ impl CasCore {
                         .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
                 })
         };
-        if in_progress.iter().any(|other| same_worker(other)) {
+        if !unchanged_rebase && in_progress.iter().any(|other| same_worker(other)) {
             return;
         }
         let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {

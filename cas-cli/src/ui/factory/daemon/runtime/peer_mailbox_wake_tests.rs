@@ -362,7 +362,8 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
             name: "gold-fox".into(),
         },
     ] {
-        assert_ne!(FactoryDaemon::supervisor_wake_class(&sender,"supervisor","peer:far-heron-3@box-b",&prompt),
+        let class = FactoryDaemon::supervisor_wake_class(&sender,"supervisor","peer:far-heron-3@box-b",&prompt);
+        assert_ne!(class,
             Some(super::queue_and_events::SupervisorWakeClass::CloudPeerSupervisor),
             "{sender:?} must not raise a cloud peer wake");
     }

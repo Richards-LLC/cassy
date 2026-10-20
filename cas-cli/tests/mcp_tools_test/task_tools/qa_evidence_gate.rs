@@ -1041,6 +1041,61 @@ async fn cas_6f10_waiver_does_not_cover_another_tip() {
     assert!(!fx.notes().contains("QA evidence ledger waived"));
 }
 
+/// cas-1377c: a per-task branch re-parked after more commits keeps its first
+/// anchor. Once merged, the delivered head is the branch tip the supervisor
+/// waived, not that stale anchor: a waiver at the anchor does not cover the
+/// close, and a waiver at the tip does (cas-d47f: anchor e4e803eda, waiver and
+/// tip e506020d3).
+#[tokio::test]
+async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let lane = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &lane]);
+    let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
+    commit_file(&fx.repo, "src/more.rs", "pub fn more() {}\n");
+    let tip = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    task.deliverables.parked_branch = Some(lane.clone());
+    tasks.update(&task).unwrap();
+    merge_into_main(&fx, &tip);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    let waive = |head: &str, reason: &str| {
+        cas_store::waive_qa_pass(
+            &fx.repo.join(".cas"),
+            TASK,
+            &supervisor_id,
+            "test-agent",
+            &lane,
+            head,
+            reason,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    };
+    waive(&anchor, "Only the stale anchor is waived");
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("QA evidence ledger is missing"), "{refused}");
+    assert!(!fx.notes().contains("QA evidence ledger waived"));
+    waive(&tip, "Delivered tip waived");
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    let notes = fx.notes();
+    assert!(
+        notes.contains(&format!("QA evidence ledger waived: head={tip}"))
+            && notes.contains("reason=Delivered tip waived"),
+        "{notes}"
+    );
+}
+
 /// GH #1199: qa_waive promises the worker may close this exact tip, including
 /// a web delivery that otherwise requires a bundle.
 async fn waive_bundle_tip_cas_06f5(fx: &Fx, env: &mut TestEnvGuard) -> String {

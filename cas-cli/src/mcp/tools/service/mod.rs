@@ -345,7 +345,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle and dependencies. Workers run start, then close; if close returns verification-required guidance, follow it. Aliases: get means show; for dep_add/dep_remove, blocked_by means to_id; for close, summary means notes. notes with only id reads a task's notes; add notes= to append (optional note_type). create with an explicit project files a cross-project proposal; pending proposals live in a cloud inbox (proposal_*), never as task rows. cancel is the supervisor's reason-required terminal path for work ended without delivery (optional superseded_by). request_changes declines AwaitingMerge or a blocked parked delivery after failed review: it reopens the task and keeps its assignee."
+        description = "Task lifecycle and dependencies. Workers run start, then close; if close returns verification-required guidance, follow it. Aliases: get means show; for dep_add/dep_remove, blocked_by means to_id; for close, summary means notes. notes with only id reads a task's notes; add notes= to append (optional note_type). create with an explicit project files a cross-project proposal; pending proposals live in a cloud inbox (proposal_*), never as task rows. cancel is the supervisor's reason-required terminal path for work ended without delivery (optional superseded_by). request_changes lets supervisors decline AwaitingMerge or blocked parked work after failed review: it reopens the task and keeps its assignee."
     )]
     pub async fn task(
         &self,

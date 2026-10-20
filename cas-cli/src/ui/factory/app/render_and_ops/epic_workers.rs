@@ -986,7 +986,7 @@ fn checkout_ref_for_spawn_base_observed(
 #[derive(Clone, Copy)]
 enum EpicBasePublication {
     Published,
-    Unpublished { no_task_deliveries: bool },
+    Unpublished,
     Unverified,
 }
 
@@ -1072,7 +1072,7 @@ fn epic_unique_work_is_in_trunk(
     Ok(output.stdout.is_empty())
 }
 
-fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> String {
+fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> Result<String, String> {
     let shared = format!(
         "origin/{}",
         parent.strip_prefix("refs/heads/").unwrap_or(parent)
@@ -1082,13 +1082,27 @@ fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> S
     } else {
         parent
     };
-    format!(
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let branch = epic.strip_prefix("refs/heads/").unwrap_or(epic);
+    let checkout = git
+        .list_worktrees()
+        .map_err(|error| format!("could not locate epic checkout for reconciliation: {error}"))?
+        .into_iter()
+        .find(|checkout| checkout.branch.as_deref() == Some(branch));
+    if let Some(checkout) = checkout {
+        return Ok(format!(
+            "git -C {} merge {}",
+            shell_words::quote(&checkout.path.to_string_lossy()),
+            shell_words::quote(parent)
+        ));
+    }
+    Ok(format!(
         "git -C {} switch {} && git -C {} merge {}",
         shell_words::quote(&repo.to_string_lossy()),
         shell_words::quote(epic),
         shell_words::quote(&repo.to_string_lossy()),
         shell_words::quote(parent)
-    )
+    ))
 }
 
 /// Fast-forward an epic's local base ref from the parent branch it recorded
@@ -1110,6 +1124,7 @@ fn refresh_epic_base_from_parent(
     parent_branch: &str,
     parent_ref: &str,
     publication: EpicBasePublication,
+    no_task_deliveries: impl FnOnce() -> Result<bool, String>,
 ) -> Result<Option<String>, String> {
     if epic_branch == parent_branch
         || !ref_exists(repo_root, epic_branch)
@@ -1156,11 +1171,16 @@ fn refresh_epic_base_from_parent(
         if parent_is_ancestor.success() {
             return Ok(None);
         }
-        if let EpicBasePublication::Unpublished { no_task_deliveries } = publication {
-            if no_task_deliveries {
-                reset_reason = Some("no task deliveries are recorded");
+        if let EpicBasePublication::Unpublished = publication {
+            // Delivery inventory is needed only to authorize a diverged reset.
+            // Aligned lanes must not depend on a whole-backlog read succeeding.
+            if no_task_deliveries()? {
+                reset_reason = Some(("NO TASK DELIVERIES", "no task deliveries are recorded"));
             } else if epic_unique_work_is_in_trunk(&git, repo_root, &epic_sha, &parent_sha)? {
-                reset_reason = Some("all epic-only commits are already reachable from trunk");
+                reset_reason = Some((
+                    "TRUNK-COVERED WORK",
+                    "all epic-only commits are already reachable from trunk",
+                ));
             }
         }
         if reset_reason.is_none() {
@@ -1168,7 +1188,7 @@ fn refresh_epic_base_from_parent(
                 "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`",
                 &epic_sha[..epic_sha.len().min(8)],
                 &parent_sha[..parent_sha.len().min(8)],
-                epic_reconcile_command(repo_root, epic_branch, parent_ref),
+                epic_reconcile_command(repo_root, epic_branch, parent_ref)?,
             ));
         }
     }
@@ -1247,9 +1267,9 @@ fn refresh_epic_base_from_parent(
         }
     }
 
-    if let Some(reason) = reset_reason {
+    if let Some((label, reason)) = reset_reason {
         return Ok(Some(format!(
-            "EPIC BASE RESET (UNPUBLISHED, NO UNIQUE WORK): '{epic_branch}' ({epic_sha}) reset to recorded parent '{parent_ref}' ({parent_sha}); {reason}. Previous tip retained at '{recovery}'. Publication is handled separately before worker checkout."
+            "EPIC BASE RESET (UNPUBLISHED, {label}): '{epic_branch}' ({epic_sha}) reset to recorded parent '{parent_ref}' ({parent_sha}); {reason}. Previous tip retained at '{recovery}'. Publication is handled separately before worker checkout."
         )));
     }
     if !matches!(publication, EpicBasePublication::Published) {
@@ -2157,7 +2177,7 @@ impl WorkerSpawnContext {
                                         "{}",
                                         epic_base_refresh_refusal(&format!(
                                             "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`",
-                                            epic_reconcile_command(&repo_root, &parent_branch, &parent_ref),
+                                            epic_reconcile_command(&repo_root, &parent_branch, &parent_ref).map_err(anyhow::Error::msg)?,
                                         ))
                                     );
                                 }
@@ -2165,9 +2185,7 @@ impl WorkerSpawnContext {
                                 let publication = if existing_remote {
                                     EpicBasePublication::Published
                                 } else if matches!(observation.remote, Ok(None) | Ok(Some(false))) && !observation.previous_remote {
-                                    EpicBasePublication::Unpublished {
-                                        no_task_deliveries: epic_has_no_task_deliveries(&self.cas_dir, recorded_epic.as_ref().expect("managed epic"))?,
-                                    }
+                                    EpicBasePublication::Unpublished
                                 } else {
                                     EpicBasePublication::Unverified
                                 };
@@ -2177,6 +2195,8 @@ impl WorkerSpawnContext {
                                     &parent,
                                     &parent_ref,
                                     publication,
+                                    || epic_has_no_task_deliveries(&self.cas_dir, recorded_epic.as_ref().expect("managed epic"))
+                                        .map_err(|error| error.to_string()),
                                 )
                                 .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?
                                 {

@@ -4354,6 +4354,13 @@ impl FactoryDaemon {
         self.enqueue_delivery_stalled_bounces(queue);
         self.relay_idle_unacked_messages(queue);
         self.escalate_undelivered_supervisor_relays();
+        // cas-7456 (GH #1302 B): an expired verification dispatch wakes the
+        // supervisor instead of lapsing silently; store work, off the loop.
+        let dispatch_dir = self.app.cas_dir().to_path_buf();
+        self.relay_jobs.submit_write(&mut self.queue_jobs, "expired-verification-dispatches", None, move || {
+            super::lifecycle::escalate_expired_verification_dispatches(&dispatch_dir, chrono::Utc::now());
+            super::relay_jobs::RelayOutput::ProbeWritten
+        });
         // cas-786a6 (H3): the two pure-store sweeps run on the store
         // worker, off the loop.
         let cas_dir = self.app.cas_dir().to_path_buf();

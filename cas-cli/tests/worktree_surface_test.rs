@@ -2252,7 +2252,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     task.deliverables.parked_branch = Some("factory/alice".into());
     task.deliverables.parked_close_reason = Some("parked delivery".into());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:merge-noop".into(), target_branch: "main".into(),
+        repo_selector: "project:github.com/org/merge-noop".into(), target_branch: "main".into(),
     });
     tasks.add(&task).unwrap();
     env.set_current_dir(&repo.root);

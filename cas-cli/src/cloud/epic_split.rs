@@ -642,8 +642,10 @@ fn local_check(cas_root: &Path) -> Result<impl Fn(&str) -> bool, String> {
     Ok(move |id: &str| agents.get(id).is_ok())
 }
 
-/// Splits that may still bind (not expired), other than `except`, sharing a
-/// child with `ids`: `(split id, child)`.
+/// Splits reserving a child in `ids`, other than `except`: `(split id, child)`.
+/// Outgoing proposals reserve through expiry cleanup; a live successor may
+/// cancel an expired orphan after proving its owner is gone. Cleanup work and
+/// accepted splits also reserve, while expired incoming proposals do not.
 fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(String, String)>, String> {
     let now = Utc::now();
     let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
@@ -994,9 +996,9 @@ pub fn answer(
 }
 
 /// Cancel split `id`: normally release this side's supervisor claims and tell
-/// the peer. A live supervisor may also supersede an accepted split owned by
-/// another registered supervisor once that owner is proven gone past the
-/// heartbeat TTL. The override records its actor and reason on the split.
+/// the peer. A live supervisor may also supersede an accepted split or an
+/// expired outgoing proposal once its registered owner is proven gone past
+/// the heartbeat TTL. The override records its actor and reason on the split.
 pub fn cancel(
     cas_root: &Path,
     caller: &Caller,
@@ -1010,7 +1012,8 @@ pub fn cancel(
     let superseded_owner = if split.local_agent_id == caller.id {
         None
     } else {
-        if split.state != SplitState::Accepted {
+        let expired_proposal = split.direction == SplitDirection::Outgoing && split.is_expired(Utc::now());
+        if split.state != SplitState::Accepted && !expired_proposal {
             return Err(format!("{id} belongs to another supervisor of this database"));
         }
         let agents = crate::store::open_agent_store(cas_root)

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RetiredConfigNotice {
     pub path: PathBuf,
     pub keys: BTreeSet<String>,
@@ -48,7 +48,37 @@ impl RetiredNoticeScope {
         }
     }
 
-    fn take(&mut self) -> Vec<RetiredConfigNotice> {
+    /// Return a bounded discovery worker's notices to the command that owns
+    /// them. Its later project phases can still mark those notices represented.
+    pub(crate) fn adopt(
+        notices: Vec<RetiredConfigNotice>,
+        replay: fn(Vec<RetiredConfigNotice>, bool),
+    ) {
+        let remaining = PENDING.with_borrow_mut(|pending| {
+            let Some(pending) = pending else {
+                return notices;
+            };
+            for notice in notices {
+                if !pending.represented.contains(&notice.path) {
+                    pending
+                        .notices
+                        .entry(notice.path.clone())
+                        .or_insert_with(|| RetiredConfigNotice {
+                            path: notice.path,
+                            keys: BTreeSet::new(),
+                        })
+                        .keys
+                        .extend(notice.keys);
+                }
+            }
+            Vec::new()
+        });
+        if !remaining.is_empty() {
+            replay(remaining, false);
+        }
+    }
+
+    pub(crate) fn take(&mut self) -> Vec<RetiredConfigNotice> {
         if !std::mem::take(&mut self.owner) {
             return Vec::new();
         }

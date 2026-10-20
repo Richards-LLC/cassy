@@ -22,6 +22,8 @@ pub enum ArtifactCommands {
     Publish(PublishArgs),
     /// Show one artifact record
     Show(ShowArgs),
+    /// Fetch a task's proof log from Cloud and verify its SHA-256
+    Fetch(FetchArgs),
     /// List the artifacts published for a task
     List(ListArgs),
     /// Plan (and with --yes, apply) reclaiming closed tasks' artifact
@@ -78,6 +80,15 @@ pub struct ShowArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct FetchArgs {
+    /// Task carrying the published artifact reference
+    #[arg(long)]
+    pub task: String,
+    /// Published artifact id from the proof note
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct ListArgs {
     /// Task whose artifacts to list
     #[arg(long)]
@@ -92,6 +103,23 @@ pub fn execute(
     match command {
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
+        ArtifactCommands::Fetch(args) => {
+            let (artifact, path) =
+                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id)?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "artifact_id": artifact.id, "path": path, "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }))?
+                );
+            } else {
+                println!("[OK] verified {} - {}", artifact.name, artifact.id);
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         ArtifactCommands::List(args) => execute_list(args, cas_root, cli.json),
         ArtifactCommands::Prune(args) => execute_prune(
             args,

@@ -8,6 +8,20 @@
 | **Machine output** | `--json` is one object per command: `publish` returns `artifact_id`, `task_id`, `name`, `mime`, `size_bytes`, `sha256`, `status`, `storage` (`committed` / `not_live` / `not_logged_in` / `upload_failed`), `storage_detail`, `cloud_url`, `source`; `show` returns the stored record; `list` returns an array of records. The human verdict line never appears on stdout in JSON mode. |
 | **Omitted** | The pre-signed upload URL, in every mode — it is a credential, so it is never printed, never persisted, and never included in a failure report. The full digest is shortened to `b94d27b9…cde9` in `publish` (whole in `show` and `--json`), and per-step upload timings are not reported at all. |
 
+## Fetch
+
+| Field | Contract |
+| --- | --- |
+| **First two lines** | `[OK] verified <name> - <id>` proves the download matched the published bytes; the next line is the local file to read. |
+| **Scannable** | One verdict followed by one path; no table or transfer progress. |
+| **Readable** | A refusal names authentication, a missing reference, or the size/digest disagreement before a local copy is saved. |
+| **Machine output** | One object: `artifact_id`, `path`, `sha256`, `size_bytes`; no human banner. |
+| **Omitted** | Signed view URLs and credentials stay in memory; artifact metadata is available through `show`. |
+
+Like publish, fetch mutates disk and the local ledger. Its real CLI and MCP
+paths share the verified download implementation; the portable-proof handler
+regression covers both surfaces, including corruption refusal.
+
 ## Why the refusals are this loud
 
 Three of the five outcomes this command has are refusals, and each one is a

@@ -474,6 +474,11 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         "hits": 0
     }])
     .to_string();
+    std::fs::write(
+        peer.path().join(".cas/config.toml"),
+        "[verification]\nenabled=false\n[qa]\nindependent_pass=false\n",
+    )
+    .unwrap();
     let close_outcome = service
         .task(Parameters(
             serde_json::from_value(serde_json::json!({

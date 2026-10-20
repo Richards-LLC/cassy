@@ -136,15 +136,47 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
 
 #[test]
 fn cas_bfa1_spawn_first_use_publishes_and_checks_out_current_base() {
-    with_fixture(|f| {
-        f.advance_parent();
-        let prep = f.prepare().unwrap();
-        assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
-        let work = prep.worktree_info.unwrap();
-        let checkout = work.base_ref.as_deref().unwrap_or(&work.parent_branch);
-        assert_eq!(git(&f.repo, &["rev-parse", checkout]), f.base);
-        assert!(prep.warnings.iter().any(|line| line.contains("published")));
-    });
+    // Equal, behind and ahead lanes need no delivery inventory. An unrelated
+    // malformed backlog row must not prevent preparing their current base.
+    for relation in ["equal", "behind", "ahead"] {
+        with_fixture(|f| {
+            match relation {
+                "behind" => f.advance_parent(),
+                "ahead" => {
+                    git(&f.repo, &["checkout", "epic/round2"]);
+                    commit(&f.repo, "epic-work");
+                    f.base = git(&f.repo, &["rev-parse", "HEAD"]);
+                    git(&f.repo, &["checkout", "main"]);
+                }
+                _ => {}
+            }
+            let tasks = open_task_store_cached(&f.root).unwrap();
+            tasks
+                .add(&cas_types::Task::new(
+                    "cas-unrelated".into(),
+                    "Unrelated".into(),
+                ))
+                .unwrap();
+            let db = rusqlite::Connection::open(f.root.join("cas.db")).unwrap();
+            db.execute(
+                "UPDATE tasks SET priority = 'invalid' WHERE id = 'cas-unrelated'",
+                [],
+            )
+            .unwrap();
+            assert!(
+                tasks.list(None).is_err(),
+                "delivery inventory is unavailable"
+            );
+            let prep = f
+                .prepare()
+                .expect("aligned lanes must not read the delivery inventory");
+            assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.base);
+            let work = prep.worktree_info.unwrap();
+            let checkout = work.base_ref.as_deref().unwrap_or(&work.parent_branch);
+            assert_eq!(git(&f.repo, &["rev-parse", checkout]), f.base);
+            assert!(prep.warnings.iter().any(|line| line.contains("published")));
+        });
+    }
 }
 
 #[test]
@@ -186,30 +218,34 @@ fn cas_bfa1_spawn_offline_refreshes_local_base_and_retains_unverified_notice() {
 
 #[test]
 fn cas_bfa1_spawn_dirty_epic_refuses_without_cutting_worktree() {
-    with_fixture(|f| {
-        git(&f.repo, &["checkout", "epic/round2"]);
-        commit(&f.repo, "planning-only-epic-work");
-        f.old = git(&f.repo, &["rev-parse", "HEAD"]);
-        git(&f.repo, &["checkout", "main"]);
-        f.advance_parent();
-        git(&f.repo, &["checkout", "epic/round2"]);
-        std::fs::write(f.repo.join("initial"), "uncommitted").unwrap();
-        let error = f
-            .prepare()
-            .err()
-            .expect("tracked changes must refuse")
-            .to_string();
-        assert!(
-            error.contains("EPIC BASE REFRESH REFUSED") && error.contains("tracked changes"),
-            "{error}"
-        );
-        assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
-        assert_eq!(
-            std::fs::read_to_string(f.repo.join("initial")).unwrap(),
-            "uncommitted"
-        );
-        assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
-    });
+    for diverged in [false, true] {
+        with_fixture(|f| {
+            if diverged {
+                git(&f.repo, &["checkout", "epic/round2"]);
+                commit(&f.repo, "planning-only-epic-work");
+                f.old = git(&f.repo, &["rev-parse", "HEAD"]);
+                git(&f.repo, &["checkout", "main"]);
+            }
+            f.advance_parent();
+            git(&f.repo, &["checkout", "epic/round2"]);
+            std::fs::write(f.repo.join("initial"), "uncommitted").unwrap();
+            let error = f
+                .prepare()
+                .err()
+                .expect("tracked changes must refuse")
+                .to_string();
+            assert!(
+                error.contains("EPIC BASE REFRESH REFUSED") && error.contains("tracked changes"),
+                "{error}"
+            );
+            assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
+            assert_eq!(
+                std::fs::read_to_string(f.repo.join("initial")).unwrap(),
+                "uncommitted"
+            );
+            assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
+        });
+    }
 }
 
 #[test]
@@ -241,7 +277,14 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
             if delivered && !in_trunk {
                 // An archived branch named master is not the authoritative
                 // trunk. Its copy of this work must not authorize a reset.
-                git(&f.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+                git(
+                    &f.repo,
+                    &[
+                        "symbolic-ref",
+                        "refs/remotes/origin/HEAD",
+                        "refs/remotes/origin/main",
+                    ],
+                );
                 git(&f.repo, &["branch", "master", &tip]);
                 git(&f.repo, &["push", "origin", "master"]);
             }
@@ -264,8 +307,13 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
             if online && (in_trunk || !delivered) {
                 let prep = result.expect("an unpublished stale plan must reset, not refuse");
                 let notice = prep.warnings.join("\n");
+                let reason = if delivered {
+                    "TRUNK-COVERED WORK"
+                } else {
+                    "NO TASK DELIVERIES"
+                };
                 assert!(
-                    notice.contains("EPIC BASE RESET (UNPUBLISHED, NO UNIQUE WORK)"),
+                    notice.contains(&format!("EPIC BASE RESET (UNPUBLISHED, {reason})")),
                     "{notice}"
                 );
                 assert_eq!(
@@ -279,8 +327,14 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
                 assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), parent);
                 assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), parent);
                 if !delivered {
-                    assert!(f.repo.join("parent-current").is_file(), "the checked-out epic receives the parent tree");
-                    assert!(!f.repo.join("epic-work").exists(), "old-only content remains in the recovery ref, not the reset checkout");
+                    assert!(
+                        f.repo.join("parent-current").is_file(),
+                        "the checked-out epic receives the parent tree"
+                    );
+                    assert!(
+                        !f.repo.join("epic-work").exists(),
+                        "old-only content remains in the recovery ref, not the reset checkout"
+                    );
                     git(&f.repo, &["diff", "--exit-code", "HEAD"]);
                 }
                 let work = prep.worktree_info.unwrap();
@@ -312,6 +366,44 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
             }
         });
     }
+}
+
+#[test]
+fn spawn_reconcile_command_uses_existing_epic_checkout_cas_6e67() {
+    with_fixture(|f| {
+        let linked = f.repo.parent().unwrap().join("epic checkout");
+        git(
+            &f.repo,
+            &["worktree", "add", linked.to_str().unwrap(), "epic/round2"],
+        );
+        commit(&linked, "epic-work");
+        // Publishing prevents a planning-only reset and requires reconciliation.
+        git(&f.repo, &["push", "origin", "epic/round2"]);
+        f.advance_parent();
+        let error = f
+            .prepare()
+            .err()
+            .expect("divergence must refuse")
+            .to_string();
+        let command = error
+            .split("Reconcile: `")
+            .nth(1)
+            .unwrap()
+            .split('`')
+            .next()
+            .unwrap();
+        let output = std::process::Command::new("sh")
+            .args(["-c", command])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "printed reconciliation must work with a linked checkout: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(&linked, &["merge-base", "--is-ancestor", &f.base, "HEAD"]);
+        assert_eq!(git(&f.repo, &["branch", "--show-current"]), "main");
+    });
 }
 
 #[test]

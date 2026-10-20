@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::coordination::external_work::{
     ExternalWorkService, HttpCloudCoordinationPort, OperationContext, RemoteError,
-    SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
+    SqliteRequestJournal, VioletThreadResolver,
 };
 
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
@@ -90,13 +90,9 @@ impl VioletThreadResolver for DaemonVioletResolver {
             )
             .await
         });
-        match result {
-            Ok(Ok(value)) => decode_violet_result(value),
-            Ok(Err(error)) => Err(RemoteError::unavailable(
-                cmcp_core::describe_upstream_call_error(&error),
-            )),
-            Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
-        }
+        // cas-85c1: the MCP resolver's classification, so a daemon reconcile
+        // retries a reconnecting drop exactly as a supervisor's claim does.
+        crate::coordination::external_work::violet_proxy_outcome(result)
     }
 }
 

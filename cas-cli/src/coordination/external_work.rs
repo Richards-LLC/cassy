@@ -450,7 +450,32 @@ pub trait VioletThreadResolver: Send + Sync {
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError>;
 }
 
-/// Decode the MCP envelope around Violet's deployed `violet_read` response and
+/// cas-85c1 (GH #1292): the one mapping from a proxied `violet_read` call to
+/// the resolver result, shared by the MCP and daemon resolvers so both mark
+/// a dropped, reconnecting upstream the same way (via the proxy's structural
+/// classifier) and the service retries it within its reconnect window.
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn violet_proxy_outcome(
+    outcome: Result<anyhow::Result<Value>, tokio::time::error::Elapsed>,
+) -> Result<Value, RemoteError> {
+    match outcome {
+        Ok(Ok(value)) => decode_violet_result(value),
+        Ok(Err(error)) => {
+            let message = format!(
+                "Violet could not resolve the Slack permalink: {}",
+                cmcp_core::describe_upstream_call_error(&error)
+            );
+            Err(if cmcp_core::upstream_call_is_reconnectable(&error) {
+                RemoteError::reconnecting(message)
+            } else {
+                RemoteError::unavailable(message)
+            })
+        }
+        Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
+    }
+}
+
+/// Decode the MCP envelope around Violet's deployed `violet_read` response and/// Decode the MCP envelope around Violet's deployed `violet_read` response and
 /// normalize the identity-only v1 contract for the external-work service.
 /// Violet intentionally returns no message body or identity-proof field.
 pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
@@ -1833,6 +1858,65 @@ mod tests {
         assert!(journal.lease_due(RECONCILE_BATCH_LIMIT, now + worst, RECONCILE_LEASE).unwrap().is_empty());
         let expiry = now + RECONCILE_LEASE.as_millis() as i64;
         assert_eq!(journal.lease_due(RECONCILE_BATCH_LIMIT, expiry, RECONCILE_LEASE).unwrap().len(), 1);
+    }
+
+    /// A resolver that classifies through the shared proxy mapping: proxied
+    /// transport drops first, then Violet's real answer.
+    #[cfg(feature = "mcp-proxy")]
+    struct ProxiedDrops {
+        calls: AtomicUsize,
+        drops: usize,
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    impl VioletThreadResolver for ProxiedDrops {
+        fn resolve(&self, _external_ref: &str, _timeout: Duration) -> Result<Value, RemoteError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = if call < self.drops {
+                Ok(Err(anyhow::Error::from(rmcp::service::ServiceError::TransportClosed)
+                    .context("tool call 'violet_read' on 'violet' failed")))
+            } else {
+                let capture: Value = serde_json::from_str(include_str!(
+                    "../../tests/fixtures/coordination_contract/v1/captured/violet-production-2026-10-16.json"
+                ))
+                .unwrap();
+                Ok(Ok(capture["cases"][0]["response"].clone()))
+            };
+            violet_proxy_outcome(outcome)
+        }
+    }
+
+    /// cas-85c1 (GH #1292): a daemon reconcile of a journaled claim, whose
+    /// Violet call goes through the shared proxy mapping, retries a dropped
+    /// upstream within the window and succeeds; a drop that persists fails
+    /// clearly and posts nothing to Cloud.
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn daemon_reconcile_retries_a_proxied_violet_drop_cas_85c1() {
+        let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        for (drops, succeeds) in [(2, true), (usize::MAX, false)] {
+            let journal = journal();
+            let context = OperationContext {
+                project_id: "github.com/richards-llc/cassy".into(),
+                registration_id: "reg-supervisor-alpha-01".into(),
+            };
+            journal.prepare(REQUEST_ID, "claim", &claim(REQUEST_ID, link).input(&context)).unwrap();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let violet = Arc::new(ProxiedDrops { calls: AtomicUsize::new(0), drops });
+            let mut service = ExternalWorkService::new(journal, cloud.clone(), violet.clone(), context);
+            service.violet_reconnect_window = Duration::from_millis(150);
+            let outcome = service.reconcile_due(chrono::Utc::now().timestamp_millis());
+            if succeeds {
+                assert_eq!(outcome.unwrap()[0]["code"], "acquired");
+                assert_eq!(violet.calls.load(Ordering::SeqCst), 3);
+                assert_eq!(cloud.posts.load(Ordering::SeqCst), 1);
+            } else {
+                let error = outcome.unwrap_err().to_string();
+                assert!(error.contains("authority_unavailable") && error.contains("after retrying"), "{error}");
+                assert!(violet.calls.load(Ordering::SeqCst) > 1);
+                assert_eq!(cloud.posts.load(Ordering::SeqCst), 0);
+            }
+        }
     }
 
     #[test]

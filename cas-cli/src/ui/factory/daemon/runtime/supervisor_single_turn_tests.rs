@@ -204,6 +204,90 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
     typed_once(&root, &mut daemon, needle).await;
 }
 
+/// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
+/// physical submit is not evidence that the real Codex harness accepted a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b() {
+    if !fixture_child("codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b") {
+        return;
+    }
+    #[derive(Clone)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for (source, prompt) in [
+        (None, "Reminder #266: Check the pending reply."),
+        (Some("peer:remote@soundwave"), "<cas-peer-message v=\"1\" id=\"reply\" from=\"remote\" from_agent=\"remote-id\" machine=\"soundwave\" repo=\"cloud\" in_reply_to=\"request\"/>\nActionable reply."),
+    ] {
+        let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+            cas.clone(), daemon.app.project_scope(),
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let id = match queue.enqueue_idempotent(
+            source.unwrap_or(&name), &name, prompt, Some(&daemon.session_name),
+            None, None, prompt, Some(&cas_store::QueueOrigin::Daemon),
+        ).unwrap() {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh reminder/reply"),
+        };
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(sink.clone())).finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let log = || String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.queue_jobs.has_claim(id, &name) {
+            daemon.process_prompt_queue().await.unwrap();
+            assert!(Instant::now() < deadline, "claim must be submitted: {prompt}");
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0), 0,
+            "claim-only pass must not spend the wake budget (cas-979e)");
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        while daemon.urgent_injects.owners.is_empty() {
+            daemon.process_prompt_queue().await.unwrap();
+            assert!(Instant::now() < deadline, "completed claim must reach PTY: {prompt}");
+            tokio::task::yield_now().await;
+        }
+        // pin: this log stage promises physical submit, never queue admission.
+        assert!(!log().contains("pty_submit_confirmed"));
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            if queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some()
+                && std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "payload and submit must complete: {prompt}");
+            tokio::task::yield_now().await;
+        }
+        let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+        assert!(typed.contains(prompt), "original body must reach PTY: {typed:?}");
+        assert_eq!(typed.matches('\r').count(), 1, "exactly one physical submit: {typed:?}");
+        assert!(teams_messages(&daemon).is_empty(), "Codex never uses the Claude inbox");
+        let logs = log();
+        // pin: operators join dispatch to physical completion by stage, row and pane.
+        let confirmed: Vec<_> = logs.lines().filter(|line| line.contains("pty_submit_confirmed")).collect();
+        assert_eq!(confirmed.len(), 1, "one confirmed submit, not just an injection attempt: {logs}");
+        assert!(confirmed[0].contains(&format!("message_id={id}")) && confirmed[0].contains(&name), "{logs}");
+        assert!(confirmed[0].contains("unconfirmed"), "a shell PTY cannot prove a Codex turn: {logs}");
+        // pin: dispatch attempts have a distinct stage from physical completion.
+        assert!(logs.contains("prompt_inject_attempt"), "{logs}");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&cas, Duration::from_secs(3)));
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy() {
     if !fixture_child("cas_3f90_bounded_event_has_one_body_turn_and_no_relay_copy") {

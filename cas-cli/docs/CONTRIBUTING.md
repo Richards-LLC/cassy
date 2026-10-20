@@ -809,6 +809,41 @@ an empty list disables its check. These denials override project proxy credentia
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
 
+An explicit Claude `config_dir` can opt in to selected account connectors while
+keeping `--strict-mcp-config`. The account owner provisions a regular file at
+`<config_dir>/cassy-worker-connectors.json` (after `~` expansion), for example:
+
+```json
+{
+  "mcpServers": {
+    "claude.ai Gmail": {
+      "type": "claudeai-proxy",
+      "url": "https://<exact-upstream-from-this-account>/mcp",
+      "id": "<exact-connector-id-from-this-account>"
+    }
+  }
+}
+```
+
+Copy the exact connector name, URL and ID from this account's authorized MCP
+status metadata; the example values are placeholders. The manifest is an
+operator grant of the listed connectors, so keep it owner-only. It accepts
+only those three descriptor fields, HTTPS URLs without embedded credentials or
+query strings, and `claude.ai ` names. Other transports, fields, symlinks and
+files over 64 KiB are invalid. A missing or invalid manifest leaves strict
+CAS-only launch working and emits a one-line notice, also available in
+`CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE`. Configured supervisor-only connectors
+and deployment connectors Vercel/Neon are omitted. Claude's managed restrictions
+and connector-disable settings still apply; the manifest cannot override them.
+
+Only an explicit account parameter reads this file. Host/requester account
+inheritance, default workers, supervisors and Codex do not import it. Cassy
+copies no credentials and fetches no connector metadata; Claude authenticates
+using the selected account. Operator verification must confirm tool discovery
+on the actual Claude version and absence of denied/other-account tools before
+relying on this path. A visible connector does not enforce read-only use.
+The `inherit` mode above retains its existing semantics and ignores manifests.
+
 The existing protected-operator-token policy removes inherited `NEON_API_KEY`
 and `VERCEL_TOKEN` from workers by default, even though `supervisor_only_env`
 is empty. Explicit project credential grants can authorize these names;

@@ -2451,11 +2451,13 @@ fn cas_16c0_only_explicit_account_manifest_adds_connectors_under_strict_mcp() {
     }}).to_string();
     std::fs::write(project.path().join(".mcp.json"), &project_mcp).unwrap();
     env.set("CLAUDE_CONFIG_DIR", requester.to_str().unwrap());
-    for explicit in [false, true] {
+    // Reuse each worker name after the explicit grant to catch stale snapshots.
+    for source in ["explicit", "supervisor", "host"] {
+        let explicit = source == "explicit";
         let spec = WorkerSpec {
             name: Some("worker-1".into()),
             config_dir: explicit.then(|| selected.display().to_string()),
-            requester_config_dir: Some(requester.display().to_string()),
+            requester_config_dir: (source != "host").then(|| requester.display().to_string()),
             ..WorkerSpec::builtin_default()
         };
         let configs = Mux::factory_pane_configs(&MuxConfig {
@@ -2494,7 +2496,10 @@ fn cas_16c0_missing_or_invalid_manifest_keeps_strict_cas_with_notice() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&selected).unwrap();
     let manifest = selected.join("cassy-worker-connectors.json");
-    for contents in [None, Some("not-json"), Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"http","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected"}}}"#)] {
+    for contents in [None, Some("not-json"),
+        Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"http","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected"}}}"#),
+        Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"claudeai-proxy","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected","env":{"PRIVATE_TOKEN":"never-copy-fixture"}}}}"#),
+    ] {
         if let Some(contents) = contents {
             std::fs::write(&manifest, contents).unwrap();
         }

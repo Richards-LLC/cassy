@@ -2966,7 +2966,23 @@ pub(crate) fn run_queue_select(
             Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
         }
     }
-    crate::supervisor_message_wakes::schedule(&request.cas_dir, session, &request.supervisor_name, &registered_agents, &mut selection.rows, &mut selection.facts, chrono::Utc::now())?;
+    // Batching is optional. Even a late park-write error must leave the
+    // original action rows available to the normal delivery path this pass.
+    let mut batched_rows = selection.rows.clone();
+    let mut batched_facts = selection.facts.clone();
+    match crate::supervisor_message_wakes::schedule(
+        &request.cas_dir, session, &request.supervisor_name, &registered_agents,
+        &mut batched_rows, &mut batched_facts, chrono::Utc::now(),
+    ) {
+        Ok(()) => {
+            selection.rows = batched_rows;
+            selection.facts = batched_facts;
+        }
+        Err(error) => tracing::warn!(
+            target: "cas::coordination", %error,
+            "supervisor message batching unavailable; continuing normal queue delivery"
+        ),
+    }
     selection.native_agents = native_agents;
     selection.registered_agents = registered_agents;
     // Wake the loop so the batch is delivered now, not after its idle sleep

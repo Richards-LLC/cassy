@@ -11698,10 +11698,11 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
         decision.reason
     );
 
-    // THE CONTROL, on the same fixture so the two rules cannot drift: the same
-    // worker, the same claim, no flag. CAS attaches nothing, and the row stays
-    // inbox-only — which is what keeps cas-dab2's stolen-typing symptom from
-    // returning through ordinary chatter.
+    assert!(decision.reason.contains("blocker escalation"), "{}", decision.reason);
+
+    // The same authenticated worker without the flag can send a directed
+    // message. Shouting BLOCKER cannot turn it into the typed blocker class;
+    // ordinary directed traffic still uses the scheduler and pane safety gates.
     let free_text = get_text(
         &env.service
             .coordination(Parameters(coord_msg(
@@ -11724,7 +11725,7 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
         "shouting the word must not mint an envelope: {}",
         free_row.prompt
     );
-    let refused = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
+    let ordinary = cas::ui::factory::FactoryDaemon::supervisor_wake_decision(
         &data,
         "cosmic-bear-43",
         "cosmic-bear-43",
@@ -11734,12 +11735,9 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
         quiet_supervisor_pane(),
         chrono::Utc::now(),
     );
-    assert!(!refused.allowed, "{}", refused.reason);
-    assert_eq!(
-        refused.kind,
-        cas::ui::factory::WakeOutcome::NotApplicable,
-        "ordinary worker traffic is not a stalled wake; it was never a wake"
-    );
+    assert!(ordinary.allowed, "{}", ordinary.reason);
+    assert_eq!(ordinary.kind, cas::ui::factory::WakeOutcome::Allowed);
+    assert!(ordinary.reason.contains("authenticated directed message"), "{}", ordinary.reason);
 
     // And the envelope alone buys nothing on a row nobody stamped — the shape
     // `cas factory message --from …` and bridge POST /message still produce.

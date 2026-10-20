@@ -1157,6 +1157,7 @@ pub fn deliver_claimed_with(
         factory_session,
         consumer_id,
         &RecipientHistory::default(),
+        &|_, _| Ok(None),
         on_admitted,
     )
 }
@@ -1171,6 +1172,7 @@ fn deliver_claimed_with_history(
     factory_session: &str,
     consumer_id: &str,
     history: &RecipientHistory,
+    queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<(), String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
@@ -1343,6 +1345,13 @@ fn deliver_claimed_with_history(
             acks.push((message.id.clone(), PeerAckOutcome::Rejected));
             continue;
         };
+        let key = match queue_key(recipient, message) {
+            Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),
+            Err(error) => {
+                report.errors.push(format!("peer message {} queue identity failed: {error}", message.id));
+                continue; // Retry before admitting a second logical decision.
+            }
+        };
         let summary = format!(
             "peer {}@{}: {}",
             message.sender_name,
@@ -1360,7 +1369,7 @@ fn deliver_claimed_with_history(
             Some(factory_session),
             Some(&summary),
             Some(NotificationPriority::High),
-            &format!("peer:{}", message.id),
+            &key,
             Some(&QueueOrigin::Daemon),
         ) {
             Ok(admitted) => {

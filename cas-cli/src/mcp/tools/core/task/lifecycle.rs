@@ -2586,8 +2586,8 @@ impl CasCore {
         task.status = TaskStatus::InProgress;
         if !split_note.is_empty() {
             task.notes.push_str(&split_note);
-            task.deliverables.split_takeover = None;
         }
+        task.deliverables.split_takeover = None;
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store

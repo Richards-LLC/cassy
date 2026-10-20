@@ -344,6 +344,10 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     })).await.unwrap_err();
     assert!(refused.message.contains("SPLIT TO A PEER") && refused.message.contains(&id), "{refused}");
     assert_eq!(tasks.get("cas-d3").unwrap().status, TaskStatus::Open);
+    let refused = soundwave.task(json!({"action": "transfer", "id": "cas-d3",
+        "to_agent": "other-worker", "supervisor_override": true, "reason": reason}))
+        .await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
 
     // Each side is refused on the other's children: start, claim and spawn.
     for child in PROWL_TAKES {
@@ -396,6 +400,7 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     assert_eq!(task.status, TaskStatus::InProgress);
     assert!(task.notes.contains(reason) && task.notes.contains(&id), "{}", task.notes);
     assert!(serde_json::to_value(&task).unwrap()["deliverables"].get("split_takeover").is_none());
+    assert_eq!(cloud_holder(&cloud, "cas-d3").as_deref(), Some("pr"));
 
     // The peers detail view shows the split on both sides.
     for supervisor in [&soundwave, &prowl] {

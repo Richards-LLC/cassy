@@ -1382,13 +1382,29 @@ mod tests {
                 repo_selector: "project:healthy".to_string(),
                 target_branch: "main".to_string(),
             };
-            let first = resolve_repo_context(&healthy.join(".cas"), &target)
-                .expect("an unrelated blocked root must not prevent healthy resolution");
+            let cas_root = healthy.join(".cas");
+            let first = std::thread::scope(|scope| {
+                let peer = scope.spawn(|| resolve_repo_context(&cas_root, &target));
+                let first = resolve_repo_context(&cas_root, &target)
+                    .expect("an unrelated blocked root must not prevent healthy resolution");
+                assert_eq!(peer.join().unwrap().unwrap(), first);
+                first
+            });
             assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
             let first_calls = std::fs::read_to_string(&calls).expect("blocked root was probed");
-            assert!(!first_calls.is_empty());
-            let second = resolve_repo_context(&healthy.join(".cas"), &target).unwrap();
-            assert_eq!(second, first);
+            assert_eq!(first_calls.lines().count(), 1, "overlapping callers share one probe");
+            std::fs::write(
+                healthy.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"healthy-renamed\"\n",
+            )
+            .unwrap();
+            let renamed = WorkTarget {
+                repo_selector: "project:healthy-renamed".to_string(),
+                ..target
+            };
+            let second = resolve_repo_context(&cas_root, &renamed).unwrap();
+            assert_eq!(second.repo_root, first.repo_root);
+            assert_eq!(second.repo_selector, renamed.repo_selector);
             assert_eq!(
                 std::fs::read_to_string(&calls).unwrap(),
                 first_calls,
@@ -1429,7 +1445,9 @@ mod tests {
                 &bin.join("git"),
                 r#"#!/bin/sh
 if [ "$2" = "$CAS_TEST_BLOCKED_ROOT" ]; then
-    printf 'probe\n' >> "$CAS_TEST_BLOCKED_CALLS"
+    if [ "$4" = --show-toplevel ]; then
+        printf 'probe\n' >> "$CAS_TEST_BLOCKED_CALLS"
+    fi
     if [ "$CAS_TEST_BLOCKED_MODE" = git ]; then
         read -r blocked < "$CAS_TEST_BLOCKED_FIFO"
         exit 1

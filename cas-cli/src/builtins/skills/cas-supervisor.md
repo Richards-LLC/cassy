@@ -24,7 +24,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request and recipe.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
 - **Public surfaces:** before merge, score distinctiveness, fit, hierarchy 1–5 (cas-codebase-design; floor 4/5); record exceptions/remedies.
-- **Worker liveness:** use `factory action=worker_status summary_mode=true` and its `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`), not heartbeat/registry status. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
+- **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** `qa.user_facing_labels` require `demo_statement`: `As a <user>, I <do X> and see <Y>`; epics/internal tasks exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).

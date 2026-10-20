@@ -3433,7 +3433,13 @@ impl CasService {
                 ));
                 continue;
             }
-            let solicited_task = if queue.is_abandonment_recovery(message.id).unwrap_or(false) {
+            let solicited_task = if match queue.is_abandonment_recovery(message.id) {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    tracing::warn!(prompt_id = message.id, %error, "could not classify abandonment recovery");
+                    false
+                }
+            } {
                 None
             } else {
                 assignment_solicited_task_id(&message.prompt)

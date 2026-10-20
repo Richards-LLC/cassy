@@ -268,14 +268,19 @@ pub const NOTICE_DIGEST_KIND: &str = "notice_digest";
 /// CAS made rather than mail that spells the copy's lead.
 pub const PEER_COPY_KIND: &str = "worker_peer_copy";
 
-/// cas-bf890: the predicate for [`NOTICE_DIGEST_KIND`] rows over an unaliased
-/// `prompt_queue`, for the daemon's selection.
+/// Non-rendering metadata (digests and explicit recovery cards) must not
+/// trigger a daemon transport delivery.
 const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
-     AND COALESCE(kind, '') = 'notice_digest')";
+     AND (COALESCE(kind, '') = 'notice_digest'
+     OR (source = 'delivery-watchdog' AND COALESCE(kind, '') = 'recovery_reference')))";
 
-/// cas-bf890: [`NOT_NOTICE_DIGEST_SQL`] over the hook drains' `q` alias.
+/// Hook drains exclude digests; recovery cards have their own filter below.
 const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' \
      AND COALESCE(q.kind, '') = 'notice_digest')";
+
+/// cas-286c: explicit-read cards never consume automatic delivery slots.
+const NOT_RECOVERY_REFERENCE_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon'
+     AND q.source = 'delivery-watchdog' AND COALESCE(q.kind, '') = 'recovery_reference')";
 
 /// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
 const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND COALESCE(q.origin_kind, '') = 'daemon' \
@@ -4064,7 +4069,8 @@ impl SqlitePromptQueueStore {
     }
 
     /// A maintenance sweep may expire an entire backlog. Recovery notices keep
-    /// each original body; routine failures fold into one notice per inbox.
+    /// three full recovery bodies per recipient; excess originals remain
+    /// accessible by explicit reference. Routine failures fold per inbox.
     /// Give each aged, unprocessed row an honest terminal state (cas-f7b0;
     /// communication contract v2, P1.3). Shared by the roster sweep and the
     /// 24 h stale expiry, so the two cannot disagree.
@@ -4156,23 +4162,66 @@ impl SqlitePromptQueueStore {
 
         // GH #1196: Commander and agent abandonments are separate episodes.
         // cas-bf890: so are a supervisor's notices about ended recipients.
-        let mut groups: BTreeMap<
-            (String, Option<String>, bool, bool),
-            Vec<AbandonedSenderNotice>,
-        > = BTreeMap::new();
+        let mut groups: BTreeMap<(String, Option<String>, bool, bool), Vec<AbandonedSenderNotice>> =
+            BTreeMap::new();
+        let mut recoveries: BTreeMap<(String, Option<String>), Vec<AbandonedSenderNotice>> =
+            BTreeMap::new();
         for id in prompt_ids {
             if let Some(notice) = Self::abandoned_sender_notice_in_tx(tx, *id)? {
-                if let Some(content) = notice.recovery_content.as_deref() {
-                    Self::insert_abandonment_recovery_in_tx(tx, &notice, content)?;
+                if notice.recovery_content.is_some() {
+                    recoveries
+                        .entry((notice.sender.clone(), notice.session.clone()))
+                        .or_default()
+                        .push(notice);
                     continue;
                 }
                 let operator = is_operator_target(&notice.target);
                 let digest = !operator
                     && Self::abandonment_is_digest_in_tx(tx, &notice.sender, &notice.target)?;
                 groups
-                    .entry((notice.sender.clone(), notice.session.clone(), operator, digest))
+                    .entry((
+                        notice.sender.clone(),
+                        notice.session.clone(),
+                        operator,
+                        digest,
+                    ))
                     .or_default()
                     .push(notice);
+            }
+        }
+        for ((sender, session), mut notices) in recoveries {
+            notices.sort_by_key(|notice| notice.prompt_id);
+            let mut references = Vec::new();
+            for (index, notice) in notices.iter().enumerate() {
+                if index < 3 {
+                    Self::insert_abandonment_recovery_in_tx(
+                        tx,
+                        notice,
+                        notice.recovery_content.as_deref().unwrap(),
+                    )?;
+                } else {
+                    let reference_id = Self::insert_recovery_reference_in_tx(tx, notice)?;
+                    references.push(format!(
+                        "notification_id={reference_id} (original #{}, to {})",
+                        notice.prompt_id, notice.target
+                    ));
+                }
+            }
+            if !references.is_empty() {
+                let ids = notices
+                    .iter()
+                    .skip(3)
+                    .map(|notice| notice.prompt_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                tx.execute(
+                    "INSERT OR IGNORE INTO prompt_queue
+                        (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key)
+                     VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?)",
+                    params![sender, format!("{} more undelivered messages. Read each complete original with inbox_poll and its reference:\n{}", references.len(), references.join("\n")),
+                        Utc::now().to_rfc3339(), session, format!("{} more undelivered messages", references.len()),
+                        format!("delivery-abandoned-recovery:fold:{ids}")],
+                )?;
             }
         }
         for ((sender, session, operator, digest), mut notices) in groups {
@@ -4308,8 +4357,8 @@ impl SqlitePromptQueueStore {
         )?)
     }
 
-    /// One durable, fully readable copy per recovered message. Do not fold:
-    /// even oversized originals must remain whole for the successor's inbox poll.
+    /// A complete recovery notice, bounded to three per recipient and sweep.
+    /// Excess originals use recipient-owned explicit-read reference cards.
     fn insert_abandonment_recovery_in_tx(
         tx: &Connection,
         notice: &AbandonedSenderNotice,
@@ -4327,6 +4376,69 @@ impl SqlitePromptQueueStore {
                 format!("Undelivered message {} to {}", notice.prompt_id, notice.target),
                 format!("delivery-abandoned-recovery:{}", notice.prompt_id)],
         )?;
+        Ok(())
+    }
+
+    fn insert_recovery_reference_in_tx(
+        tx: &Connection,
+        notice: &AbandonedSenderNotice,
+    ) -> Result<i64> {
+        let dedupe = format!("delivery-abandoned-recovery:{}", notice.prompt_id);
+        tx.execute(
+            "INSERT OR IGNORE INTO prompt_queue
+                (source, target, prompt, created_at, factory_session, summary, priority, urgent, origin_kind, dedupe_key, kind)
+             VALUES ('delivery-watchdog', ?, ?, ?, ?, ?, 1, 0, 'daemon', ?, 'recovery_reference')",
+            params![notice.sender, format!("Recovery reference for undelivered message {}", notice.prompt_id),
+                Utc::now().to_rfc3339(), notice.session, format!("Undelivered message {}", notice.prompt_id), dedupe],
+        )?;
+        Ok(tx.query_row(
+            "SELECT id FROM prompt_queue WHERE dedupe_key = ?",
+            params![dedupe],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Called only after a named read passes the card's recipient/session SQL.
+    /// Keep the original abandoned; only the recipient-owned card is surfaced.
+    fn hydrate_recovery_reference_in_tx(tx: &Connection, prompt: &mut QueuedPrompt) -> Result<()> {
+        let reference: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE id = ? AND origin_kind = 'daemon'
+                AND source = 'delivery-watchdog' AND kind = 'recovery_reference')",
+            params![prompt.id],
+            |row| row.get(0),
+        )?;
+        if !reference {
+            return Ok(());
+        }
+        let original = tx.query_row(
+            "SELECT original.id, original.source, original.target, original.summary, original.prompt,
+                    COALESCE(original.last_pending_detail, original.last_pending_reason, 'undeliverable'),
+                    COALESCE(original.wake_gate_declines, 0), original.wake_attempt_detail
+             FROM prompt_queue card JOIN prompt_queue original
+               ON original.id = CAST(substr(card.dedupe_key, length('delivery-abandoned-recovery:') + 1) AS INTEGER)
+              AND card.dedupe_key = 'delivery-abandoned-recovery:' || original.id
+             WHERE card.id = ? AND original.highest_stage = 'abandoned'",
+            params![prompt.id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, u32>(6)?, row.get::<_, Option<String>>(7)?)),
+        ).optional()?;
+        prompt.prompt = match original {
+            Some((id, source, target, summary, body, mut reason, declines, detail)) => {
+                if declines > 0 {
+                    reason.push_str(&format!(
+                        "; wake gate declined {declines} times: {}",
+                        detail.as_deref().unwrap_or("no wake-gate detail recorded")
+                    ));
+                }
+                format!(
+                    "Message {id} to {target} was abandoned as undeliverable: {reason}\nOriginal source: {source}\nSummary: {}\nOriginal message:\n{body}",
+                    summary.as_deref().unwrap_or("(none)")
+                )
+            }
+            None => format!(
+                "The original for recovery reference {} is no longer retained.",
+                prompt.id
+            ),
+        };
         Ok(())
     }
 
@@ -4684,6 +4796,7 @@ impl SqlitePromptQueueStore {
              WHERE 1 = 1
                {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
                {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+               {NOT_RECOVERY_REFERENCE_Q_SQL}
                {deliverable_sql}
                AND (q.target = ? OR q.target = 'all_workers')
                {audience_sql}
@@ -9089,7 +9202,8 @@ impl SqlitePromptQueueStore {
                 "AND (q.highest_stage IS NULL
                      OR q.highest_stage NOT IN ('dropped', 'suppressed', 'abandoned'))"
             };
-            let deliverable_sql = format!("AND q.created_at >= ? {terminal_stage_sql}");
+            let reference_sql = if named_read { "" } else { NOT_RECOVERY_REFERENCE_Q_SQL };
+            let deliverable_sql = format!("AND q.created_at >= ? {terminal_stage_sql} {reference_sql}");
             // Filtering after the drain would already acknowledge and consume
             // the alarm. Keep all automatic hook variants on this SQL boundary.
             let daemon_nudge_sql = if source == SurfacingSource::HookSurfaced {
@@ -9300,7 +9414,12 @@ impl SqlitePromptQueueStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()?
             };
-            let prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            let mut prompts = Self::expire_supervisor_relays_in_tx(&tx, prompts)?;
+            if named_read {
+                for prompt in &mut prompts {
+                    Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;
+                }
+            }
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -19475,27 +19594,110 @@ mod cas_f17b_tests {
         );
         // A large expiry is bounded per recipient, while every excess body
         // remains available through that recipient's explicit named read.
-        let bodies: Vec<_> = (0..7).map(|n| format!("Recover request number {n} with its complete body")).collect();
-        let ids: Vec<_> = bodies.iter().map(|body| aged_message(&queue, &sender, body)).collect();
-        assert_eq!(queue.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().len(), 7);
-        let delivered = queue.poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100).unwrap();
-        assert_eq!(delivered.len(), 4, "three complete notices plus one folded row");
-        let complete = delivered.iter().filter(|row| bodies.iter().any(|body| row.prompt.contains(body.as_str()))).count();
+        let bodies: Vec<_> = (0..7)
+            .map(|n| format!("Recover request number {n} with its complete body"))
+            .collect();
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| aged_message(&queue, &sender, body))
+            .collect();
+        assert_eq!(
+            queue
+                .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(
+            queue
+                .count_unseen_for_recipient(&sender.name, sender.factory_session.as_deref())
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            queue
+                .peek_for_targets(
+                    &[sender.name.as_str()],
+                    sender.factory_session.as_deref(),
+                    100
+                )
+                .unwrap()
+                .len(),
+            4
+        );
+        let preview = queue
+            .surface_for_recipient_within_budget(
+                &sender.name,
+                sender.factory_session.as_deref(),
+                HookDrain::Unseen,
+                100,
+                0,
+            )
+            .unwrap();
+        assert!(preview.rows.is_empty());
+        assert_eq!(
+            preview.over_budget.len(),
+            4,
+            "reference cards must not enter hook drains"
+        );
+        let delivered = queue
+            .poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100)
+            .unwrap();
+        assert_eq!(
+            delivered.len(),
+            4,
+            "three complete notices plus one folded row"
+        );
+        let complete = delivered
+            .iter()
+            .filter(|row| bodies.iter().any(|body| row.prompt.contains(body.as_str())))
+            .count();
         assert_eq!(complete, 3);
-        let folded = delivered.iter().find(|row| row.prompt.contains("notification_id=")).unwrap();
-        let references: Vec<i64> = folded.prompt.lines().filter_map(|line| line.split_once("notification_id="))
-            .filter_map(|(_, tail)| tail.split_whitespace().next()?.parse().ok()).collect();
+        let folded = delivered
+            .iter()
+            .find(|row| row.prompt.contains("notification_id="))
+            .unwrap();
+        let references: Vec<i64> = folded
+            .prompt
+            .lines()
+            .filter_map(|line| line.split_once("notification_id="))
+            .filter_map(|(_, tail)| tail.split_whitespace().next()?.parse().ok())
+            .collect();
         assert_eq!(references.len(), 4);
-        assert!(queue.poll_named_for_recipient(&sender.name, Some("foreign-session"), &references).unwrap().is_empty());
-        let details = queue.poll_named_for_recipient(&sender.name, sender.factory_session.as_deref(), &references).unwrap();
+        assert!(
+            queue
+                .poll_named_for_recipient(&sender.name, Some("foreign-session"), &references)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            queue
+                .poll_named_for_recipient(
+                    "foreign-recipient",
+                    sender.factory_session.as_deref(),
+                    &references
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let details = queue
+            .poll_named_for_recipient(&sender.name, sender.factory_session.as_deref(), &references)
+            .unwrap();
         assert_eq!(details.len(), 4);
         for (original, body) in ids.iter().zip(&bodies).skip(3) {
-            assert!(details.iter().any(|row| row.prompt.contains(&original.to_string()) && row.prompt.contains(body)),
-                "explicit recipient read must recover original {original}");
+            assert!(
+                details
+                    .iter()
+                    .any(|row| row.prompt.contains(&original.to_string())
+                        && row.prompt.contains(body)),
+                "explicit recipient read must recover original {original}"
+            );
         }
-        assert!(queue.poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100).unwrap().is_empty());
-
+        assert!(
+            queue
+                .poll_unseen_for_recipient(&sender.name, sender.factory_session.as_deref(), 100)
+                .unwrap()
+                .is_empty()
+        );
     }
-
-
 }

@@ -829,8 +829,8 @@ fn over_budget_note(
     }
     if !no_room.is_empty() {
         notes.push(format!(
-            "[not shown here] Message {} did not fit in this block and stays unread; read it \
-             with inbox_poll notification_id=<id>.",
+            "[not shown here] Message {} did not fit in this block and stays unread; it is \
+             retried automatically at the next eligible turn or tool boundary.",
             ids(&no_room)
         ));
     }

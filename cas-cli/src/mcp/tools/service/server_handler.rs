@@ -626,8 +626,12 @@ impl CasService {
                 let Some(tool_use) = caller_tool_use else {
                     // A shared Claude server cannot attribute an untagged call
                     // to the parent. Leave its mail for a proven call or hook.
-                    return super::factory_ops::worker_cli_from_agent(&agent)
-                        != cas_mux::SupervisorCli::Claude;
+                    let claude = super::factory_ops::worker_cli_from_agent(&agent)
+                        == cas_mux::SupervisorCli::Claude;
+                    if claude {
+                        tracing::debug!(agent_id = %agent.id, "untagged Claude call skipped parent mailbox");
+                    }
+                    return !claude;
                 };
                 caller_transcript_path(&agent)
                     .is_some_and(|path| top_level_tool_use(&path, &tool_use, wait))

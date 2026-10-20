@@ -102,6 +102,9 @@ pub enum Kept {
     Recent,
     /// An open or recently updated task cites it or its published artifacts.
     Referenced,
+    /// cas-6162: a legacy top-level directory whose task id cannot be proven
+    /// to be this project's (the reason says why).
+    Unproven(String),
 }
 
 /// One task directory under the project's artifact namespace.
@@ -111,6 +114,9 @@ pub struct TaskArtifactDir {
     pub path: PathBuf,
     pub bytes: u64,
     pub closed_at: Option<DateTime<Utc>>,
+    /// cas-6162: a legacy directory directly under the artifacts root, not
+    /// under this project's key.
+    pub legacy: bool,
 }
 
 /// What `cas artifact prune` would remove and what it keeps.
@@ -131,10 +137,16 @@ impl PrunePlan {
     }
 }
 
-/// Plan a prune of `root` (this project's artifact namespace).
+/// Plan a prune of `root` (this project's artifact namespace) and, when
+/// given, of the legacy task directories directly under `legacy_root`
+/// (cas-6162). A legacy directory is a candidate only when its name is
+/// exactly a task id that is closed in this project and held by no other
+/// known project; otherwise it is kept and reported as unproven.
 pub fn plan_prune(
     cas_root: &Path,
     root: &Path,
+    legacy_root: Option<&Path>,
+    others: &dyn crate::task_ownership::OtherProjects,
     tasks: &[cas_types::Task],
     now: DateTime<Utc>,
     retention_days: i64,
@@ -148,14 +160,17 @@ pub fn plan_prune(
     if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err("project artifact namespace must not be a symlink".into());
     }
+    // A project with no keyed directory yet may still own legacy ones.
     let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(plan),
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
     let eligible = eligible_artifact_tasks(cas_root, tasks, now, retention_days)?;
     let cutoff = now - Duration::days(retention_days);
     let mut dirs: Vec<_> = entries
+        .into_iter()
+        .flatten()
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .collect();
@@ -174,16 +189,81 @@ pub fn plan_prune(
             bytes: artifact_root_usage(&entry.path()).bytes,
             path: entry.path(),
             closed_at: task.closed_at,
+            legacy: false,
         };
-        if eligible.contains(&dir.task_id) {
-            plan.reclaimable.push(dir);
-        } else if task.closed_at.is_some_and(|closed| closed <= cutoff) {
-            plan.kept.push((dir, Kept::Referenced));
-        } else {
-            plan.kept.push((dir, Kept::Recent));
-        }
+        classify_dir(&mut plan, dir, task, &eligible, cutoff);
+    }
+    if let Some(legacy_root) = legacy_root {
+        plan_legacy(&mut plan, legacy_root, others, tasks, &eligible, cutoff)?;
     }
     Ok(plan)
+}
+
+fn classify_dir(
+    plan: &mut PrunePlan,
+    dir: TaskArtifactDir,
+    task: &cas_types::Task,
+    eligible: &BTreeSet<String>,
+    cutoff: DateTime<Utc>,
+) {
+    if eligible.contains(&dir.task_id) {
+        plan.reclaimable.push(dir);
+    } else if task.closed_at.is_some_and(|closed| closed <= cutoff) {
+        plan.kept.push((dir, Kept::Referenced));
+    } else {
+        plan.kept.push((dir, Kept::Recent));
+    }
+}
+
+/// Legacy `<artifacts_root>/cas-<id>/` directories (cas-6162).
+fn plan_legacy(
+    plan: &mut PrunePlan,
+    legacy_root: &Path,
+    others: &dyn crate::task_ownership::OtherProjects,
+    tasks: &[cas_types::Task],
+    eligible: &BTreeSet<String>,
+    cutoff: DateTime<Utc>,
+) -> Result<(), String> {
+    if std::fs::symlink_metadata(legacy_root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("artifacts root must not be a symlink".into());
+    }
+    let entries = match std::fs::read_dir(legacy_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut dirs: Vec<_> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| crate::task_ownership::is_task_id(&entry.file_name().to_string_lossy()))
+        .collect();
+    dirs.sort_by_key(|entry| entry.file_name());
+    for entry in dirs {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(task) = tasks
+            .iter()
+            .find(|task| task.id == name && task.status == cas_types::TaskStatus::Closed)
+        else {
+            plan.untouched += 1;
+            continue;
+        };
+        let dir = TaskArtifactDir {
+            task_id: name,
+            bytes: artifact_root_usage(&entry.path()).bytes,
+            path: entry.path(),
+            closed_at: task.closed_at,
+            legacy: true,
+        };
+        match others.holders(&dir.task_id) {
+            Ok(holders) if holders.is_empty() => classify_dir(plan, dir, task, eligible, cutoff),
+            Ok(holders) => {
+                let why = format!("task id also exists in {}", holders.join(", "));
+                plan.kept.push((dir, Kept::Unproven(why)));
+            }
+            Err(error) => plan.kept.push((dir, Kept::Unproven(error))),
+        }
+    }
+    Ok(())
 }
 
 /// Remove every reclaimable directory; returns (removed, bytes freed).

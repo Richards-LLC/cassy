@@ -6623,6 +6623,7 @@ impl CasService {
             out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
                 &crate::task_simulators::Simctl::default(),
                 &tasks,
+                &crate::task_ownership::KnownProjects::load(&self.inner.cas_root),
                 chrono::Utc::now(),
             )));
         }
@@ -7366,7 +7367,10 @@ impl CasService {
             let simulators = crate::store::open_task_store(&self.inner.cas_root)
                 .map_err(anyhow::Error::from)
                 .and_then(|store| store.list(None).map_err(anyhow::Error::from))
-                .and_then(|tasks| crate::task_simulators::inventory(&simctl, &tasks, chrono::Utc::now()));
+                .and_then(|tasks| {
+                    let others = crate::task_ownership::KnownProjects::load(&self.inner.cas_root);
+                    crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                });
             output.push_str(&crate::task_simulators::render(&simulators));
             if artifact_authorized && let Ok(simulators) = &simulators {
                 let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);

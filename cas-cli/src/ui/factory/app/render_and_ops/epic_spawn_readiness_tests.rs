@@ -250,6 +250,9 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
             if !online {
                 f.offline();
             }
+            if online && !delivered {
+                git(&f.repo, &["checkout", "epic/round2"]);
+            }
             let result = f.prepare();
             if online && (in_trunk || !delivered) {
                 let prep = result.expect("an unpublished stale plan must reset, not refuse");
@@ -268,6 +271,11 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
                 );
                 assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), parent);
                 assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), parent);
+                if !delivered {
+                    assert!(f.repo.join("parent-current").is_file(), "the checked-out epic receives the parent tree");
+                    assert!(!f.repo.join("epic-work").exists(), "old-only content remains in the recovery ref, not the reset checkout");
+                    git(&f.repo, &["diff", "--exit-code", "HEAD"]);
+                }
                 let work = prep.worktree_info.unwrap();
                 assert_eq!(
                     git(

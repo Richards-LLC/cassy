@@ -215,6 +215,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
         content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
@@ -894,6 +898,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
         content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
@@ -1504,6 +1512,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
         content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/correction-proof.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/correction-proof.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",

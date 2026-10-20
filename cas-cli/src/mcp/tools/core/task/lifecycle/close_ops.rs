@@ -5051,11 +5051,6 @@ pub(crate) enum VerificationSkipReason {
     /// The assignee is alive and no bypass flag was set. Verification
     /// runs normally; this is *not* a skip.
     None,
-    /// The caller passed the epic ownership gate. Epics do not run the
-    /// per-task verifier because their child tasks are verified individually;
-    /// closing one as its verification owner is therefore not an orphan
-    /// recovery action even though epics normally have no task assignee.
-    EpicOwnerClosed,
     /// The task has no assignee at all. Treated as orphaned; legacy
     /// callers reached this via the same skip path.
     NoAssignee,
@@ -5101,9 +5096,6 @@ impl VerificationSkipReason {
                     String::new()
                 }
             }
-            VerificationSkipReason::EpicOwnerClosed => {
-                " (epic verification: owner-closed; child tasks individually verified)".to_string()
-            }
             VerificationSkipReason::NoAssignee => {
                 " (verification skipped — orphaned task, no assignee)".to_string()
             }
@@ -5141,10 +5133,6 @@ impl VerificationSkipReason {
     pub(crate) fn audit_reason(&self) -> String {
         match self {
             VerificationSkipReason::None => String::new(),
-            VerificationSkipReason::EpicOwnerClosed => {
-                "Epic closed by its verification owner; child tasks were individually verified."
-                    .to_string()
-            }
             VerificationSkipReason::NoAssignee => {
                 "Closed via supervisor bypass — task had no assignee (orphaned).".to_string()
             }
@@ -5880,7 +5868,6 @@ impl CasCore {
             cas_store::worker_delivery_transaction_id(&receipt.id),
         );
         let owner_id = self.verification_dispatch_owner(&caller.id)?;
-        let was_existing = existing_delivery.is_some();
         let transaction = if let Some((_, transaction)) = existing_delivery {
             transaction
         } else {
@@ -5966,27 +5953,44 @@ impl CasCore {
             }
         }
 
-        let projection_coherent = was_existing
-            && task.status == projected_status
-            && task.pending_verification == projected_pending_verification
-            && task.deliverables.pre_close_hook.as_ref() == Some(&hook_evidence)
-            && task.deliverables.factory_branch_anchor.as_deref()
-                == Some(input.commit_sha.as_str())
-            && task.deliverables.parked_branch.as_deref() == Some(input.source_branch.as_str());
-        if !projection_coherent {
+        let projection_coherent = |current: &cas_types::Task| {
+            current.status == projected_status
+                && current.pending_verification == projected_pending_verification
+                && current.deliverables.pre_close_hook.as_ref() == Some(&hook_evidence)
+                && current.deliverables.factory_branch_anchor.as_deref()
+                    == Some(input.commit_sha.as_str())
+                && current.deliverables.parked_branch.as_deref()
+                    == Some(input.source_branch.as_str())
+        };
+        if !projection_coherent(task) {
+            let expected = task.clone();
             task.status = projected_status;
             task.pending_verification = projected_pending_verification;
-            task.deliverables.pre_close_hook = Some(hook_evidence);
+            task.deliverables.pre_close_hook = Some(hook_evidence.clone());
             task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
             task.deliverables.parked_branch = Some(input.source_branch.clone());
             task.updated_at = chrono::Utc::now();
-            task_store.update(task).map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Failed to project worker delivery state onto task: {error}"
-                )),
-                data: None,
-            })?;
+            match task_store.update_if_current(task, &expected) {
+                Ok(updated_at) => task.updated_at = updated_at,
+                Err(error) => {
+                    // Concurrent exact receipt submissions share one immutable
+                    // boundary. The other call may already have projected it.
+                    // Accept that postcondition without writing the stale row;
+                    // request_changes clears the anchor and cannot match it.
+                    match task_store.get(&task.id) {
+                        Ok(current) if projection_coherent(&current) => *task = current,
+                        _ => {
+                            return Err(McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to project worker delivery state onto task: {error}"
+                                )),
+                                data: None,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         let next = match transaction.state {
@@ -6175,7 +6179,7 @@ impl CasCore {
         merge_conflicted: bool,
         measured_branch: Option<String>,
         close_reason: Option<&str>,
-    ) {
+    ) -> cas_store::Result<()> {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
@@ -6223,13 +6227,14 @@ impl CasCore {
             format!("{}\n\n{}", parked.notes, audit)
         };
 
-        match task_store.update(&parked) {
+        match task_store.update_if_current(&parked, task) {
             Err(e) => {
                 tracing::warn!(
                     task_id = %task.id,
                     error = %e,
                     "failed to park task awaiting merge after close rejection"
                 );
+                return Err(e);
             }
             // cas-ec74: `updated_at` is store-owned; derive the occurrence from
             // the stamp the store persisted, not from the pre-write value.
@@ -6281,6 +6286,7 @@ impl CasCore {
         }
 
         self.record_close_rejection_activity(&task.id, reason, message);
+        Ok(())
     }
 
     /// Advance a parked task's delivery boundary when its worker continues
@@ -6547,7 +6553,7 @@ impl CasCore {
             parking.deliverables.factory_branch_anchor =
                 advanced.deliverables.factory_branch_anchor;
             parking.notes = advanced.notes;
-            parking.updated_at = advanced.updated_at;
+            // Keep the original store clock for the guarded park below.
         }
         parking
     }
@@ -6625,9 +6631,9 @@ impl CasCore {
         repo_path: &std::path::Path,
         parent_branch: &str,
         factory_branch_anchor: Option<&str>,
-    ) {
+    ) -> cas_store::Result<()> {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
-            return;
+            return Ok(());
         };
         let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
@@ -6642,7 +6648,7 @@ impl CasCore {
         // continuations still require exclusive ownership; a proven identical
         // rebase preserves the earlier delivery even after that handoff.
         let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
-            return;
+            return Ok(());
         };
         let same_worker = |other: &Task| {
             other.id != task.id
@@ -6654,17 +6660,17 @@ impl CasCore {
                 })
         };
         if !unchanged_rebase && in_progress.iter().any(|other| same_worker(other)) {
-            return;
+            return Ok(());
         }
         let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {
-            return;
+            return Ok(());
         };
         if other_parked.iter().any(|other| {
             same_worker(other)
                 && other.deliverables.factory_branch_anchor.as_deref()
                     == Some(factory_branch_anchor)
         }) {
-            return;
+            return Ok(());
         }
         // cas-ba4a: retain attribution checks for changed continuations. A
         // rewritten delivery additionally needs positive patch equivalence.
@@ -6675,7 +6681,7 @@ impl CasCore {
             parent_branch,
             Some(factory_branch_anchor),
         ) else {
-            return;
+            return Ok(());
         };
         let factory_branch_anchor = factory_branch_anchor.as_str();
         // cas-44e93: a move that does not descend from the recorded anchor is
@@ -6695,7 +6701,7 @@ impl CasCore {
             Some(parent_branch),
         )
         else {
-            return;
+            return Ok(());
         };
         if rebound {
             let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
@@ -6715,13 +6721,14 @@ impl CasCore {
             advanced.notes.push_str(reason);
         }
 
-        match task_store.update(&advanced) {
+        match task_store.update_if_current(&advanced, task) {
             Err(error) => {
                 tracing::warn!(
                     task_id = %task.id,
                     error = %error,
                     "failed to advance parked task delivery anchor after close retry"
                 );
+                return Err(error);
             }
             Ok(persisted_at) => {
                 let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
@@ -6752,6 +6759,7 @@ impl CasCore {
                 }
             }
         }
+        Ok(())
     }
 
     fn apply_awaiting_merge_anchor_advance(
@@ -6832,9 +6840,10 @@ impl CasCore {
         if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
             return;
         }
+        let expected = task.clone();
         task.deliverables.merge_conflicted = true;
         task.updated_at = chrono::Utc::now();
-        if let Err(e) = task_store.update(&task) {
+        if let Err(e) = task_store.update_if_current(&task, &expected) {
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
@@ -8334,7 +8343,7 @@ impl CasCore {
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
-                        self.park_task_awaiting_merge(
+                        if let Err(error) = self.park_task_awaiting_merge(
                             task_store.as_ref(),
                             &parking,
                             "MERGE REQUIRED",
@@ -8343,19 +8352,23 @@ impl CasCore {
                             merge_conflicted,
                             measured_branch.clone(),
                             req.reason.as_deref(),
-                        );
+                        ) {
+                            return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
+                        }
                     } else {
                         // GH #744 / #743: a worker may push again after the
                         // first park. Re-anchor before the retry returns its
                         // merge-required refusal so the queued request and
                         // supervisor status describe the current tip.
-                        self.advance_awaiting_merge_anchor(
+                        if let Err(error) = self.advance_awaiting_merge_anchor(
                             task_store.as_ref(),
                             &task,
                             &close_project_root,
                             &resolved_parent_branch,
                             anchor.as_deref(),
-                        );
+                        ) {
+                            return Ok(Self::tool_error(format!("PARK REFUSED: {error}")));
+                        }
                         if merge_conflicted && !task.deliverables.merge_conflicted {
                             // Already parked (a retry), but a fresh preflight now
                             // shows a genuine conflict or cannot be evaluated.
@@ -8490,12 +8503,18 @@ impl CasCore {
         } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
             // cas-eda0: Cassy's own post-merge close never takes the
             // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic && task.epic_verification_owner.is_some() {
-                // The ownership gate above already proved that this caller is
-                // the configured epic verification owner. Epics normally have
-                // no task assignee, so feeding them through the generic helper
-                // would mislabel a healthy owner-close as orphan recovery.
-                VerificationSkipReason::EpicOwnerClosed
+            if task.task_type == TaskType::Epic {
+                // Ownership admits this caller; the assembled epic still needs
+                // its own dispatch/verdict. Epics normally have no assignee,
+                // which is not orphan recovery and cannot imply verification.
+                if req.supervisor_override
+                    .or(req.legacy_bypass_code_review)
+                    .unwrap_or(false)
+                {
+                    VerificationSkipReason::SupervisorBypass
+                } else {
+                    VerificationSkipReason::None
+                }
             } else {
                 self.compute_verification_skip_reason(&task, &req)
             }
@@ -16309,7 +16328,7 @@ mod awaiting_merge_anchor_tests {
                 temp.path(),
                 "main",
                 Some("task-b-tip"),
-            );
+            ).unwrap();
             assert_eq!(
                 store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
                 Some("task-a-tip".to_string()),
@@ -17854,6 +17873,7 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     if task.notes.contains(note) {
         return;
     }
+    let expected = task.clone();
     let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     let formatted = format!("[{timestamp}] {note}");
     task.notes = if task.notes.is_empty() {
@@ -17861,13 +17881,15 @@ fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut 
     } else {
         format!("{}\n\n{formatted}", task.notes)
     };
-    task.updated_at = chrono::Utc::now();
-    if let Err(error) = task_store.update(task) {
-        tracing::warn!(
-            task_id = %task.id,
-            error = %error,
-            "failed to persist close decision note"
-        );
+    match task_store.update_if_current(task, &expected) {
+        Ok(persisted_at) => task.updated_at = persisted_at,
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %error,
+                "failed to persist close decision note"
+            );
+        }
     }
 }
 
@@ -25365,7 +25387,7 @@ mod merge_state_gate_tests {
             &tasks, &task, "MERGE REQUIRED", "delivery is ready for merge",
             Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
             Some("PASS delivery-tip: relay fixture"),
-        );
+        ).unwrap();
         let parked = tasks.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge);
         assert_eq!(
@@ -25382,6 +25404,25 @@ mod merge_state_gate_tests {
         let prompts = cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].prompt.contains("task_awaiting_merge"));
+
+        cas_store::request_changes_for_parked_delivery(
+            dir.path(), &task.id, "relay-supervisor-id", "Correct the delivery before parking again",
+        ).unwrap();
+        let mut stale_close = task.clone();
+        append_close_decision_note(&tasks, &mut stale_close, "stale pre-park audit");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        let refused = core.park_task_awaiting_merge(
+            &tasks, &stale_close, "MERGE REQUIRED", "stale close still running",
+            Some("delivery-tip".into()), false, Some("factory/relay-worker-cas-3a82".into()),
+            Some("PASS delivery-tip: stale close"),
+        ).expect_err("GH #1276: a stale close cannot erase the review rejection");
+        assert!(refused.to_string().contains("task changed"));
+        let reopened = tasks.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(reopened.notes.contains("Correct the delivery"));
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(queue.peek("relay-supervisor-id", 10).unwrap().len(), 1,
+            "a refused park cannot enqueue another relay");
     }
 
     #[tokio::test]
@@ -27370,7 +27411,7 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
     ) -> EpicCloseRun {
-        run_epic_close_fixture_cas_7e91e(children, checker, setup, None).await
+        run_epic_close_fixture_cas_7e91e(children, checker, setup, None, false).await
     }
 
     #[cfg(unix)]
@@ -27379,6 +27420,7 @@ mod merge_state_gate_tests {
         checker: &str,
         setup: impl FnOnce(&std::path::Path) -> (String, String),
         ci: Option<(&str, bool)>,
+        owner_verification: bool,
     ) -> EpicCloseRun {
         use crate::mcp::CasService;
         use crate::store::{
@@ -27426,7 +27468,11 @@ mod merge_state_gate_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled = false\n",
+            if owner_verification {
+                "[verification]\nenabled = true\n"
+            } else {
+                "[verification]\nenabled = false\n"
+            },
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -27444,6 +27490,11 @@ mod merge_state_gate_tests {
                 AgentRole::Supervisor,
             ))
             .unwrap();
+        if owner_verification {
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+            git(p, &["checkout", "-q", &epic_branch]);
+        }
         let core = CasCore::with_daemon(cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(actor.into());
         let service = CasService::new(core, None);
@@ -27458,6 +27509,7 @@ mod merge_state_gate_tests {
             branch: Some(epic_branch),
             risk: vec![TaskRisk::None],
             notes: epic_notes,
+            epic_verification_owner: owner_verification.then(|| actor.to_string()),
             ..Default::default()
         };
         epic.deliverables.files_changed = vec!["delivery.rs".to_string()];
@@ -27483,15 +27535,65 @@ mod merge_state_gate_tests {
         }
 
         let started = std::time::Instant::now();
-        let request = serde_json::from_value(serde_json::json!({
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close",
             "id": epic.id,
-            "supervisor_override": ci.is_none_or(|(_, override_requested)| override_requested),
+            "supervisor_override": !owner_verification && ci.is_none_or(|(_, override_requested)| override_requested),
             "reason": "inspected every terminal child delivery against main",
             "stranded_branch_override": "inspected every child lane: each factory branch and anchor is deleted locally and on origin after its delivery shipped",
         }))
         .unwrap();
-        let response = service.task(Parameters(request)).await.unwrap();
+        let mut response = service.task(Parameters(request.clone())).await.unwrap();
+        if owner_verification {
+            assert_ne!(
+                store.get(&epic.id).unwrap().status,
+                TaskStatus::Closed,
+                "epic ownership and assembly proof must not replace the epic verdict: {response:?}"
+            );
+            let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
+                .unwrap()
+                .expect("owner close must mint the active proof boundary");
+            assert_eq!(
+                dispatch.repository.as_ref().unwrap().head_commit,
+                rev_parse_local(p, "HEAD")
+            );
+            let reject = serde_json::from_value(serde_json::json!({
+                "action": "add", "task_id": epic.id, "dispatch_id": dispatch.id,
+                "verification_type": "epic", "status": "rejected",
+                "summary": "Step 0A: REJECT stale epic flow walk; assembled tip differs from the recorded walk. Live deployment evidence is retained; current-tip evidence is owed.",
+            })).unwrap();
+            let verdict = service.verification(Parameters(reject)).await.unwrap();
+            assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            let latest = crate::store::open_verification_store(&cas_dir)
+                .unwrap()
+                .get_latest_for_task_by_type(&epic.id, VerificationType::Epic)
+                .unwrap()
+                .unwrap();
+            assert_eq!(latest.status, VerificationStatus::Rejected);
+            assert_eq!(latest.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+            assert_ne!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
+
+            // A rejected walk remains in the audit log. A corrected evidence
+            // review gets a new exact dispatch, rather than reusing rejection.
+            response = service.task(Parameters(request.clone())).await.unwrap();
+            assert_ne!(
+                store.get(&epic.id).unwrap().status,
+                TaskStatus::Closed,
+                "{response:?}"
+            );
+            let fresh = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
+                .unwrap()
+                .unwrap();
+            assert_ne!(fresh.id, dispatch.id);
+            let approve = serde_json::from_value(serde_json::json!({
+                "action": "add", "task_id": epic.id, "dispatch_id": fresh.id,
+                "verification_type": "epic", "status": "approved",
+                "summary": "Fixture: current-tip assembly and epic walk accepted after the recorded stale-walk rejection.",
+            })).unwrap();
+            let verdict = service.verification(Parameters(approve)).await.unwrap();
+            assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+            response = service.task(Parameters(request)).await.unwrap();
+        }
         let elapsed = started.elapsed();
         let text = response
             .content
@@ -27546,6 +27648,7 @@ esac
                 ("epic/landed".into(), String::new())
             },
             Some((&gh, override_requested)),
+            false,
         )
         .await
     }
@@ -27697,7 +27800,7 @@ esac
                 git(p, &["push", "-q", "origin", "main"]);
                 let head = if current { rev_parse_local(p, "main") } else { old };
                 ("epic/landed".into(), format!("ASSEMBLY_PROOF: head={head} result=PASS command=integrated-suite log=assembly.log"))
-            }, Some((&gh, false))).await;
+            }, Some((&gh, false)), false).await;
                 let closes = current || queue == r#"{"data":null}"#;
                 assert_eq!(run.is_error, !closes, "{}", run.text);
                 assert_eq!(
@@ -27798,13 +27901,13 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn epic_with_covering_assembly_proof_defers_build_proof_cas_74cb() {
-        let run = run_epic_override_close_cas_74cb(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
+        let run = run_epic_close_fixture_cas_7e91e(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
             let tip = unreleased_epic_lane_cas_74cb(p);
             let notes = format!(
                 "[2026-10-02 20:00] PROGRESS ASSEMBLY_PROOF: head={tip} result=PASS command=assembly-proof log=/tmp/assembly.log"
             );
             ("epic/unreleased".to_string(), notes)
-        })
+        }, None, true)
         .await;
         assert!(!run.is_error, "{}", run.text);
         assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);
@@ -30587,7 +30690,7 @@ esac
             next.id = "cas-b0b0".to_string();
             next.status = status;
             let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone(), next]);
-            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip));
+            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip)).unwrap();
             assert_eq!(
                 store
                     .get(&parked.id)
@@ -30602,7 +30705,7 @@ esac
         git(p, &["reset", "-q", "--hard", &base]);
         let forced = commit_local(p, "c.rs", "untagged work");
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)
@@ -30615,7 +30718,7 @@ esac
 
         git(p, &["reset", "-q", "--hard", &parked_at]);
         let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
-        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own));
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
         assert_eq!(
             store
                 .get(&parked.id)

@@ -370,6 +370,7 @@ test("HUB-J3 failed reply persistence withholds ACK; reload replays before stori
   let id = 0;
   await journey.stage("A forwarded reply is displayed, but failed storage grants no application ACK", async () => {
     await journey.open(); await choose(page);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __failReplyStorage?: boolean }).__failReplyStorage = true; });
     id = hub.supervisorSays(PELICAN, "Replay this if the tab disappears");
     await expect(page.getByRole("log").getByText("Not kept on this device yet", { exact: true })).toBeVisible();
@@ -394,6 +395,7 @@ test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", j
   await journey.stage("Read a reply, then move to another conversation", async () => {
     await journey.open();
     await casSrc.click();
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     hub.supervisorSays(PELICAN, "Read before the reload.");
     await expect(page.getByRole("log").getByText("Read before the reload.")).toBeVisible();
     await list.getByRole("button", { name: /gabber-studio/ }).click();

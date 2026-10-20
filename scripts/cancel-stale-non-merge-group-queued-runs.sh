@@ -13,8 +13,9 @@ queue_seconds="$WATCHDOG_THRESHOLD_SECONDS"
 now_epoch="$WATCHDOG_NOW_EPOCH"
 
 list_call="repos/$repository/actions/runs?status=queued&per_page=100"
-if ! queued_runs="$(gh api "$list_call")"; then
-    printf 'error: queued list failed call=GET %s; cannot enumerate queued runs\n' "$list_call" >&2
+if ! queued_runs="$(watchdog_api_read "$list_call")"; then
+    printf 'error: queued list failed after %s attempts call=GET %s; cannot enumerate queued runs\n' \
+        "$WATCHDOG_API_READ_ATTEMPTS" "$list_call" >&2
     exit 1
 fi
 while IFS=$'\t' read -r run_id created_at event head_branch; do
@@ -32,8 +33,9 @@ while IFS=$'\t' read -r run_id created_at event head_branch; do
     # The list endpoint is eventually consistent. Re-read status so a run
     # claimed or cancelled between list and action is never cancelled again.
     status_call="repos/$repository/actions/runs/$run_id"
-    if ! current_status="$(gh api "$status_call" --jq '.status')"; then
-        printf 'warning: status failed run=%s call=GET %s; skipping run\n' "$run_id" "$status_call" >&2
+    if ! current_status="$(watchdog_api_read "$status_call" --jq '.status')"; then
+        printf 'warning: status failed after %s attempts run=%s call=GET %s; skipping run\n' \
+            "$WATCHDOG_API_READ_ATTEMPTS" "$run_id" "$status_call" >&2
         continue
     fi
     if [[ "$current_status" != queued ]]; then

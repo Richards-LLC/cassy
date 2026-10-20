@@ -813,6 +813,7 @@ impl VioletWake {
     }
 
     /// Claim this project's events, admit them, and acknowledge them.
+    #[cfg(test)]
     pub(crate) fn poll_once(
         &mut self,
         relay: &dyn ActivityRelay,
@@ -820,7 +821,26 @@ impl VioletWake {
         supervisor_live: bool,
         now: DateTime<Utc>,
     ) -> PollReport {
+        self.poll_with_policy(relay, queue, supervisor_live, now, true, &|_| true)
+    }
+
+    /// cas-9021: v1 claims are project-wide, so a paused or uncertain channel
+    /// closes the whole claim (`claim_allowed`). A channel that may be managed
+    /// is never admitted or acknowledged on this legacy path, even from a
+    /// stale fence or a previously held entry: its lease is left to Cloud.
+    pub(crate) fn poll_with_policy(
+        &mut self,
+        relay: &dyn ActivityRelay,
+        queue: &dyn PromptQueueStore,
+        supervisor_live: bool,
+        now: DateTime<Utc>,
+        claim_allowed: bool,
+        channel_allowed: &dyn Fn(&str) -> bool,
+    ) -> PollReport {
         let mut report = PollReport::default();
+        if !claim_allowed && self.held.is_empty() {
+            return report;
+        }
         let request = ClaimRequest {
             project_ids: vec![self.project_id.clone()],
             consumer_id: self.consumer_id.clone(),
@@ -828,8 +848,14 @@ impl VioletWake {
             lease_secs: LEASE_SECS,
         };
         let mut acks = Vec::new();
-        match relay.claim(&request) {
-            Ok(claim) => {
+        let claimed = if claim_allowed {
+            Some(relay.claim(&request))
+        } else {
+            None
+        };
+        match claimed {
+            None => {}
+            Some(Ok(claim)) => {
                 report.claimed = claim.events.len();
                 report.denied = claim.denied;
                 for event in claim.events {
@@ -842,6 +868,10 @@ impl VioletWake {
                                 .entry(event.id)
                                 .or_insert(HeldEvent { envelope, first_seen: now });
                         }
+                        Admission::Ignore
+                            if event.envelope["channel"]["id"]
+                                .as_str()
+                                .is_some_and(|channel| !channel_allowed(channel)) => {}
                         Admission::Ignore => {
                             acks.push(Ack { id: event.id, outcome: AckOutcome::Admitted });
                             report.admitted += 1;
@@ -854,7 +884,7 @@ impl VioletWake {
                     }
                 }
             }
-            Err(error) => report.errors.push(format!("claim: {error}")),
+            Some(Err(error)) => report.errors.push(format!("claim: {error}")),
         }
         // A peer may open a thread watch while the Cloud request is in flight.
         let book_lock = match self.reload_locked(now) {
@@ -865,7 +895,7 @@ impl VioletWake {
                 return report;
             }
         };
-        self.admit_held(queue, supervisor_live, now, &mut acks, &mut report);
+        self.admit_held(queue, supervisor_live, now, channel_allowed, &mut acks, &mut report);
         report.held = self.held.len();
         drop(book_lock);
         for batch in acks.chunks(ACK_BATCH) {
@@ -880,7 +910,10 @@ impl VioletWake {
                 Err(error) => report.errors.push(format!("ack: {error}")),
             }
         }
-        self.record_relay_health(&report, now);
+        // A gated tick made no claim; it must not read as a healthy relay.
+        if claim_allowed {
+            self.record_relay_health(&report, now);
+        }
         report
     }
 
@@ -940,13 +973,18 @@ impl VioletWake {
         queue: &dyn PromptQueueStore,
         supervisor_live: bool,
         now: DateTime<Utc>,
+        channel_allowed: &dyn Fn(&str) -> bool,
         acks: &mut Vec<Ack>,
         report: &mut PollReport,
     ) {
+        // cas-9021: an ineligible channel's entry stays held and unacknowledged
+        // through replay, no-supervisor expiry and admission alike.
+        let eligible = |held: &HeldEvent| channel_allowed(&held.envelope.channel.id);
         // Redeliveries of already-admitted messages: acknowledge, no wake.
         let replayed: Vec<String> = self
             .held
             .iter()
+            .filter(|(_, held)| eligible(held))
             .filter(|(_, held)| {
                 let owner = self
                     .book
@@ -968,6 +1006,7 @@ impl VioletWake {
             let expired: Vec<String> = self
                 .held
                 .iter()
+                .filter(|(_, held)| eligible(held))
                 .filter(|(_, held)| {
                     self.book
                         .thread_owner(&held.envelope.channel.id, &held.envelope.message.thread_ts)
@@ -984,7 +1023,7 @@ impl VioletWake {
         }
 
         let mut by_channel: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-        for (id, held) in &self.held {
+        for (id, held) in self.held.iter().filter(|(_, held)| eligible(held)) {
             let owner = self
                 .book
                 .thread_owner(&held.envelope.channel.id, &held.envelope.message.thread_ts)
@@ -1672,6 +1711,36 @@ pub(crate) fn violet_activity_envelope(
     kind: &str,
     items: &[WakeItem],
 ) -> String {
+    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, |item| {
+        item.age_secs.to_string()
+    })
+}
+
+/// Managed wakes can lack a trustworthy source age. Keep that uncertainty out
+/// of the legacy numeric WakeItem contract, and render it explicitly instead
+/// of claiming an invalid/future source is freshly observed.
+pub(crate) fn managed_violet_activity_envelope(
+    channel_id: &str,
+    channel_name: &str,
+    kind: &str,
+    item: &WakeItem,
+    source_age_secs: Option<i64>,
+) -> String {
+    let age = source_age_secs
+        .map(|seconds| seconds.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    violet_activity_envelope_with_age(
+        channel_id, channel_name, kind, std::slice::from_ref(item), |_| age.clone(),
+    )
+}
+
+fn violet_activity_envelope_with_age(
+    channel_id: &str,
+    channel_name: &str,
+    kind: &str,
+    items: &[WakeItem],
+    age_text: impl Fn(&WakeItem) -> String,
+) -> String {
     use crate::prompt_revalidation::xml_attribute_value as attr;
     let first = items.first();
     let mut lines = String::new();
@@ -1689,7 +1758,7 @@ pub(crate) fn violet_activity_envelope(
             attr(&item.message_ts),
             attr(&item.thread_ts),
             attr(&item.user),
-            item.age_secs
+            age_text(item)
         ));
     }
     if items.len() > WAKE_LIST_CAP {
@@ -2124,6 +2193,14 @@ impl VioletWakeRuntime {
             }
             return (PollReport::default(), Vec::new(), None);
         }
+        // cas-9021: the durable intake gate decides legacy admission per
+        // channel. It never gates the v2 managed reader or idle stops below;
+        // an unreadable gate only closes the legacy path, conservatively.
+        let intake = crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).read();
+        let legacy_claims = intake.as_ref().is_ok_and(|intake| intake.legacy_claims_allowed());
+        let legacy_channel = |channel: &str| {
+            intake.as_ref().is_ok_and(|intake| intake.channel_legacy_allowed(channel))
+        };
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
             return (PollReport::default(), Vec::new(), None);
@@ -2149,8 +2226,19 @@ impl VioletWakeRuntime {
         });
         let report = match managed {
             Some(ref report) => report.clone(),
-            None => state.poll_once(&relay, queue.as_ref(), presence.is_some(), now),
+            None => state.poll_with_policy(
+                &relay,
+                queue.as_ref(),
+                presence.is_some(),
+                now,
+                legacy_claims,
+                &legacy_channel,
+            ),
         };
+        let mut report = report;
+        if let Err(error) = &intake {
+            report.errors.push(format!("binding intake gate: {error}"));
+        }
         // Shutdown never waits for this tick's HTTP calls. The in-flight tick
         // owns the deferred stop and must finish it before releasing state.
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
@@ -2164,7 +2252,13 @@ impl VioletWakeRuntime {
             tracing::info!(channels = ?stopped, "Violet channel watches stopped after 1 h idle");
         }
         // Sweeps run only with a live supervisor to read the result.
-        let sweeps = if presence.is_some() && managed.is_none() { state.due_sweeps(now) } else { Vec::new() };
+        let sweeps = if presence.is_some() && managed.is_none() {
+            let mut sweeps = state.due_sweeps(now);
+            sweeps.retain(|sweep| legacy_channel(&sweep.channel_id));
+            sweeps
+        } else {
+            Vec::new()
+        };
         (report, sweeps, presence)
     }
 
@@ -2183,7 +2277,19 @@ impl VioletWakeRuntime {
     /// Run the due sweeps: read through Violet, then apply the results.
     /// Returns how many sweeps queued a wake.
     #[cfg(feature = "mcp-proxy")]
-    pub(crate) async fn sweep(&self, sweeps: Vec<SweepRequest>, presence: SupervisorPresence) -> usize {
+    pub(crate) async fn sweep(&self, sweeps: Vec<SweepRequest>, presence: SupervisorPresence) -> Result<usize, String> {
+        // A prepared list is not admission. Refuse paused/corrupt state before
+        // connecting, reading, advancing watermarks or applying anything.
+        let Ok(intake) = crate::coordination::binding_intake::IntakeJournal::new(&self.cas_dir).read() else {
+            return Ok(0);
+        };
+        let sweeps: Vec<SweepRequest> = sweeps
+            .into_iter()
+            .filter(|sweep| intake.channel_legacy_allowed(&sweep.channel_id))
+            .collect();
+        if sweeps.is_empty() {
+            return Ok(0);
+        }
         let caller = cmcp_core::ProxyCaller {
             agent_id: presence.agent_id.clone(),
             role: cas_types::AgentRole::Supervisor,
@@ -2205,26 +2311,29 @@ impl VioletWakeRuntime {
                 }
             }
         }
+        self.apply_sweep_results(results).await
+    }
+
+    /// The owned sweep handle includes blocking apply, not just the read.
+    pub(super) async fn apply_sweep_results(&self, results: Vec<(String, Result<SweepRead, String>)>) -> Result<usize, String> {
         let state = std::sync::Arc::clone(&self.state);
         let cas_dir = self.cas_dir.clone();
         tokio::task::spawn_blocking(move || {
-            let Ok(queue) = crate::store::open_prompt_queue_store(&cas_dir) else {
-                return 0;
-            };
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).map_err(|e| format!("sweep apply queue unavailable: {e}"))?;
             let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            results
+            Ok(results
                 .into_iter()
                 .map(|(channel, read)| state.apply_sweep(queue.as_ref(), &channel, read, Utc::now()))
                 .filter(|outcome| matches!(outcome, SweepOutcome::Woke { .. }))
-                .count()
+                .count())
         })
         .await
-        .unwrap_or(0)
+        .map_err(|error| format!("sweep apply did not finish: {error}"))?
     }
 
     #[cfg(not(feature = "mcp-proxy"))]
-    pub(crate) async fn sweep(&self, _sweeps: Vec<SweepRequest>, _presence: SupervisorPresence) -> usize {
-        0
+    pub(crate) async fn sweep(&self, _sweeps: Vec<SweepRequest>, _presence: SupervisorPresence) -> Result<usize, String> {
+        Ok(0)
     }
 }
 

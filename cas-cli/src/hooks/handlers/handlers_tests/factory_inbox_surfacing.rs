@@ -77,7 +77,7 @@ fn cas_7af8_assert_hook_expiry(kind: &str) {
             let hook = input("supervisor");
             let surfaced = if tool_boundary {
                 let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
-                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget).and_then(|outcome| outcome.text)
             } else {
                 crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
             };
@@ -123,7 +123,7 @@ fn cas_1485_supervisor_hooks_never_render_a_closed_task_merge_relay() {
         let hook = input("supervisor");
         let surfaced = if tool_boundary {
             let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
-            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget)
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(Some(temp.path()), &hook, None, &mut budget).and_then(|outcome| outcome.text)
         } else {
             crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(temp.path()), &hook)
         };
@@ -799,7 +799,8 @@ fn cas_27ad_subagent_post_tool_does_not_consume_parent_mail() {
             hook.transcript_path = Some("/tmp/session/subagents/agent-child.jsonl".into());
         }
         let surfaced = super::super::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
-            Some(temp.path()), &hook, None, &mut cas_store::HOOK_SURFACE_BUDGET_CHARS.clone());
+            Some(temp.path()), &hook, None, &mut cas_store::HOOK_SURFACE_BUDGET_CHARS.clone())
+            .and_then(|outcome| outcome.text);
         assert!(surfaced.is_none(), "a child consumed the parent's mail: {surfaced:?}");
         let output = crate::hooks::handle_post_tool_use(&hook, Some(temp.path())).unwrap();
         let rendered = serde_json::to_string(&output).unwrap();

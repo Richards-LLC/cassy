@@ -43,6 +43,9 @@ export interface HubSession {
   dormant?: boolean;
   /** Browser-only retention of a destination with an in-flight message. */
   unreachable?: boolean;
+  /** Browser-only: listed from a catalog past its freshness while the machine
+   * can't send a fresh one, as last known (cas-6c7a). */
+  stale?: boolean;
   /** When the session last did anything: its newest queue row (cas-55a4). */
   last_activity_at?: string;
   /** Who that row was between, e.g. "supervisor → worker-1"; never its content. */

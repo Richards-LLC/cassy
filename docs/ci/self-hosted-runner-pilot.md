@@ -114,6 +114,21 @@ depth; do not weaken them independently. Ephemeral/JIT runners remain future
 hardening, but the operator chose the enforceable approval gate now rather than
 changing runner routing or retiring the merge-queue acceleration.
 
+### Light lane slots (cas-3b5e)
+
+Slots 3 and 4 (`soundwave-cas-lane-3`, `soundwave-cas-lane-4`) run only the
+slim factory lane in `.github/workflows/lane.yml`, which has a single `push`
+trigger for `factory/**` and no pull-request event. They carry the
+`cas-lane-light` label and never `cas-ci-32core`, so merge-queue and release
+jobs cannot select them. They were registered on 2026-10-19 with a repository
+registration token (`RUNNER_REGISTRATION=repo`), because the available token
+lacks `admin:org`. They are therefore repository runners outside the
+`cassy-public-trusted` group, with the same effective scope (this repository
+only). The organization fork-PR approval policy above remains the boundary for
+a fork that edits a workflow to request the label. Move them into the group
+with an org registration token when one is available. Their units cap CPU at
+200% and run no sccache server.
+
 ## Availability and isolation
 
 The pilot job is not present in `docs/branch-protection/main-ruleset.json`. The

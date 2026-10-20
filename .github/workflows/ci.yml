@@ -33,12 +33,15 @@ on:
   # required contexts must report on that ref or queue entries time out rather
   # than proving the tree that will actually land.
   merge_group:
+  # cas-32e9: factory/** pushes start in lane.yml. A slim lane runs there
+  # alone; with CAS_LANE_SLIM unset, lane.yml calls this workflow, so the
+  # factory conditions below still apply to those pushes.
+  workflow_call:
   push:
     branches:
       - main
       - staging
       - "epic/**"
-      - "factory/**"
     tags:
       - "v*"
   schedule:
@@ -344,7 +347,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # A slim factory push builds nothing that needs the submodules.
+          submodules: ${{ vars.CAS_LANE_SLIM == 'true' && 'false' || 'recursive' }}
           fetch-depth: 0
           ref: ${{ github.sha }}
 
@@ -487,7 +491,8 @@ jobs:
           >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report sccache stats
-        if: always()
+        # A slim factory push compiles nothing; there is no cache to report.
+        if: always() && vars.CAS_LANE_SLIM != 'true'
         run: |
           if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
             ./scripts/ci-sccache-summary.sh "Scoped Validation (fast)"
@@ -527,7 +532,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # A slim factory push builds nothing that needs the submodules.
+          submodules: ${{ (github.event_name == 'push' && vars.CAS_LANE_SLIM == 'true') && 'false' || 'recursive' }}
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -707,7 +713,8 @@ jobs:
           fi
 
       - name: Report sccache stats
-        if: always()
+        # A slim factory push compiles nothing; there is no cache to report.
+        if: always() && (github.event_name != 'push' || vars.CAS_LANE_SLIM != 'true')
         run: |
           # Version skew (cas-3e14): the workflow can come from a newer main
           # while the checkout is an older head that predates this script.

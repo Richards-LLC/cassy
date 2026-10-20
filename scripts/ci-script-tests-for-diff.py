@@ -44,6 +44,7 @@ NAMED = {
     "hub-web/package.json": "python3 scripts/test-worker-memory.py "
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }
+RELEASE_TRAIN_TEST = "scripts/test-release-portable.py"
 
 
 def tier_commands(repo: Path) -> list[str]:
@@ -91,7 +92,13 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         if not test:
             continue
         subject = stem(test).removeprefix("test-")
-        if test in changed or subject in changed_stems or stem(test) in changed_stems:
+        # cas-850b: stem matching misses both release-train.sh and
+        # release-train.d/post-publication.sh, although the portable suite
+        # exercises their release/report lifecycle.
+        release_train_related = test == RELEASE_TRAIN_TEST and any(
+            path.startswith("scripts/release-train") for path in changed
+        )
+        if test in changed or subject in changed_stems or stem(test) in changed_stems or release_train_related:
             selected.append((test, command))
     return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
 

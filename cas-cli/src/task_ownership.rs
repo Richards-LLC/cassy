@@ -515,6 +515,48 @@ mod tests {
         drop(recovered);
     }
 
+    #[test]
+    fn ownership_inspection_preserves_local_sqlite_locks_cas_5a02() {
+        let dir = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+        let db = root.join(".cas/cas.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE; UPDATE tasks SET title='pending';").unwrap();
+        let observe = || {
+            let output = std::process::Command::new("python3")
+                .args(["-I", "-S", "-c", r#"
+import fcntl, json, sys
+held = []
+for path, offset in [(sys.argv[1], 1073741826), (sys.argv[1] + '-shm', 120)]:
+    with open(path, 'r+b') as file:
+        try:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, offset)
+        except BlockingIOError:
+            held.append(True)
+        else:
+            held.append(False)
+print(json.dumps(held))
+"#])
+                .arg(&db).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap()
+        };
+        assert_eq!(observe(), vec![true, true], "real SQLite shared and WAL write locks are held");
+        let before = (
+            std::fs::metadata(&db).unwrap().len(),
+            std::fs::metadata(root.join(".cas/cas.db-wal")).unwrap().len(),
+        );
+        let projects = KnownProjects::from_roots(&this.path().join(".cas"), vec![root.clone()]);
+        assert_eq!(projects.holders("cas-aaaa").unwrap(), vec![root.display().to_string()]);
+        assert_eq!(observe(), vec![true, true], "inspection must preserve the caller's SQLite locks");
+        assert_eq!(before, (
+            std::fs::metadata(&db).unwrap().len(),
+            std::fs::metadata(root.join(".cas/cas.db-wal")).unwrap().len(),
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
     /// cas-69b5: a checkpoint already copying frames when the read starts
     /// (and still copying when it ends) leaves every fingerprint field as it
     /// was, so the store is unproven rather than trusted.
@@ -528,41 +570,18 @@ mod tests {
         shm[128..132].copy_from_slice(&1u32.to_ne_bytes());
         let path = root.join(".cas/cas.db-shm");
         std::fs::write(&path, shm).unwrap();
-        // Hold SQLite's actual checkpointer byte in another process. Counters
-        // alone must not decide whether a checkpoint is running.
-        let mut child = std::process::Command::new("python3")
-            .args([
-                "-I",
-                "-S",
-                "-c",
-                r#"
-import fcntl, sys
-with open(sys.argv[1], 'r+b') as shm:
-    fcntl.lockf(shm, fcntl.LOCK_EX, 1, 121)
-    print('locked', flush=True)
-    sys.stdin.buffer.read(1)
-"#,
-            ])
-            .arg(&path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut ready = String::new();
-        std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
-            &mut ready,
-        )
-        .unwrap();
-        assert_eq!(ready.trim(), "locked");
-        let projects = KnownProjects::from_specs_with(
-            &this.path().join(".cas"),
-            vec![repo_spec(root)],
-            &|| {},
-        );
+        // Hold the checkpointer lock in this process, as a local connection
+        // may do. An isolated observer must see it as a conflicting lock.
+        use std::os::fd::AsRawFd;
+        let held = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        lock.l_start = 121;
+        lock.l_len = 1;
+        assert_eq!(unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETLK, &lock) }, 0);
+        let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![repo_spec(root)], &|| {});
         let result = projects.holders("cas-aaaa");
-        drop(child.stdin.take());
-        assert!(child.wait().unwrap().success());
         assert!(result.unwrap_err().contains("changed while it was read"));
     }
 

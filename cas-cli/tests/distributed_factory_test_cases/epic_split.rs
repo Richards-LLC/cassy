@@ -211,6 +211,7 @@ fn assert_split_decision(side: &Side, id: &str, decision: &str) {
     let rows = cas::store::open_prompt_queue_store(&side.machine.cas_dir)
         .unwrap().peek_all(100).unwrap();
     let row = rows.iter().find(|row| {
+        // pin: select the split protocol's public decision kind, not its human wording.
         row.prompt.contains(id) && row.prompt.contains(&format!("kind=\"{decision}\""))
     }).unwrap_or_else(|| panic!("{id} {decision} must reach the proposer: {rows:?}"));
     assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));

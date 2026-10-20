@@ -57,8 +57,9 @@ pub(crate) struct DirectorRefreshRequest {
     /// clock no longer matches is older than a refresh applied since, and is
     /// discarded rather than rolling panel data back.
     requested_after: Instant,
-    /// The supervisor-stall delivery evidence to compute with the snapshot
-    /// (`None` without a factory session or focused epic).
+    /// The supervisor-stall evidence to compute with the snapshot
+    /// (`None` without a factory session). Assignment ownership is checked
+    /// across the whole ready queue even when no epic is focused.
     stall: Option<StallEvidenceRequest>,
     /// The factory session whose metadata the supervisor-stall check reads
     /// (cas-3b16: read here, not on the loop).
@@ -643,15 +644,16 @@ impl FactoryApp {
         }
     }
 
-    /// The supervisor-stall evidence request, when the stall check runs at
-    /// all: a factory session and a focused epic.
+    /// The supervisor-stall evidence request, when a factory session exists.
+    /// Parked deliveries use the focus when present; assignment ownership
+    /// spans every ready task so fallback work is covered without focus too.
     fn stall_evidence_request(&self) -> Option<StallEvidenceRequest> {
         self.factory_session.as_ref()?;
         let epic_id = self
             .epic_state
             .epic_id()
-            .or(self.current_epic_id.as_deref())?
-            .to_string();
+            .or(self.current_epic_id.as_deref())
+            .map(str::to_string);
         Some(StallEvidenceRequest::new(
             self.cas_dir.clone(),
             epic_id,

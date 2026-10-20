@@ -22,13 +22,12 @@ pub(super) struct AssignmentEvidence {
 }
 
 impl AssignmentRequest {
-    pub(super) fn new(cas_dir: PathBuf, data: &DirectorData, epic: &str) -> Option<Self> {
+    pub(super) fn new(cas_dir: PathBuf, data: &DirectorData) -> Option<Self> {
         let task_ids: HashSet<_> = data
             .ready_tasks
             .iter()
             .filter(|task| {
-                task.epic.as_deref() == Some(epic)
-                    && task.status == cas_types::TaskStatus::Open
+                task.status == cas_types::TaskStatus::Open
                     && task.assignee.is_none()
                     && !data.start_gated_task_ids.contains(&task.id)
             })

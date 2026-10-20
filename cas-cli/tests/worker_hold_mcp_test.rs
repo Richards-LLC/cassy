@@ -134,7 +134,6 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     ]);
     let env = TestEnv::new();
     let worker_id = env.register_worker(worker, session);
-    let path = write_metadata(&env, session, &[worker.to_string()]);
     let reminders = open_reminder_store(&env.cas_root).unwrap();
     reminders
         .create(
@@ -150,6 +149,15 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
         )
         .unwrap();
     assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+
+    // cas-c5ab: before the session metadata exists the hold cannot be
+    // persisted, and the failed hold changes no reminder.
+    env.service
+        .coordination(Parameters(request("hold_worker", worker)))
+        .await
+        .expect_err("an unpersisted hold fails");
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+    let path = write_metadata(&env, session, &[worker.to_string()]);
 
     let result = env
         .service
@@ -190,32 +198,6 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
 }
 
-/// cas-c5ab: a hold whose state cannot be persisted changes no reminder.
-#[tokio::test]
-async fn failed_hold_persist_leaves_reminders_pending_cas_c5ab() {
-    let home = TempDir::new().unwrap();
-    let session = "session-worker-hold-unpersisted";
-    let worker = "lively-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "supervisor"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
-    let env = TestEnv::new();
-    let worker_id = env.register_worker(worker, session);
-    let reminders = open_reminder_store(&env.cas_root).unwrap();
-    let after = chrono::Utc::now() + chrono::Duration::hours(1);
-    reminders
-        .create("hold-test-supervisor", Some(&worker_id), "watch", ReminderTriggerType::Time, Some(after), None, None, 3600, Some(session))
-        .unwrap();
-
-    // No session metadata file exists, so the hold cannot be persisted.
-    env.service
-        .coordination(Parameters(request("hold_worker", worker)))
-        .await
-        .expect_err("an unpersisted hold fails");
-    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
-}
 
 #[tokio::test]
 async fn worker_cannot_change_hold_state_cas_60dd() {

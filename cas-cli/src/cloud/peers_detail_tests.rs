@@ -163,7 +163,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
     agents[0]
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
-    let report = PeerReport {
+    let mut report = PeerReport {
         #[cfg(feature = "mcp-proxy")]
         stakeholder_contacts: serde_json::json!({"state":"shared","contacts":[{"workspace_id":"T123","user_id":"U123","last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z","owner":{"registration_id":"new-owner"}}]}),
         hidden_peers: 0,
@@ -190,11 +190,20 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         ),
         error: None,
     };
+    // cas-2db0 (QA F01): the logged-out reason wraps instead of being cut.
+    report.peers[0].supervisor.harness_auth_failed = Some("Login expired · Please run /login".into());
     for ascii in [true, false] {
         for width in [80, 120] {
             let text = render_peer_report(&report, width, ascii);
             assert!(
                 text.starts_with("[OK] 1 peer supervisor | 1 live\nRepo github.com/acme/widgets\n"),
+                "{text}"
+            );
+            let middot = if ascii { "?" } else { "·" };
+            assert!(
+                text.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!(
+                    "Harness logged out: \"Login expired {middot} Please run /login\"; messages to it are refused"
+                )),
                 "{text}"
             );
             assert!(

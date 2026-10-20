@@ -21,15 +21,55 @@ pub(super) fn check(cas_dir: &Path) -> Check {
             "communication SLOs",
             CheckStatus::Warning,
             format!(
-                "UNKNOWN communication: cannot measure last session: {error}\nRun cas update --schema-only; then cas doctor"
+                "UNKNOWN communication: cannot measure last session: {}\nRun cas update --schema-only; then cas doctor",
+                human_database_error(&error)
             ),
         ),
     }
 }
 
+/// cas-884c: SQLite's prepare errors carry the whole statement, so a failing
+/// metrics query printed metrics.sql (its internal review comment included,
+/// with a non-ASCII section sign) into doctor output. Keep SQLite's message,
+/// which names the missing table or column, drop the statement, and escape
+/// anything outside printable ASCII so C-locale terminals stay readable.
+fn human_database_error(error: &cas_store::StoreError) -> String {
+    let text = match error {
+        cas_store::StoreError::Database(rusqlite::Error::SqlInputError { msg, .. }) => {
+            format!("database error: {msg}")
+        }
+        other => other.to_string(),
+    };
+    text.chars()
+        .map(|c| if c == ' ' || c.is_ascii_graphic() { c.to_string() } else { c.escape_unicode().to_string() })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-884c: a schema the metrics query cannot prepare against yields an
+    /// actionable, ASCII-only warning that names the missing column, never the
+    /// metrics SQL or its comments.
+    #[test]
+    fn database_failure_names_the_cause_without_sql_and_stays_ascii_cas_884c() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        use cas_store::PromptQueueStore;
+        let queue = cas_store::SqlitePromptQueueStore::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue_with_session("supervisor", "worker-a", "hello", "fixture-session").unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        // The 24d3 QA database: a prompt_queue predating highest_stage.
+        conn.execute_batch("ALTER TABLE prompt_queue RENAME COLUMN highest_stage TO stage_before_cas_447d").unwrap();
+        let row = check(&root);
+        assert!(matches!(row.status, CheckStatus::Warning), "{}", row.message);
+        assert!(row.message.contains("no such column: highest_stage"), "{}", row.message);
+        assert!(row.message.contains("cas update --schema-only"), "{}", row.message);
+        assert!(!row.message.contains("cas-447d") && !row.message.contains("SELECT"), "{}", row.message);
+        assert!(row.message.lines().all(|line| line.is_ascii()), "{}", row.message);
+    }
 
     #[test]
     fn cas_7e24_doctor_outcome_values_targets_and_read_only() {

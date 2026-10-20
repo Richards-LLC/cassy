@@ -107,17 +107,18 @@ impl Backend for Codex {
         // A per-worker CODEX_HOME is only installed in the child environment
         // below. Trust must therefore target that explicit home here, before
         // the CLI starts; consulting the daemon's own home leaves alternate
-        // accounts at Codex's interactive hooks-review prompt.
-        let trust = match config_dir.filter(|dir| !dir.trim().is_empty()) {
+        // accounts at Codex's interactive hooks-review prompt. Resolve `~` as
+        // the child's CODEX_HOME does, never against the daemon's cwd (cas-10af).
+        let account_home = config_dir
+            .filter(|dir| !dir.trim().is_empty())
+            .map(|dir| std::path::PathBuf::from(cas_pty::expand_codex_home(dir)));
+        let trust = match account_home.as_deref() {
             Some(home) => {
-                let config = Path::new(home).join("config.toml");
+                let config = home.join("config.toml");
                 match cas_pty::ensure_project_trusted_in(&config, cwd)? {
                     cas_pty::CodexTrustOutcome::Added(_)
                     | cas_pty::CodexTrustOutcome::AlreadyPresent => {
-                        cas_pty::ensure_cas_hooks_trusted_in(
-                            &config,
-                            &Path::new(home).join("hooks.json"),
-                        )?;
+                        cas_pty::ensure_cas_hooks_trusted_in(&config, &home.join("hooks.json"))?;
                         Ok(())
                     }
                     cas_pty::CodexTrustOutcome::Skipped(reason) => Err(Error::pty(format!(
@@ -134,11 +135,7 @@ impl Backend for Codex {
             },
         };
         trust?;
-        if let Some(home) = config_dir
-            .filter(|dir| !dir.trim().is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(cas_pty::codex_home)
-        {
+        if let Some(home) = account_home.or_else(cas_pty::codex_home) {
             let config = home.join("config.toml");
             cas_pty::prepare_cas_tool_hooks_in(&config, &home.join("hooks.json"))?;
             // Codex 0.162 loads a linked worktree's hooks from its main
@@ -497,5 +494,32 @@ mod tests {
             )
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tilde_account_home_is_prepared_under_home_never_cwd_cas_10af() {
+        // cas-10af: config_dir "~/.codex-…" was joined unexpanded, so trust
+        // landed in `<daemon cwd>/~/…` and the absent hooks.json there failed
+        // the launch with a bare JSON EOF.
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let account = home.join(".codex-alt");
+        let worktree = home.join("worktree");
+        let daemon_cwd = home.join("daemon-cwd");
+        for dir in [&account, &worktree.join(".codex"), &daemon_cwd] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let hooks = r#"{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"CAS_HOOK_HARNESS=codex cas hook PreToolUse","timeout":3}]}],"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"cas hook PostToolUse"}]}]}}"#;
+        std::fs::write(account.join("hooks.json"), hooks).unwrap();
+        std::fs::write(worktree.join(".codex/hooks.json"), hooks).unwrap();
+        env.set_current_dir(&daemon_cwd);
+
+        CODEX
+            .prepare_workdir(&worktree, Some("~/.codex-alt"))
+            .unwrap();
+
+        let config = std::fs::read_to_string(account.join("config.toml")).unwrap();
+        assert!(config.contains(&worktree.display().to_string()), "{config}");
+        assert!(!daemon_cwd.join("~").exists());
     }
 }

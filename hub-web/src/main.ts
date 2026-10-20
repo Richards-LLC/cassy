@@ -528,9 +528,17 @@ function setDormantRevealed(next: boolean): void {
 }
 
 function visibleSessions(machineId: string): HubSession[] {
+  const fresh = Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity);
+  // cas-6c7a: a machine that is reconnecting (or unsteady) can't send a fresh
+  // catalog, so past its freshness the last one stays listed as last known
+  // beside the open conversation, never an empty list. A live machine's
+  // catalog still expires, and one it sends empty still empties the list.
+  const state = connectionStates.get(machineId);
+  const kept = !fresh && !(state?.phase === "live" && !state.degraded);
   // cas-9846: until the machine answers, its cached catalog is shown as last known.
-  return visibleCatalog(sessions.get(machineId) ?? [], name => cachedCatalogs.has(machineId) || (conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false),
-    Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity), revealDormant);
+  const listed = visibleCatalog(sessions.get(machineId) ?? [], name => cachedCatalogs.has(machineId) || (conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false),
+    fresh || kept, revealDormant);
+  return kept ? listed.map((session) => session.unreachable ? session : { ...session, stale: true }) : listed;
 }
 
 function selectionStorage(): SelectionStorage | undefined {
@@ -4123,7 +4131,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: unreadCount, selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable", interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5350,9 +5358,13 @@ function renderMachineRegister(): void {
     // cas-d043 G03: before any machine has answered with its sessions (a
     // reload during an outage), the count is unknown, not "0 conversations".
     const counted = machines.size === 0 || [...machines.keys()].some((id) => fleetCatalogUpdatedAt.has(id));
-    // cas-9846: before any machine answers, a kept catalog is counted as last known.
-    const lastKnown = !counted && cachedCatalogs.size > 0;
-    const total = [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0);
+    // cas-9846: before any machine answers, a kept catalog is counted as last
+    // known. Past its freshness while its machine reconnects (cas-6c7a), only
+    // that machine's conversations are, beside a live machine's (cas-c552).
+    const counts = [...machines.keys()].map((id) => visibleSessions(id).filter(session => supervisorTarget(session)));
+    const total = counts.reduce((sum, listed) => sum + listed.length, 0);
+    const stale = counts.reduce((sum, listed) => sum + listed.filter((session) => session.stale).length, 0);
+    const lastKnown = (!counted && cachedCatalogs.size > 0) || stale;
     const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, __HUB_BUILD__, !machineCatalogLoaded, lastKnown);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');

@@ -134,6 +134,9 @@ set optional `executed_head_sha` in the bundle when rebinding, and keep
 `head_sha` as the final reviewed tip. Close proves ancestor history,
 documentation-only changes and unchanged hub-web, selector, runner, bundler,
 catalog and build inputs. A catalog edit is not exempt documentation.
+This bundle rebind does not itself carry an independent QA verdict; use
+[correction proof](../../cas-supervisor/references/correction-proof.md) for
+the separate source-review, verdict and CI limits, including test-only changes.
 
 ## Config
 

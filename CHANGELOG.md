@@ -7,6 +7,143 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.66.0] - 2026-10-20
+
+### Added — safer setup and cleanup
+
+- **Neon workspace setup** — Was: initialization checked only root-level
+  packages and needed an interactive choice. → Now: it finds supported nested
+  workspace packages and accepts explicit organization and project IDs.
+- **Alternate Codex accounts** — Was: a home-relative account location could
+  reach setup literally and fail with an empty parse error. → Now: the home
+  shortcut expands before trust preparation, and missing hook setup is named.
+- **Codex model checks** — Was: a fresh list from an older Codex app could hide
+  models the current client supports. → Now: older or unversioned lists are
+  treated as unverified, so they cannot falsely mark a model unsupported.
+- **Safe retention preview** — Was: closed-task evidence and task-created iOS
+  simulators could accumulate indefinitely. → Now: pruning previews age, size,
+  keep reasons and owned simulators; applying requires confirmation and checks
+  project ownership.
+- **Team queue recovery** — Was: a team-linked project could hold a personal
+  backlog without exposing a safe recovery path. → Now: status and preflight
+  name the scope mismatch, and an explicit plan-first migration uses itemized
+  receipts before retiring personal copies.
+
+### Fixed — reliable recovery and idle signals
+
+- **Violet reconnects** — Was: a brief proxy reconnect could fail a claim while
+  repeated reads restarted the Cloud budget. → Now: the read retries through a
+  bounded reconnect window with one shared request budget and a covering lease.
+- **Rebased deliveries** — Was: an unchanged delivery rebased onto a new base
+  could leave its parked anchor stale. → Now: the anchor advances only after
+  proving the patch set is identical and the task still owns the continuation.
+- **Stalled project checks** — Was: one unavailable repository config could
+  hold up task close or merge while lifecycle code inspected unrelated roots.
+  → Now: probes are bounded, a stalled root shares one in-flight lookup, and
+  healthy project identities stay fresh.
+- **Project refreshes** — Was: one stalled known-root config could delay
+  refresh for every project. → Now: each observation is bounded independently
+  so healthy roots can still refresh.
+- **Idle-session wakeups** — Was: replayed Claude tool events could look like
+  unfinished work and suppress a completion or recovery wake. → Now: only
+  actual turn records hold the wake gate open.
+- **Repeated idle alerts** — Was: an alert could be marked before delivery,
+  and older expired-review relays could starve newer ones. → Now: an unanswered
+  idle page repeats until delivered, and the sweep skips relays already sent.
+- **Actionable next steps** — Was: blocked work could hide available work, and
+  a missing focus could hide ready work, while stale reminders could mask the
+  lack of a wake source. → Now: suggestions include eligible work even with no
+  focus and respect current peer ownership, while end-of-turn warnings identify
+  missing wake sources.
+- **Clearer provisioning errors** — Was: a failed worker launch could omit its
+  project and spawn context. → Now: failures identify the worker, project and
+  launch step.
+
+### Changed — reports, boundaries and checks
+
+- **Credential boundaries** — Was: the default policy omitted Neon tools, and
+  delegated commands could reach saved Neon or Vercel credentials. → Now:
+  Neon CLI and MCP access is denied by default, `NEON_API_KEY` stays out of
+  delegated environments, and credential-store reads are blocked across
+  command and script inputs.
+- **Bounded cleanup reports** — Was: a cleanup report could return hundreds
+  of thousands of characters. → Now: the default summarizes counts, sizes and
+  samples while preserving machine-readable status; bounded pages retain the
+  complete detail.
+- **Assembly proof selection** — Was: an unsupported row name could be ignored
+  while the command reported success. → Now: invalid names fail before proof
+  work begins and list the supported rows.
+- **Fixture isolation** — Was: a Codex trust test could dirty its checkout and
+  a provisioner dispatch test lacked its CLI companion. → Now: launch evidence
+  is isolated and dispatch is exercised through the real CLI fixture; strict
+  reminder assertions also hold under CPU load.
+- **Readable Violet posts** — Was: dense posts could cite unavailable items or
+  use unsupported time zones, and the CLI hid formatting violations. → Now:
+  shared rules require attached-only references and CT times; the hub
+  refuses unreadable posts with actionable violations, and `cas violet post`
+  surfaces the fixes.
+
+## [3.65.0] - 2026-10-19
+
+### Fixed — managed Slack replies
+
+- **Historical backlog** — Was: managed replay typed deliveries that predate a binding's activation, and recovered backlog ahead of fresh claims. → Now: pre-activation and unknown-time deliveries are quarantined as metadata only (no body, prompt or receipt); fresh claims are walked first, and activation is re-read once per tick for unknown channels.
+- **Wake age** — Was: managed wakes reported age 0 for old messages. → Now: age comes from the source message time; future or invalid times read unknown.
+- **Thread attachments** — Was: `cas violet thread` reported OK when reply files were not attached. → Now: each reply must show distinct attached file ids, or the run fails with a named code and keeps the receipt.
+- **Unmanaged channels** — Was: a claim on a channel without a managed binding read as no reply authority. → Now: the response marks it unmanaged and points to an ordinary Violet v1 reply; other refusals stay fail-closed.
+- **Multipart receipts** — Was: Violet's split-post part ids were not shown. → Now: post and thread output list every part id and still accept the old receipt shape.
+
+### Added — managed Slack evidence and repair
+
+- **Claim receipts** — The managed reader keeps its newest 20 claim receipts without message bodies, and `cas doctor` reports them.
+- **Channel binding reconciliation** — `cas update` reconciles Violet-mapped Slack channels with Cloud bindings through a durable intake gate, keeping uncertain outcomes and evidence.
+
+### Fixed — hub
+
+- **macOS lifecycle** — Was: start, stop and restart could race launchd or wait out the machine lock. → Now: they use installed supervision, share one stop deadline, and accept a loopback fallback only when no Tailscale CLI can publish.
+- **One remedy after reboot** — Was: an exited hub that recorded Serve showed two remedies. → Now: it shows one, in text, JSON and authorize.
+- **Uninstalled service** — Was: status failed when no service was installed and the manager was unavailable. → Now: it reports the uninstalled state without an error.
+- **80-column output** — Was: the idle audit line and the service install dry-run overflowed 80 columns. → Now: both fit.
+
+### Fixed — CLI output and settings
+
+- **Doctor database errors** — Was: a failing metrics query printed its SQL, comments included, with non-ASCII text. → Now: doctor names the cause and the remedy in printable ASCII.
+- **Locale-aware notices** — Was: the CAS_ROOT override notice and success marks used symbols under `LC_ALL=C`. → Now: they fall back to ASCII.
+- **Claude sign-in line** — Was: the login profile line printed an absolute path wider than 80 columns. → Now: it prints a home-relative path.
+- **Update failures in JSON** — Was: a failed binary install before the swap emitted no JSON. → Now: it emits one structured failure receipt, pinned or not.
+- **Sync output contrast** — Was: `cas update --sync` lines failed light-palette contrast. → Now: they are legible on light and dark terminals.
+- **Store override notice** — Was: the CAS_ROOT override notice overflowed 80 and 120 columns. → Now: it wraps without losing either store path.
+- **Coordination help** — Was: coordination subcommand flags had no help text and usage lines exceeded 80 columns. → Now: flags are explained and usage fits.
+- **Issue tracker settings** — Was: malformed repository names were accepted. → Now: they are validated before any config write, and the raw blank opt-out is explained.
+
+### Fixed — Cloud sync and cross-project work
+
+- **Pull echoes** — Was: a full pull queued team rows for push. → Now: pulls never queue echoes, and `cas cloud queue --purge-pull-echoes` removes existing ones.
+- **Alias scope** — Was: alias records matched across personal and team projects. → Now: the active team's record wins, then personal.
+- **Accepted proposals** — Was: an accepted cross-project task could not start in its target, and pulls duplicated its provenance block. → Now: it starts in its attested target with one provenance block.
+- **Proposal receipts** — Was: an identity-mismatch refusal hid that Cloud had saved the proposal. → Now: it returns the persisted proposal, task and attempt ids.
+- **Commander catalog** — Was: a disconnected machine's conversations vanished after the catalog TTL, and the footer then marked every conversation last known. → Now: they stay listed, and only the reconnecting machine's count is qualified.
+- **Commander connection log** — Was: a hub's retryable 503 auth_store_unavailable read as a refused request. → Now: the log names the reason and retry.
+- **Commander reply composer** — Was: the operator inbox reply box ignored the dark theme. → Now: it uses theme tokens with inset text.
+
+### Fixed — supervisor coordination
+
+- **Corrected identity** — Was: a running factory kept the scope it resolved at startup. → Now: it follows a corrected project identity without a restart.
+- **Peer ownership** — Was: peer listings did not say who owned which epic, and a peer's worker was unreachable. → Now: peers declare their focused epic, `supervisor:<epic>` resolves, and peer workers relay through their supervisor.
+- **Shared clones** — Was: the older supervisor on a shared clone lost managed claims. → Now: Cloud slots are scoped per factory session.
+- **Review and park races** — Was: a concurrent park could undo a review rejection, and team pull could reopen parked tasks. → Now: park writes are guarded and sync clocks are preserved.
+- **Task start** — Was: start on a heavy task could time out with an unknown outcome. → Now: the local start commits before Cloud handoffs.
+- **Unread and wake signals** — Was: FYI rows and acted-on merge requests counted as unread, and busy mail drains could drop messages. → Now: classification uses the stamped row, and incomplete drains retry.
+- **Escalation** — Was: queue ejections with no live supervisor and blocked PTY writes waited indefinitely. → Now: both escalate without retyping bytes.
+- **Reply routes and nudges** — Was: notices advertised unregistered reply targets, and nudges named peer-owned tasks. → Now: reply routes resolve, and peer-owned tasks are omitted.
+- **Hook guards** — Was: prose and write-free heredocs mentioning git could be refused. → Now: only actual git commands are guarded, with a named write-root remedy.
+
+### Changed — CI
+
+- **Factory lanes** — Slim factory lanes run in a small dedicated workflow on local light runner slots behind `CASSY_LANE_SELF_HOSTED`, in about 26–52 s per lane.
+- **CI verdicts** — The newest non-cancelled run at a SHA decides, and watchdogs retry transient GitHub API errors.
+- **Native macOS proof** — Native tests cover unknown-cache reclaim and the hub lifecycle; the required macOS workspace check is unchanged.
+
 ## [3.64.0] - 2026-10-18
 
 ### Fixed — project and hub diagnostics

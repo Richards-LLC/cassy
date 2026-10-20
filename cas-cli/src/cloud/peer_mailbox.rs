@@ -718,19 +718,47 @@ pub fn resolve_peer_target<'a>(
     matches.sort_by_key(|peer| &peer.agent_id);
     matches.dedup_by_key(|peer| &peer.agent_id);
     match matches.as_slice() {
-        [] => Ok(None),
+        [] => resolve_epic_owner(peers, target),
         [peer] => Ok(Some(peer)),
         many => Err(format!(
             "'{target}' names {} peer supervisors; address one as {}",
             many.len(),
             many.iter()
                 .map(|peer| format!(
-                    "{} ({}@{}, session {})",
+                    "{} ({}@{}, session {}, epic {})",
                     peer.agent_id,
                     peer.name,
                     peer.machine,
-                    peer.session.as_deref().unwrap_or("unknown")
+                    peer.session.as_deref().unwrap_or("unknown"),
+                    peer.epic_label()
                 ))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+    }
+}
+
+/// cas-8522: an epic id addresses the supervisor that declared it as its
+/// focus. Live owners win over stale ones; two live owners are refused.
+fn resolve_epic_owner<'a>(peers: &'a [Peer], target: &str) -> Result<Option<&'a Peer>, String> {
+    let owners: Vec<&Peer> = peers
+        .iter()
+        .filter(|peer| peer.focus.as_deref().is_some_and(|epic| epic.eq_ignore_ascii_case(target)))
+        .collect();
+    let live: Vec<&Peer> = owners.iter().copied().filter(|peer| peer.live).collect();
+    let pool = if live.is_empty() {
+        owners.into_iter().max_by_key(|peer| peer.last_heartbeat).into_iter().collect()
+    } else {
+        live
+    };
+    match pool.as_slice() {
+        [] => Ok(None),
+        [peer] => Ok(Some(peer)),
+        many => Err(format!(
+            "epic '{target}' is the focus of {} live supervisors; address one as {}",
+            many.len(),
+            many.iter()
+                .map(|peer| format!("{}@{}", peer.name, peer.machine))
                 .collect::<Vec<_>>()
                 .join(" or ")
         )),
@@ -807,17 +835,28 @@ pub fn resolve_user_peer_target<'a>(
     match pool.as_slice() {
         [] => Ok(None),
         [peer] => Ok(Some(peer)),
+        // cas-8522: say what each candidate owns, and how to address an
+        // owner by its declared epic instead of broadcasting the ask.
         many => Err(format!(
             "'{target}' names {} supervisors of your account; address one as {}",
             many.len(),
             many.iter()
-                .map(|peer| format!(
-                    "{}@{} ({}, session {})",
-                    peer.name,
-                    peer.machine,
-                    peer.project_name().unwrap_or_else(|| "unknown project".into()),
-                    peer.session.as_deref().unwrap_or("unknown")
-                ))
+                .map(|peer| match peer.focus.as_deref() {
+                    Some(epic) => format!(
+                        "supervisor:{epic} ({}@{}, {}, owns epic {})",
+                        peer.name,
+                        peer.machine,
+                        peer.project_name().unwrap_or_else(|| "unknown project".into()),
+                        peer.epic_label()
+                    ),
+                    None => format!(
+                        "{}@{} ({}, session {}, no declared epic)",
+                        peer.name,
+                        peer.machine,
+                        peer.project_name().unwrap_or_else(|| "unknown project".into()),
+                        peer.session.as_deref().unwrap_or("unknown")
+                    ),
+                })
                 .collect::<Vec<_>>()
                 .join(" or ")
         )),

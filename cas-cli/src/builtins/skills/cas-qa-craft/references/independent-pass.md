@@ -15,15 +15,25 @@ incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED`.
 
 ## 1. Build the exact tip
 
+For a correction or rebase, first use the supervisor's
+[correction proof](../../cas-supervisor/references/correction-proof.md) to
+identify affected checks and any supported verdict carry. Preserve original
+execution identities; a carried verdict must be recorded for this tip.
+
 Check out the reviewed tip in your own worktree with
-`git switch --detach <bound_head>`. Build with the project's real build and
-serve it through `cas-servers`. For hub-web, run `npm run build`, then serve
+`git switch --detach <bound_head>`. Use an existing build with verified identity
+or build once with the project's real build, then serve it through `cas-servers`.
+For hub-web without a matching build, run `npm run build`, then serve
 `hub-web/dist`. A build or serve failure is a **Blocking** finding. Record the
 command, the URL, and `npx playwright --version` in the ledger header. Where
 the build guard refuses you a compile (a factory agent cannot build Rust), run
-the binary the supervisor provides for `<bound_head>` instead, named as
+the immutable candidate the supervisor provides for `<bound_head>` instead, named as
 [evidence-ledger](evidence-ledger.md) requires. A missing binary is not the
 delivery's defect: ask the supervisor for one and mark its cells `NOT EXERCISED`.
+Reuse an existing candidate with verified identity before requesting another
+build. On a correction, run affected independent cells and cite unaffected
+prior rows with their actual executed revision; current-round bundle and
+verdict validation still apply.
 
 ## 2. Review the worker's affected-journey evidence
 

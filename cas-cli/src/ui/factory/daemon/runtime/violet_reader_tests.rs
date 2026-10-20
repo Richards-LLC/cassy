@@ -35,6 +35,8 @@ struct FixtureCloud {
     ack_response: Option<Value>,
     registration_id: &'static str,
     recover: Value,
+    /// cas-b94d: the bindings.activation payload (`None` refuses the read).
+    activation: Option<Value>,
     generations: Mutex<std::collections::HashMap<String, u64>>,
     claim_calls: AtomicUsize,
     log: Mutex<Vec<String>>,
@@ -45,7 +47,9 @@ impl FixtureCloud {
         Self {
             claim: fixture(CLAIM, claim_case), refuse_dispatch: false,
             ack_response: None, registration_id: REGISTRATION,
-            recover: fixture(RECOVER, "nothing left to recover"), generations: Mutex::default(),
+            recover: fixture(RECOVER, "nothing left to recover"),
+            activation: Some(activation("C08COORD01", Some("2025-01-01T00:00:00.000Z"))),
+            generations: Mutex::default(),
             claim_calls: AtomicUsize::new(0), log: Mutex::new(Vec::new()),
         }
     }
@@ -77,7 +81,9 @@ impl CloudCoordinationPort for FixtureCloud {
                 assert_eq!(ack["lease_token"], "0001ea5e-1111-4111-8111-00000001ea5e");
                 assert_eq!(ack["delivery_generation"], 1);
                 self.push(format!("ack {} {}", ack["delivery_id"].as_str().unwrap(), ack["outcome"].as_str().unwrap()));
-                results.push(fixture(ACK, "durable admission")["results"][0].clone());
+                let mut result = fixture(ACK, "durable admission")["results"][0].clone();
+                result["delivery_id"] = ack["delivery_id"].clone(); // cas-b94d: multi-delivery claims
+                results.push(result);
             }
             let mut response = fixture(ACK, "durable admission");
             response["results"] = Value::Array(results);
@@ -114,6 +120,12 @@ impl CloudCoordinationPort for FixtureCloud {
     }
 
     fn get(&self, path: &str, query: &[(&str, &str)], _: Duration) -> Result<Value, RemoteError> {
+        if path == ACTIVATION_PATH {
+            assert!(query.contains(&("registration_id", self.registration_id)), "{query:?}");
+            return Ok(self.activation.clone().unwrap_or_else(
+                || json!({"schema": CONTRACT_SCHEMA, "code": "authority_unavailable", "reason": "activation read failed"}),
+            ));
+        }
         assert_eq!(path, "/api/coordination/activity/deliveries");
         assert!(query.contains(&("registration_id", self.registration_id)), "{query:?}");
         Ok(self.recover.clone())
@@ -143,6 +155,23 @@ fn violet_body(refusal: Option<&str>) -> impl BodySource + '_ {
     })
 }
 
+/// A bindings.activation payload with one binding for `channel`.
+fn activation(channel: &str, activated_at: Option<&str>) -> Value {
+    json!({"schema": CONTRACT_SCHEMA, "code": "completed", "bindings": [{
+        "binding": {"channel_id": channel, "mode": "managed", "activated_at": activated_at},
+        "strict_activation": "evidenced"
+    }]})
+}
+
+/// cas-b94d: logs each quarantined delivery into the shared timeline.
+struct Quarantined<'a>(&'a FixtureCloud);
+impl Quarantine for Quarantined<'_> {
+    fn hold(&self, delivery: &ClaimedDelivery, class: Withheld, _: DateTime<Utc>) -> Result<(), NamedRefusal> {
+        self.0.push(format!("quarantine {} {}", delivery.id, class.as_str()));
+        Ok(())
+    }
+}
+
 struct Typer<'a>(&'a FixtureCloud);
 impl SessionTyper for Typer<'_> {
     fn type_into(&self, session: &str, delivery: &ClaimedDelivery, body: &str) -> Result<(), NamedRefusal> {
@@ -156,7 +185,12 @@ impl SessionTyper for Typer<'_> {
 }
 
 fn tick(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
-    reader.tick(cloud, REGISTRATION, &violet_body(None), &Typer(cloud), Utc::now())
+    tick_with(reader, cloud, REGISTRATION, &violet_body(None))
+}
+
+fn tick_with(reader: &mut VioletReader, cloud: &FixtureCloud, registration: &str, body: &dyn BodySource) -> ClaimOutcome {
+    let io = ReaderIo { body, typer: &Typer(cloud), quarantine: &Quarantined(cloud) };
+    reader.tick(cloud, registration, &io, Utc::now())
 }
 
 /// Reader order is ack admitted → dispatch_uncertain → type → consumed, and a
@@ -167,7 +201,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
     let mut reader = VioletReader::new("factory-session");
     for registration in [REGISTRATION, "successor-registration"] {
         cloud.registration_id = registration;
-        let outcome = reader.tick(&cloud, registration, &violet_body(None), &Typer(&cloud), Utc::now());
+        let outcome = tick_with(&mut reader, &cloud, registration, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(_)));
     }
     assert_eq!(
@@ -209,7 +243,7 @@ fn refused_dispatch_uncertain_types_nothing() {
     for code in ["violet_unavailable", "violet_refused", "identity_mismatch", "message_missing"] {
         let cloud = FixtureCloud::new("leases this reader's deliveries");
         let mut reader = VioletReader::new("factory-session");
-        let ClaimOutcome::Read(report) = reader.tick(&cloud, REGISTRATION, &violet_body(Some(code)), &Typer(&cloud), Utc::now()) else { panic!("claim refused") };
+        let ClaimOutcome::Read(report) = tick_with(&mut reader, &cloud, REGISTRATION, &violet_body(Some(code))) else { panic!("claim refused") };
         assert_eq!(cloud.log(), [format!("ack {DELIVERY} admitted")], "{code}: no receipt or typing after failed fetch");
         assert_eq!((report.typed, report.not_typed[0].1.code.as_str()), (0, code));
     }
@@ -226,7 +260,9 @@ fn delivery_routes_to_its_mapped_local_session_cas_c186() {
         if let Some(session) = mapped {
             reader.bind_session(DELIVERY, session);
         }
-        let outcome = reader.tick(&cloud, REGISTRATION, &violet_body(None), &PromptQueueTyper(&queue), Utc::now());
+        let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
+        let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &quarantine };
+        let outcome = reader.tick(&cloud, REGISTRATION, &io, Utc::now());
         assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
         let queued = queue.peek_all(10).unwrap();
         assert_eq!(queued.len(), 1);
@@ -258,7 +294,7 @@ fn unknown_registration_stops_consumption_until_successor_cas_c186() {
         cloud.claim = fixture(CLAIM, "leases this reader's deliveries");
         cloud.ack_response = None;
         cloud.registration_id = "successor-registration";
-        let outcome = reader.tick(&cloud, cloud.registration_id, &violet_body(None), &Typer(&cloud), Utc::now());
+        let outcome = tick_with(&mut reader, &cloud, cloud.registration_id, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
         assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 2);
     }
@@ -268,6 +304,7 @@ fn unknown_registration_stops_consumption_until_successor_cas_c186() {
 /// lease never acked returns through claim; an unread admission still bound
 /// to the predecessor is rebound and resumed; a dispatch-uncertain one gets
 /// one recovery notice, then `consumed`, and its ask is never typed again.
+/// cas-b94d: the fresh claim is walked before the recovery listing.
 #[test]
 fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     const SUCCESSOR: &str = "reg-supervisor-beta-08";
@@ -287,6 +324,10 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     assert_eq!(
         cloud.log(),
         [
+            format!("ack {DELIVERY} admitted"),
+            format!("receipt {DELIVERY} dispatch_uncertain"),
+            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
+            format!("receipt {DELIVERY} consumed"),
             format!("rebind {resumed} 2"),
             format!("receipt {resumed} dispatch_uncertain"),
             format!("typed {resumed} into factory-session: body for 1760616000.123456"),
@@ -295,16 +336,12 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
             format!("notice {uncertain} into factory-session"),
             format!("receipt {uncertain} consumed"),
             format!("ack {DELIVERY} admitted"),
-            format!("receipt {DELIVERY} dispatch_uncertain"),
-            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
-            format!("receipt {DELIVERY} consumed"),
-            format!("ack {DELIVERY} admitted"),
         ]
     );
 }
 
 fn tick_as(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {
-    reader.tick(cloud, cloud.registration_id, &AnyTarget, &Typer(cloud), Utc::now())
+    tick_with(reader, cloud, cloud.registration_id, &AnyTarget)
 }
 
 /// Recovery resumes targets other than `violet_body`'s one fixture message;
@@ -332,4 +369,304 @@ fn strict_activation_refusal_is_named_and_unmanaged_keeps_legacy() {
     let mut reader = VioletReader::new("factory-session");
     assert_eq!(tick(&mut reader, &cloud), ClaimOutcome::Unmanaged);
     assert!(!reader.managed());
+}
+
+/// cas-b94d: counts body fetches, so a withheld delivery provably has none.
+struct CountingBody(AtomicUsize);
+impl BodySource for CountingBody {
+    fn fetch_body(&self, target: &Value) -> Result<String, NamedRefusal> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(format!("body for {}", target["message_ts"].as_str().unwrap_or("?")))
+    }
+}
+
+const FRESH: &str = "0000de2b-1111-4111-8111-00000000de2b";
+
+/// The claim fixture plus a second, fresh delivery at `fresh_ts`.
+fn claim_with_fresh(cloud: &mut FixtureCloud, fresh_ts: &str) {
+    let mut fresh = cloud.claim["deliveries"][0].clone();
+    fresh["delivery"]["id"] = json!(FRESH);
+    fresh["target"]["message_ts"] = json!(fresh_ts);
+    cloud.claim["deliveries"].as_array_mut().unwrap().push(fresh);
+}
+
+/// cas-b94d: a message posted before its binding's activation is quarantined
+/// (metadata only): never fetched, never typed, no receipt, acked admitted
+/// only after the quarantine record. The fresh ask in the same claim is
+/// fetched and typed. A redelivery quarantines nothing twice.
+#[test]
+fn history_before_activation_is_quarantined_never_fetched_or_receipted_cas_b94d() {
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    // DELIVERY is 2025-10-16T12:00:42Z; activation follows it, the fresh ask follows activation.
+    cloud.activation = Some(activation("C08COORD01", Some("2025-10-16T12:30:00.000Z")));
+    claim_with_fresh(&mut cloud, "1760619600.000100");
+    let body = CountingBody(AtomicUsize::new(0));
+    let mut reader = VioletReader::new("factory-session");
+    for _ in 0..2 {
+        let ClaimOutcome::Read(report) = tick_with(&mut reader, &cloud, REGISTRATION, &body) else { panic!("claim refused") };
+        assert!(report.not_typed.is_empty(), "{:?}", report.not_typed);
+    }
+    assert_eq!(
+        cloud.log(),
+        [
+            format!("quarantine {DELIVERY} historical"),
+            format!("ack {DELIVERY} admitted"),
+            format!("ack {FRESH} admitted"),
+            format!("receipt {FRESH} dispatch_uncertain"),
+            format!("typed {FRESH} into factory-session: body for 1760619600.000100"),
+            format!("receipt {FRESH} consumed"),
+            format!("ack {DELIVERY} admitted"),
+            format!("ack {FRESH} admitted"),
+        ]
+    );
+    assert_eq!(body.0.load(Ordering::Relaxed), 1, "only the fresh ask is fetched");
+}
+
+/// cas-b94d: an unreadable message time or an unactivated binding is unknown
+/// and held like history; an unreadable activation admits nothing at all.
+#[test]
+fn unknown_time_is_held_and_unreadable_activation_releases_the_claim_cas_b94d() {
+    for (activated_at, message_ts) in [(None, Some("1760616042.000200")), (Some("2025-01-01T00:00:00.000Z"), None), (Some("2025-01-01T00:00:00.000Z"), Some("-5.0"))] {
+        let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        cloud.activation = Some(activation("C08COORD01", activated_at));
+        cloud.claim["deliveries"][0]["target"]["message_ts"] = message_ts.map_or(Value::Null, |ts| json!(ts));
+        let body = CountingBody(AtomicUsize::new(0));
+        let ClaimOutcome::Read(report) = tick_with(&mut VioletReader::new("factory-session"), &cloud, REGISTRATION, &body) else { panic!() };
+        assert_eq!(cloud.log(), [format!("quarantine {DELIVERY} unknown"), format!("ack {DELIVERY} admitted")], "{activated_at:?} {message_ts:?}");
+        assert_eq!((report.typed, report.held, body.0.load(Ordering::Relaxed)), (0, 1, 0));
+    }
+
+    // The binding is activated after the reader's first read: the next tick
+    // re-reads activation for the unactivated channel and types the fresh ask.
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.activation = Some(activation("C08COORD01", None));
+    let (mut reader, body) = (VioletReader::new("factory-session"), CountingBody(AtomicUsize::new(0)));
+    tick_with(&mut reader, &cloud, REGISTRATION, &body);
+    cloud.activation = Some(activation("C08COORD01", Some("2025-01-01T00:00:00.000Z")));
+    cloud.claim["deliveries"][0]["delivery"]["id"] = json!(FRESH);
+    let ClaimOutcome::Read(report) = tick_with(&mut reader, &cloud, REGISTRATION, &body) else { panic!() };
+    assert_eq!((report.typed, report.held), (1, 0), "{:?}", report.not_typed);
+
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.activation = None;
+    cloud.recover = fixture(RECOVER, "successor on another machine");
+    let ClaimOutcome::Read(report) = tick(&mut VioletReader::new("factory-session"), &cloud) else { panic!() };
+    assert_eq!(cloud.log(), [format!("ack {DELIVERY} released")], "no admission, recovery or typing without activation");
+    assert_eq!(report.not_typed[0].0, "activation");
+}
+
+/// cas-b94d: recovery's direct resume is guarded too. A historical unread
+/// admission is quarantined with no rebind and no receipt; the fresh claim is
+/// still walked first; Cloud's dispatch-uncertain notice path is unchanged.
+#[test]
+fn recovery_resume_of_history_is_quarantined_without_rebind_cas_b94d() {
+    const SUCCESSOR: &str = "reg-supervisor-beta-08";
+    let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.registration_id = SUCCESSOR;
+    cloud.recover = fixture(RECOVER, "successor on another machine");
+    // The resumed admission (12:00:00Z) predates activation; the claim (12:00:42Z) does not.
+    cloud.activation = Some(activation("C08COORD01", Some("2025-10-16T12:00:20.000Z")));
+    let body = CountingBody(AtomicUsize::new(0));
+    let ClaimOutcome::Read(report) = tick_with(&mut VioletReader::new("factory-session"), &cloud, SUCCESSOR, &body) else { panic!() };
+    assert_eq!(
+        cloud.log(),
+        [
+            format!("ack {DELIVERY} admitted"),
+            format!("receipt {DELIVERY} dispatch_uncertain"),
+            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
+            format!("receipt {DELIVERY} consumed"),
+            format!("quarantine {resumed} historical"),
+            format!("rebind {uncertain} 2"),
+            format!("notice {uncertain} into factory-session"),
+            format!("receipt {uncertain} consumed"),
+        ]
+    );
+    assert_eq!((report.typed, report.held, body.0.load(Ordering::Relaxed)), (2, 1, 1));
+}
+
+/// cas-b94d through the real handlers: a historical delivery leaves no
+/// supervisor prompt row and one durable, idempotent, text-free quarantine
+/// record; entries past retention are pruned on the next write.
+#[test]
+fn real_queue_gets_no_prompt_and_file_quarantine_is_durable_and_idempotent_cas_b94d() {
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let path = temp.path().join("violet/quarantine.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let stale = (Utc::now() - chrono::Duration::days(QUARANTINE_RETENTION_DAYS + 1)).to_rfc3339();
+    std::fs::write(&path, format!("{}\n", json!({"delivery_id": "old", "held_at": stale}))).unwrap();
+    let quarantine = FileQuarantine(path.clone());
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.activation = Some(activation("C08COORD01", Some("2025-10-16T12:30:00.000Z")));
+    let body = CountingBody(AtomicUsize::new(0));
+    for _ in 0..2 {
+        // A fresh process each time: the file, not memory, prevents a second record.
+        let io = ReaderIo { body: &body, typer: &PromptQueueTyper(&queue), quarantine: &quarantine };
+        VioletReader::new("factory-session").tick(&cloud, REGISTRATION, &io, Utc::now());
+    }
+    assert!(queue.peek_all(10).unwrap().is_empty(), "history never becomes a supervisor prompt");
+    assert_eq!(body.0.load(Ordering::Relaxed), 0);
+    let lines: Vec<Value> =
+        std::fs::read_to_string(&path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(lines.len(), 1, "stale entry pruned, one record despite two processes: {lines:?}");
+    let entry = &lines[0];
+    assert_eq!((entry["delivery_id"].as_str(), entry["class"].as_str()), (Some(DELIVERY), Some("historical")));
+    let mut keys: Vec<_> = entry.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["channel_id", "class", "delivery_id", "held_at", "message_ts", "root_ts"], "metadata only, never text");
+}
+
+/// Re-observing the source does not make an old delivery or recovery fresh.
+#[test]
+fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
+    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let old = format!("{}.000000", (now - chrono::Duration::days(5)).timestamp());
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let delivery = ClaimedDelivery {
+        id: DELIVERY.to_owned(),
+        delivery_generation: 1,
+        lease_token: "fixture-lease".into(),
+        target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":old}, "message_ts":old}),
+    };
+    for (kind, key) in [
+        ("delivery", "violet-delivery"),
+        ("recovery_notice", "violet-recovery"),
+    ] {
+        let typer = PromptQueueTyper(&queue);
+        typer
+            .enqueue_at("fixture-session", &delivery, kind, "", key, now)
+            .unwrap();
+        typer
+            .enqueue_at(
+                "fixture-session",
+                &delivery,
+                kind,
+                "",
+                key,
+                now + chrono::Duration::minutes(3),
+            )
+            .unwrap();
+    }
+    let rows = queue.peek_all(10).unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "the original delivery/recovery keys still dedupe re-observation"
+    );
+    for row in rows {
+        // pin: source age is trusted agent-facing wake metadata, in seconds.
+        assert!(row.prompt.contains("age_secs=432000"), "{}", row.prompt);
+        // pin: the original source occurrence/thread identity must survive formatting.
+        assert!(
+            row.prompt
+                .contains(&format!("message_ts={old} thread_ts={old}")),
+            "source identity is unchanged"
+        );
+        assert_eq!(row.factory_session.as_deref(), Some("fixture-session"));
+    }
+}
+
+#[test]
+fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
+    let now = DateTime::parse_from_rfc3339("2026-10-17T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let fresh = format!("{}.000000", now.timestamp());
+    let future = format!("{}.000001", now.timestamp());
+    let invalid_fraction = format!("{}.000000invalid", now.timestamp());
+    for (source, expected) in [
+        (Some(fresh.as_str()), Some("age_secs=0")),
+        (Some(future.as_str()), Some("age_secs=unknown")),
+        (Some("invalid"), Some("age_secs=unknown")),
+        (Some(invalid_fraction.as_str()), Some("age_secs=unknown")),
+        (Some(""), None),
+        (None, None),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let delivery = ClaimedDelivery {
+            id: DELIVERY.to_owned(),
+            delivery_generation: 1,
+            lease_token: "fixture-lease".into(),
+            target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":fresh}, "message_ts":source}),
+        };
+        let result = PromptQueueTyper(&queue).enqueue_at(
+            "fixture-session",
+            &delivery,
+            "delivery",
+            "",
+            "violet-delivery",
+            now,
+        );
+        let rows = queue.peek_all(10).unwrap();
+        if let Some(age) = expected {
+            result.unwrap();
+            assert_eq!(rows.len(), 1);
+            // pin: unknown source age must differ textually from a legitimate fresh zero.
+            assert!(
+                rows[0].prompt.contains(age),
+                "source={source:?}: {}",
+                rows[0].prompt
+            );
+        } else {
+            assert_eq!(result.unwrap_err().code, "invalid_target");
+            assert!(
+                rows.is_empty(),
+                "missing source identity is refused, never displayed as fresh"
+            );
+        }
+    }
+}
+
+/// cas-6ace: every claim the managed reader makes leaves a bounded receipt —
+/// an empty claim and a refusal alike — readable through `cas doctor`'s line,
+/// with counts and codes but no message text, guidance or token.
+#[test]
+fn managed_claims_leave_bounded_receipts_without_bodies() {
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let reader = Mutex::new(VioletReader::new("factory-session"));
+    let at = |secs| DateTime::parse_from_rfc3339("2026-10-17T18:00:00Z").unwrap().with_timezone(&Utc)
+        + chrono::Duration::seconds(secs);
+    let tick_on = |case: &str, secs| {
+        let cloud = FixtureCloud::new(case);
+        let (body, typer) = (violet_body(None), PromptQueueTyper(&queue));
+        let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
+        let io = ReaderIo { body: &body, typer: &typer, quarantine: &quarantine };
+        read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, at(secs))
+    };
+    for n in 0..CLAIM_RECEIPTS_KEPT as i64 {
+        tick_on("nothing pending", n);
+    }
+    assert_eq!(tick_on("without strict activation evidence", 100).unwrap().errors.len(), 1);
+    let (healthy, line) = claim_receipts_summary(temp.path(), at(130)).expect("receipts are readable");
+    assert!(!healthy, "the newest claim was refused: {line}");
+    assert!(line.starts_with("last claim 30s ago: strict_activation_required"), "{line}");
+    assert!(line.contains("18:00:19Z completed claimed=0"), "an empty claim is a receipt: {line}");
+    assert!(line.contains(REGISTRATION) && line.contains(CLAIM_PATH), "{line}");
+    for secret in ["binding_unevidenced", "Every managed binding", "No deliveries pending", "Bearer"] {
+        assert!(!line.contains(secret), "{secret} leaked: {line}");
+    }
+    let kept: Vec<Value> = serde_json::from_slice(&std::fs::read(claim_receipts_path(temp.path())).unwrap()).unwrap();
+    assert_eq!(kept.len(), CLAIM_RECEIPTS_KEPT, "the oldest receipt rotates out");
+    assert_eq!(kept[0]["at"], "2026-10-17T18:00:01Z");
+
+    // A receipt that cannot be written never changes the tick.
+    let blocked = tempfile::tempdir().unwrap();
+    std::fs::write(blocked.path().join("violet"), "not a directory").unwrap();
+    let cloud = FixtureCloud::new("nothing pending");
+    let (body, typer) = (violet_body(None), PromptQueueTyper(&queue));
+    let quarantine = FileQuarantine(blocked.path().join("violet/quarantine.jsonl"));
+    let io = ReaderIo { body: &body, typer: &typer, quarantine: &quarantine };
+    let report = read_managed_on(&reader, &cloud, REGISTRATION, blocked.path(), &io, at(200));
+    assert!(report.is_some_and(|report| report.errors.is_empty()));
+    assert!(claim_receipts_summary(blocked.path(), at(200)).is_none());
 }

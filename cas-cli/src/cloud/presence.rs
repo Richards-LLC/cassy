@@ -142,6 +142,18 @@ pub fn current_focus(agent: &Agent) -> Option<String> {
         .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
 }
 
+/// Publish the focused epic's title beside its id (cas-8522), so peers can
+/// read what this supervisor owns. Empty clears a previous title.
+fn publish_focus_title(cas_root: &Path, agent: &mut Agent, focus: Option<&str>) {
+    let title = focus
+        .and_then(|id| crate::store::open_task_store_local(cas_root).ok()?.get(id).ok())
+        .map(|epic| epic.title.trim().chars().take(120).collect::<String>())
+        .unwrap_or_default();
+    agent
+        .metadata
+        .insert(crate::cloud::peers::META_FOCUS_TITLE.into(), title);
+}
+
 /// The directory `agent` works in: its registered clone path, else the
 /// project root that holds `cas_root`.
 fn work_dir(cas_root: &Path, agent: &Agent) -> PathBuf {
@@ -206,7 +218,14 @@ pub fn heartbeat_metadata(
     }
     metadata.insert(META_FOCUS.into(), focus.unwrap_or_default().into());
     metadata.insert(META_BRANCH.into(), branch.unwrap_or_default().into());
-    for key in ["clone_path", "scratch_root", "scratch_scope", "peer_prs_v1", "peer_splits_v1"] {
+    for key in [
+        "clone_path",
+        "scratch_root",
+        "scratch_scope",
+        "peer_prs_v1",
+        "peer_splits_v1",
+        crate::cloud::peers::META_FOCUS_TITLE,
+    ] {
         metadata.insert(key.into(), agent.metadata.get(key).cloned().unwrap_or_default().into());
     }
     if let Some(session) = agent.factory_session.as_deref().filter(|s| !s.is_empty()) {
@@ -300,7 +319,8 @@ fn register_with_shutdown(
     let mut coordinator = coordinator.clone().with_timeout(PRESENCE_TIMEOUT).with_factory_slot_id(
         crate::config::Config::load(cas_root).ok().and_then(|config| config.factory().slot_id),
     );
-    let published_agent = super::peers_detail::presence_agent(cas_root, agent);
+    let mut published_agent = super::peers_detail::presence_agent(cas_root, agent);
+    publish_focus_title(cas_root, &mut published_agent, focus.as_deref());
     let record =
         match coordinator.register_with_presence(&published_agent, focus.as_deref(), branch.as_deref()) {
             Ok(_) => PresenceRecord {
@@ -429,7 +449,8 @@ pub(crate) fn tick_with_shutdown(
     }
     let focus = current_focus(agent);
     let branch = current_branch(cas_root, agent);
-    let published_agent = super::peers_detail::presence_agent(cas_root, agent);
+    let mut published_agent = super::peers_detail::presence_agent(cas_root, agent);
+    publish_focus_title(cas_root, &mut published_agent, focus.as_deref());
     let metadata = heartbeat_metadata(coordinator, &published_agent, focus.as_deref(), branch.as_deref());
     let heartbeat = {
         let _lease = match super::shutdown::presence_lease(cas_root) {

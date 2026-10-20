@@ -201,7 +201,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Include full content in JSON output
+    /// Include full content in JSON output or a dry-run service definition
     #[arg(long, global = true)]
     pub full: bool,
 

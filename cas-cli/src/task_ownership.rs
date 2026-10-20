@@ -33,6 +33,10 @@ pub trait OtherProjects {
     /// The other projects whose store holds `task_id`. `Err` means ownership
     /// cannot be proven (a store is missing, unreadable or changed while read).
     fn holders(&self, task_id: &str) -> Result<Vec<String>, String>;
+
+    /// Kept for callers that already know the candidate ids. Implementations
+    /// may warm their ownership index; no candidates should trigger no reads.
+    fn prefetch(&self, _task_ids: &[String]) {}
 }
 
 type StoreIds = Result<Vec<(String, HashSet<String>)>, String>;
@@ -168,6 +172,12 @@ impl OtherProjects for KnownProjects {
             .map(|(label, _)| (label.as_str(), ()))
             .collect();
         Ok(holders.into_keys().map(str::to_string).collect())
+    }
+
+    fn prefetch(&self, task_ids: &[String]) {
+        if !task_ids.is_empty() {
+            let _ = self.stores();
+        }
     }
 }
 

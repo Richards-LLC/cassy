@@ -1049,23 +1049,18 @@ fn epic_unique_work_is_in_trunk(
     command
         .args(["rev-list", "--max-count=1", epic, "--not", parent])
         .current_dir(repo);
-    for branch in [
-        git.detect_default_branch(),
-        "main".into(),
-        "master".into(),
-        "trunk".into(),
-    ] {
-        if branch.starts_with("epic/") || branch.starts_with("factory/") {
-            continue;
-        }
-        let shared = if git.has_origin_remote() {
-            format!("origin/{branch}")
-        } else {
-            branch
-        };
-        if let Some(sha) = full_sha(repo, &shared) {
-            command.arg(sha);
-        }
+    // A legacy branch merely named main/master/trunk is not trunk authority.
+    let branch = git.detect_default_branch();
+    if branch.starts_with("epic/") || branch.starts_with("factory/") {
+        return Ok(false);
+    }
+    let shared = if git.has_origin_remote() {
+        format!("origin/{branch}")
+    } else {
+        branch
+    };
+    if let Some(sha) = full_sha(repo, &shared) {
+        command.arg(sha);
     }
     let output = command.output().map_err(|error| error.to_string())?;
     if !output.status.success() {

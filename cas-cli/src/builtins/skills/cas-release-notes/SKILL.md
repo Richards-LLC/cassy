@@ -22,7 +22,10 @@ Use the project's release rubric as the contract. The procedure is:
    audience labels, Was → Now format, thread count, reply count and Slack
    mrkdwn shape. Put one punch in each top-level message and the supporting
    detail in its reply. Do not include internal ticket labels or
-   implementation process.
+   implementation process. Lay each message out with the
+   [slack-formatting](../slack-formatting/SKILL.md) skill and pass its
+   self-check: name no file unless it is attached to that message, and show
+   every time in CT (or labelled ET), never UTC.
 4. **Save the draft.** Write the exact postable text to
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
 5. **Post in rubric order** through [violet](../violet/SKILL.md),

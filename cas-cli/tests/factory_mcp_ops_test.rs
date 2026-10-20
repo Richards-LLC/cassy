@@ -5901,7 +5901,7 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     let summary = get_text(&default_report);
 
     let mut offset = 0;
-    let mut found_last_agent = false;
+    let mut found_agents = vec![false; AGENT_COUNT];
     loop {
         let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "gc_report",
@@ -5920,9 +5920,12 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
             "detail page must satisfy the byte cap, got {} bytes",
             page_text.len()
         );
-        found_last_agent |= page_text.contains("stale-report-239-");
-        if found_last_agent {
-            break;
+        assert!(
+            !page_text.contains(" omitted:"),
+            "a detail page must not replace inventory rows with an omission marker: {page_text}"
+        );
+        for (index, found) in found_agents.iter_mut().enumerate() {
+            *found |= page_text.contains(&format!("stale-report-{index:03}-"));
         }
         let Some(next_offset) = page_text.lines().find_map(|line| {
             line.strip_prefix("Next offset: ")
@@ -5937,8 +5940,10 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         offset = next_offset;
     }
     assert!(
-        found_last_agent,
-        "last inventory item was not reachable through pages"
+        found_agents.iter().all(|found| *found),
+        "every stale-agent item must be reachable through pages; found {}/{}",
+        found_agents.iter().filter(|found| **found).count(),
+        AGENT_COUNT
     );
     assert!(
         summary.len() < 24_000,
@@ -6081,6 +6086,13 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         report_text.contains("closed-task candidates=1"),
         "{report_text}"
     );
+    let artifact_summary = report_text
+        .lines()
+        .find(|line| line.starts_with("- Durable task artifacts:"))
+        .expect("durable artifact heading and summary");
+    assert!(artifact_summary.contains(&format!("root={}", root.display())));
+    assert!(artifact_summary.contains("closed-task candidates=1"));
+    assert!(artifact_summary.contains("stray inventory=1 mode=review-only"));
     assert!(
         report_text.contains("review-only stray artifact"),
         "{report_text}"

@@ -7728,6 +7728,59 @@ fn gc_report_short_line(line: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod gc_report_render_tests {
+    use super::*;
+
+    #[test]
+    fn large_machine_status_is_bounded_and_records_omitted_cache_details() {
+        let caches = (0..1_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/tmp/factory/cache-{index}"),
+                    "bytes": index,
+                    "disposition": "selected",
+                    "reason": "stale regenerable cache; review before cleanup",
+                })
+            })
+            .collect::<Vec<_>>();
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "filesystem": {"total_bytes": 10_000, "available_bytes": 5_000},
+            "candidate_bytes": 499_500,
+            "selected_bytes": 499_500,
+            "reclaimed_bytes": 0,
+            "dry_run": true,
+            "remediation": "Review gc_report before cleanup.",
+            "caches": caches,
+            "lane_previews": [],
+        });
+        let report = format!(
+            "Factory GC Report\n=================\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\n\nTARGET_CACHE_STATUS_JSON={status}\n"
+        );
+
+        let summary = render_gc_report_response(&report, None, None);
+        let line = summary
+            .lines()
+            .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))
+            .expect("bounded machine-readable status line");
+        assert!(line.len() <= 8 * 1024, "{} bytes", line.len());
+        let value: serde_json::Value = serde_json::from_str(
+            line.strip_prefix("TARGET_CACHE_STATUS_JSON=").unwrap(),
+        )
+        .expect("status remains valid JSON");
+        assert_eq!(value["summary_truncated"], true);
+        assert_eq!(value["caches"].as_array().unwrap().len(), 3);
+        assert_eq!(value["caches_omitted"], 997);
+        let category = summary
+            .lines()
+            .find(|line| line.starts_with("- Cargo target cache pressure:"))
+            .unwrap();
+        assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
+        assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn serve_rss_bytes(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;

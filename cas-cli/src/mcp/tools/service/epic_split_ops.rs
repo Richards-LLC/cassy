@@ -1,7 +1,8 @@
 //! cas-4736: `factory action=epic_split`, splitting an epic's children with
 //! a peer supervisor of this repository on another machine or clone.
 //!
-//! - propose: `id=<epic> target=<peer> mine=<ids> theirs=<ids> [ttl_secs]`
+//! - propose: `id=<epic> target=<peer> [mine=<ids>] [theirs=<ids>] [ttl_secs]`
+//!   At least one share is required; omit the other for a request or grant.
 //! - answer: `id=<split> decision=accept|reject [reason]`
 //! - cancel: `id=<split> decision=cancel [reason]`
 //! - list: no arguments
@@ -66,7 +67,7 @@ impl CasService {
                 (None, Some(epic)) => {
                     let peer = target.ok_or(
                         "propose an epic split with id=<epic> target=<peer supervisor> \
-                         mine=<ids> theirs=<ids>",
+                         mine=<ids> or theirs=<ids> (or both)",
                     )?;
                     epic_split::propose(
                         &cas_root,
@@ -82,7 +83,7 @@ impl CasService {
                     let splits = epic_split::render_splits(&cas_root);
                     Ok(if splits.is_empty() {
                         "No epic splits recorded. Propose one with factory action=epic_split \
-                         id=<epic> target=<peer> mine=<ids> theirs=<ids>."
+                         id=<epic> target=<peer> mine=<ids> or theirs=<ids> (or both)."
                             .to_string()
                     } else {
                         splits

@@ -274,7 +274,7 @@ pub fn ingest(
         let Some(expires_at) = line.expires_at else {
             return Ok(Ingested::Ignored(format!("proposal {} has no expiry", line.id)));
         };
-        if line.epic.is_empty() || line.peer_takes.is_empty() {
+        if line.epic.is_empty() || (line.proposer_takes.is_empty() && line.peer_takes.is_empty()) {
             return Ok(Ingested::Ignored(format!("proposal {} names no share", line.id)));
         }
         if let Some(existing) = get_epic_split(cas_root, &line.id).map_err(store_error)?
@@ -507,7 +507,8 @@ fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<
 }
 
 /// Propose splitting `epic_id` with peer supervisor `peer_target`: claim
-/// `mine` now, record the proposal, and send it.
+/// `mine` now, record the proposal, and send it. Either share may be empty
+/// for a one-sided request or grant, but at least one task must be named.
 pub fn propose(
     cas_root: &Path,
     caller: &Caller,
@@ -517,8 +518,8 @@ pub fn propose(
     theirs: &[String],
     ttl_secs: Option<i64>,
 ) -> Result<String, String> {
-    if mine.is_empty() || theirs.is_empty() {
-        return Err("epic_split needs both shares: mine=<ids> and theirs=<ids>".to_string());
+    if mine.is_empty() && theirs.is_empty() {
+        return Err("epic_split needs at least one share: mine=<ids> or theirs=<ids>".to_string());
     }
     if let Some(both) = mine.iter().find(|id| theirs.contains(id)) {
         return Err(format!("{both} is in both mine and theirs; the shares must be disjoint"));

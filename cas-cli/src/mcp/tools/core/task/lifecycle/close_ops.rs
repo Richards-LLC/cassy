@@ -11574,6 +11574,8 @@ impl CasCore {
         let reopen_note = audit::reopen_note(
             task.updated_at, old_status, fresh_scope_dispatch.is_some(), &actor, reason,
         );
+        let actor = format!("{} ({})", actor.name, actor.id).replace(['\n', '\r'], " ");
+        let reason = reason.replace(['\n', '\r'], " ");
         if task.notes.is_empty() {
             task.notes = reopen_note;
         } else {

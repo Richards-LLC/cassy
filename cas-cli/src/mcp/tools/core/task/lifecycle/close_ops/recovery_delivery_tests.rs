@@ -938,8 +938,9 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             .find(|row| row.source == format!("qa-dispatch:{}", next.id))
             .unwrap();
         // pin: assigned-reviewer handoffs must not instruct a duplicate reviewer spawn.
+        let instructs_spawn = handoff.prompt.contains("Spawn a reviewer");
         assert_eq!(
-            handoff.prompt.contains("Spawn a reviewer"),
+            instructs_spawn,
             busy,
             "handoff must match actual reviewer assignment"
         );

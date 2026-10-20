@@ -951,11 +951,14 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
 async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_close() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
-    close(&f).await;
     let cas_dir = f.dir.path().join(".cas");
     let mut config = crate::config::Config::load(&cas_dir).unwrap();
     config.set("verification.enabled", "true").unwrap();
     config.save(&cas_dir).unwrap();
+    // CasCore caches config for its lifetime: enable verification before
+    // the first close, so the merged close exercises dispatch preparation.
+    assert!(f.core.load_config().verification_enabled());
+    close(&f).await;
     let old = cas_store::create_verification_dispatch_bound(
         &cas_dir,
         TASK,
@@ -975,7 +978,14 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         true,
     )
     .unwrap();
-    cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_dir, TASK).unwrap();
+    let invalidated = cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_dir, TASK)
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.id, old.id);
+    assert_eq!(
+        invalidated.state,
+        cas_types::VerificationDispatchState::Invalidated
+    );
     // A merge fact is retained even when its tree discarded the delivery.
     // The integration gate must still refuse; a verifier must still be able to report.
     git(

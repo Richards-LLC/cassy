@@ -474,7 +474,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         "hits": 0
     }])
     .to_string();
-    let _ = service
+    let close_outcome = service
         .task(Parameters(
             serde_json::from_value(serde_json::json!({
                 "action": "close", "id": spike.id, "reason": "search audit complete",
@@ -488,7 +488,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .get(&spike.id)
         .unwrap()
         .notes;
-    assert!(spike_notes.contains("ZERO_HIT_SEARCH_WARNING"), "{spike_notes}");
+    assert!(spike_notes.contains("ZERO_HIT_SEARCH_WARNING"), "notes: {spike_notes}; close: {close_outcome:?}");
     assert!(spike_notes.contains("ARTIFACT_PROOF:"), "{spike_notes}");
     assert!(!spike_notes.lines().any(|line| line.starts_with("ARTIFACT_PROOF:")
         || line.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---")), "{spike_notes}");

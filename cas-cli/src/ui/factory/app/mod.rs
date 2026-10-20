@@ -4976,6 +4976,190 @@ mod tests {
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
     }
 
+    /// A normal worker shutdown deletes the agent row before its final
+    /// director refresh and reminder cleanup. The pre-shutdown ID must survive
+    /// that order so its held reminder is re-armed.
+    #[test]
+    fn normal_worker_shutdown_rearms_held_reminder_after_agent_deletion() {
+        use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
+        use crate::types::{Agent, AgentRole};
+
+        let home = tempfile::tempdir().unwrap();
+        let session = "worker-shutdown-hold";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", session),
+        ]);
+        let worker = "lively-crow";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut agent = Agent::new("worker-id".into(), worker.into());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some(session.into());
+        agents.register(&agent).unwrap();
+
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        reminders
+            .create(
+                "worker-id",
+                None,
+                "red run done",
+                ReminderTriggerType::Time,
+                Some(after),
+                None,
+                None,
+                3600,
+                Some(session),
+            )
+            .unwrap();
+        assert_eq!(
+            reminders.suspend_pending_for_target("worker-id").unwrap(),
+            1
+        );
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.set_factory_session(session.to_string());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "set_factory_session must rehydrate a hold before the first refresh tick"
+        );
+
+        app.refresh_data().unwrap();
+        assert!(
+            app.unfiltered_director_data
+                .agent_id_to_name
+                .contains_key("worker-id")
+        );
+        let captured_ids = vec![agent.id.clone()];
+        agents.graceful_shutdown(&agent.id).unwrap();
+        agents.unregister(&agent.id).unwrap();
+        assert!(
+            agents.get(&agent.id).is_err(),
+            "SessionEnd removes the agent row"
+        );
+
+        // Match shutdown_worker_inner: the row is gone before its refresh and
+        // the cleanup that clears the hold and re-arms reminders.
+        app.last_db_fingerprint = None;
+        app.refresh_data().unwrap();
+        assert!(
+            !app.unfiltered_director_data
+                .agent_id_to_name
+                .contains_key("worker-id")
+        );
+        app.remove_worker_from_event_detector(worker);
+        assert!(!app.event_detector.is_worker_held(worker));
+        let metadata: crate::ui::factory::protocol::SessionMetadata =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            metadata.held_workers.is_empty(),
+            "worker removal must clear durable state so a reused name cannot inherit it"
+        );
+        assert_eq!(
+            reminders
+                .list_pending_for_target("worker-id")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+
+        // Keep the captured ID live in the test so it documents the value the
+        // production shutdown path must pass after the snapshot loses the row.
+        assert_eq!(captured_ids, ["worker-id"]);
+    }
+
+    /// Same-name cache entries from another factory session must not release
+    /// that session's held reminders.
+    #[test]
+    fn worker_removal_does_not_rearm_same_named_foreign_session_reminder() {
+        use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
+        use crate::types::{Agent, AgentRole};
+
+        let home = tempfile::tempdir().unwrap();
+        let session = "current-reminder-session";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", "other-reminder-session"),
+        ]);
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let worker = "lively-crow";
+        for (id, factory_session) in [
+            ("current-worker-id", session),
+            ("foreign-worker-id", "other-reminder-session"),
+        ] {
+            let mut agent = Agent::new(id.into(), worker.into());
+            agent.role = AgentRole::Worker;
+            agent.factory_session = Some(factory_session.into());
+            agents.register(&agent).unwrap();
+        }
+
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        for id in ["current-worker-id", "foreign-worker-id"] {
+            reminders
+                .create(
+                    id,
+                    None,
+                    "red run done",
+                    ReminderTriggerType::Time,
+                    Some(after),
+                    None,
+                    None,
+                    3600,
+                    Some(session),
+                )
+                .unwrap();
+            assert_eq!(reminders.suspend_pending_for_target(id).unwrap(), 1);
+        }
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec![worker.to_string()];
+        app.set_factory_session(session.to_string());
+        // Load a stale director snapshot scoped to a different session. The
+        // same-name foreign row must not be treated as this app's worker.
+        app.refresh_data().unwrap();
+        assert!(app.unfiltered_director_data.agent_id_to_name.contains_key("foreign-worker-id"));
+        assert!(!app.unfiltered_director_data.agent_id_to_name.contains_key("current-worker-id"));
+
+        app.remove_worker_from_event_detector(worker);
+
+        assert_eq!(
+            reminders
+                .list_pending_for_target("current-worker-id")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            reminders
+                .list_pending_for_target("foreign-worker-id")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 1);
+    }
+
     /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
     #[test]
     fn session_shutdown_rearms_held_workers_reminders_cas_5f4b() {

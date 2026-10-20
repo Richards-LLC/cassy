@@ -18790,8 +18790,8 @@ fn reanchored_delivery_content_in_parent(
 /// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
 /// task-specific and remains stable when a worker later reuses the same
 /// factory branch for another epic. When that anchor is absent or no longer
-/// resolves, an existing per-task branch (local or origin) is measured alone;
-/// the shared worker branch can carry other tasks' history. Without a per-task
+/// resolves, all existing per-task branches (local or origin) are measured,
+/// excluding shared worker branches that can carry other tasks' history. Without a per-task
 /// branch, both the historical `parked_branch` and a distinct current
 /// assignee-derived live branch are checked. Taking the maximum unmerged count
 /// avoids double-counting shared history while ensuring reassignment cannot
@@ -18939,17 +18939,21 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // reused bare branch. Resolve against the same local/origin snapshot
         // as measurement, including a parked task lane after reassignment.
         let task_branch_suffix = format!("-{}", t.id);
-        let per_task_branch = has_delivery.then(|| {
-            task_delivery_branch_candidates(t).into_iter().find(|branch| {
-                branch.starts_with("factory/")
-                    && branch.ends_with(&task_branch_suffix)
-                    && git_snapshot.read_ref(branch).read_ref().is_some()
-            })
-        }).flatten();
-        let mut fallback_branches = Vec::new();
-        if let Some(branch) = per_task_branch {
-            fallback_branches.push(branch);
+        let mut fallback_branches = if has_delivery {
+            task_delivery_branch_candidates(t)
+                .into_iter()
+                .filter(|branch| {
+                    branch.starts_with("factory/")
+                        && branch.ends_with(&task_branch_suffix)
+                        && git_snapshot.read_ref(branch).read_ref().is_some()
+                })
+                .collect::<Vec<_>>()
         } else {
+            Vec::new()
+        };
+        // cas-b28c: reassignment can leave work on multiple task lanes.
+        // Measure them all; the loop below takes the highest unmerged count.
+        if fallback_branches.is_empty() {
             if let Some(branch) = parked_branch.as_ref() {
                 fallback_branches.push(branch.clone());
             }

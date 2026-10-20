@@ -1,3 +1,4 @@
+use super::audit;
 use crate::mcp::tools::core::imports::*;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::worktree::GitOperations;
@@ -1842,20 +1843,9 @@ impl CasCore {
             }
 
             let now = chrono::Utc::now();
-            let timestamp = now.format("%Y-%m-%d %H:%M");
-            let parked_branch = task
-                .deliverables
-                .parked_branch
-                .as_deref()
+            let parked_branch = task.deliverables.parked_branch.as_deref()
                 .unwrap_or("the parked factory branch");
-            let audit = format!(
-                "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
-                 {parked_branch} was flagged with a merge conflict or its conflict \
-                 preflight could not be evaluated, so the task is back in_progress for \
-                 the assigned worker to inspect from inside the worker worktree. Rebase \
-                 {parked_branch} onto the current integration target tip, push the \
-                 rebased factory branch, and re-park it with merge_request=true."
-            );
+            let audit = audit::merge_recovery_note(now, parked_branch);
             task.notes = if task.notes.is_empty() {
                 audit
             } else {

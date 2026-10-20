@@ -2174,10 +2174,7 @@ pub fn request_changes_for_parked_delivery(
             "prior commits remain on {rejected_branch}; the assigned worker must add corrective commits (including an explicit revert commit when requested) before re-delivery."
         )
     };
-    let note = format!(
-        "[{}] Decision: changes requested by supervisor. {reason}\n\nBranch handling: {branch_handling}",
-        now.format("%Y-%m-%d %H:%M")
-    );
+    let note = request_changes_audit_note(now, reason, &branch_handling);
     let notes = if notes.is_empty() {
         note.clone()
     } else {
@@ -4669,4 +4666,12 @@ mod credential_redaction_tests {
             "the capability and its token HASH stay visible; only the bearer goes: {rendered}"
         );
     }
+}
+
+/// Prefix emitted by the authorized parked-delivery request_changes writer.
+pub const REQUEST_CHANGES_AUDIT_PREFIX: &str = "Decision: changes requested by supervisor. ";
+
+/// Format the replicated decision exactly as the transactional writer does.
+pub fn request_changes_audit_note(at: chrono::DateTime<chrono::Utc>, reason: &str, branch_handling: &str) -> String {
+    format!("[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}", at.format("%Y-%m-%d %H:%M"))
 }

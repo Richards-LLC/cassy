@@ -4926,7 +4926,7 @@ fn skipped_refresh_receipt(installed_version: &str, reason: &str) -> serde_json:
     })
 }
 
-fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
+pub(super) fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
     let Some(path_str) = path.to_str() else {
         return path;
     };

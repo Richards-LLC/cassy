@@ -910,6 +910,11 @@ fn require_installed_service_binary(
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => return Ok(()),
     };
+    // Linux can run this comparison in the pre-swap image. /proc/self/exe
+    // then names the old inode as "<install path> (deleted)".
+    let stable_binary = (platform == ServicePlatform::Systemd)
+        .then(|| super::update::strip_deleted_suffix(installed_binary.to_owned()));
+    let installed_binary = stable_binary.as_deref().unwrap_or(installed_binary);
     let resolved_configured = fs::canonicalize(&configured).unwrap_or_else(|_| configured.clone());
     let resolved_installed =
         fs::canonicalize(installed_binary).unwrap_or_else(|_| installed_binary.to_owned());

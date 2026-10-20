@@ -116,8 +116,6 @@ pub fn classify(
     now: DateTime<Utc>,
 ) -> Vec<TaskSimulator> {
     let cutoff = now - Duration::hours(SIMULATOR_TTL_HOURS);
-    let ids: Vec<String> = devices.iter().filter_map(|device| owner_task(&device.name)).map(str::to_string).collect();
-    others.prefetch(&ids);
     devices
         .iter()
         .filter_map(|device| {

@@ -127,16 +127,16 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             // The failed native write already finished, but the PTY fallback has not run.
             fixture.advance_target(true);
         }
-        if scenario == "shutdown" {
-            let _ = refresh.drain_deliverability(&mut daemon.queue_jobs, Duration::from_secs(10)).await;
-            daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10));
-        } else {
+        if scenario != "shutdown" {
             daemon.director_refresh_pass(
                 &mut refresh, false, super::super::store_worker::global(),
                 &super::super::loop_watchdog::LoopProgress::new(),
             ).await;
-            assert!(daemon.queue_jobs.drain_for_shutdown(&cas_dir, Duration::from_secs(10)));
         }
+        daemon.drain_director_deliveries_for_shutdown(
+            &mut refresh, super::super::store_worker::global(), Duration::from_secs(10),
+        ).await;
+        assert!(daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10)));
         let rows: Vec<super::super::teams::InboxMessage> =
             serde_json::from_str(&std::fs::read_to_string(inbox).unwrap_or_else(|_| "[]".into()))
                 .unwrap();

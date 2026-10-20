@@ -1019,7 +1019,7 @@ impl QueueJobs {
         }
     }
 
-    fn generation(&mut self) -> u64 {
+    pub(crate) fn generation(&mut self) -> u64 {
         self.next_generation += 1;
         self.next_generation
     }
@@ -1761,6 +1761,13 @@ impl QueueJobs {
         work: impl FnOnce(Option<&DirectorStores>) -> Box<dyn std::any::Any + Send> + Send + 'static,
     ) -> Submitted {
         self.submit_job_read(spec, true, move |stores| QueueJobOutcome::External(work(stores)))
+    }
+
+    /// Completion owners must remain alive until their critical jobs settle.
+    pub(crate) fn external_kind_pending(&self, kind: &str) -> bool {
+        self.job_owners.values().any(|owner| {
+            owner.external && owner.kind == kind && !owner.outstanding.is_empty()
+        })
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).

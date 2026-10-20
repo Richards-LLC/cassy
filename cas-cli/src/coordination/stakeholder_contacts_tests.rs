@@ -90,7 +90,11 @@ for line in sys.stdin:
     let engine = cmcp_core::ProxyEngine::from_configs(HashMap::from([("violet".into(),config)])).await.unwrap();
     engine.set_call_interceptor(service.clone()).await;
     let who = caller("poster-on-soundwave");
-    let call = |args: Value| async { engine.call_tool(&who, "violet", "violet_post", args.as_object().cloned()).await.unwrap() };
+    let call = |args: Value| {
+        let engine = &engine;
+        let who = &who;
+        async move { engine.call_tool(who, "violet", "violet_post", args.as_object().cloned()).await.unwrap() }
+    };
     call(json!({"kind":"file_external","action":"begin","initial_comment":"<@U123>","channel":"dev"})).await;
     call(json!({"kind":"message","text":"<@U123>","channel":"dev"})).await;
     assert!(service.status()["contacts"][0]["last_contact_at"].is_null(), "staging and refusals never stamp");

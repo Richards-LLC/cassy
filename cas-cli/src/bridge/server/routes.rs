@@ -380,20 +380,13 @@ pub(crate) fn handle_session_routes(
                 msg.target.clone()
             };
 
-            let payload = if msg.no_wrap {
-                msg.message
-            } else {
-                let response_hint = crate::ui::factory::external_response_hint(&cas_root, &from);
-                format!("{}\n\n{}", msg.message.trim_end(), response_hint)
-            };
-
-            let queue = open_prompt_queue_store(&cas_root)?;
-            let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-            let message_id = if let Some(ref session) = factory_session {
-                queue.enqueue_with_session(&from, &resolved_target, &payload, session)?
-            } else {
-                queue.enqueue(&from, &resolved_target, &payload)?
-            };
+            let message_id = crate::ui::factory::enqueue_external_message(
+                &cas_root,
+                &from,
+                &resolved_target,
+                &msg.message,
+                msg.no_wrap,
+            )?;
 
             let ack_event_id = if msg.wait_ack {
                 wait_for_supervisor_ack(&cas_root, message_id, msg.timeout_ms.unwrap_or(5000))?

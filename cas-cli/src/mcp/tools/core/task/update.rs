@@ -459,6 +459,17 @@ impl CasCore {
                 data: None,
             });
         }
+        if [req.notes.as_deref(), proof_scope_fix_reason]
+            .into_iter()
+            .flatten()
+            .any(crate::artifacts::proof::contains_proof_marker)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references."),
+                data: None,
+            });
+        }
         let task_store = self.open_task_store()?;
         let mut requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());

@@ -945,6 +945,17 @@ impl CasCore {
         confirm_warning: bool,
         delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        if req
+            .notes
+            .as_deref()
+            .is_some_and(crate::artifacts::proof::contains_proof_marker)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references."),
+                data: None,
+            });
+        }
         let task_store = self.open_task_store()?;
 
         let id = task_store.generate_id().map_err(|e| McpError {

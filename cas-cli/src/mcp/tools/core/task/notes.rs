@@ -55,7 +55,18 @@ impl CasCore {
         if crate::cloud::syncer::contains_proposal_provenance_marker(&req.note) {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556)."),
+                message: Cow::from(
+                    "Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).",
+                ),
+                data: None,
+            });
+        }
+        if crate::artifacts::proof::contains_proof_marker(&req.note) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.",
+                ),
                 data: None,
             });
         }
@@ -88,15 +99,33 @@ impl CasCore {
             data: None,
         })?;
 
+        let proof_note = matches!(
+            req.note_type.to_ascii_lowercase().as_str(),
+            "platform_proof" | "loaded_proof"
+        );
         let config = self.load_config();
         let base = crate::config::resolved_factory_artifacts_root(
             config.factory().artifacts_root.as_deref(),
         );
-        let artifacts = cas_store::SqliteArtifactStore::open(&self.cas_root)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        let (note, warnings) =
-            crate::artifacts::proof::prepare_note(&artifacts, &req.id, &req.note, &base)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let prepared = cas_store::SqliteArtifactStore::open(&self.cas_root)
+            .map_err(anyhow::Error::from)
+            .and_then(|artifacts| {
+                crate::artifacts::proof::prepare_note(
+                    &artifacts, &req.id, &req.note, &base, proof_note,
+                )
+            });
+        let (note, warnings) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(task_id = %req.id, error = %error, "artifact proof lookup unavailable; saving note without references");
+                (
+                    req.note.clone(),
+                    vec![format!(
+                        "artifact proof lookup unavailable; note saved without attached references: {error}"
+                    )],
+                )
+            }
+        };
 
         // Format the note with type prefix and timestamp
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");

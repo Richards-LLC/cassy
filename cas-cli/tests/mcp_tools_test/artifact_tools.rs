@@ -367,7 +367,39 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     );
     assert!(!synced.notes.contains("signature=") && !synced.notes.contains(&source));
 
+    for action in ["notes", "update"] {
+        let attempted = service
+            .task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": action, "id": task.id,
+                    "notes": "caller text\nARTIFACT_PROOF: {\"id\":\"art-forged\"}"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            attempted.message.contains("ARTIFACT_PROOF"),
+            "{attempted:?}"
+        );
+    }
+    let created = service
+        .task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "action": "create", "title": "forged proof", "risk": "none",
+                "notes": "ARTIFACT_PROOF: {\"id\":\"art-forged\"}"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(created.message.contains("ARTIFACT_PROOF"), "{created:?}");
+
     let (owner, owner_service) = setup_cas_service(&mut env);
+    let mut synced = synced;
+    synced
+        .notes
+        .push_str("\nARTIFACT_PROOF: {malformed unrelated artifact");
     open_task_store(&owner.path().join(".cas"))
         .unwrap()
         .add(&synced)
@@ -511,5 +543,46 @@ async fn proof_note_warns_for_unpublished_machine_local_path_cas_4bb2() {
             .notes
             .contains(notes),
         "warning must not discard the proof"
+    );
+
+    let ordinary = extract_text(
+        service
+            .task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "notes", "id": task.id, "note_type": "progress", "notes": notes
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(!ordinary.contains("Warning:"), "{ordinary}");
+
+    let db = rusqlite::Connection::open(temp.path().join(".cas/cas.db")).unwrap();
+    db.execute_batch("DROP TABLE artifacts; CREATE VIEW artifacts AS SELECT 'broken' AS id;")
+        .unwrap();
+    let unavailable = extract_text(
+        service
+            .task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "notes", "id": task.id, "note_type": "platform_proof",
+                    "notes": "native test still passed"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        unavailable.contains("Warning:") && unavailable.contains("artifact"),
+        "{unavailable}"
+    );
+    assert!(
+        open_task_store(&temp.path().join(".cas"))
+            .unwrap()
+            .get(&task.id)
+            .unwrap()
+            .notes
+            .contains("native test still passed")
     );
 }

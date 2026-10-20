@@ -119,13 +119,21 @@ Abandoned queue messages report `undelivered` in the `message_status` header
 and JSON `legacy_status`, even though their queue rows are processed. A sender
 notice preserves the wake-gate refusal when one was recorded. Authenticated
 messages whose sender has ended use the existing local supervisor fallback;
-that supervisor receives each original source, summary and complete body in an
-ordinary inbox row. These recovery notices do not fold into the routine
-ended-worker digest. Large originals remain readable through `inbox_poll`.
+that supervisor receives each original source, summary and complete body.
+Each sweep emits at most three full-body recovery notices per recipient and
+one folded reference list for the rest. Each listed `notification_id` names a
+recipient-owned card: an explicit `inbox_poll notification_id=<id>` hydrates its
+retained abandoned original after the usual recipient/session checks. Cards
+stay out of automatic drains and unread counts. Recovery notices do not fold
+into the routine ended-worker digest. Large originals remain readable through
+`inbox_poll`.
 Recovery rows require daemon origin, the delivery-watchdog source and their
-recovery dedupe marker; assignment checks in the daemon and inbox poll treat
-these original bodies as history. A caller-supplied watchdog name cannot claim
-that exemption.
+recovery dedupe marker; assignment checks in daemon delivery, inbox poll and
+turn-start hooks use the same store predicate to treat these bodies as history.
+A caller-supplied watchdog name cannot claim that exemption. Recovery rows use
+the queue delivery and hook lane. The director's separate event-generated
+prompts have no queue provenance; their ordinary stale-assignment recheck
+continues to refuse closed work.
 
 For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
 project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty
@@ -568,6 +576,12 @@ health. JSON exposes `epic_splits` separately
 from the health-only `mailbox_status`. Each split retains its stored `state` and
 an effective `display_state` (`expired` for a lapsed pending proposal), its task
 shares, peer, reason, expiry and decision time.
+
+For a single-child handover, request it with `factory action=epic_split
+id=<epic> target=<owner> mine=<child>`; the owner accepts or rejects the proposal.
+Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
+omitted, but not both. The proposer claims only `mine`; acceptance claims only
+the recipient's share. Existing expiry, cancel and start guards apply.
 
 ## Adding Features
 

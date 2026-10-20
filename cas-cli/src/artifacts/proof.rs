@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 
 const MARKER: &str = "ARTIFACT_PROOF: ";
 
+pub fn contains_proof_marker(note: &str) -> bool {
+    note.contains("ARTIFACT_PROOF:")
+}
+
 fn same_artifact(a: &PublishedArtifact, b: &PublishedArtifact) -> bool {
     a.id == b.id
         && a.task_id == b.task_id
@@ -64,6 +68,7 @@ pub fn prepare_note(
     task_id: &str,
     note: &str,
     artifacts_base: &Path,
+    warn_local_paths: bool,
 ) -> anyhow::Result<(String, Vec<String>)> {
     let records = store.list_for_task(task_id)?;
     let mut attached = std::collections::BTreeMap::new();
@@ -109,7 +114,7 @@ pub fn prepare_note(
                 });
             if let Some(record) = published {
                 attached.insert(record.id.clone(), record.clone());
-            } else {
+            } else if warn_local_paths {
                 warnings.push(format!("{token} is machine-local and unpublished; use artifact action=publish task_id={task_id} path=<log> note_type=platform_proof notes=<receipt>"));
             }
         }
@@ -128,7 +133,13 @@ pub fn prepare_note(
 fn from_notes(notes: &str, id: &str, task_id: &str) -> anyhow::Result<Option<PublishedArtifact>> {
     let mut found = None;
     for line in notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
-        let record: PublishedArtifact = serde_json::from_str(line)?;
+        let record: PublishedArtifact = match serde_json::from_str(line) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(task_id, error = %error, "skipping malformed artifact proof note");
+                continue;
+            }
+        };
         if record.id != id {
             continue;
         }
@@ -160,10 +171,14 @@ fn fetch(
             "artifact ledger conflicts with proof reference"
         );
     }
+    let cloud_id = artifact
+        .cloud_artifact_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("artifact is not committed to Cloud"))?;
     let client = cloud.ok_or_else(|| anyhow::anyhow!("not logged in to Cassy Cloud"))?;
-    let view = client.view_url(artifact.cloud_artifact_id.as_deref().unwrap())?;
+    let view = client.view_url(cloud_id)?;
     anyhow::ensure!(
-        view.artifact_id == artifact.cloud_artifact_id.as_deref().unwrap(),
+        view.artifact_id == cloud_id,
         "Cloud returned another artifact id"
     );
     let signed = SignedView {
@@ -196,7 +211,7 @@ fn fetch(
                 size_bytes: artifact.size_bytes,
                 sha256: artifact.sha256.clone(),
             })?;
-            store.mark_uploaded(&artifact.id, artifact.cloud_artifact_id.as_deref().unwrap())?;
+            store.mark_uploaded(&artifact.id, cloud_id)?;
             store.mark_committed(&artifact.id, None)?;
         }
         Some(_) => {}

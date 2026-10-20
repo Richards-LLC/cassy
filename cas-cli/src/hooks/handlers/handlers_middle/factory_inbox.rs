@@ -42,9 +42,10 @@
 use std::path::Path;
 
 use cas_core::hooks::types::HookInput;
-use cas_store::QueuedPrompt;
+use cas_store::{PromptQueueStore, QueuedPrompt};
 
 fn assignment_is_stale_for_recipient(
+    queue: &dyn PromptQueueStore,
     task_store: &dyn crate::store::TaskStore,
     row: &QueuedPrompt,
     recipient: &str,
@@ -52,6 +53,15 @@ fn assignment_is_stale_for_recipient(
     let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt) else {
         return false;
     };
+    // Recovery bodies quote historical work; only the store's authenticated
+    // row predicate can exempt them from a fresh assignment's stale check.
+    match queue.is_abandonment_recovery(row.id) {
+        Ok(true) => return false,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(prompt_id = row.id, %error, "could not classify abandonment recovery at hook surface");
+        }
+    }
     let Ok(task) = task_store.get(&task_id) else {
         return false;
     };
@@ -568,7 +578,7 @@ fn surface_factory_inbox_with_transport_delivery(
                 // assignment/start boilerplate before rendering it: the
                 // task may have moved beyond Open while the row waited.
                 if task_store.as_ref().is_some_and(|store| {
-                    assignment_is_stale_for_recipient(store.as_ref(), &row, alias)
+                    assignment_is_stale_for_recipient(queue.as_ref(), store.as_ref(), &row, alias)
                 }) {
                     tracing::info!(
                         target: "cas::coordination",
@@ -829,8 +839,8 @@ fn over_budget_note(
     }
     if !no_room.is_empty() {
         notes.push(format!(
-            "[not shown here] Message {} did not fit in this block and stays unread; read it \
-             with inbox_poll notification_id=<id>.",
+            "[not shown here] Message {} did not fit in this block and stays unread; it is \
+             retried automatically at the next eligible turn or tool boundary.",
             ids(&no_room)
         ));
     }

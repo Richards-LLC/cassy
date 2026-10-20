@@ -112,6 +112,7 @@ fn format_reminder(
         ReminderStatus::Fired => "fired".to_string(),
         ReminderStatus::Cancelled => "cancelled".to_string(),
         ReminderStatus::Expired => "expired".to_string(),
+        ReminderStatus::Suspended => "held".to_string(),
     };
 
     // Truncate message based on available width

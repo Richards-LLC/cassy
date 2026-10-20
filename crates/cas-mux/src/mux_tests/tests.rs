@@ -2427,6 +2427,121 @@ fn explicit_config_dir_beats_requester_config_dir() {
 }
 
 #[test]
+fn cas_16c0_only_explicit_account_manifest_adds_connectors_under_strict_mcp() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    let requester = env.home().join("supervisor-account");
+    for directory in [&root, &selected, &requester] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let gmail = serde_json::json!({
+        "type": "claudeai-proxy", "url": "https://gmail.example.test/mcp", "id": "mcpsrv_selected"
+    });
+    std::fs::write(selected.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": {"claude.ai Gmail": gmail}}).to_string()).unwrap();
+    std::fs::write(requester.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": {"claude.ai Other Account": {
+            "type": "claudeai-proxy", "url": "https://other.example.test/mcp", "id": "mcpsrv_other"
+        }}}).to_string()).unwrap();
+    let project_mcp = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "never-run-vercel"}, "neon": {"command": "never-run-neon"}
+    }}).to_string();
+    std::fs::write(project.path().join(".mcp.json"), &project_mcp).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", requester.to_str().unwrap());
+    for explicit in [false, true] {
+        let spec = WorkerSpec {
+            name: Some("worker-1".into()),
+            config_dir: explicit.then(|| selected.display().to_string()),
+            requester_config_dir: Some(requester.display().to_string()),
+            ..WorkerSpec::builtin_default()
+        };
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+            resolved_worker_specs: vec![spec.clone()], include_director: false,
+            ..Default::default()
+        });
+        let initial = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let dynamic = Mux::new(24, 80).build_add_worker_config(
+            "dynamic", project.path().into(), Some(&root), "supervisor", None, Some(spec));
+        for pane in [initial, &dynamic] {
+            assert!(env_value(pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            assert!(pane.args.contains(&"--strict-mcp-config".into()));
+            let index = pane.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+            let document: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&pane.args[index + 1]).unwrap()).unwrap();
+            let servers = document["mcpServers"].as_object().unwrap();
+            assert!(servers.contains_key("cas"));
+            assert_eq!(servers.len(), if explicit { 2 } else { 1 });
+            if explicit {
+                assert_eq!(servers["claude.ai Gmail"], gmail);
+                assert_eq!(env_value(pane, "CLAUDE_CONFIG_DIR"), selected.to_str());
+            }
+        }
+    }
+    assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), project_mcp);
+}
+
+#[test]
+fn cas_16c0_missing_or_invalid_manifest_keeps_strict_cas_with_notice() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    let manifest = selected.join("cassy-worker-connectors.json");
+    for contents in [None, Some("not-json"), Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"http","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected"}}}"#)] {
+        if let Some(contents) = contents {
+            std::fs::write(&manifest, contents).unwrap();
+        }
+        let pane = Mux::new(24, 80).build_add_worker_config(
+            "worker", project.path().into(), Some(&root), "supervisor", None,
+            Some(WorkerSpec { config_dir: Some(selected.display().to_string()), ..WorkerSpec::builtin_default() }));
+        assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(pane.args.contains(&"--strict-mcp-config".into()));
+        let document: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("worker-mcp/worker.json")).unwrap()).unwrap();
+        assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas"]);
+        let notice = env_value(&pane, "CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE").expect("missing/invalid manifest must be visible");
+        assert!(notice.contains("cassy-worker-connectors.json") && notice.contains("strict"), "{notice}");
+        assert!(!notice.contains('\n'));
+    }
+}
+
+#[test]
+fn cas_16c0_manifest_cannot_regrant_denied_connectors_or_environment() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory]\nsupervisor_only_mcp=['calendar']\nsupervisor_only_env=['PRIVATE_TOKEN']\n").unwrap();
+    env.set("PRIVATE_TOKEN", "never-forward-fixture");
+    let servers = ["Gmail", "Vercel", "Neon", "Calendar"].into_iter().map(|name| (
+        format!("claude.ai {name}"), serde_json::json!({"type":"claudeai-proxy",
+            "url":format!("https://{}.example.test/mcp", name.to_lowercase()), "id":format!("mcpsrv_{name}")})
+    )).collect::<serde_json::Map<_, _>>();
+    std::fs::write(selected.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": servers}).to_string()).unwrap();
+    let pane = Mux::new(24, 80).build_add_worker_config(
+        "worker", project.path().into(), Some(&root), "supervisor", None,
+        Some(WorkerSpec { config_dir: Some(selected.display().to_string()), ..WorkerSpec::builtin_default() }));
+    let document: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("worker-mcp/worker.json")).unwrap()).unwrap();
+    assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas", "claude.ai Gmail"]);
+    assert!(pane.args.contains(&"--strict-mcp-config".into()));
+    assert!(pane.env_remove.contains(&"PRIVATE_TOKEN".into()));
+    assert!(env_value(&pane, "PRIVATE_TOKEN").is_none());
+    assert!(!pane.args.contains(&"--managed-settings".into()), "native managed policy must stay authoritative");
+}
+
+#[test]
 fn requester_config_dir_applies_when_explicit_param_is_omitted() {
     let mux = Mux::new(24, 80);
     let config = mux.build_add_worker_config(

@@ -266,3 +266,88 @@ async fn post_is_dispatched_and_its_failures_are_named() {
         Some(&serde_json::json!("violet_unavailable"))
     );
 }
+
+/// The task note is the transport: the owner has neither the peer's SQLite
+/// artifact row nor its filesystem, only the synced task and Cloud credentials.
+#[tokio::test]
+async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
+    use cas::store::{TaskStore, open_task_store};
+    use cas::types::Task;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mut env = TestEnvGuard::temp_home();
+    let (peer, service) = setup_cas_service(&mut env);
+    let task = Task::new("cas-proof".into(), "native proof".into());
+    open_task_store(&peer.path().join(".cas")).unwrap().add(&task).unwrap();
+    let server = MockServer::start().await;
+    let sha = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    for (verb, route, response) in [
+        ("POST", "/api/artifacts/begin", serde_json::json!({
+            "artifact_id": "cloud-proof", "upload_url": format!("{}/blob", server.uri())
+        })),
+        ("POST", "/api/artifacts/cloud-proof/complete", serde_json::json!({})),
+        ("GET", "/api/artifacts/cloud-proof/url", serde_json::json!({
+            "artifact_id": "cloud-proof", "url": format!("{}/download?signature=secret", server.uri())
+        })),
+    ] {
+        Mock::given(method(verb)).and(path(route)).and(header("Authorization", "Bearer fixture-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response)).mount(&server).await;
+    }
+    Mock::given(method("PUT")).and(path("/blob"))
+        .respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+    let download = Mock::given(method("GET")).and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world"))
+        .mount_as_scoped(&server).await;
+    let cloud = serde_json::json!({"endpoint": server.uri(), "token": "fixture-token"});
+    std::fs::write(peer.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
+    let source = write_in_checkout(&peer, "native-proof.log", b"hello world");
+    let published = extract_text(service.artifact(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "publish", "task_id": task.id, "path": source,
+        "note_type": "platform_proof", "notes": "macOS: native command PASS, 2 passed"
+    })).unwrap())).await.unwrap());
+    let id = published.lines().find_map(|line| line.strip_prefix("artifact_id: ")).unwrap();
+    let synced = open_task_store(&peer.path().join(".cas")).unwrap().get(&task.id).unwrap();
+    assert!(synced.notes.contains("PLATFORM_PROOF") && synced.notes.contains(id), "{}", synced.notes);
+    assert!(synced.notes.contains(sha) && synced.notes.contains("cloud-proof"), "{}", synced.notes);
+    assert!(!synced.notes.contains("signature=") && !synced.notes.contains(&source));
+
+    let (owner, owner_service) = setup_cas_service(&mut env);
+    open_task_store(&owner.path().join(".cas")).unwrap().add(&synced).unwrap();
+    std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
+    assert!(cas::store::SqliteArtifactStore::open(&owner.path().join(".cas")).unwrap().get(id).unwrap().is_none());
+    // Delete the source: resolving must use Cloud, not a shared-host shortcut.
+    std::fs::remove_file(source).unwrap();
+    let fetch = serde_json::json!({"action": "fetch", "task_id": task.id, "id": id});
+    let fetched = extract_text(owner_service.artifact(Parameters(serde_json::from_value(fetch.clone()).unwrap())).await.unwrap());
+    let local = fetched.lines().find_map(|line| line.strip_prefix("path: ")).unwrap();
+    assert_eq!(std::fs::read(local).unwrap(), b"hello world");
+    assert!(fetched.contains(sha), "{fetched}");
+
+    drop(download);
+    Mock::given(method("GET")).and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong bytes"))
+        .mount(&server).await;
+    let error = owner_service.artifact(Parameters(serde_json::from_value(fetch).unwrap())).await.unwrap_err();
+    assert!(error.message.contains("digest mismatch"), "{}", error.message);
+    assert!(!error.message.contains("signature=secret"));
+    assert_eq!(std::fs::read(local).unwrap(), b"hello world", "a failed fetch must not replace verified evidence");
+    assert!(server.received_requests().await.unwrap().iter().filter(|r| r.url.path() == "/download").all(|r| !r.headers.contains_key("authorization")));
+}
+
+#[tokio::test]
+async fn proof_note_warns_for_unpublished_machine_local_path_cas_4bb2() {
+    use cas::store::{TaskStore, open_task_store};
+    use cas::types::Task;
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_service(&mut env);
+    let task = Task::new("cas-proof".into(), "native proof".into());
+    open_task_store(&temp.path().join(".cas")).unwrap().add(&task).unwrap();
+    // The peer's project key need not exist on this machine.
+    let notes = "macOS command PASS; log: ~/.cas/artifacts/cassy-prowl/cas-proof/native-proof.log";
+    let response = extract_text(service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "notes", "id": task.id, "note_type": "platform_proof", "notes": notes
+    })).unwrap())).await.unwrap());
+    assert!(response.contains("Warning:") && response.contains("machine-local") && response.contains("artifact"), "{response}");
+    assert!(open_task_store(&temp.path().join(".cas")).unwrap().get(&task.id).unwrap().notes.contains(notes), "warning must not discard the proof");
+}

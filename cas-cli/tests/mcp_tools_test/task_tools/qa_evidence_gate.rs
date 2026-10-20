@@ -1057,7 +1057,9 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     let lane = format!("factory/test-agent-{TASK}");
     git(&fx.repo, &["checkout", "-q", "-b", &lane]);
     let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
-    commit_file(&fx.repo, "src/more.rs", "pub fn more() {}\n");
+    std::fs::write(fx.repo.join("src/more.rs"), "pub fn more() {}\n").unwrap();
+    git(&fx.repo, &["add", "src/more.rs"]);
+    git(&fx.repo, &["commit", "-q", "-m", &format!("fix: review round ({TASK})")]);
     let tip = git(&fx.repo, &["rev-parse", "HEAD"]);
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();

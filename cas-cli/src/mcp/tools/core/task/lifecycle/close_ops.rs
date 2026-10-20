@@ -8079,12 +8079,18 @@ impl CasCore {
                 .unwrap_or(close_project_root.as_path());
             match parked_delivery_head(parked_repo, &task) {
                 Ok(Some(anchor)) => {
-                    let live_tip = task.assignee.as_deref().and_then(|assignee| {
-                        resolve_branch_sha(
-                            &close_project_root,
-                            &close_measured_factory_branch(&close_project_root, &task, assignee),
-                        )
-                    });
+                    // cas-1377c: a parked task's lease is released, so with no
+                    // assignee the delivery branch is the recorded one. Without
+                    // it the anchor from an earlier park stayed the head, and a
+                    // waiver bound to the delivered tip never matched.
+                    let live_tip = task
+                        .assignee
+                        .as_deref()
+                        .map(|assignee| {
+                            close_measured_factory_branch(&close_project_root, &task, assignee)
+                        })
+                        .or_else(|| task_delivery_branch(&close_project_root, &task))
+                        .and_then(|branch| resolve_branch_sha(&close_project_root, &branch));
                     Some(
                         self.eligible_awaiting_merge_advance(
                             task_store.as_ref(),

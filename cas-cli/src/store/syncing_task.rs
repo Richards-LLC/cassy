@@ -1728,39 +1728,25 @@ mod tests {
     }
 
     #[test]
-    fn test_append_note_queues_the_canonical_task_once() {
+    fn append_note_preserves_nul_in_the_canonical_task_queue() {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
         let task = Task::new("task-note-sync".to_string(), "Task notes".to_string());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
+        let note = "sync\u{0}ed task note";
         store
-            .append_note(&task.id, "synced task note")
+            .append_note(&task.id, note)
             .expect("append note should commit locally and stage sync");
 
         let pending = queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
-        assert_eq!(
-            pending[0]
-                .payload
-                .as_ref()
-                .unwrap()
-                .matches("synced task note")
-                .count(),
-            1
-        );
-        assert_eq!(
-            store
-                .get(&task.id)
-                .unwrap()
-                .notes
-                .matches("synced task note")
-                .count(),
-            1
-        );
+        let queued: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(queued.notes, note);
+        assert_eq!(store.get(&task.id).unwrap().notes, note);
     }
 
     #[test]

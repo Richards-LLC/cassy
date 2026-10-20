@@ -7822,6 +7822,15 @@ mod team_cmd_tests {
         assert!(args.retry);
         assert_eq!(args.retry_reason.as_deref(), Some("project_mismatch"));
 
+        let nul_retry = CloudQueueArgs::try_parse_from([
+            "queue",
+            "--retry",
+            "--retry-reason",
+            "invalid_json_nul",
+        ])
+        .unwrap();
+        assert_eq!(nul_retry.retry_reason.as_deref(), Some("invalid_json_nul"));
+
         let alias =
             CloudQueueArgs::try_parse_from(["queue", "--retry", "--reason", "timeout"]).unwrap();
         assert_eq!(alias.retry_reason.as_deref(), Some("timeout"));

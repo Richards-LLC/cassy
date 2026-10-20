@@ -1075,8 +1075,9 @@ pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
 
 /// The operator-facing next step for one cloud rejection reason.
 ///
-/// Reporting a rejection without the repair leaves an operator with a count
-/// and no move; an unknown reason is named honestly rather than guessed at.
+/// When a remote fix makes a rejected payload retryable, keep its content
+/// unchanged and point the operator at a reason-specific retry. Unknown
+/// reasons are named honestly rather than guessed at.
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
         "unattributed_origin" => "retained locally: authoring project is unknown; supply creation provenance before requeueing",

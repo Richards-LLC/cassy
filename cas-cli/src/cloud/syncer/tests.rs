@@ -728,18 +728,14 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     );
     let diagnostic = row.last_error.as_deref().unwrap();
     assert!(
-        diagnostic.contains("PostgreSQL jsonb cannot store U+0000"),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("lossless"), "{diagnostic}");
-    assert!(
-        diagnostic.contains("petra-stella-cloud/issues/184"),
+        diagnostic.contains("U+0000 in task notes now round-trips losslessly"),
         "{diagnostic}"
     );
     assert!(
         diagnostic.contains("cas cloud queue --retry --retry-reason invalid_json_nul"),
         "{diagnostic}"
     );
+    assert!(!diagnostic.contains("repair-task-note-nuls"), "{diagnostic}");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         decode_push_body(&requests[0])["tasks"][0]["notes"],
@@ -747,7 +743,7 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     );
     assert!(
         queue.intentional_park_counts(None, 5).unwrap().is_empty(),
-        "unsupported data stays a failure"
+        "the remote rejection remains a retryable failure until the targeted retry"
     );
 }
 

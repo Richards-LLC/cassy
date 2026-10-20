@@ -17,6 +17,8 @@ mod factory_preflight_test;
 mod factory_probe_comm_test;
 #[path = "../factory_server_test.rs"]
 mod factory_server_test;
+#[path = "../provisioning_dispatch_test.rs"]
+mod provisioning_dispatch_test;
 #[path = "../loop_test.rs"]
 mod loop_test;
 #[path = "../multi_agent_test.rs"]

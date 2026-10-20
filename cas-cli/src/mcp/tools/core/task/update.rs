@@ -400,8 +400,11 @@ fn parked_assignment_note(
 fn clean_idle_assignment_note(
     task_store: &dyn cas_store::TaskStore,
     worker: &cas_types::Agent,
-    target_branch: &str,
+    task: &Task,
+    status: TaskStatus,
 ) -> Option<String> {
+    let target = super::lifecycle::initial_factory_branch_reset_target(task, status)?;
+    let target_branch = target.target_branch.trim();
     if worker.role != cas_types::AgentRole::Worker
         || !matches!(
             worker.status,
@@ -426,6 +429,10 @@ fn clean_idle_assignment_note(
 
     let clone_path = worker.metadata.get("clone_path")?;
     let path = std::path::Path::new(clone_path);
+    let (repo_root, _) = super::repo_context::git_layout(path).ok()?;
+    if !super::repo_context::repo_answers_to(&repo_root, &target.repo_selector) {
+        return None;
+    }
     let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
     if crate::factory_isolation::branch_at(path).as_deref() != Some(branch.as_str()) {
         return None;
@@ -505,25 +512,14 @@ impl CasCore {
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
-        if [req.notes.as_deref(), proof_scope_fix_reason]
+        if let Some(message) = [req.notes.as_deref(), proof_scope_fix_reason]
             .into_iter()
             .flatten()
-            .any(crate::cloud::syncer::contains_proposal_provenance_marker)
+            .find_map(super::caller_note_marker_rejection)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556)."),
-                data: None,
-            });
-        }
-        if [req.notes.as_deref(), proof_scope_fix_reason]
-            .into_iter()
-            .flatten()
-            .any(crate::artifacts::proof::contains_proof_marker)
-        {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references."),
+                message: Cow::from(message),
                 data: None,
             });
         }
@@ -1448,6 +1444,9 @@ impl CasCore {
                         // never an unrelated concurrent epic branch.
                         let preferred_sync =
                             resolve_assignment_freshness_branch(task_store.as_ref(), &task);
+                        let assignment_status = req.status.as_deref()
+                            .and_then(|status| status.parse::<TaskStatus>().ok())
+                            .unwrap_or(task.status);
 
                         if let Ok(agent_store) = self.open_agent_store() {
                             if let Ok(agents) = agent_store.list(None) {
@@ -1486,7 +1485,10 @@ impl CasCore {
                                             {
                                                 if behind_count > 0 {
                                                     if let Some(note) = clean_idle_assignment_note(
-                                                        task_store.as_ref(), worker, &branch,
+                                                        task_store.as_ref(),
+                                                        worker,
+                                                        &task,
+                                                        assignment_status,
                                                     ) {
                                                         warnings.push(note);
                                                     } else {
@@ -1554,7 +1556,10 @@ impl CasCore {
                                             {
                                                 if behind_count > 0 {
                                                     if let Some(note) = clean_idle_assignment_note(
-                                                        task_store.as_ref(), worker, &branch,
+                                                        task_store.as_ref(),
+                                                        worker,
+                                                        &task,
+                                                        assignment_status,
                                                     ) {
                                                         warnings.push(note);
                                                     } else {

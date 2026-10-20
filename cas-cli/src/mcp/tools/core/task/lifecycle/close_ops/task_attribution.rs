@@ -1255,12 +1255,14 @@ pub(super) fn merge_tip_content_presence(
     }
 }
 
-/// The changed lines of a unified patch: the `+`/`-` lines inside its `@@`
+/// Indexed content lines of a unified patch, inside its `@@`
 /// hunks. `---`/`+++` are file headers only before a file's first hunk; inside
 /// one they are real content such as `++i;` or a removed `-- note` (cas-e594).
-fn hunk_lines(patch: &str) -> impl Iterator<Item = &str> {
+/// Original patch indices let metadata readers distinguish even identical
+/// header/content text without duplicating the hunk-state parser.
+pub(super) fn hunk_lines(patch: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut in_hunk = false;
-    patch.lines().filter(move |line| {
+    patch.lines().enumerate().filter(move |(_, line)| {
         if line.starts_with("diff --git ") {
             in_hunk = false;
         } else if line.starts_with("@@") {
@@ -1277,7 +1279,7 @@ fn adds_meaningful_lines(repo: &Path, commit: &str, path: &str) -> bool {
     git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
         .is_some_and(|patch| {
             hunk_lines(&patch)
-                .any(|line| line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric)))
+                .any(|(_, line)| line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric)))
         })
 }
 
@@ -1312,7 +1314,7 @@ fn draft_retired_by_delivery(
     let meaningful = |line: &str| line.trim().chars().any(char::is_alphanumeric);
     let mut added = Vec::new();
     let mut removed = Vec::new();
-    for line in hunk_lines(&patch) {
+    for (_, line) in hunk_lines(&patch) {
         if let Some(line) = line.strip_prefix('+') {
             added.push(line);
         } else if let Some(line) = line.strip_prefix('-') {
@@ -1613,7 +1615,7 @@ fn resolution_has_novel_lines(
     )?;
     Some(
         hunk_lines(&patch)
-            .filter_map(|line| line.strip_prefix('+'))
+            .filter_map(|(_, line)| line.strip_prefix('+'))
             .map(str::trim)
             .any(|line| line.chars().any(|c| c.is_alphanumeric()) && !parent_lines.contains(line)),
     )

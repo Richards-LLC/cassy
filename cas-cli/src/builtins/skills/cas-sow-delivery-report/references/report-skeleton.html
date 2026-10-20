@@ -103,14 +103,24 @@ footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14p
 
 @media print {
   body { background: #fff; color: #000; font-size: 11pt; }
-  [data-section=verdict] { background: none; }
-  section { padding: 18pt 0; }
+  header.brand { padding: 4pt 0; }
+  [data-section=verdict] { background: none; padding: 4pt 0; }
+  [data-section=verdict] h1 { max-width: none; margin-bottom: 8pt; }
+  .strip { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+  section { padding: 8pt 0; }
+  h2 { font-size: 18pt; margin-bottom: 8pt; }
+  th, td { padding-top: 6pt; padding-bottom: 6pt; }
   .sides { display: block; }
   figure, tr { break-inside: avoid; }
   /* A whole full-width pair may exceed a sheet; keep each image/caption,
      rather than the pair, together. */
-  .pair { break-inside: auto; }
-  .pair > figcaption { break-inside: avoid; break-after: avoid; }
+  .pair { break-inside: auto; margin-bottom: 16pt; }
+  /* Missing history is a note, not an empty screenshot-sized print panel. */
+  .missing { min-height: 0; padding: 8pt; }
+  .walk { display: block; }
+  .walk figure + figure { margin-top: 16pt; }
+  /* Keep the explanation intact without gluing the whole comparison to it. */
+  .pair > figcaption { break-inside: avoid; margin-bottom: 4pt; }
   .side + .side { margin-top: 16pt; }
   h2 { break-after: avoid; }
   /* Rounds + provenance print as one block: a footer-only last page is a defect (pdf.md). */
@@ -185,7 +195,7 @@ footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14p
   <figure class="pair" id="pair-C2-2">
     <figcaption><b>C2.2</b> You asked: <q>Make the digest arrive Monday morning instead of Sunday night.</q> The digest is now sent Mondays at 7:00 local time.</figcaption>
     <div class="sides">
-      <figure class="side before"><div class="missing">Before not captured: the old schedule had no screen. It is described in the SOW, section 4.</div><figcaption><b>Before</b> · round 1</figcaption></figure>
+      <figure class="side before"><div class="missing">Before not captured: the old schedule had no screen. It is described in the SOW, section&nbsp;4.</div><figcaption><b>Before</b> · round 1</figcaption></figure>
       <figure class="side after"><div class="shot"><img src="shots/R4-digest-settings.jpg" alt="Digest settings showing Monday 7:00."></div><figcaption><b>After</b> · round 2 · staging · 2026-10-20</figcaption></figure>
     </div>
   </figure>

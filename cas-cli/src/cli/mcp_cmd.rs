@@ -484,6 +484,29 @@ fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) ->
     };
 
     guard_supervisor_only(&raw_name, None, &config, cas_root)?;
+    if scope.eq_ignore_ascii_case("user") && raw_name.eq_ignore_ascii_case("viktor") {
+        crate::cli::viktor::set_enabled(false)?;
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "action": "removed",
+                    "name": public_name,
+                    "viktor_enabled": false
+                })
+            );
+        } else {
+            let theme = ActiveTheme::default();
+            let mut stdout = io::stdout();
+            let mut fmt = Formatter::stdout(&mut stdout, theme);
+            StatusLine::success(format!(
+                "Removed server \"{public_name}\" and disabled managed Viktor; restore it with `cas config set viktor.enabled true`"
+            ))
+            .render(&mut fmt)?;
+        }
+        return Ok(());
+    }
+
     debug_assert!(config.remove_server(&raw_name));
 
     config.save_to(&path)?;
@@ -1325,5 +1348,89 @@ mod tests {
         let v = serde_json::to_value(&cfg).unwrap();
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("plain_SECRET"), "un-redacted value retains secret: {s}");
+    }
+
+    #[tokio::test]
+    async fn removing_user_viktor_persists_machine_opt_out_cas_1312() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home();
+        let project_root = home.join("project/.cas");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let mut project_config = Config::default();
+        project_config.add_server(
+            "viktor".into(),
+            ServerConfig::Stdio {
+                command: "cas-ebce-missing-viktor".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+        );
+        project_config
+            .save_to(&project_root.join("proxy.toml"))
+            .unwrap();
+
+        let user_path = cmcp_core::config::Scope::User.config_path().unwrap();
+        let mut user_config = Config::default();
+        user_config.ensure_viktor_managed_default();
+        user_config.save_to(&user_path).unwrap();
+
+        let effective = crate::mcp::load_proxy_config_for_process(&project_root).unwrap();
+        let engine = cmcp_core::ProxyEngine::from_configs(effective.servers.clone())
+            .await
+            .unwrap();
+        crate::mcp::write_proxy_snapshot_cache_for_config(&project_root, &engine, &effective)
+            .await
+            .unwrap();
+        assert!(
+            crate::mcp::viktor_watch::session_start_warning(&project_root).is_some(),
+            "unhealthy Viktor should warn while enabled"
+        );
+
+        let cli = crate::cli::Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("false"),
+            "removing user Viktor must persist the startup opt-out"
+        );
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(!user_config.servers.contains_key("viktor"));
+        assert!(user_config.allowlist.iter().all(|route| route.server != "viktor"));
+        assert!(
+            crate::mcp::viktor_watch::session_start_warning(&project_root).is_none(),
+            "the opt-out suppresses the warning even with an unhealthy project snapshot"
+        );
+
+        crate::cli::config::execute_subcommand(
+            &crate::cli::ConfigCommands::Set(crate::cli::config::ConfigSetArgs {
+                key: "viktor.enabled".into(),
+                value: "true".into(),
+                store: Default::default(),
+            }),
+            &cli,
+            &project_root,
+        )
+        .unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("true"));
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(user_config.servers.contains_key("viktor"));
+        assert_eq!(
+            user_config
+                .allowlist
+                .iter()
+                .filter(|route| route.server == "viktor")
+                .count(),
+            cmcp_core::config::VIKTOR_CONVERSATION_TOOLS.len()
+        );
+        assert!(crate::mcp::viktor_watch::session_start_warning(&project_root).is_some());
     }
 }

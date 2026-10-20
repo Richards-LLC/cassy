@@ -187,6 +187,10 @@ fn cas_bfa1_spawn_offline_refreshes_local_base_and_retains_unverified_notice() {
 #[test]
 fn cas_bfa1_spawn_dirty_epic_refuses_without_cutting_worktree() {
     with_fixture(|f| {
+        git(&f.repo, &["checkout", "epic/round2"]);
+        commit(&f.repo, "planning-only-epic-work");
+        f.old = git(&f.repo, &["rev-parse", "HEAD"]);
+        git(&f.repo, &["checkout", "main"]);
         f.advance_parent();
         git(&f.repo, &["checkout", "epic/round2"]);
         std::fs::write(f.repo.join("initial"), "uncommitted").unwrap();
@@ -209,23 +213,105 @@ fn cas_bfa1_spawn_dirty_epic_refuses_without_cutting_worktree() {
 }
 
 #[test]
-fn cas_bfa1_spawn_remote_parent_divergence_refuses_even_offline() {
-    with_fixture(|f| {
-        git(&f.repo, &["checkout", "epic/round2"]);
-        commit(&f.repo, "epic-work");
-        let epic = git(&f.repo, &["rev-parse", "HEAD"]);
-        git(&f.repo, &["checkout", "main"]);
-        f.advance_parent();
-        git(&f.repo, &["update-ref", "refs/heads/main", &f.old]);
-        f.offline();
-        let error = f
-            .prepare()
-            .err()
-            .expect("cached remote-parent divergence must refuse")
-            .to_string();
-        assert!(error.contains("have diverged"), "{error}");
-        assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), epic);
-    });
+fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9() {
+    for (in_trunk, delivered, online) in [
+        (true, true, true),
+        (false, false, true),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        with_fixture(|f| {
+            git(&f.repo, &["branch", "staging", "main"]);
+            let tasks = open_task_store_cached(&f.root).unwrap();
+            let mut epic = tasks.get("cas-round2-epic").unwrap();
+            epic.deliverables
+                .work_target
+                .as_mut()
+                .unwrap()
+                .target_branch = "staging".into();
+            tasks.update(&epic).unwrap();
+            git(&f.repo, &["checkout", "epic/round2"]);
+            commit(&f.repo, "epic-work");
+            let tip = git(&f.repo, &["rev-parse", "HEAD"]);
+            if delivered {
+                let mut child = tasks.get("cas-round2-child").unwrap();
+                child.deliverables.commit_hash = Some(tip.clone());
+                tasks.update(&child).unwrap();
+            }
+            if delivered && !in_trunk {
+                // An archived branch named master is not the authoritative
+                // trunk. Its copy of this work must not authorize a reset.
+                git(&f.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+                git(&f.repo, &["branch", "master", &tip]);
+                git(&f.repo, &["push", "origin", "master"]);
+            }
+            git(&f.repo, &["checkout", "main"]);
+            if in_trunk {
+                git(&f.repo, &["merge", "--ff-only", "epic/round2"]);
+                git(&f.repo, &["push", "origin", "main"]);
+            }
+            git(&f.repo, &["checkout", "staging"]);
+            commit(&f.repo, "parent-current");
+            git(&f.repo, &["push", "origin", "staging"]);
+            let parent = git(&f.repo, &["rev-parse", "HEAD"]);
+            if !online {
+                f.offline();
+            }
+            if online && !delivered {
+                git(&f.repo, &["checkout", "epic/round2"]);
+            }
+            let result = f.prepare();
+            if online && (in_trunk || !delivered) {
+                let prep = result.expect("an unpublished stale plan must reset, not refuse");
+                let notice = prep.warnings.join("\n");
+                assert!(
+                    notice.contains("EPIC BASE RESET (UNPUBLISHED, NO UNIQUE WORK)"),
+                    "{notice}"
+                );
+                assert_eq!(
+                    git(
+                        &f.repo,
+                        &["rev-parse", &format!("refs/cas/epic-base-resets/{tip}")]
+                    ),
+                    tip,
+                    "the previous graph remains recoverable"
+                );
+                assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), parent);
+                assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), parent);
+                if !delivered {
+                    assert!(f.repo.join("parent-current").is_file(), "the checked-out epic receives the parent tree");
+                    assert!(!f.repo.join("epic-work").exists(), "old-only content remains in the recovery ref, not the reset checkout");
+                    git(&f.repo, &["diff", "--exit-code", "HEAD"]);
+                }
+                let work = prep.worktree_info.unwrap();
+                assert_eq!(
+                    git(
+                        &f.repo,
+                        &[
+                            "rev-parse",
+                            work.base_ref.as_deref().unwrap_or(&work.parent_branch)
+                        ]
+                    ),
+                    parent
+                );
+            } else {
+                let error = result
+                    .err()
+                    .expect("unique deliveries or unverified publication must refuse")
+                    .to_string();
+                assert!(
+                    error.contains("EPIC BASE REFRESH REFUSED") && error.contains("have diverged"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("git -C") && error.contains("merge origin/staging"),
+                    "{error}"
+                );
+                assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), tip);
+                assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
+            }
+        });
+    }
 }
 
 #[test]
@@ -627,6 +713,9 @@ pub(super) fn prepare_recorded_lane(
     let mut epic = cas_types::Task::new("cas-legacy-lane".into(), "Recorded lane".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some(branch.into());
+    // This legacy lane fixture represents retained task work. Planning-only
+    // lanes are exercised by with_fixture and the GH #1317 regression.
+    epic.deliverables.commit_hash = Some(git(repo, &["rev-parse", branch]));
     epic.deliverables.work_target = Some(cas_types::WorkTarget {
         repo_selector: "project:legacy-spawn-test".into(),
         target_branch: parent.into(),

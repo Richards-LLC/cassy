@@ -163,7 +163,7 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
     agents[0]
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
-    let report = PeerReport {
+    let mut report = PeerReport {
         #[cfg(feature = "mcp-proxy")]
         stakeholder_contacts: serde_json::json!({"state":"shared","contacts":[{"workspace_id":"T123","user_id":"U123","last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z","owner":{"registration_id":"new-owner"}}]}),
         hidden_peers: 0,
@@ -190,11 +190,20 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         ),
         error: None,
     };
+    // cas-2db0 (QA F01): the logged-out reason wraps instead of being cut.
+    report.peers[0].supervisor.harness_auth_failed = Some("Login expired · Please run /login".into());
     for ascii in [true, false] {
         for width in [80, 120] {
             let text = render_peer_report(&report, width, ascii);
             assert!(
                 text.starts_with("[OK] 1 peer supervisor | 1 live\nRepo github.com/acme/widgets\n"),
+                "{text}"
+            );
+            let middot = if ascii { "?" } else { "·" };
+            assert!(
+                text.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!(
+                    "Harness logged out: \"Login expired {middot} Please run /login\"; messages to it are refused"
+                )),
                 "{text}"
             );
             assert!(
@@ -820,12 +829,13 @@ async fn cas_47a2_reset_then_new_worker_start_shows_the_new_branch() {
     task.deliverables.factory_branch_anchor = Some("a".repeat(40));
     tasks.add(&task).unwrap();
 
-    crate::mcp::CasCore::with_daemon(root.clone(), None, None)
-        .cas_task_reset(rmcp::handler::server::wrapper::Parameters(
-            crate::mcp::tools::TaskReleaseRequest { task_id: "cas-reset".into(), force: None },
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    let reset_task = |task_id: &str| {
+        core.cas_task_reset(rmcp::handler::server::wrapper::Parameters(
+            crate::mcp::tools::TaskReleaseRequest { task_id: task_id.into(), force: None },
         ))
-        .await
-        .unwrap();
+    };
+    reset_task("cas-reset").await.unwrap();
     let reset = tasks.get("cas-reset").unwrap();
     assert_eq!(reset.deliverables.parked_branch, None);
     assert_eq!(reset.deliverables.factory_branch_anchor, None);
@@ -886,4 +896,28 @@ async fn cas_47a2_reset_then_new_worker_start_shows_the_new_branch() {
     );
     assert_eq!(gate[0].factory_branch.as_deref(), Some("factory/dead-worker-cas-reset"));
     assert_eq!(gate[0].unmerged_count, 1, "{:?}", gate[0]);
+
+    // cas-2b10: an old-style shared lane retired by reset is still measured,
+    // and commits claiming another task strand nothing here (cas-dbbf).
+    let mut shared = crate::types::Task::new("cas-shared".into(), "Shared-lane work".into());
+    shared.status = crate::types::TaskStatus::InProgress;
+    shared.assignee = Some("dead-worker".into());
+    shared.deliverables.parked_branch = Some("factory/dead-worker".into());
+    tasks.add(&shared).unwrap();
+    reset_task("cas-shared").await.unwrap();
+    git(&["checkout", "-q", "-b", "factory/dead-worker", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "feat: later lane work (cas-beef)"]);
+    let measure = || {
+        crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses(
+            &[tasks.get("cas-shared").unwrap()],
+            "main",
+            repo.path(),
+        )
+        .remove(0)
+    };
+    let row = measure();
+    assert_eq!(row.factory_branch.as_deref(), Some("factory/dead-worker"), "{row:?}");
+    assert_eq!(row.unmerged_count, 0, "{row:?}");
+    git(&["commit", "-q", "--allow-empty", "-m", "dead worker's own shared-lane work"]);
+    assert_eq!(measure().unmerged_count, 2, "own work blocks epic close");
 }

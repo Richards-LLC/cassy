@@ -567,6 +567,36 @@ impl Config {
         changed
     }
 
+    /// Remove every user-scoped Viktor server and route when the operator opts out.
+    pub fn disable_viktor_managed_default(&mut self) -> bool {
+        let mut changed = self.servers.remove(VIKTOR_SERVER).is_some();
+        changed |= self.worker_access.remove(VIKTOR_SERVER).is_some();
+
+        let route_count = self.allowlist.len();
+        self.allowlist.retain(|route| route.server != VIKTOR_SERVER);
+        changed |= self.allowlist.len() != route_count;
+
+        let read_route_count = self.worker_read_routes.len();
+        self.worker_read_routes
+            .retain(|route| route.server != VIKTOR_SERVER);
+        changed |= self.worker_read_routes.len() != read_route_count;
+        changed
+    }
+
+    /// Reconcile the machine-managed Viktor entry with the persisted opt-out.
+    pub fn reconcile_viktor_managed_default(path: &Path, enabled: bool) -> Result<bool> {
+        let mut config = Self::load_from(path)?;
+        let changed = if enabled {
+            config.ensure_viktor_managed_default()
+        } else {
+            config.disable_viktor_managed_default()
+        };
+        if changed {
+            config.save_to(path)?;
+        }
+        Ok(changed)
+    }
+
     /// Install (or correct) the Violet hub registration, referencing both
     /// credentials by environment-variable name only.
     ///

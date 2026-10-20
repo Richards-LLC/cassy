@@ -1802,6 +1802,29 @@ async fn gh1319_mail_for_an_ended_supervisor_reaches_its_successor() {
             "{sent}"
         );
     }
+    // cas-2db0: a split offer to the old identity names its successor too.
+    let tasks = cas::store::open_task_store(&p).unwrap();
+    let mut epic = cas::types::Task::new("cas-e1".into(), "shared epic".into());
+    epic.task_type = cas::types::TaskType::Epic;
+    tasks.add(&epic).unwrap();
+    tasks.add(&cas::types::Task::new("cas-c1".into(), "child".into())).unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            "cas-c1".into(),
+            "cas-e1".into(),
+            cas::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    let offer: cas_mcp::types::CoordinationRequest = serde_json::from_value(
+        json!({"action": "epic_split", "id": "cas-e1", "target": "sup-old", "theirs": "cas-c1"}),
+    )
+    .unwrap();
+    let offered = service_a
+        .factory(rmcp::handler::server::wrapper::Parameters(offer))
+        .await
+        .map(|result| format!("{:?}", result.content))
+        .unwrap();
+    assert!(offered.contains("delivered to its successor sup-new@soundwave"), "{offered}");
     assert!(
         mailbox.lock().unwrap()[1..]
             .iter()

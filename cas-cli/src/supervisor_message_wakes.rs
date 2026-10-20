@@ -12,6 +12,7 @@ use std::{
 };
 
 pub(crate) const QUIET: &str = "<cas-message-quiet/>";
+const DEBOUNCE_DETAIL: &str = "directed supervisor message burst debounce";
 
 /// Conservative acknowledgement vocabulary. Any substantive word or question
 /// retains the wake. Replies are not acknowledgements merely because they reply.
@@ -95,6 +96,17 @@ fn wants_wake(row: &QueuedPrompt) -> bool {
     }
 }
 
+/// A daemon-local legacy hold can remove a passenger after QueueSelect.
+/// Charge only the eligible sender pairs still represented in this handoff.
+pub(crate) fn retain_batch_senders(
+    senders: &mut Vec<String>, lead: &QueuedPrompt, passengers: &[QueuedPrompt],
+    supervisor: &str, agents: &[cas_types::Agent],
+) {
+    senders.retain(|id| std::iter::once(lead).chain(passengers).any(|row| {
+        wants_wake(row) && sender(row, supervisor, agents).as_ref() == Some(id)
+    }));
+}
+
 fn db(cas: &Path) -> anyhow::Result<Arc<Mutex<Connection>>> {
     job_thread_store("supervisor_message_wakes", cas, |cas| {
         let connection = Connection::open(cas.join("cas.db"))?;
@@ -160,23 +172,51 @@ pub(crate) fn schedule(
     let debounce =
         chrono::Duration::seconds(config.supervisor_message_debounce_secs.min(300) as i64);
     let cap = config.supervisor_message_wakes_per_hour.max(1);
+    let queue =
+        crate::ui::factory::daemon::runtime::prompt_queue_jobs::job_thread_prompt_queue(cas)?;
     let db = db(cas)?;
     let conn = db
         .lock()
         .map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
     let mut capped = HashMap::new();
-    for (_, sender) in &candidates {
-        if capped.contains_key(sender) {
-            continue;
+    let mut pair_capped = |sender: &str| -> anyhow::Result<bool> {
+        if let Some(capped) = capped.get(sender) {
+            return Ok(*capped);
         }
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
             WHERE p.sender=?1 AND p.recipient=?2 AND w.injected_at>?3",
             params![sender, supervisor, (now-chrono::Duration::hours(1)).to_rfc3339()], |row| row.get(0))?;
-        capped.insert(sender.clone(), count >= cap.min(i64::MAX as u64) as i64);
+        let held = count >= cap.min(i64::MAX as u64) as i64;
+        capped.insert(sender.to_string(), held);
+        Ok(held)
+    };
+    for (_, sender) in &candidates {
+        pair_capped(sender)?;
+    }
+    // A parked leader is invisible to normal QueueSelect until its deadline.
+    // New arrivals join that deadline, without draining/claiming the leader or
+    // scanning other sessions. Validate origin and pair cap as for fresh rows.
+    let waiting: Vec<(i64, String)> = conn.prepare(
+        "SELECT q.id,q.next_attempt_at FROM prompt_queue q
+         WHERE q.processed_at IS NULL AND q.acked_at IS NULL
+           AND q.last_pending_detail=?1 AND q.next_attempt_at>?4
+           AND (q.factory_session=?2 OR q.factory_session IS NULL)
+           AND q.target IN ('supervisor',?3)
+           AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+               WHERE seen.prompt_id=q.id AND seen.recipient=q.target)
+         ORDER BY q.next_attempt_at,q.id LIMIT 64"
+    )?.query_map(params![DEBOUNCE_DETAIL,session,supervisor,now.to_rfc3339()],
+        |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<Result<_,_>>()?;
+    let mut inherited_deadline: Option<DateTime<Utc>> = None;
+    for (id, deadline) in waiting {
+        let Some(row) = queue.queued_prompt(id)? else { continue };
+        let Some(sender) = sender(&row, supervisor, agents) else { continue };
+        if wants_wake(&row) && !pair_capped(&sender)? {
+            let deadline = DateTime::parse_from_rfc3339(&deadline)?.with_timezone(&Utc);
+            inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
+        }
     }
     drop(conn);
-    let queue =
-        crate::ui::factory::daemon::runtime::prompt_queue_jobs::job_thread_prompt_queue(cas)?;
     for (row, sender) in &candidates {
         if capped[sender] && wants_wake(row) {
             let notice = format!(
@@ -202,8 +242,9 @@ pub(crate) fn schedule(
         .iter()
         .filter(|(row, sender)| wants_wake(row) && !capped[sender])
         .collect();
-    let oldest = wakers.iter().map(|(row, _)| row.created_at).min();
-    let due = oldest.is_some_and(|created| now >= created + debounce);
+    let deadline = wakers.iter().map(|(row, _)| row.created_at + debounce)
+        .chain(inherited_deadline).min();
+    let due = deadline.is_some_and(|deadline| now >= deadline);
     let ids: HashSet<_> = candidates.iter().map(|(row, _)| row.id).collect();
     rows.retain(|row| !ids.contains(&row.id));
     if !due {
@@ -215,8 +256,8 @@ pub(crate) fn schedule(
                 )
             } else if wants_wake(row) {
                 (
-                    "directed supervisor message burst debounce",
-                    oldest.unwrap_or(row.created_at) + debounce,
+                    DEBOUNCE_DETAIL,
+                    deadline.unwrap_or(row.created_at + debounce),
                 )
             } else {
                 (
@@ -233,6 +274,7 @@ pub(crate) fn schedule(
     let can_batch = |row: &QueuedPrompt| {
         facts.get(&row.id).is_some_and(|fact| {
             fact.assignment_stale.is_none()
+                && fact.deferred_inbox.is_none()
                 && fact.lifecycle_task.is_none()
                 && fact.merge_request.is_none()
         }) && !row.prompt.contains("<cas-blocker ")
@@ -576,6 +618,70 @@ mod tests {
                 [(Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
             )
             .unwrap();
+    }
+    #[test]
+    fn cas_bc4d_batching_errors_leave_action_selection_intact() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        for failure in ["config", "ledger", "park"] {
+            let (_root, cas, peer) = setup();
+            let ordinary = enqueue(&cas, &peer, "A peer field report");
+            let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+            let lifecycle = queue.enqueue_urgent_with_outcome(
+                "lifecycle-wake:test", "supervisor", "<ci-red-run>Review CI</ci-red-run>",
+                Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
+            ).unwrap().id();
+            let blocker = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_blocker_envelope(
+                "A decision is required", &peer.name, None,
+            ));
+            let merge = enqueue(&cas, &peer, &crate::prompt_revalidation::attach_merge_request_envelope(
+                "Please merge the delivery", &crate::prompt_revalidation::MergeRequestEnvelope {
+                    task_id: "cas-bc4d".into(), branch_tip: "delivery".into(),
+                    target_branch: "epic/test".into(), target_branch_tip: "base".into(),
+                    anchor_tip: None, commits_not_on_target_base: 1, pr_number: None,
+                    source_freshness_unavailable: None,
+                },
+            ));
+            match failure {
+                "config" => std::fs::write(cas.join("config.toml"), "[factory\n").unwrap(),
+                "ledger" => {
+                    db(&cas).unwrap().lock().unwrap().execute_batch(
+                        "DROP TABLE supervisor_message_wake_pairs"
+                    ).unwrap();
+                }
+                "park" => {
+                    rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute_batch(&format!(
+                        "CREATE TRIGGER fail_wake_park BEFORE UPDATE OF next_attempt_at ON prompt_queue
+                         WHEN NEW.id={ordinary} AND NEW.next_attempt_at IS NOT NULL
+                         BEGIN SELECT RAISE(FAIL,'wake park unavailable'); END;"
+                    )).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let sink = logs.clone();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || Capture(sink.clone())).finish();
+            let selected = tracing::subscriber::with_default(subscriber, || select(&cas));
+            for id in [ordinary, lifecycle, blocker, merge] {
+                assert!(selected.rows.iter().any(|row| row.id == id),
+                    "{failure}: batching failure must not lose selected row #{id}");
+                assert!(selected.facts[&id].message_batch.is_empty());
+            }
+            let log = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            // pin: this incident stage identifies the optional batching failure.
+            assert!(log.contains("WARN") && log.contains("supervisor_message_batching_failed"),
+                "{failure}: unavailable batching must be visible: {log}");
+        }
     }
     #[test]
     fn cas_1e7e2_acknowledgements_wait_readable_for_the_next_turn() {

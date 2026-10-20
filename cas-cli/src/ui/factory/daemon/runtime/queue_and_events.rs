@@ -2979,7 +2979,7 @@ pub(crate) fn run_queue_select(
             selection.facts = batched_facts;
         }
         Err(error) => tracing::warn!(
-            target: "cas::coordination", %error,
+            target: "cas::coordination", stage = "supervisor_message_batching_failed", %error,
             "supervisor message batching unavailable; continuing normal queue delivery"
         ),
     }

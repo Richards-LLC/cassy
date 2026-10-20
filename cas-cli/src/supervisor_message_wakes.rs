@@ -677,8 +677,10 @@ mod tests {
                     "{failure}: batching failure must not lose selected row #{id}");
                 assert!(selected.facts[&id].message_batch.is_empty());
             }
-            assert!(String::from_utf8(logs.lock().unwrap().clone()).unwrap().contains("WARN"),
-                "{failure}: unavailable batching must be visible");
+            let log = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            // pin: this incident stage identifies the optional batching failure.
+            assert!(log.contains("WARN") && log.contains("supervisor_message_batching_failed"),
+                "{failure}: unavailable batching must be visible: {log}");
         }
     }
     #[test]

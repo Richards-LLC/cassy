@@ -286,6 +286,7 @@
     },
     "rule": {
       "actions": [
+        "candidates",
         "check_similar",
         "create",
         "delete",
@@ -294,6 +295,7 @@
         "history",
         "list",
         "list_all",
+        "observe",
         "promote",
         "restore",
         "show",

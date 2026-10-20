@@ -68,14 +68,14 @@ Back every finding with a command output or an exact line reference.
 
 ### Step 7: Honor the task's `execution_note`
 
-- `test-first`: the diff must add at least one test file. Check with:
+- `test-first`: the delivery must add or change at least one test case, in a new or an existing file, and the task must record a run in which that case failed before the fix. Never require a new test file or a number of tests: a few tests that each prove one behaviour are the target. Added cases show in:
 
   ```bash
-  git diff --name-status "$BASE" HEAD | grep -E '^A[[:space:]]+.*(_test\.rs|tests/.*\.rs|\.test\.tsx?$|\.spec\.tsx?$|test_.*\.py|_test\.py|tests?/|__tests__/)'
+  git diff "$BASE" HEAD | grep -nE '^\+.*(#\[(tokio::)?test|fn test_|\b(it|test)\(|def test_)'
   ```
 
-  If none, reject with "REJECTED (test-first posture): no new test file in the diff."
-- `characterization-first`: expect new tests that pin current behaviour before the change; if none, reject naming the posture.
+  A case whose body changed counts too, so read the test hunks before rejecting. If no test case was added or changed, or no failing-first run is recorded, reject with "REJECTED (test-first posture): no failing-first test case in the diff."
+- `characterization-first`: expect added or changed tests that pin current behaviour before the change; if none, reject naming the posture.
 - `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
 
 ## Phase 2: Quality (only when Phase 1 passes)
@@ -110,7 +110,7 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
 - Blocking categories: `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`. Warning categories: `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`.
 
-On a rejection, for each new issue category run `rule action=check_similar content="<proposed rule>"`; if nothing matches, `rule action=create content="<rule>" tags="from_verification,category:<cat>"` (pass `source_ids` when the context provides them). One draft rule per category.
+Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 
 ## Epic verification
 

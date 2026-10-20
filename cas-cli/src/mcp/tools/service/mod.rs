@@ -460,7 +460,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Project rules. Draft rules become proven through helpful; list shows proven rules only, list_all shows every rule."
+        description = "Project rules; drafts become proven through helpful."
     )]
     pub async fn rule(
         &self,
@@ -472,7 +472,7 @@ impl CasService {
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
-                "create" | "update" | "delete" | "restore" | "helpful" | "promote" | "harmful" | "sync"
+                "create" | "update" | "delete" | "restore" | "helpful" | "promote" | "harmful" | "sync" | "observe"
             );
 
             let result = match req.action.as_str() {
@@ -489,10 +489,12 @@ impl CasService {
                 "harmful" => this.rule_harmful(req).await,
                 "sync" => this.rule_sync(req).await,
                 "check_similar" => this.rule_check_similar(req).await,
+                "observe" => this.rule_observe(req).await,
+                "candidates" => this.inner.cas_rule_candidates().await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar",
+                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar, observe, candidates",
                         req.action
                     ),
                 )),

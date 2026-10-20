@@ -889,6 +889,27 @@ impl CasService {
         self.inner.cas_rule_sync().await
     }
 
+    pub(super) async fn rule_observe(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let content = req
+            .content
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "content required for observe"))?;
+        let verdict_link = req.source_ids.ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "source_ids=<task-id>:<verification-id> required for observe",
+            )
+        })?;
+        let category = req
+            .tags
+            .unwrap_or_default()
+            .split(',')
+            .find_map(|tag| tag.trim().strip_prefix("category:").map(str::to_owned))
+            .unwrap_or_default();
+        self.inner
+            .cas_rule_observe(req.id, content, category, verdict_link)
+            .await
+    }
+
     pub(super) async fn rule_check_similar(
         &self,
         req: RuleRequest,
@@ -924,9 +945,30 @@ impl CasService {
             .filter(|r| r.score >= threshold as f64)
             .collect();
 
+        // cas-f0a1: candidates are matched too, so a repeat observation
+        // counts against the lesson it repeats instead of starting over.
+        let candidates = cas_store::similar_rule_candidates(&self.inner.cas_root, &content)
+            .unwrap_or_default();
+        let mut candidate_report = String::new();
+        if !candidates.is_empty() {
+            candidate_report.push_str(&format!(
+                "\n\nSimilar rule candidates ({}), never surfaced to agents:\n",
+                candidates.len()
+            ));
+            for (candidate, score) in &candidates {
+                candidate_report.push_str(&format!(
+                    "- {} (similarity: {:.0}%, {} task(s)): {}\n",
+                    candidate.id,
+                    score * 100.0,
+                    candidate.distinct_tasks(),
+                    candidate.content.chars().take(200).collect::<String>()
+                ));
+            }
+        }
+
         if similar.is_empty() {
             return Ok(Self::success(format!(
-                "No similar rules found (threshold: {:.0}%)\n\nYou can create a new rule with this content.",
+                "No similar rules found (threshold: {:.0}%){candidate_report}\n\nYou can create a new rule with this content.",
                 threshold * 100.0
             )));
         }
@@ -966,6 +1008,7 @@ impl CasService {
         output.push_str(
             "Consider marking an existing rule as `helpful` instead of creating a duplicate.",
         );
+        output.push_str(&candidate_report);
 
         Ok(Self::success(output))
     }

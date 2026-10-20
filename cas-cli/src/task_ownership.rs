@@ -197,10 +197,10 @@ struct Fingerprint {
     /// checkpoint progress (backfilled frames). Every commit and every
     /// checkpoint moves one of them; reader marks are left out.
     wal_index: Vec<u8>,
-    /// cas-69b5: a checkpoint is copying frames into the database right now
-    /// (SQLite raises `nBackfillAttempted` when it starts and `nBackfill` to
-    /// match when it finishes). One that spans the whole read leaves the
-    /// wal-index unchanged, so it is detected here instead.
+    /// Another process holds SQLite's checkpointer lock. A checkpoint that
+    /// spans the whole read can leave the wal-index unchanged. Backfill
+    /// counters cannot establish activity: WAL recovery also raises
+    /// nBackfillAttempted ahead of nBackfill (cas-593e).
     checkpointing: bool,
 }
 
@@ -220,6 +220,37 @@ fn file_bytes(path: &Path, start: u64, len: usize) -> Result<(u64, Vec<u8>), Str
     }
 }
 
+/// Observe SQLite's exclusive WAL_CKPT_LOCK (shm byte 121), without
+/// acquiring it or opening a SQLite connection that might recover the WAL.
+/// F_GETLK observes other processes; same-process raw-reader safety is
+/// tracked separately in cas-5a02.
+#[cfg(unix)]
+fn checkpoint_in_progress(shm: &Path) -> Result<bool, String> {
+    use std::os::fd::AsRawFd;
+    let file = match std::fs::File::open(shm) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    // SAFETY: flock is a plain C struct; all fields are initialized before
+    // fcntl reads them, including platform-specific padding/extra fields.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    lock.l_start = 121;
+    lock.l_len = 1;
+    // SAFETY: file owns a live descriptor and lock is a valid output buffer.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(lock.l_type != libc::F_UNLCK as _)
+}
+
+#[cfg(not(unix))]
+fn checkpoint_in_progress(_shm: &Path) -> Result<bool, String> {
+    Err("checkpoint lock inspection is unavailable on this platform".into())
+}
+
 fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
     let meta = std::fs::metadata(db).map_err(|error| error.to_string())?;
     let (_, db_change_counter) = file_bytes(db, 24, 4)?;
@@ -228,8 +259,7 @@ fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
     let (_, header) = file_bytes(&shm, 0, 48)?;
     let (_, backfill) = file_bytes(&shm, 96, 4)?;
     let (_, attempted) = file_bytes(&shm, 128, 4)?;
-    let word = |bytes: &[u8]| <[u8; 4]>::try_from(bytes).ok().map(u32::from_ne_bytes);
-    let checkpointing = matches!((word(&backfill), word(&attempted)), (Some(done), Some(started)) if started > done);
+    let checkpointing = checkpoint_in_progress(&shm)?;
     let wal_index = [header, backfill, attempted].concat();
     Ok(Fingerprint {
         db_len: meta.len(),
@@ -463,13 +493,24 @@ mod tests {
         let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
         let db = root.join(".cas/cas.db");
         let recovered = rusqlite::Connection::open(&db).unwrap();
-        recovered.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
-        assert_eq!(recovered.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        recovered
+            .execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        assert_eq!(
+            recovered
+                .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
         let shm = std::fs::read(root.join(".cas/cas.db-shm")).unwrap();
-        let word = |offset| u32::from_ne_bytes(shm[offset..offset+4].try_into().unwrap());
+        let word = |offset| u32::from_ne_bytes(shm[offset..offset + 4].try_into().unwrap());
         assert_eq!(word(96), 0, "recovery has not backfilled");
-        assert!(word(128) > word(96), "recovery leaves attempted ahead of backfill");
-        let ids = store_task_ids(&db, &|| {}).unwrap_or_else(|_| panic!("recovered idle store must be proven"));
+        assert!(
+            word(128) > word(96),
+            "recovery leaves attempted ahead of backfill"
+        );
+        let ids = store_task_ids(&db, &|| {})
+            .unwrap_or_else(|_| panic!("recovered idle store must be proven"));
         assert!(ids.contains("cas-aaaa") && ids.contains("cas-bbbb"));
         drop(recovered);
     }
@@ -490,21 +531,35 @@ mod tests {
         // Hold SQLite's actual checkpointer byte in another process. Counters
         // alone must not decide whether a checkpoint is running.
         let mut child = std::process::Command::new("python3")
-            .args(["-I", "-S", "-c", r#"
+            .args([
+                "-I",
+                "-S",
+                "-c",
+                r#"
 import fcntl, sys
 with open(sys.argv[1], 'r+b') as shm:
     fcntl.lockf(shm, fcntl.LOCK_EX, 1, 121)
     print('locked', flush=True)
     sys.stdin.buffer.read(1)
-"#])
+"#,
+            ])
             .arg(&path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         let mut ready = String::new();
-        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut ready).unwrap();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
         assert_eq!(ready.trim(), "locked");
-        let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![repo_spec(root)], &|| {});
+        let projects = KnownProjects::from_specs_with(
+            &this.path().join(".cas"),
+            vec![repo_spec(root)],
+            &|| {},
+        );
         let result = projects.holders("cas-aaaa");
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());

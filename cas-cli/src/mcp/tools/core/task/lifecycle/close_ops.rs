@@ -37117,6 +37117,73 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn prior_holders_unmerged_task_lane_blocks_epic_close_cas_b28c() {
+        let dir = init_epic_repo(&[("current", 2), ("previous", 3)]);
+        let p = dir.path();
+        let current = "factory/current-cas-b28c";
+        let previous = "factory/previous-cas-b28c";
+        git(p, &["branch", current, "main"]);
+        git(p, &["checkout", "-q", "-b", previous, "main"]);
+        commit_returning_sha(p, "undelivered.rs", "fn undelivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        let mut reassigned = child("cas-b28c", TaskStatus::Closed, Some("current"));
+        reassigned.deliverables.parked_branch = Some(previous.to_string());
+        let children = [reassigned];
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        let row = &statuses[0];
+        assert_eq!(row.unmerged_count, 1, "prior holder's work must remain visible: {row:?}");
+        assert_eq!(row.factory_branch.as_deref(), Some(current));
+        assert_eq!(row.additional_factory_branches, [previous]);
+        assert_eq!(row.checked_ref_reads.len(), 2);
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    /// cas-dbbf fallback: without a per-task ref, only commits attributable to
+    /// this child (or with unknown ownership) strand the reused bare lane.
+    #[test]
+    fn bare_lane_foreign_task_attribution_without_task_refs_cas_b28c() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let branch = "factory/worker";
+        git(p, &["checkout", "-q", "-b", branch, "main"]);
+        commit_returning_sha(p, "delivered.rs", "fn delivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "--no-ff", "-q", "-m", "land task", branch]);
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task (cas-0be7)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let children = [child("cas-b28c", TaskStatus::Closed, Some("worker"))];
+        assert!(!git_ref_exists(p, "factory/worker-cas-b28c"));
+        assert_eq!(count_unmerged_factory_commits(p, branch, "main"), 1);
+
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert_eq!(statuses[0].unmerged_count, 0, "foreign-task residue must clear");
+        assert_eq!(statuses[0].factory_branch.as_deref(), Some(branch));
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)), "{out:?}");
+
+        git(p, &["checkout", "-q", branch]);
+        std::fs::write(p.join("follow-up.rs"), "fn follow_up() {}\n").unwrap();
+        git(p, &["add", "follow-up.rs"]);
+        git(p, &["commit", "-q", "-m", "fix: own follow-up (cas-b28c)"]);
+        git(p, &["checkout", "-q", "main"]);
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert!(statuses[0].unmerged_count > 0, "own work must still strand bare lane");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
+    }
+
+    #[test]
     fn epic_close_still_blocks_a_behind_lane_rather_than_assuming_it_landed() {
         // Fail-closed: being behind is not proof that nothing was lost. The fix
         // must stop the destructive ADVICE without weakening the GATE.

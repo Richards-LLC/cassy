@@ -2644,6 +2644,9 @@ pub(crate) struct StallNudgeRead {
 /// and never opens a store for them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
+    pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
+    pub(crate) message_senders: Vec<String>,
+    pub(crate) wake_cap_notice: Option<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
     /// `None` when the read failed.
     pub(crate) wake_gate: Option<(u32, Option<chrono::DateTime<chrono::Utc>>)>,
@@ -2816,7 +2819,7 @@ fn read_operator_replies(
 /// roster, withdraw rows for recipients that shut down, collapse duplicate
 /// worker deaths, then select the batch, stamp it `Selected` and take its
 /// transport claims in one transaction.
-pub(super) fn run_queue_select(
+pub(crate) fn run_queue_select(
     request: &super::prompt_queue_jobs::QueueSelectRequest,
     generation: u64,
 ) -> anyhow::Result<super::prompt_queue_jobs::QueueSelection> {
@@ -2952,6 +2955,7 @@ pub(super) fn run_queue_select(
             Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
         }
     }
+    crate::supervisor_message_wakes::schedule(&request.cas_dir, session, &request.supervisor_name, &registered_agents, &mut selection.rows, &mut selection.facts, chrono::Utc::now())?;
     selection.native_agents = native_agents;
     selection.registered_agents = registered_agents;
     // Wake the loop so the batch is delivered now, not after its idle sleep

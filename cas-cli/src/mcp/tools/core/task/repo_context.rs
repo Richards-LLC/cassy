@@ -1392,7 +1392,7 @@ mod tests {
                 fixtures.path().join("blocked-git")
             };
             assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-            let actual_git = which::which("git").unwrap();
+            let actual_git = cmcp_core::resolve_stdio_executable("git").unwrap();
             let bin = fixtures.path().join("bin");
             std::fs::create_dir(&bin).unwrap();
             let calls = fixtures.path().join("blocked-probes");

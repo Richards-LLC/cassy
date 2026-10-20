@@ -155,7 +155,6 @@ pub fn execute(
 /// cas-8239: the reply intent this session registered for the thread, read
 /// from the project's request journal. No session or no intent is `None`.
 fn current_reply_claim(cas_root: &Path, reply_to: &str) -> Option<Value> {
-    use crate::store::AgentStore;
     let session = std::env::var("CAS_SESSION_ID")
         .ok()
         .filter(|id| !id.trim().is_empty())
@@ -278,7 +277,21 @@ fn run_post(
     // registered a reply intent for carries that intent, so the hub posts it
     // as the managed reply. Without one the fields stay off and a managed
     // thread refuses the reply, exactly as before.
-    let claim = reply_to.as_deref().and_then(|reply_to| (context.reply_claim)(reply_to)).map(|block| {
+    let managed = reply_to.as_deref().and_then(|reply_to| (context.reply_claim)(reply_to));
+    // cas-d626: the hub accepts a managed reply only inline, so files past
+    // the inline limit fail here instead of as a bare hub refusal.
+    if managed.is_some() && route == Route::External {
+        let total: u64 = files.iter().map(|file| file.size_bytes).sum();
+        return Err(VioletError::local(
+            "invalid_input",
+            format!(
+                "a managed thread reply carries files only inline, at most {} bytes (1 MiB) in total; \
+                 these files total {total} bytes. Attach fewer or smaller files",
+                files::INLINE_LIMIT
+            ),
+        ));
+    }
+    let claim = managed.map(|block| {
         json!({
             "coordination_operation_id": block["coordination_operation_id"],
             "expected_generation": block["expected_generation"],

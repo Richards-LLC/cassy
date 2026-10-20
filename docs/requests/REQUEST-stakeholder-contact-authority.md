@@ -3,7 +3,7 @@
 Owner requested: Richards-LLC/petra-stella-cloud, with Violet as trusted effect
 gateway. Status: proposed contract; **not a deployed capability**. Cassy task
 cas-8882 implements the client and an explicitly local warning fallback.
-Filed: https://github.com/Richards-LLC/petra-stella-cloud/issues/198 (2026-10-20).
+Filed: [petra-stella-cloud#198](https://github.com/Richards-LLC/petra-stella-cloud/issues/198) (2026-10-20).
 
 ## Problem and boundary
 

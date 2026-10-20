@@ -504,6 +504,50 @@ fn expire(side: &Side, id: &str, seconds_ago: i64) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn epic_split_expired_orphan_recovery_preserves_live_gap_cas_44c8() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let mut soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    expire(&soundwave, &id, 1);
+    let refused = soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap_err();
+    assert!(refused.contains(&id), "live-owner expiry gap still reserves the claim: {refused}");
+
+    let mut successor = Agent::new("sw-next".into(), "replacement-soundwave-cas-44c8".into());
+    successor.role = AgentRole::Supervisor;
+    successor.factory_session = Some("factory-sw-next".into());
+    successor.machine_id = Some("machine-soundwave".into());
+    register(&soundwave.machine, &successor);
+    let core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    core.set_agent_id_for_testing(successor.id.clone());
+    soundwave.service = cas::mcp::CasService::new(core, None);
+    soundwave.id = "sw-next";
+    assert!(soundwave.factory(json!({"id": id, "decision": "cancel"})).await.is_err(),
+        "a successor cannot supersede a live owner's expiry gap");
+    let agents = open_agent_store(&soundwave.machine.cas_dir).unwrap();
+    let mut owner = agents.get("sw").unwrap();
+    owner.status = cas::types::AgentStatus::Shutdown;
+    owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(2);
+    agents.update(&owner).unwrap();
+
+    let recovered = soundwave.factory(json!({"id": id, "decision": "cancel", "reason": "recover ended session"}))
+        .await.unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "supersession releases the ended owner's claim: {recovered}");
+    let old = cas_store::get_epic_split(&soundwave.machine.cas_dir, &id).unwrap().unwrap();
+    assert_eq!(old.state, cas_store::SplitState::Cancelled);
+    assert_eq!(old.decided_by.as_deref(), Some("sw-next"));
+    let audit = old.reason.unwrap();
+    assert!(audit.contains("sw-next") && audit.contains("sw") && audit.contains("recover ended session"), "{audit}");
+    soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await.unwrap();
+    cas::cloud::epic_split::reconcile(&soundwave.machine.cas_dir, "factory-sw", chrono::Utc::now()).unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-next"),
+        "the orphan cannot later release its replacement's claim");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn epic_split_reconcile_filters_owner_before_limit_cas_537c() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();

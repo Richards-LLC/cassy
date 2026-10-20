@@ -172,6 +172,9 @@ async fn cas_559c_detail_preserves_presence_and_mailbox_order_in_text_and_json()
                 expires_at: now - chrono::Duration::minutes(1),
                 created_at: now - chrono::Duration::minutes(10),
                 decided_at: (state == cas_store::SplitState::Accepted).then_some(now),
+                decided_by: None,
+                cleanup_pending: false,
+                expiry_notice_pending: false,
             },
         )
         .unwrap();

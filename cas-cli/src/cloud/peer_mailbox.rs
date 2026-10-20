@@ -225,6 +225,7 @@ pub enum PeerMessageKind {
     Blocker,
     Receipt,
     Quiet,
+    EpicSplitDecided,
 }
 
 impl PeerMessageKind {
@@ -234,6 +235,7 @@ impl PeerMessageKind {
             Self::Receipt => "receipt",
             Self::Quiet => "quiet",
             Self::Blocker => "blocker",
+            Self::EpicSplitDecided => "epic_split_decided",
         }
     }
 
@@ -243,6 +245,7 @@ impl PeerMessageKind {
             "receipt" => Some(Self::Receipt),
             "quiet" => Some(Self::Quiet),
             "blocker" => Some(Self::Blocker),
+            "epic_split_decided" => Some(Self::EpicSplitDecided),
             _ => None,
         }
     }
@@ -380,12 +383,14 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
     } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
-    // Existing first-line split proposals are typed asks too. Preserve their
+    // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {
         crate::cloud::epic_split::SplitMessage::parse(body)
-            .filter(|split| split.kind == crate::cloud::epic_split::SplitKind::Proposal)
-            .map(|_| PeerMessageKind::Ask)
+            .map(|split| match split.kind {
+                crate::cloud::epic_split::SplitKind::Proposal => PeerMessageKind::Ask,
+                _ => PeerMessageKind::EpicSplitDecided,
+            })
     });
     let cross_project = message.scope == PeerScope::User;
     // cas-2a5a: another project's supervisor is advisory only. It may ask,
@@ -1436,6 +1441,21 @@ pub(crate) fn send_raw(
         PeerScope::Project,
         None,
     )
+}
+
+/// One durable logical expiry notice, reused if reconciliation restarts after
+/// Cloud acceptance but before its split work flag is settled.
+pub(crate) fn send_split_expiry(
+    root: &Path, sender: &str, recipient: &str, body: &str, split_id: &str,
+) -> Result<SendReceipt, PeerSendError> {
+    let project_id = crate::cloud::resolve_canonical_id(root)
+        .ok_or_else(|| PeerSendError::Failed { cause: "project has no canonical id".into(), retry: String::new() })?;
+    outbox::enqueue_and_send(root, PeerSend {
+        project_id, sender_agent_id: sender.into(), recipient_agent_id: recipient.into(),
+        body: body.into(), summary: Some(format!("epic split {split_id} expired")),
+        in_reply_to: None, dedupe_key: format!("split-expiry:{sender}:{split_id}"),
+        scope: PeerScope::Project, recipient_project_id: None,
+    }, recipient)
 }
 
 /// Send `body` from local supervisor `sender_agent_id` to `peer`, a

@@ -820,7 +820,7 @@ pub struct FactoryRequest {
     /// `tag_exists` with filter `{"tag":"<tag>"}`; external conditions
     /// require `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'epic_split_decided', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
@@ -828,7 +828,7 @@ pub struct FactoryRequest {
     /// JSON filter for event matching. GH #1207: each external event's
     /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: epic_split_decided {\"split_id\":\"<split>\"}; branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -936,21 +936,21 @@ pub struct FactoryRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
     )]
     #[serde(default)]
     pub decision: Option<String>,
@@ -1413,7 +1413,7 @@ pub struct CoordinationRequest {
     /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; both require
     /// `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'epic_split_decided', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
@@ -1421,7 +1421,7 @@ pub struct CoordinationRequest {
     /// JSON filter for event matching. GH #1207: each external event's
     /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: epic_split_decided {\"split_id\":\"<split>\"}; branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -1520,21 +1520,21 @@ pub struct CoordinationRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
     )]
     #[serde(default)]
     pub decision: Option<String>,

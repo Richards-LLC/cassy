@@ -9,6 +9,41 @@ fn child(test: &str) -> bool {
     ))
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn epic_split_decided_reminder_survives_late_registration_cas_ae81() {
+    if !child("epic_split_decided_reminder_survives_late_registration_cas_ae81") { return }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (_root, mut daemon) = fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let now = chrono::Utc::now();
+    cas_store::insert_epic_split(&cas, &cas_store::EpicSplit {
+        id: "split-decided".into(), epic_id: "cas-e".into(), local_agent_id: "single-sup".into(),
+        peer_agent_id: "peer".into(), peer_name: "peer".into(), peer_machine: "other-host".into(),
+        direction: cas_store::SplitDirection::Outgoing, mine: vec![], theirs: vec!["cas-child".into()],
+        state: cas_store::SplitState::Accepted, reason: None, message_id: None,
+        expires_at: now + chrono::Duration::minutes(30), created_at: now, decided_at: Some(now),
+        decided_by: Some("peer".into()), cleanup_pending: false, expiry_notice_pending: false,
+    }).unwrap();
+    let reminders = crate::store::open_reminder_store(&cas).unwrap();
+    for id in ["split-other", "split-decided"] {
+        reminders.create_with_scope("single-sup", None, "continue split work",
+            cas_store::ReminderTriggerType::Event, None, Some("epic_split_decided"),
+            Some(&serde_json::json!({"split_id": id})), 0, Some(&daemon.session_name),
+            None, false, None).unwrap();
+    }
+    daemon.process_reminders(&[]);
+    daemon.process_reminders(&[]);
+    let fired = reminders.list_recently_fired(60).unwrap();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(reminders.list_pending("single-sup").unwrap().len(), 1);
+    let event = fired[0].fired_event.as_ref().unwrap();
+    assert_eq!(event["data"]["split_id"], "split-decided");
+    assert_eq!(event["data"]["state"], "accepted");
+    let rows = open_prompt_queue_store(&cas).unwrap().peek_all(20).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+}
+
 fn dispatch(daemon: &mut FactoryDaemon, ci: bool, takeover: bool) -> (i64, String) {
     let cas = daemon.app.cas_dir().to_path_buf();
     let reminders = crate::store::open_reminder_store(&cas).unwrap();

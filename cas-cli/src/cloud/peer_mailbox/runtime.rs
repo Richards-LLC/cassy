@@ -194,6 +194,11 @@ impl PeerMailboxRuntime {
         if let Some(error) = outbox_error {
             report.errors.push(format!("peer outbox: {error}"));
         }
+        if let Err(error) = crate::cloud::epic_split::reconcile(
+            &self.cas_dir, &self.factory_session, chrono::Utc::now(),
+        ) {
+            report.errors.push(format!("epic split reconciliation: {error}"));
+        }
         report
     }
 }

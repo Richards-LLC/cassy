@@ -12272,7 +12272,22 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         }
     };
 
+    let split_ready: Vec<_> = reminder_store.get_event_reminders("epic_split_decided")
+        .unwrap_or_default().into_iter().filter_map(|reminder| {
+            let id = reminder.trigger_filter.as_ref()?.get("split_id")?.as_str()?;
+            let split = cas_store::get_epic_split(&cas_dir, id).ok()??;
+            let data = crate::cloud::epic_split::decision_data(&split)?;
+            if !matches_json_filter(reminder.trigger_filter.as_ref(), &data) { return None }
+            let context = ReminderTriggerContext {
+                event_type: "epic_split_decided".into(),
+                description: format!("Epic split {}: {} (decider {})", split.id, split.state.as_str(),
+                    split.decided_by.as_deref().unwrap_or("unknown")),
+                data,
+            };
+            Some((reminder, context))
+        }).collect();
     let any_due = !due_reminders.is_empty()
+        || !split_ready.is_empty()
         || !events.is_empty()
         || !external_ready.is_empty()
         || !ci_wakes.is_empty();
@@ -12335,6 +12350,13 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             Some(&ReminderTriggerContext::ci(wake)),
             &cas_dir,
         );
+    }
+
+    for (reminder, context) in &split_ready {
+        if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &session_name) {
+            fire_reminder(reminder, &reminder_store, &supervisor_queue, &prompt_queue,
+                &session_name, &supervisor_name, &agent_id_to_name, Some(context), &cas_dir);
+        }
     }
 
     // Check event-based reminders against detected events
@@ -12601,12 +12623,14 @@ fn matches_event_filter(
     reminder: &cas_store::Reminder,
     event: &crate::ui::factory::director::DirectorEvent,
 ) -> bool {
-    let filter = match &reminder.trigger_filter {
+    matches_json_filter(reminder.trigger_filter.as_ref(), &event.to_json())
+}
+
+fn matches_json_filter(filter: Option<&serde_json::Value>, event_data: &serde_json::Value) -> bool {
+    let filter = match filter {
         Some(f) => f,
         None => return true, // No filter = match any event of this type
     };
-
-    let event_data = event.to_json();
 
     match (filter.as_object(), event_data.as_object()) {
         (Some(filter_obj), Some(event_obj)) => {

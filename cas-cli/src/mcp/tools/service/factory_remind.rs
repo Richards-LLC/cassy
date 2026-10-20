@@ -485,7 +485,7 @@ impl CasService {
         } else {
             let event_type = req.remind_event.unwrap();
 
-            // Validate event type (must match DirectorEvent variants)
+            // Director events plus persisted split decisions and external conditions.
             let valid_events = [
                 "task_assigned",
                 "task_completed",
@@ -494,6 +494,7 @@ impl CasService {
                 "agent_registered",
                 "epic_started",
                 "epic_completed",
+                "epic_split_decided",
                 EXTERNAL_BRANCH_CONTAINED_EVENT,
                 EXTERNAL_TAG_EXISTS_EVENT,
                 EXTERNAL_CI_COMPLETED_EVENT,
@@ -536,6 +537,13 @@ impl CasService {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, error));
             }
             let mut filter = filter;
+            if event_type == "epic_split_decided"
+                && filter.as_ref().and_then(|value| value.get("split_id"))
+                    .and_then(serde_json::Value::as_str).is_none_or(|id| id.trim().is_empty())
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "epic_split_decided requires remind_filter={\"split_id\":\"<split>\"}"));
+            }
             if let Some(filter) = filter.as_mut() {
                 normalize_external_filter(&event_type, filter);
             }

@@ -114,6 +114,15 @@ database at a guessed path. Writable prompt-queue opens remove a regular empty
 files, symlinks and sidecar-backed artifacts remain untouched for investigation.
 Read-only queue opens never perform this cleanup.
 
+Cross-project task ownership inspection self-execs the internal
+`--internal-task-ownership-probe` route before ordinary CLI startup. Raw database,
+WAL and shared-memory reads, immutable SQLite and checkpoint-lock queries run in
+those fresh processes, preserving the caller's POSIX locks. Two probe phases
+retain the WAL/main fingerprint comparison and checkpoint-race checks; retries
+share a ten-second deadline per store. Helper failures, malformed responses and
+active checkpointers leave ownership unproven. This route is internal; retention
+and simulator callers continue using `KnownProjects`.
+
 `cas doctor` inspects legacy `prompt_queue` columns without initializing the
 queue or recording migration detections. If required health-check columns are
 missing, its schema finding names them and points to `cas update --schema-only`.

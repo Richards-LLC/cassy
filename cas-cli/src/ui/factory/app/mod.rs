@@ -1920,7 +1920,7 @@ impl FactoryApp {
             next_step,
             occurrence: now.to_rfc3339(),
             actionable_idle_secs: observation.actionable_idle_secs,
-            page_operator: observation.page_operator,
+            operator_page_episode: observation.operator_page_episode,
         })
     }
 

@@ -650,14 +650,33 @@ impl Drop for LaneLock {
     }
 }
 pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
-    let repo = repo.canonicalize()?;
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
-    let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let lock = lock_file(&slots.join(format!("lane-{key}.lock"))).map_err(std::io::Error::other)?;
+    let lock = lock_file(&lane_lock_path(cas_root, repo)?).map_err(std::io::Error::other)?;
     match lock.try_lock_exclusive() {
         Ok(()) => Ok(Some(LaneLock(lock))),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn lane_lock_path(cas_root: &Path, repo: &Path) -> std::io::Result<PathBuf> {
+    let repo = repo.canonicalize()?;
+    let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
+    Ok(cas_root.join("worker-check-slots").join(format!("lane-{key}.lock")))
+}
+
+/// Positive, read-only evidence of a capped check waiting for admission or
+/// executing in this worktree. A leftover lock file is not a running build.
+pub(crate) fn lane_is_busy(cas_root: &Path, repo: &Path) -> std::io::Result<bool> {
+    let file = match OpenOptions::new().read(true).open(lane_lock_path(cas_root, repo)?) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
         Err(error) => Err(error),
     }
 }

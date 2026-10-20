@@ -1566,7 +1566,7 @@ impl FactoryApp {
             assignment,
             session: session_progress,
             mut merge_alerts,
-            worker_ci_waits,
+            worker_waits,
         } = inputs;
         let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
@@ -1615,7 +1615,7 @@ impl FactoryApp {
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
-        let focused_epic_id = self.current_epic_id.as_deref();
+        let focused_epic_id = self.current_epic_id.clone();
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
@@ -1642,16 +1642,19 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                         self.event_detector.worker_idle_since(worker),
                     )?;
-                    if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = &current
-                        && let Some((waiting_task, tip)) = worker_ci_waits.get(worker)
-                        && *waiting_task == task.task_id
-                        && task.task_status == cas_types::TaskStatus::InProgress
-                    {
-                        tracing::debug!(worker = %worker, task = %waiting_task, tip = %tip,
-                            "suppressing idle relay while pushed-tip CI is pending");
+                    let active = match &current {
+                        DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
+                        _ => None,
+                    };
+                    if merge_alert::worker_has_pending_reminder(
+                        &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
+                    ) || worker_waits.get(worker).is_some_and(|read| {
+                        active.is_some_and(|task| task.task_id == read.task) && read.waiting
+                    }) {
+                        self.merge_alert_retries.waiting(worker);
                         return None;
                     }
                     Some(current)
@@ -1670,7 +1673,7 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                     )
                 }
             })
@@ -1762,6 +1765,13 @@ impl FactoryApp {
                     } else {
                         prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
                     }
+                }
+                if let DirectorEvent::WorkerIdle { worker, active_task: Some(task) } = event
+                    && let Some(read) = worker_waits.get(worker)
+                    && task.task_id == read.task
+                    && !self.merge_alert_retries.admit_idle(worker, read, merge_now)
+                {
+                    continue;
                 }
                 prompts.push(prompt);
             }

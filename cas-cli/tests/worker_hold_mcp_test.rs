@@ -159,6 +159,24 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
     let path = write_metadata(&env, session, &[worker.to_string()]);
 
+    // cas-5f4b: when suspending fails after the hold is saved, the hold is
+    // rolled back and the reminder stays pending.
+    let db = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_suspend BEFORE UPDATE OF status ON reminders \
+         WHEN NEW.status = 'suspended' BEGIN SELECT RAISE(ABORT, 'suspend refused'); END;",
+    )
+    .unwrap();
+    env.service
+        .coordination(Parameters(request("hold_worker", worker)))
+        .await
+        .expect_err("a failed suspend fails the hold");
+    let rolled_back: cas::ui::factory::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(rolled_back.held_workers.is_empty());
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+    db.execute_batch("DROP TRIGGER refuse_suspend;").unwrap();
+
     let result = env
         .service
         .coordination(Parameters(request("hold_worker", worker)))

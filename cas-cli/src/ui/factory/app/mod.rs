@@ -2282,6 +2282,7 @@ impl FactoryApp {
         let path = metadata_path(&session_name);
         let worker = worker_name.to_string();
         let cas_dir = self.cas_dir().to_path_buf();
+        let known_ids = self.snapshot_agent_ids(std::slice::from_ref(&worker));
         let clear_hold = move || {
             if let Err(error) = persist_session_metadata_worker_hold_at(&path, &worker, false) {
                 tracing::warn!(
@@ -2291,7 +2292,7 @@ impl FactoryApp {
                     "failed to clear removed worker from durable hold set"
                 );
             }
-            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker));
+            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
         };
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
@@ -2302,6 +2303,24 @@ impl FactoryApp {
         } else {
             clear_hold();
         }
+    }
+
+    /// cas-5f4b: agent ids the director snapshot holds for these workers.
+    fn snapshot_agent_ids(&self, workers: &[String]) -> Vec<String> {
+        self.unfiltered_director_data
+            .agent_id_to_name
+            .iter()
+            .chain(self.director_data.agent_id_to_name.iter())
+            .filter(|(_, name)| workers.contains(name))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// cas-c5ab/cas-5f4b: a session shutdown ends every hold, so re-arm all
+    /// its workers' held reminders before their agents are unregistered.
+    pub(crate) fn rearm_held_reminders_at_shutdown(&self, session_name: &str) {
+        let workers = self.worker_names.clone();
+        resume_held_reminders(self.cas_dir(), session_name, &workers, &self.snapshot_agent_ids(&workers));
     }
 
     /// Get the focused pane kind
@@ -3456,17 +3475,15 @@ pub(crate) fn persist_session_metadata_delivery_mode_at(
 /// cas-c5ab: re-arm the suspended reminders of workers leaving a factory
 /// session (removed, or the session shutting down). Their hold ends with
 /// them, so nothing else would ever resume or cancel those reminders.
-pub(crate) fn resume_held_reminders(cas_dir: &std::path::Path, session_name: &str, workers: &[String]) {
-    let agents = crate::store::open_agent_store(cas_dir)
-        .map_err(|error| error.to_string())
-        .and_then(|store| store.list(None).map_err(|error| error.to_string()));
-    let agents = match agents {
-        Ok(agents) => agents,
-        Err(error) => {
-            tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders");
-            return;
-        }
-    };
+/// cas-5f4b: `known_ids` come from the director snapshot taken before the
+/// worker left, so a worker record deleted before this runs still has its
+/// reminders re-armed; the store lookup only adds ids the snapshot missed.
+pub(crate) fn resume_held_reminders(
+    cas_dir: &std::path::Path,
+    session_name: &str,
+    workers: &[String],
+    known_ids: &[String],
+) {
     let reminders = match crate::store::open_reminder_store(cas_dir) {
         Ok(reminders) => reminders,
         Err(error) => {
@@ -3474,11 +3491,20 @@ pub(crate) fn resume_held_reminders(cas_dir: &std::path::Path, session_name: &st
             return;
         }
     };
-    for agent in agents.iter().filter(|agent| {
-        workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
-    }) {
-        if let Err(error) = reminders.resume_suspended_for_target(&agent.id) {
-            tracing::warn!(worker = %agent.name, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
+    let mut ids: Vec<String> = known_ids.to_vec();
+    match crate::store::open_agent_store(cas_dir).map_err(|error| error.to_string())
+        .and_then(|store| store.list(None).map_err(|error| error.to_string()))
+    {
+        Ok(agents) => ids.extend(agents.into_iter().filter(|agent| {
+            workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
+        }).map(|agent| agent.id)),
+        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders"),
+    }
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        if let Err(error) = reminders.resume_suspended_for_target(&id) {
+            tracing::warn!(agent_id = %id, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
         }
     }
 }
@@ -4909,11 +4935,10 @@ mod tests {
         std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
         super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
         // cas-c5ab: the held worker's reminder is suspended; removal re-arms it.
+        // cas-5f4b: its agent record is already gone; the director snapshot
+        // still names it.
         let project = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
-        let mut agent = cas_types::Agent::new("worker-id".into(), worker.into());
-        agent.factory_session = Some(session.into());
-        crate::store::open_agent_store(&cas_dir).unwrap().register(&agent).unwrap();
         let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
         let after = chrono::Utc::now() + chrono::Duration::hours(1);
         let time = cas_store::ReminderTriggerType::Time;
@@ -4922,6 +4947,7 @@ mod tests {
 
         let mut app = super::FactoryApp::for_test_at(cas_dir);
         app.worker_names = vec![worker.to_string()];
+        app.unfiltered_director_data.agent_id_to_name.insert("worker-id".into(), worker.into());
         app.event_detector.add_worker(worker.to_string());
         app.set_factory_session(session.to_string());
         assert!(
@@ -4948,6 +4974,30 @@ mod tests {
         );
         assert_eq!(reminders.list_pending_for_target("worker-id").unwrap().len(), 1);
         assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+    }
+
+    /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
+    #[test]
+    fn session_shutdown_rearms_held_workers_reminders_cas_5f4b() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        let time = cas_store::ReminderTriggerType::Time;
+        for id in ["crow-id", "wren-id"] {
+            reminders.create(id, None, "red run done", time, Some(after), None, None, 3600, Some("shutdown-5f4b")).unwrap();
+            reminders.suspend_pending_for_target(id).unwrap();
+        }
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec!["lively-crow".into(), "quiet-wren".into()];
+        for (id, name) in [("crow-id", "lively-crow"), ("wren-id", "quiet-wren")] {
+            app.unfiltered_director_data.agent_id_to_name.insert(id.into(), name.into());
+        }
+        app.rearm_held_reminders_at_shutdown("shutdown-5f4b");
+
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 1);
     }
 
     /// A hold update touches session metadata, not cas.db. The ordinary

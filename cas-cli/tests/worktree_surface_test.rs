@@ -2229,7 +2229,9 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     run_git(&["remote", "add", "origin", origin], &repo.root);
     run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), origin], &repo.root);
     let root = init_cas_dir(&repo.root, &mut env).unwrap();
-    std::fs::write(root.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[verification]\nenabled = true\n[project]\ncanonical_id = \"github.com/org/merge-noop\"\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
     register_delivery_agent(&root, "supervisor-noop", "supervisor", AgentRole::Supervisor, "noop-session");
     register_delivery_agent(&root, "worker-noop", "alice", AgentRole::Worker, "noop-session");
     let worker = root.join("worktrees/alice");
@@ -2250,7 +2252,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     task.deliverables.parked_branch = Some("factory/alice".into());
     task.deliverables.parked_close_reason = Some("parked delivery".into());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "remote:github.com/org/merge-noop".into(), target_branch: "main".into(),
+        repo_selector: "project:merge-noop".into(), target_branch: "main".into(),
     });
     tasks.add(&task).unwrap();
     env.set_current_dir(&repo.root);

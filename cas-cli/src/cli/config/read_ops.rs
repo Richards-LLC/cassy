@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 use crate::cli::config::{
@@ -13,6 +13,14 @@ use crate::ui::theme::ActiveTheme;
 use crate::cli::config::operator_ops::guard_operator_config;
 use crate::cli::config::util::{format_constraint, truncate_description};
 use crate::config::operator_policy::InvocationContext;
+
+fn config_root_for_key(key: &str, cas_root: &Path) -> PathBuf {
+    if key == "viktor.enabled" {
+        crate::config::host_config_dir()
+    } else {
+        cas_root.to_path_buf()
+    }
+}
 
 // Plain `get` stays a machine-readable scalar for `gh --repo "$(cas config get
 // issues.repo)"`. Structured and human multi-field views expose provenance.
@@ -83,8 +91,9 @@ fn get_output(
 }
 
 pub(crate) fn execute_get(args: &ConfigGetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let config = Config::load(cas_root)?;
-    execute_get_internal(&config, &args.key, cli, cas_root)
+    let config_root = config_root_for_key(&args.key, cas_root);
+    let config = Config::load(&config_root)?;
+    execute_get_internal(&config, &args.key, cli, &config_root)
 }
 
 fn execute_get_internal(
@@ -120,8 +129,9 @@ fn execute_get_internal(
 }
 
 pub(crate) fn execute_set(args: &ConfigSetArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let mut config = Config::load(cas_root)?;
-    execute_set_internal(&mut config, &args.key, &args.value, cas_root, cli)
+    let config_root = config_root_for_key(&args.key, cas_root);
+    let mut config = Config::load(&config_root)?;
+    execute_set_internal(&mut config, &args.key, &args.value, &config_root, cli)
 }
 
 /// Set and save one key; a security-relevant key needs the operator
@@ -138,6 +148,9 @@ pub(crate) fn set_config_value(
     config.set(key, value)?;
     guard_operator_config(&before, config, context)?;
     config.save(cas_root)?;
+    if key == "viktor.enabled" {
+        crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
+    }
     Ok(old_value)
 }
 
@@ -187,6 +200,8 @@ pub(crate) fn execute_list(
 
     // Get all current values
     let mut items: HashMap<String, String> = config.list().into_iter().collect();
+    let host_config = Config::load(&crate::config::host_config_dir())?;
+    items.insert("viktor.enabled".into(), host_config.viktor_enabled().to_string());
     items.insert(
         "issues.repo".into(),
         config
@@ -529,7 +544,8 @@ pub(crate) fn execute_reset(
     cli: &Cli,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
-    let mut config = Config::load(cas_root)?;
+    let config_root = config_root_for_key(&args.key, cas_root);
+    let mut config = Config::load(&config_root)?;
     let reg = registry();
 
     if args.key == "all" {
@@ -543,7 +559,7 @@ pub(crate) fn execute_reset(
         let reset = Config::default();
         guard_operator_config(&config, &reset, InvocationContext::from_process)?;
         config = reset;
-        config.save(cas_root)?;
+        config.save(&config_root)?;
 
         if cli.json {
             println!(r#"{{"reset":"all","count":{}}}"#, reg.count());
@@ -555,7 +571,7 @@ pub(crate) fn execute_reset(
             &mut config,
             &args.key,
             meta.default,
-            cas_root,
+            &config_root,
             InvocationContext::from_process,
         )?;
 

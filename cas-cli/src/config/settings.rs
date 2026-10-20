@@ -56,6 +56,19 @@ pub struct SlackConfig {
     pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
 }
 
+/// Machine-wide managed Viktor upstream setting. Absence keeps the default on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ViktorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl ViktorConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StakeholderContactPolicy {

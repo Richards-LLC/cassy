@@ -29,6 +29,7 @@ impl Config {
                     .unwrap_or(true)
                     .to_string(),
             ),
+            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",

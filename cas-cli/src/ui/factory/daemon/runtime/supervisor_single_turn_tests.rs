@@ -429,6 +429,59 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
 
 
 #[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
+    if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for guard in ["budget", "held-leader", "held-passenger", "memory-passenger"] {
+        let (root, mut daemon) = fixture().await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let peer = cas_types::Agent::new_with_role(
+            "guard-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+        let bodies = if guard == "budget" {
+            vec![format!("Budget report A {}", "a".repeat(2600)), format!("Budget report B {}", "b".repeat(2600))]
+        } else { vec!["First field report".into(), "Second field report".into()] };
+        assert!(bodies.iter().all(|body| cas_store::fits_hook_surface(body)));
+        let ids: Vec<_> = bodies.iter().map(|body| enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() })).collect();
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let held = if guard == "held-leader" { 0 } else { 1 };
+        if guard != "budget" {
+            let row = queue.queued_prompt(ids[held]).unwrap().unwrap();
+            let legacy = super::delivery::claude_teams_inbox_text(
+                &format!("{}\n{}", crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&row), row.prompt),
+                &row.prompt, "director", row.id,
+            );
+            daemon.teams.as_ref().unwrap().write_to_inbox("supervisor", "director", &legacy, None, None).unwrap();
+            let pane = daemon.app.supervisor_name().to_string();
+            let bytes = daemon.app.mux.pane_bytes_received(&pane).unwrap();
+            if guard == "memory-passenger" {
+                daemon.inbox_deferred_writes.insert(row.id, super::queue_and_events::InboxDeferredWrite {
+                    pane, bytes_at_write: bytes, written_at: Instant::now(), delivered_at: chrono::Utc::now(),
+                });
+            } else { queue.record_deferred_inbox(row.id, bytes).unwrap(); }
+        }
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+            [(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()],
+        ).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        let inbox = teams_messages(&daemon);
+        if guard == "budget" {
+            assert_eq!(inbox.len(), 1, "oversized directed burst must use the full-body Teams path");
+            let text = inbox[0]["text"].as_str().unwrap();
+            for body in &bodies { assert!(text.contains(body), "no truncation or lost passenger"); }
+        } else {
+            assert_eq!(inbox.len(), 1, "{guard}: the held legacy copy must not be duplicated");
+            assert!(!std::fs::read_to_string(root.path().join("input")).unwrap().contains(&bodies[held]),
+                "{guard}: legacy content must not be typed again as a batch member");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
     if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
         return;

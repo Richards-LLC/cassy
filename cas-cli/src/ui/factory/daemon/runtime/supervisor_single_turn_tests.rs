@@ -489,6 +489,63 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_staggered_arrivals_share_one_deadline_and_turn() {
+    if !fixture_child("cas_bc4d_staggered_arrivals_share_one_deadline_and_turn") { return; }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let peer = cas_types::Agent::new_with_role(
+        "staggered-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+    );
+    crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+    // Move the durable clock between arrivals without waiting out the debounce.
+    let advance = |seconds| {
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let rows: Vec<(i64, String, String)> = conn.prepare(
+            "SELECT id,created_at,next_attempt_at FROM prompt_queue WHERE processed_at IS NULL"
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap().collect::<Result<_,_>>().unwrap();
+        for (id, created, deadline) in rows {
+            let shift = |value: &str| (chrono::DateTime::parse_from_rfc3339(value).unwrap()
+                - chrono::Duration::seconds(seconds)).to_rfc3339();
+            conn.execute("UPDATE prompt_queue SET created_at=?1,next_attempt_at=?2 WHERE id=?3",
+                rusqlite::params![shift(&created),shift(&deadline),id]).unwrap();
+        }
+    };
+    let mut ids = Vec::new();
+    let bodies = ["Staggered report one", "Staggered report two", "Staggered report three"];
+    for body in bodies {
+        if !ids.is_empty() { advance(5); }
+        ids.push(enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() }));
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let deadlines: Vec<_> = ids.iter().map(|id| {
+            let value: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1",
+                [id], |row| row.get(0)).unwrap();
+            chrono::DateTime::parse_from_rfc3339(&value).unwrap()
+        }).collect();
+        assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]),
+            "arrivals within the window must keep the leader's deadline: {deadlines:?}");
+    }
+    advance(21);
+    daemon.process_prompt_queue().await.unwrap();
+    settle_injected_writes(&mut daemon).await;
+    let typed = typed_once(&root, &mut daemon, bodies[0]).await;
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    for (id, body) in ids.iter().zip(bodies) {
+        assert_eq!(typed.matches(body).count(), 1);
+        assert!(typed.contains(&format!("[cas #{id} ")));
+        assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Delivered);
+    }
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed,
+        "no separate turn for staggered passengers");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
     if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
         return;

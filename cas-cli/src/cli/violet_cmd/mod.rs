@@ -266,13 +266,6 @@ fn run_post(
         }])?;
     }
     let route = choose_route(&files);
-    if route != Route::Message {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": route_kind(route)}),
-        )?;
-    }
-    let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     // cas-8239 (GH #1300): a reply into a thread this session claimed and
     // registered a reply intent for carries that intent, so the hub posts it
     // as the managed reply. Without one the fields stay off and a managed
@@ -291,6 +284,13 @@ fn run_post(
             ),
         ));
     }
+    if route != Route::Message {
+        gate_check(
+            context,
+            &json!({"channel": channel, "kind": route_kind(route)}),
+        )?;
+    }
+    let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     let claim = managed.map(|block| {
         json!({
             "coordination_operation_id": block["coordination_operation_id"],

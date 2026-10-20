@@ -343,7 +343,6 @@ impl ProxyHub {
 /// factory role it was spawned with, if any, otherwise a plain session.
 #[cfg(feature = "mcp-proxy")]
 fn cli_caller(cas_root: Option<&std::path::Path>) -> cmcp_core::ProxyCaller {
-    use crate::store::AgentStore;
     if let Some(agent) = cas_root.and_then(|root| {
         let session = std::env::var("CAS_SESSION_ID").ok()
             .or_else(|| crate::agent_id::read_session_for_mcp(root).ok())?;

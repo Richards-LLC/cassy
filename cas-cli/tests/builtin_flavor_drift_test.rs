@@ -1092,6 +1092,34 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
                 .count(),
             21
         );
+        // cas-ddb0: the SOW delivery bundle installs beside it and its installed
+        // gate stops a completion report on a Gap row.
+        let sow = destination.join("skills/cas-sow-delivery-report");
+        for file in [
+            "SKILL.md",
+            "references/DELIVERY-template.md",
+            "references/rounds.md",
+            "references/handoff.md",
+            "references/report-contract.md",
+            "references/report-skeleton.html",
+            "scripts/capture.mjs",
+            "scripts/print-pdf.mjs",
+            "scripts/inline-images.py",
+            "scripts/check-sow.py",
+        ] {
+            assert!(sow.join(file).is_file(), "missing installed sow {file}");
+            println!("installed {directory}/skills/cas-sow-delivery-report/{file}");
+        }
+        let gap_check = fixture.path().join("GAP-CHECK.md");
+        fs::write(&gap_check, "| R# | SOW | Status | Evidence | Owner |\n| --- | --- | --- | --- | --- |\n| R1 | \"Export.\" | Gap | not built | us |\n").unwrap();
+        let gate = Command::new("python3")
+            .arg(sow.join("scripts/check-sow.py"))
+            .arg("gap")
+            .arg(&gap_check)
+            .output()
+            .expect("run installed sow gate");
+        assert_eq!(gate.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&gate.stderr).contains("STOP: 1 Gap row(s): R1 (ours)"));
     }
 }
 

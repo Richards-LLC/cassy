@@ -127,9 +127,15 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     await page.goto("./");
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
+    // The header reports the machine connection; it can go Live before the
+    // session's first Welcome has painted a thread frame. The outage banner
+    // (and its Details control) only exists once that frame is on screen.
+    await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
     await hub.down("atlas", { sockets: "close" });
     await expect(page.locator("#conversation-connection")).toHaveText(" · Reconnecting");
-    await page.getByRole("button", { name: "Connection details", exact: true }).click();
+    const details = page.getByRole("button", { name: "Connection details", exact: true });
+    await expect(details).toBeVisible();
+    await details.click();
     await expect(page.getByRole("dialog", { name: "Connection log" })).toBeVisible();
     await hub.up("atlas");
     await clock.advance(1_000);

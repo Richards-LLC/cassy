@@ -1043,13 +1043,26 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
 test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", journeyPart, async ({ page, journey }) => {
   await journey.stage("Kept messages show before attach, then send once without moving the reader", async () => {
     const { hub, clock, held } = await connected(page);
+    const refusalCount = hub.upstreamRefusals.length;
+    const releaseAttach = hub.holdAttach(PELICAN);
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Kept while the session is away");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-    // The reloaded page's attach is held: the session cannot attach yet.
-    const releaseAttach = hub.holdAttach(PELICAN);
+    const persistedState = async () => (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.state;
+    const sendId = (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.id;
+    expect(sendId).toBeTruthy();
+    // The upstream refused this exact send, and every reconnect Welcome is
+    // held so a concurrent retry cannot make the session live before reload.
+    await hub.waitFor(() => hub.upstreamRefusals.slice(refusalCount).includes(sendId!));
+    await expect.poll(persistedState, { message: "the waiting message's refusal is committed before this tab reloads" }).toBe("held");
+    const attachesBeforeReload = hub.attaches.filter((session) => session === PELICAN).length;
     await page.reload();
     await chooseConversation(page);
+    // The new session subscription has reached the fixture, but its Welcome
+    // is still held. A machine-level Live label alone does not mean attach is ready.
+    await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
+    await expect(page.locator(".conversation-thread-slot")).toHaveCount(0);
+    await expect.poll(persistedState, { message: "the saved waiting message remains held while Welcome is withheld" }).toBe("held");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
     expect(sentTimes(hub, "Kept while the session is away")).toBe(0);

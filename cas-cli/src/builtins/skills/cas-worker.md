@@ -25,27 +25,20 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 1. Run `coordination action=whoami`, then `task action=mine`. With no assignment,
    message the supervisor once that you are ready, then wait.
-2. Choose one assigned task; `task action=show id=<task-id>`, then
-   `task action=start id=<task-id>` before editing. Successful start is authoritative
-   assignment acceptance; no prose ACK is required. Read its criteria, depth,
-   execution note and project instructions. Reused checkout: `git rebase <target>`
-   onto the supervisor's named target after checkpointing dirt.
-   For an assigned QA-pass task, follow cas-qa-craft's Independent pass and
-   `verification action=qa_record`; recording the verdict closes the QA task.
-3. Implement its scope and commit logical units with the task ID, locally. Push
-   once, right before the close that parks it for merge (and once per review
-   round after that), unless `delivery_mode=local_merge`: every push to a
-   factory branch starts a CI run. Where the project ships
-   `scripts/fast-rows-pre-push.sh`, the push hook runs its no-build fast rows
-   (a missing tool fails the push), so lane CI may skip them and broad Rust tests. Park
-   only reads receipts: the fast-rows PASS and a capped test PASS in each
-   changed crate, both at the exact tip. Add milestone `note_type=progress` notes.
-4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
-   and read [close-gate.md](references/close-gate.md). Close with
-   `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain
-   is empty and HEAD is the claimed commit. For verification-required closes,
-   quote the required evidence in `need:` and close the task yourself after
-   verification is complete.
+2. Read `task action=show id=<task-id>`; call `task action=start` before editing.
+   Successful start accepts the assignment; no prose ACK. Follow task criteria,
+   depth, execution note and project instructions. Checkpoint dirt before
+   `git rebase <target>` in a reused checkout.
+   QA-pass tasks follow cas-qa-craft; `verification action=qa_record` closes them.
+3. Commit scoped work; push once before parking, once per review round, unless
+   `delivery_mode=local_merge`. Each push starts CI. The pre-push hook runs
+   `scripts/fast-rows-pre-push.sh` when present; missing tools fail the push.
+   Park reads the exact-tip fast-rows and capped test receipts, never runs checks.
+   Add milestones with `task action=notes note_type=progress`.
+4. Read [verify-before-claim](../verify-before-claim/SKILL.md) and
+   [close-gate.md](references/close-gate.md); close with `task action=close reason="PASS <sha>: <proof>"`
+   on a clean tree at that HEAD. Quote verification-required guidance in `need:`;
+   retry close after verification completes.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before
@@ -71,28 +64,44 @@ use assigned work; `ready` and `available` are backlog
   to that session's supervisor. Use this narrow lane for collision
   warnings, not general chat or cross-session contact; send task status, blockers
   and handoffs to `target=supervisor`.
-- A worker can send `coordination action=message target=supervisor kind=status summary="status" message="Please review the current task update."`
-  or `kind=ready` with `summary` and `message` for a typed action wake when the
-  supervisor must review an update or continue coordination. Ordinary messages
-  remain inbox-only; never set `merge_request=true` to wake the supervisor for a
-  status update.
+- Use `kind=status` for actionable updates that allow work to continue, or
+  `kind=ready` for completed work awaiting coordination: these request a typed action wake.
+  Ordinary updates stay inbox-only.
 - Never block the pane: run long commands in the background with a log.
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: commit, push and note, then request a respawn when
   context runs low.
 - When close says verification required, quote its guidance in `need:`.
 
+## Blockers and review waits
+
+When required supervisor review or approval blocks work (e.g. publication),
+enter awaiting supervisor review:
+
+1. Add a `note_type=blocker` task note with the required decision, blocked next
+   action, commit and proof; run `task action=update id=<task-id> status=blocked`.
+2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
+   using the return contract with `status: blocked` and `blocker: <cause>`.
+   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
+3. Save the notification ID; wait for the review reply. Record its ID and actual
+   decision/action. Clear the review hold with
+   `task action=update id=<task-id> status=open`, then
+   `task action=start id=<task-id>` before resuming.
+   Track transport delivery and inbox receipt separately with `message_status`.
+   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
+
+Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
+Wake eligibility never guarantees a turn.
+
 ## Browser checks
 
-For projects with `scripts/journey-eval.sh`, run vitest, tsc and affected
-journeys while iterating. `scripts/journey-eval.sh <task-artifact-dir>` resolves
-the task target and runs every selected ID at four workers; `--affected <base>`
-sets an explicit base. Close does not require a journey receipt; the merge
-queue runs the full journey suite once. Workers and QA cannot run `--full` or
-unfiltered Playwright. Do not rerun browsers after doc/ledger-only commits when
-evaluated inputs are unchanged. For a failure control, rerun only that spec at
-one worker and keep the original failure. A hand-picked subset cannot replace
-the selected journeys.
+Run vitest, tsc and affected journeys for browser changes. Use
+`scripts/journey-eval.sh <task-artifact-dir>` (four workers); `--affected <base>`
+sets the base. Workers and QA cannot run `--full` or unfiltered Playwright.
+The merge queue runs the full suite once; close doesn't require that receipt.
+Reuse unchanged evaluated inputs after doc/ledger-only commits. Preserve an
+original failure; rerun only its spec at one worker. A hand-picked subset cannot
+replace the selected journeys.
 
 ## Conditional references
 
@@ -122,9 +131,6 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-For blockers add `blocker: <cause>`, a blocker task note, `status=blocked`,
-and `blocker=true` on the message. Coordination uses the literal string `supervisor`
-and both `summary` and `message`. Ordinary updates reach the inbox on the next turn;
-only authenticated typed blocker, merge, status/ready action, verification or
-lifecycle events wake an idle supervisor. Free-form worker messages remain
-inbox-only. Evidence stays in notes and the close reason.
+Coordination uses the literal string `supervisor` and both `summary` and `message`.
+Authenticated typed blocker, merge, status/ready, verification or lifecycle
+events may wake an idle supervisor. Text alone stays inbox-only; proof stays in notes.

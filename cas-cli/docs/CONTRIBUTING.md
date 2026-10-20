@@ -852,6 +852,16 @@ Task creation excludes common planning words and prose such as `NOT` and
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
+### Task start cancellation
+
+`task action=start` commits its local lease and InProgress status before awaiting
+Cloud handoff or parent-epic claim work. Those requests share the existing
+8-second peer budget. A response deadline after the local transition reports
+COMMITTED, including when notification and sync wrappers are disabled. Re-query
+the task before retrying. A failed lease acquisition leaves status unchanged;
+a failed status write releases only the lease generation acquired by that start.
+A sync-publication error after the local commit keeps the matching lease.
+
 ### Task lease release
 
 `task action=release` lets a live registered supervisor release a worker's
@@ -1210,7 +1220,28 @@ and the only gate to `main`; its required checks, including the Rust suite, run
 once on the exact merged tree. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
-follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback. The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
+follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
+
+Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
+`CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
+Validation checks (Docs Lint for a docs-only diff) under their usual names, so a
+lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
+and the lane runs exactly as before. When the repository variable
+`CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the
+local light lane slots instead of waiting for a hosted slot: runner slots 3
+and 4 (cas-3b5e) carry only the `cas-lane-light` label, so merge-queue and
+release Rust jobs keep slots 1 and 2 (`cas-ci-32core`). The light units run at
+`Nice=10`, `CPUWeight=25`, `CPUQuota=200%` and `CARGO_BUILD_JOBS=2`, with no
+sccache; `scripts/install-cassy-actions-runner.sh` provisions them
+(`RUNNER_SLOT=3|4`). `lane.yml` has no pull request trigger, so forks
+never reach those runners; `scripts/ci_tiers/test-policy.py` pins the routing.
+Rollback is one setting: `gh variable delete CASSY_LANE_SELF_HOSTED --repo
+Richards-LLC/cassy` keeps the slim lane on hosted runners, and unsetting
+`CAS_LANE_SLIM` restores the full lane. Retiring the light slots also means
+`systemctl disable --now cassy-actions-runner-3 cassy-actions-runner-4` and
+reverting `lane.yml`'s label.
+
+The normal epic close follows the green queue landing. In downstream repositories without a merge queue, epic close instead requires completed successful CI check-runs on the exact default-branch SHA, or a supervisor `ASSEMBLY_PROOF` for that SHA recorded on the epic. Missing, skipped, cancelled and budget-blocked checks refuse close; an authenticated supervisor may use `supervisor_override=true` with a reason, which is audited. The gate reads existing receipts and starts no test run. Where the
 epic close gate accepts a local `ASSEMBLY_PROOF`, it covers the Rust build and
 suite only; it does not replace the queue's path to `main` or require a
 journey receipt.
@@ -2327,6 +2358,12 @@ skips one that no longer resolves or is unsafe. Roots that 3.50.0 stored in
 set factory.write_roots` moves them into `config.toml` (an empty value clears
 them too).
 
+For a support loop, the operator can include `~/.gabber-support` in the
+owning project's `factory.write_roots`, preserving any existing entries when
+setting the list. This admits `state.json` beneath that directory; a sibling
+such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
+`~/.cas/config.toml` does not grant project writes.
+
 Each grant admits only its modes; a project root admits all three:
 
 - **create**: a new file, an `apply_patch` add or move, or a `cp`, `tee` or
@@ -2393,11 +2430,15 @@ of reach. A hard boundary needs agents running as a separate Unix user.
 ## Cloud reader slots
 
 Supervisor registration derives a stable Cloud `factory_id` from the machine id,
-canonical project id and supervisor role, so `/clear` and full relaunches retain
-the reader slot. For a second supervisor on the same repo and machine, set
-`factory.slot_id` to a distinct value and keep it across relaunches. An explicit
-override also lets a successor on another machine address that same slot.
-Without enough identity to derive a slot, registration falls back to
+canonical project id, supervisor role and the registered agent's factory session.
+Concurrent factory sessions on one clone receive separate slots. A successor
+agent after `/clear` or a restart of the same named factory session keeps its
+slot. Non-factory supervisors retain the legacy machine/project/role slot.
+
+Set `factory.slot_id` to retain a particular slot across different factory
+sessions or machines. Sharing an explicit override intentionally supersedes the
+earlier registration, so concurrent supervisors should use the default session
+slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 

@@ -533,7 +533,7 @@ impl<'a> TeamRegistration<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         let account_url = format!("{}/api/account/projects", self.endpoint);
-        let record = fetch_project_alias_record(self.endpoint, self.token, pin, self.timeout)
+        let record = fetch_project_alias_record(self.endpoint, self.token, pin, Some(self.team_id), self.timeout)
             .map_err(|error| RegistrationFailure {
                 reason: format!(
                     "Could not confirm whether pinned project id '{pin}' is a registered alias \

@@ -183,6 +183,17 @@ impl Config {
         IssueRepoRegistry::from_config(self.issues.as_ref())
     }
 
+    /// Stored legacy destination selected by an explicitly blank Cassy component.
+    /// Bug filing never infers an origin; CLI provenance must use the same rule.
+    pub(crate) fn cassy_issue_legacy_repo(&self) -> Option<&str> {
+        let issues = self.issues.as_ref()?;
+        issues.components.as_ref()?.cassy.as_deref()
+            .filter(|repo| repo.trim().is_empty())
+            .and(issues.repo.as_deref())
+            .map(str::trim)
+            .filter(|repo| !repo.is_empty())
+    }
+
     /// Resolve the project destination in the context of a local checkout.
     /// This read-only view never materializes inferred values in config.toml.
     pub fn issue_repo_registry_for_project(&self, cas_root: &std::path::Path) -> IssueRepoRegistry {

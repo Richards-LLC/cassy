@@ -30,7 +30,7 @@ pub use events::{
 pub(crate) use events::{
     blocker_note_after_park, effective_stall_threshold_secs, hold_decision_after_park,
     merge_target_for_task,
-    supervisor_actionable_state_with_classifiers, task_delivery_ref, DeliveryHold,
+    supervisor_actionable_state_with_classifiers, supervisor_actionable_state_with_ownership, task_delivery_ref, DeliveryHold,
     FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };
 pub(crate) use events::MergedCloseBlockedTask;
@@ -47,6 +47,7 @@ pub use prompts::{
     worker_now_has_real_assignment, MergeAlertEvidence, MergeAlertFreshness, Prompt,
 };
 pub(crate) use prompts::{
+    external_response_hint,
     apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,
     prompt_is_still_deliverable,
 };

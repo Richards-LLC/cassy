@@ -61,6 +61,7 @@ async function connected(page: Page, multiplex = true, machines = [ATLAS]) {
   const header = page.locator("#conversation-connection");
   const held = page.getByRole("log").locator(".conversation-held");
   await expect(header).toHaveText(" · Live");
+  await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
   return { hub, clock, header, held };
 }
 
@@ -284,6 +285,9 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
     const attaches = hub.attaches.length;
     await sendNow(page, "While daemon reconnects");
     await expect(held).toHaveCount(1);
+    await banner.getByRole("button", { name: "Connection details" }).click();
+    await expect(page.locator(".connection-log-summary")).toContainText("Next retry in 1s.");
+    await page.getByRole("button", { name: "Close connection log" }).click();
     await clock.advance(1_000);
     await hub.waitFor(() => hub.attaches.length > attaches);
     // The sentence is the banner's live words; its Details button sits beside them (cas-2b3a5).
@@ -309,11 +313,15 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
 
 async function refusalAfter(clock: ProtocolClock, hub: HubDouble, held: Locator, delay: number): Promise<void> {
   const count = hub.upstreamRefusals.length;
-  // Deliberate negative boundary: retries must respect backoff, not resend early.
-  await clock.advance(delay - 1);
-  expect(hub.upstreamRefusals).toHaveLength(count);
+  const refusal = hub.waitFor(() => hub.upstreamRefusals.length === count + 1);
+  // Deliberate negative boundary: the protocol clock must reach delay - 1
+  // before the next refusal arrives; don't sample the mutable count at that edge.
+  const beforeDeadline = clock.advance(delay - 1);
+  const arrivedEarly = await Promise.race([refusal.then(() => true), beforeDeadline.then(() => false)]);
+  await beforeDeadline;
+  expect(arrivedEarly, "retry must respect its full backoff").toBe(false);
   await clock.advance(1);
-  await hub.waitFor(() => hub.upstreamRefusals.length === count + 1);
+  await refusal;
   await expect(held).toHaveCount(1); // refusal processed before the next timer
 }
 
@@ -321,8 +329,10 @@ test("HUB-J12 network switch: legacy upstream backs off and resets after uninter
   await journey.stage("Once the session has stayed live for 10 s, the next drop retries after about 1 s again", async () => {
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN);
+    const firstRefusal = hub.waitFor(() => hub.upstreamRefusals.length === 1);
     await sendNow(page, "Through repeated refusals");
     await expect(held).toHaveCount(1);
+    await firstRefusal;
     for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
     expect(hub.upstreamRefusals).toHaveLength(4);
     hub.upstreamBack(PELICAN);
@@ -334,8 +344,10 @@ test("HUB-J12 network switch: legacy upstream backs off and resets after uninter
     // No delivery receipt is sent: 10 s of healthy session time resets the streak.
     await clock.advance(10_000);
     hub.upstreamLost(PELICAN);
+    const refusalAfterReset = hub.waitFor(() => hub.upstreamRefusals.length === 5);
     await sendNow(page, "After healthy session time");
     await expect(held).toHaveCount(1);
+    await refusalAfterReset;
     await refusalAfter(clock, hub, held, 1_000);
     hub.upstreamBack(PELICAN);
     const retried = hub.nextSend();
@@ -350,8 +362,10 @@ test("HUB-J12 network switch: a reheld send expires at its original two-minute d
   await journey.stage("Past the two-minute hold, the message reads Not sent with Retry, and Retry sends it once", async () => {
     const { hub, clock, header, held } = await connected(page);
     hub.upstreamLost(PELICAN);
+    const firstRefusal = hub.waitFor(() => hub.upstreamRefusals.length === 1);
     await sendNow(page, "While the daemon stays down");
     await expect(held).toHaveCount(1);
+    await firstRefusal;
     // Exercise reholding, which must preserve the ORIGINAL expiry.
     for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
     await clock.advance(112_999);
@@ -646,6 +660,8 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
   const log = page.getByRole("log");
   const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
   const stored = async () => JSON.stringify(await journalRows(page, "sends"));
+  const waitingSendState = async () => (await journalRows(page, "sends")).find((row) => row.send?.text === "Send this when it's back")?.send?.state;
+  let releaseAttach: (() => void) | undefined;
   await journey.stage("One message goes out and its receipt never comes; the next waits for the session", async () => {
     const first = hub.nextSend();
     await sendNow(page, "Did this one land?");
@@ -655,11 +671,15 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Send this when it's back");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect.poll(waitingSendState, { message: "the waiting send is persisted before the tab reloads" }).toBe("held");
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The tab reloads: both are still there, saying what they are", async () => {
+    const attachesBeforeReload = hub.attaches.filter((session) => session === PELICAN).length;
+    releaseAttach = hub.holdAttach(PELICAN);
     await page.reload();
     await chooseConversation(page);
+    await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(bubble("Send this when it's back")).not.toContainText(/Sending…|Delivered/);
     await expect(bubble("Did this one land?")).toContainText("Not confirmed");
@@ -667,9 +687,10 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The session is back: the waiting one goes out once, the other is not resent", async () => {
-    hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
-    await clock.advance(10_000); // the reattach retry ceiling, in protocol time
+    hub.upstreamBack(PELICAN);
+    releaseAttach!();
+    await clock.advance(1_000); // settle the held attach and its send, in protocol time
     expect((await next).text).toBe("Send this when it's back");
     await expect(held).toHaveCount(0);
     hub.deliverLatest(PELICAN);
@@ -731,6 +752,58 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
     await expect(header).toHaveText(" · Live");
     await clock.advance(30_000);
     expect(sentTimes(hub, "Keep this through the reload")).toBe(1);
+  });
+});
+
+// cas-6c7a: a machine down past its catalog's freshness (30 s in the double)
+// can't send a fresh one. Whether the network is gone or the hub answers its
+// retryable 503, the list keeps its supervisors as last known, agreeing with
+// the open conversation and the footer; only a catalog the machine sends
+// empties the list. cas-c552: when only one of two machines is past its
+// freshness, the footer counts only its conversations as last known.
+test("HUB-J12 network switch: an outage past the catalog's freshness keeps the list, footer and conversation in agreement (cas-6c7a)", journeyPart, async ({ page, journey }) => {
+  const atlas = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session })) };
+  const studio = { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session })) };
+  const { hub, clock, header } = await connected(page, true, [atlas, studio]);
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const row = list.getByRole("button", { name: /cas-src/ });
+  const studioRow = list.getByRole("button", { name: /gabber-studio/ });
+  const footer = page.locator(".hub-footer-meta");
+  const empty = page.getByText(/No live supervisors listed/);
+  const outages = [
+    ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
+    ["The machine stays down past its catalog's freshness: only Atlas, its hub answering 503 auth_store_unavailable, so only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
+  ] as const;
+  for (const [stage, down, outage, count] of outages) {
+    await journey.stage(stage, async () => {
+      for (const id of down) await hub.down(id, outage);
+      await expect(header).toHaveText(" · Reconnecting");
+      for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
+      await expect(header).toHaveText(" · Reconnecting");
+      await expect(row).toContainText("Reconnecting · last known");
+      if (down.length === 1) await expect(studioRow).not.toContainText("last known");
+      else await expect(studioRow).toContainText("last known");
+      await expect(empty).toHaveCount(0);
+      await expect(footer).toContainText(new RegExp(`^${count}Hub `));
+    });
+    await journey.stage(down.length === 1
+      ? "Atlas reconnects — the full conversation count is live again"
+      : "Both machines reconnect — the full conversation count is live again", async () => {
+      for (const id of down) await hub.up(id);
+      await clock.advance(10_000);
+      await expect(header).toHaveText(" · Live");
+      await expect(list).not.toContainText("last known");
+      await expect(footer).toContainText(/^2 conversationsHub /);
+    });
+  }
+  await journey.stage("The machines answer with no live supervisors: the list is empty", async () => {
+    atlas.sessions.length = 0;
+    studio.sessions.length = 0;
+    await clock.advance(30_000);
+    await expect(row).toHaveCount(0);
+    await expect(studioRow).toHaveCount(0);
+    await expect(empty).toBeVisible();
+    await expect(footer).toContainText(/^0 conversationsHub /);
   });
 });
 
@@ -977,13 +1050,26 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
 test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", journeyPart, async ({ page, journey }) => {
   await journey.stage("Kept messages show before attach, then send once without moving the reader", async () => {
     const { hub, clock, held } = await connected(page);
+    const refusalCount = hub.upstreamRefusals.length;
+    const releaseAttach = hub.holdAttach(PELICAN);
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Kept while the session is away");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-    // The reloaded page's attach is held: the session cannot attach yet.
-    const releaseAttach = hub.holdAttach(PELICAN);
+    const persistedState = async () => (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.state;
+    const sendId = (await journalRows(page, "sends")).find((row) => row.send?.text === "Kept while the session is away")?.send?.id;
+    expect(sendId).toBeTruthy();
+    // The upstream refused this exact send, and every reconnect Welcome is
+    // held so a concurrent retry cannot make the session live before reload.
+    await hub.waitFor(() => hub.upstreamRefusals.slice(refusalCount).includes(sendId!));
+    await expect.poll(persistedState, { message: "the waiting message's refusal is committed before this tab reloads" }).toBe("held");
+    const attachesBeforeReload = hub.attaches.filter((session) => session === PELICAN).length;
     await page.reload();
     await chooseConversation(page);
+    // The new session subscription has reached the fixture, but its Welcome
+    // is still held. A machine-level Live label alone does not mean attach is ready.
+    await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
+    await expect(page.locator(".conversation-thread-slot")).toHaveCount(0);
+    await expect.poll(persistedState, { message: "the saved waiting message remains held while Welcome is withheld" }).toBe("held");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
     expect(sentTimes(hub, "Kept while the session is away")).toBe(0);

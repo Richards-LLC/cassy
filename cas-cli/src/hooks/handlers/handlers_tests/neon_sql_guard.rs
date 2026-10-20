@@ -46,13 +46,26 @@ fn repo_with_skill() -> tempfile::TempDir {
 #[test]
 fn worker_write_without_branch_or_on_production_is_denied_naming_the_branch() {
     let repo = repo_with_skill();
+    let cas_root = crate::store::init_cas_dir(repo.path()).unwrap();
     let no_branch = input(
         "mcp__neon__run_sql",
         serde_json::json!({"projectId": "proj-1", "sql": "INSERT INTO fixtures VALUES (1)"}),
         "worker",
         repo.path(),
     );
-    let reason = deny_reason(&handle_pre_tool_use(&no_branch, None).unwrap()).expect("denied");
+    let default_reason =
+        deny_reason(&handle_pre_tool_use(&no_branch, None).unwrap()).expect("default denied");
+    assert!(
+        default_reason.contains("WORKER-DENIED TOOL"),
+        "{default_reason}"
+    );
+
+    let mut config = crate::config::Config::load(&cas_root).unwrap_or_default();
+    config.set("factory.worker_denied_mcp_tools", "").unwrap();
+    config.save(&cas_root).unwrap();
+
+    let reason =
+        deny_reason(&handle_pre_tool_use(&no_branch, Some(&cas_root)).unwrap()).expect("denied");
     assert!(
         reason.contains("NEON PRODUCTION WRITE")
             && reason.contains("no branchId")
@@ -66,7 +79,8 @@ fn worker_write_without_branch_or_on_production_is_denied_naming_the_branch() {
         "worker",
         repo.path(),
     );
-    let reason = deny_reason(&handle_pre_tool_use(&prod, None).unwrap()).expect("denied");
+    let reason =
+        deny_reason(&handle_pre_tool_use(&prod, Some(&cas_root)).unwrap()).expect("denied");
     assert!(reason.contains("`br-prod`"), "{reason}");
 }
 

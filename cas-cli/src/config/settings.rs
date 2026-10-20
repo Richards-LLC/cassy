@@ -633,7 +633,7 @@ impl BuildGuardConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
     /// Stable Cloud reader slot override. Unset derives a supervisor slot
-    /// from machine + canonical project, independent of launch/session ids.
+    /// from machine + canonical project + factory session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_id: Option<String>,
     /// Claude launch options shared by initial, dynamic and recycled agents.

@@ -211,8 +211,9 @@ impl CloudCoordinator {
         self
     }
 
-    /// Cloud's slot key must survive a new agent id, /clear and full relaunch.
-    /// Keep local factory_session metadata unchanged: peer/fleet routing uses it.
+    /// Successors in one factory session share a Cloud slot; concurrent factory
+    /// sessions on the same clone must not supersede each other. Use the agent
+    /// row, not the shared daemon's ambient factory session, for this identity.
     fn factory_id(&self, agent: &Agent) -> Option<String> {
         let legacy = || std::env::var("CAS_FACTORY_ID").ok().filter(|id| !id.trim().is_empty());
         if agent.role != crate::types::AgentRole::Supervisor {
@@ -224,7 +225,13 @@ impl CloudCoordinator {
                 let machine = agent.machine_id.as_deref().map(str::trim).filter(|id| !id.is_empty())?;
                 let project = self.canonical_id.as_deref()
                     .and_then(crate::cloud::normalize_project_canonical_id)?;
-                let identity = serde_json::to_vec(&(machine, project, "supervisor")).ok()?;
+                let session = agent.factory_session.as_deref()
+                    .map(str::trim).filter(|id| !id.is_empty());
+                let identity = match session {
+                    Some(session) => serde_json::to_vec(&(machine, project, "supervisor", session)),
+                    // Preserve the legacy slot for non-factory supervisors.
+                    None => serde_json::to_vec(&(machine, project, "supervisor")),
+                }.ok()?;
                 Some(format!("cassy-slot-{}", hex::encode(Sha256::digest(identity))))
             })
             .or_else(legacy)

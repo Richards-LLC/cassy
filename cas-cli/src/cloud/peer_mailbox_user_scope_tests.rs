@@ -623,6 +623,7 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
         session: Some(session.into()),
         canonical_id: Some(format!("github.com/acme/{project}")),
         focus: focus.map(str::to_string),
+        focus_title: None,
         last_heartbeat: now - chrono::Duration::seconds(age),
         heartbeat_age_secs: age,
         live: age <= crate::cloud::peers::PEER_LIVE_SECS,
@@ -631,7 +632,7 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
         branch: None,
         own: None,
     };
-    let peers = [
+    let mut peers = [
         at("bright-newt-56", "gabber", "prowl", "s1", 13, None),
         at("fierce-shark-94", "cloud", "soundwave", "s2", 16, Some("cas-8cb0")),
         at("true-dragon-23", "gabber", "soundwave", "s3", 3_600, None),
@@ -639,12 +640,14 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
         at("true-dragon-23", "gabber", "soundwave", "s3", 7_200, None),
         at("swift-owl-75", "mines", "soundwave", "s4", 50_000, None),
     ];
+    peers[1].focus_title = Some("Cloud rollout".into());
     let text = render_user_peers(&peers, false);
     let first = text.lines().next().unwrap();
     // pin: the verdict line in the sibling `cas peers` grammar.
     assert_eq!(first, "[OK] 4 supervisors in 3 projects | 2 live");
-    assert!(!text.contains("focus -"), "{text}");
-    assert!(text.contains("focus cas-8cb0"), "{text}");
+    // cas-8522: every live row declares its owned epic, or none.
+    assert!(text.contains("| epic cas-8cb0 \"Cloud rollout\""), "{text}");
+    assert!(text.contains("session s1 | epic none"), "{text}");
     assert!(!text.contains("true-dragon-23"), "stale rows collapse: {text}");
     // pin: stale supervisors are a count per project.
     assert!(text.contains("Stale, seen in the last 24h (2): gabber 1, mines 1."), "{text}");
@@ -658,4 +661,36 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
 
     // pin: the empty directory still opens with a verdict.
     assert!(render_user_peers(&[], false).starts_with("[OK] 0 supervisors in 0 projects | 0 live"));
+}
+
+/// cas-8522 (GH #1289): two live supervisors of one project. The project
+/// address is refused with what each owns; its declared epic picks one.
+#[test]
+fn cas_8522_project_address_names_owned_epics_and_an_epic_resolves_its_owner() {
+    let supervisor = |name: &str, epic: &str, title: &str| Peer {
+        agent_id: format!("{name}-id"),
+        name: name.into(),
+        machine: "soundwave".into(),
+        machine_id: None,
+        session: Some(format!("{name}-session")),
+        canonical_id: Some(CASSY.into()),
+        focus: Some(epic.into()),
+        focus_title: Some(title.into()),
+        last_heartbeat: chrono::Utc::now(),
+        heartbeat_age_secs: 5,
+        live: true,
+        user_id: Some("u1".into()),
+        owner: None,
+        branch: None,
+        own: Some(true),
+    };
+    let peers = [
+        supervisor("zen-hound-24", "cas-fcf9", "Burn-down v50"),
+        supervisor("swift-heron-11", "cas-2570", "Cloud rollout"),
+    ];
+    let refusal = resolve_user_peer_target(&peers, "supervisor:cassy").unwrap_err();
+    assert!(refusal.contains("supervisor:cas-fcf9 (zen-hound-24@soundwave, cassy, owns epic cas-fcf9 \"Burn-down v50\")"), "{refusal}");
+    assert!(refusal.contains("supervisor:cas-2570 (swift-heron-11@soundwave"), "{refusal}");
+    let owner = resolve_user_peer_target(&peers, "supervisor:cas-2570").unwrap().unwrap();
+    assert_eq!(owner.name, "swift-heron-11");
 }

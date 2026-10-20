@@ -775,10 +775,12 @@ async fn coordination_message_to_a_peers_worker_is_never_routed_to_the_peer() {
             .coordination(rmcp::handler::server::wrapper::Parameters(request))
             .await;
         let error = outcome.expect_err("remote workers are not routable peer supervisors");
+        // cas-9f53: the refusal names the worker's own supervisor, under its
+        // machine label, as the relay channel.
         assert!(
-            error.message.contains(&format!(
-                "no supervisor or worker named {target} in this project or its peers"
-            )),
+            error.message.contains(
+                "beta-worker@beta-host is a worker in peer supervisor sup-b@beta-host's factory session"
+            ) && error.message.contains("Message target=sup-b@beta-host to relay it. Nothing was enqueued."),
             "{target}: {error}"
         );
         assert!(

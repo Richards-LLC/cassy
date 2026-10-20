@@ -16,6 +16,10 @@ use ratatui::style::Color as RatatuiColor;
 
 use crate::ui::theme::{ActiveTheme, Icons};
 
+// A one-cell success mark that remains distinguishable on the dark, light,
+// and Solarized terminal backgrounds. Longer text uses the terminal default.
+const SUCCESS_MARK_COLOR: RatatuiColor = RatatuiColor::Rgb(40, 145, 75);
+
 /// The one-word outcome of a command; drives the mark glyph and its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -310,9 +314,9 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a sub-heading with the primary text color and bold.
+    /// Print a sub-heading in bold using the terminal's default foreground.
     pub fn subheading(&mut self, text: &str) -> io::Result<()> {
-        self.write_bold(text)?;
+        self.write_bold_plain(text)?;
         self.newline()
     }
 
@@ -327,11 +331,21 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a success status: `✓ message`
+    /// Print a success status with a locale-appropriate mark.
+    ///
+    /// Styled UTF-8 output colors only the one-cell mark; the message stays
+    /// in the terminal's default foreground. ASCII fallback is bold and
+    /// uncolored so it remains legible on every terminal background.
     pub fn success(&mut self, message: &str) -> io::Result<()> {
-        let color = self.theme.palette.text_success;
         if self.mode == OutputMode::Styled {
-            self.write_colored(&format!("{} {message}", Icons::CHECK), color)?;
+            let label = Verdict::Ok.label(self.glyphs());
+            if self.glyphs() {
+                self.write_colored(label, SUCCESS_MARK_COLOR)?;
+            } else {
+                self.write_bold_plain(label)?;
+            }
+            self.write_raw(" ")?;
+            self.write_raw(message)?;
         } else {
             write!(self.writer, "[OK] {message}")?;
         }
@@ -689,24 +703,81 @@ mod tests {
     }
 
     #[test]
-    fn test_error_renderer_uses_text_error_mark_and_ascii_fallback_under_c_locale() {
+    fn test_styled_status_marks_use_ascii_fallback_under_c_locale() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
         env.remove("NO_COLOR");
         let theme = ActiveTheme::default_light();
         let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
             panic!("text_error must use a concrete theme color");
         };
-        let mut buf = Vec::new();
+        let mut error_buf = Vec::new();
         {
-            let mut fmt = Formatter::styled(&mut buf, theme);
+            let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
             fmt.error("configuration failed").unwrap();
         }
-
-        let output = String::from_utf8(buf).unwrap();
         assert_eq!(
-            output,
+            String::from_utf8(error_buf).unwrap(),
             format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
         );
+
+        let mut success_buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut success_buf, theme);
+            fmt.success("sync complete").unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(success_buf).unwrap(),
+            "\x1b[1m[OK]\x1b[0m sync complete\n"
+        );
+    }
+
+    #[test]
+    fn test_sync_output_uses_default_text_and_palette_safe_success_mark() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        env.remove("NO_COLOR");
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::new(
+                &mut buf,
+                OutputMode::Styled,
+                ActiveTheme::default_dark(),
+                80,
+            );
+            fmt.subheading("Syncing .claude files").unwrap();
+            fmt.success("Updated .mcp.json").unwrap();
+        }
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
+        );
+
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |c: u8| {
+                let s = f64::from(c) / 255.0;
+                if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let mark = luminance((40, 145, 75));
+        for (palette, background) in [
+            ("dark", (30, 30, 30)),
+            ("light", (255, 255, 255)),
+            ("Solarized dark", (0, 43, 54)),
+            ("Solarized light", (253, 246, 227)),
+        ] {
+            let bg = luminance(background);
+            let (high, low) = if mark >= bg { (mark, bg) } else { (bg, mark) };
+            let ratio = (high + 0.05) / (low + 0.05);
+            assert!(
+                ratio >= 3.0,
+                "success mark contrast on {palette}: {ratio:.2}:1"
+            );
+        }
     }
 
     #[test]

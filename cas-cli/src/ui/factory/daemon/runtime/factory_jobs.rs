@@ -175,7 +175,7 @@ pub(crate) enum FactoryJobOutput {
     Deliverability(DeliverabilityBatch),
     WorkerHealth(WorkerHealthReport),
     ReminderScan,
-    MergeAlertInbox,
+    MergeAlertInbox(Option<super::delivery::CompletedMergeAlert>),
     CiStatus(StallExternalEvidence),
 }
 

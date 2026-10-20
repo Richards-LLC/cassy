@@ -507,10 +507,15 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     synced
         .notes
         .push_str("\nARTIFACT_PROOF: {malformed unrelated artifact");
-    open_task_store(&owner.path().join(".cas"))
+    let published_proof = synced
+        .notes
+        .lines()
+        .find(|line| line.starts_with("ARTIFACT_PROOF: {") && line.contains(id))
         .unwrap()
-        .add(&synced)
-        .unwrap();
+        .to_string();
+    let owner_tasks = open_task_store(&owner.path().join(".cas")).unwrap();
+    owner_tasks.add(&synced).unwrap();
+    owner_tasks.append_trusted_note(&task.id, &published_proof).unwrap();
     std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
     assert!(
         cas_store::SqliteArtifactStore::open(&owner.path().join(".cas"))

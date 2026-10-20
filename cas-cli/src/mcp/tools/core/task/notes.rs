@@ -130,8 +130,14 @@ impl CasCore {
 
         let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
 
-        task_store
-            .append_note(&req.id, &formatted_note)
+        // prepare_note adds only committed ledger records after the caller's
+        // raw note has passed the marker rejection above.
+        let append = if formatted_note.lines().any(cas_store::task_note_markers::is_reserved_line) {
+            task_store.append_trusted_note(&req.id, &formatted_note)
+        } else {
+            task_store.append_note(&req.id, &formatted_note)
+        };
+        append
             .map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to append task note: {e}")),

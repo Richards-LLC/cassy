@@ -197,9 +197,6 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
     let git = GitOperations::new(repo_root);
-    let target_tip = git.ref_sha(target_branch).map_err(|error| {
-        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
-    })?;
     let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
@@ -226,12 +223,22 @@ fn reconcile_reused_factory_branch(
         ));
     }
 
+    // cas-21db: another merge can land after assignment or the worker's
+    // manual sync. Resolve the current target here, after the dirty check,
+    // using the existing bounded fetch and local-only/offline fallback.
+    let target = git.resolve_fresh_base(target_branch).map_err(|error| {
+        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
+    })?;
+    let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
+        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
+    })?;
+
     if target_tip == factory_tip {
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
-        git.reset_hard_in_dir(worktree_path, target_branch)
+        git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
                     "Cannot reset reused factory branch {expected_branch} to `{target_branch}`: {error}"
@@ -256,7 +263,7 @@ fn reconcile_reused_factory_branch(
                 String::from_utf8_lossy(&kept.stderr).trim()
             ));
         }
-        git.reset_hard_in_dir(worktree_path, target_branch)
+        git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
                     "Cannot move parked factory branch {expected_branch} to `{target_branch}`: {error}"

@@ -10216,7 +10216,10 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
     git_stdout(project, &["push", "origin", "epic/foreign"]);
     git_stdout(project, &["reset", "--hard", &assigned_target]);
-    git_stdout(project, &["update-ref", "refs/remotes/origin/epic/foreign", &assigned_target]);
+    git_stdout(
+        project,
+        &["update-ref", "refs/remotes/origin/epic/foreign", &assigned_target],
+    );
 
     let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "start", "id": task_b

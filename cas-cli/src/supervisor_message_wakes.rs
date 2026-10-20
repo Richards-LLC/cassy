@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn waiting_leaders_skip_bad_timestamps_without_reloading_rows_cas_626af() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        for corrupt in ["deadline", "unused-created"] {
+        for corrupt in ["unused-source", "deadline"] {
             let (_root, cas, peer) = setup();
             let leader = enqueue(&cas, &peer, "Earlier report");
             let bad = enqueue(&cas, &peer, "Malformed parked row");
@@ -708,9 +708,9 @@ mod tests {
             if corrupt == "deadline" {
                 conn.execute("UPDATE prompt_queue SET next_attempt_at='zz-invalid' WHERE id=?1", [bad]).unwrap();
             } else {
-                // Deadline inheritance does not need this field at all. A full
-                // queued_prompt(id) reload would decode it and fail the pass.
-                conn.execute("UPDATE prompt_queue SET created_at='invalid' WHERE id=?1", [bad]).unwrap();
+                // Deadline inheritance authenticates the origin, not the
+                // display source. A full row reload needlessly decodes it.
+                conn.execute("UPDATE prompt_queue SET source=x'FF' WHERE id=?1", [bad]).unwrap();
             }
             let mut rows = vec![row];
             let mut facts = HashMap::from([(fresh, RowFacts::default())]);

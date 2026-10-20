@@ -25,20 +25,6 @@ pub(crate) use pull::{
 mod push;
 mod team_push;
 
-pub(crate) fn strip_task_note_nuls(value: &mut serde_json::Value) -> bool {
-    let Some(notes) = value.get("notes").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    if !notes.contains('\0') {
-        return false;
-    }
-    let notes = notes.replace('\0', "");
-    if let Some(object) = value.as_object_mut() {
-        object.insert("notes".into(), serde_json::Value::String(notes));
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -1089,8 +1075,9 @@ pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
 
 /// The operator-facing next step for one cloud rejection reason.
 ///
-/// Reporting a rejection without the repair leaves an operator with a count
-/// and no move; an unknown reason is named honestly rather than guessed at.
+/// When a remote fix makes a rejected payload retryable, keep its content
+/// unchanged and point the operator at a reason-specific retry. Unknown
+/// reasons are named honestly rather than guessed at.
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
         "unattributed_origin" => "retained locally: authoring project is unknown; supply creation provenance before requeueing",
@@ -1115,7 +1102,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
         }
         "invalid_json_nul" => {
-            "PostgreSQL jsonb cannot store U+0000 in task notes; repair the local task and queued payload with `cas cloud queue --repair-task-note-nuls --apply`, then `cas cloud sync`"
+            "U+0000 in task notes now round-trips losslessly; queued payload retained unchanged. Retry with `cas cloud queue --retry --retry-reason invalid_json_nul`"
         }
         "version_gate" => {
             "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"

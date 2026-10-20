@@ -346,9 +346,6 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut value) => {
-                        if entity_type == EntityType::Task {
-                            super::strip_task_note_nuls(&mut value);
-                        }
                         let target_project = item.project_id.as_deref().unwrap_or(project_id);
                         if matches!(
                             entity_type,

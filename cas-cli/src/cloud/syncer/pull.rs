@@ -1505,7 +1505,6 @@ fn lifecycle_audit_note(note: &str) -> Option<(chrono::DateTime<chrono::Utc>, &s
 /// explicit transition/recovery reason. Previously observed actions cannot
 /// undo a later park, even if a replica uploads them under a newer row clock.
 fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
-    let applied_status = format!("applied_status={}", local.status);
     let local_boundary = local.notes.split("\n\n").filter_map(|block| {
         let (at, event) = lifecycle_audit_note(block)?;
         let is_boundary = if local.is_terminal() {
@@ -1513,11 +1512,12 @@ fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
         } else {
             event.starts_with("Close rejected:") && event.contains("Task parked as awaiting_merge;")
         };
-        (is_boundary || (event.starts_with("[CAS_SYNC_STATUS]")
-            && event.split_whitespace().any(|field| field == applied_status)))
-            .then_some((at, block.trim()))
+        is_boundary.then_some((at, block.trim()))
     }).max_by_key(|(at, _)| *at);
-    let boundary = local.closed_at
+    // A prior cycle can leave closed_at on a reset row. Only a terminal
+    // state uses it; a current park is anchored to its own lifecycle note.
+    // CAS_SYNC_STATUS is apply provenance and never establishes a new park.
+    let boundary = (local.is_terminal().then_some(local.closed_at).flatten())
         .or(local_boundary.map(|(at, _)| at))
         .unwrap_or(local.updated_at);
     remote.notes.split("\n\n").any(|block| {

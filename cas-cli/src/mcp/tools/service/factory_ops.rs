@@ -193,10 +193,14 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
 fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    // cas-c8de: the account probes and the codex version probe share one
+    // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
-    preflight_account_auth_with(specs, |cli, account_dir| {
-        crate::capability::probe_account_auth(cli, account_dir, deadline)
-    })
+    preflight_account_auth_with(
+        specs,
+        |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+        || installed_codex_version(deadline),
+    )
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -204,6 +208,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
 fn preflight_account_auth_with(
     specs: &[cas_mux::WorkerSpec],
     probe: impl Fn(cas_mux::SupervisorCli, Option<&str>) -> cas_factory::CapabilityEvidence,
+    codex_version: impl Fn() -> Option<String>,
 ) -> Result<(), String> {
     let mut seen: std::collections::BTreeSet<(cas_mux::SupervisorCli, Option<String>)> =
         std::collections::BTreeSet::new();
@@ -239,7 +244,7 @@ fn preflight_account_auth_with(
             crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
         ));
     }
-    preflight_codex_model_support(specs, chrono::Utc::now())
+    preflight_codex_model_support(specs, chrono::Utc::now(), &codex_version)
 }
 
 /// Refuse a Codex spawn whose target account cannot run its model, before any
@@ -253,12 +258,15 @@ fn preflight_account_auth_with(
 fn preflight_codex_model_support(
     specs: &[cas_mux::WorkerSpec],
     now: chrono::DateTime<chrono::Utc>,
+    codex_version: &dyn Fn() -> Option<String>,
 ) -> Result<(), String> {
     use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
     let mut seen = std::collections::BTreeSet::new();
-    // cas-49d3: the codex that will run the worker, probed once and only when
-    // a Codex spec names a model; the catalogue is judged against it.
-    let mut installed_codex: Option<Option<String>> = None;
+    // cas-49d3: the codex that will run the worker, judged against the
+    // catalogue. cas-c8de: probed at most once, and only when a catalogue
+    // would otherwise refuse.
+    let installed_codex: std::cell::OnceCell<Option<String>> = std::cell::OnceCell::new();
+    let installed = || installed_codex.get_or_init(codex_version).clone();
     for spec in specs {
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
@@ -278,9 +286,8 @@ fn preflight_codex_model_support(
         let Some(home) = codex_home_path(account_dir.as_deref()) else {
             continue;
         };
-        let installed = installed_codex.get_or_insert_with(installed_codex_version).as_deref();
         if let CodexModelSupport::Unsupported { catalog, listed } =
-            codex_account_model_support(&home, model, now, installed)
+            codex_account_model_support(&home, model, now, &installed)
         {
             let account = account_dir
                 .as_deref()
@@ -299,13 +306,13 @@ fn preflight_codex_model_support(
 }
 
 /// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
-/// bounded so a hung binary cannot stall a spawn; `None` when it cannot be read.
-fn installed_codex_version() -> Option<String> {
-    let budget = std::time::Duration::from_secs(3);
+/// bounded by the preflight's own deadline (cas-c8de) so a hung binary
+/// cannot stall a spawn; `None` when it cannot be read in time.
+fn installed_codex_version(deadline: crate::bounded_process::Deadline) -> Option<String> {
     let output = crate::bounded_process::run_command(
         std::process::Command::new("codex").arg("--version"),
-        crate::bounded_process::Deadline::after(budget),
-        budget,
+        deadline,
+        std::time::Duration::from_secs(3),
     )
     .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -11943,10 +11950,48 @@ mod spawn_lifecycle_tests {
         ).unwrap();
         let error = preflight_account_auth_with(&specs, |_, _| {
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
         assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
         assert!(error.contains("No worktree was created"), "{error}");
+    }
+
+    /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
+    /// client (prowl's ChatGPT.app 0.146) cannot refuse a model the installed
+    /// codex (0.163, printed with a trailing build token) runs. The version
+    /// probe runs once, and not at all when the catalogue lists the model.
+    #[test]
+    fn an_older_client_cache_does_not_refuse_the_spawn_cas_c8de() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        let (specs, _, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let model = specs[0].model.clone().unwrap();
+        let cache = |client: &str, slug: &str| {
+            std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+                "fetched_at": chrono::Utc::now(), "client_version": client, "models": [{"slug": slug}]
+            }).to_string()).unwrap();
+        };
+        let probes = std::cell::Cell::new(0);
+        let logged_in = |_: cas_mux::SupervisorCli, _: Option<&str>| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        };
+        let installed = || {
+            probes.set(probes.get() + 1);
+            Some("codex-cli 0.163.0 (abc1234)".to_string())
+        };
+
+        cache("0.146.0", "gpt-5.6-sol");
+        preflight_account_auth_with(&specs, logged_in, installed).expect("an older client's cache cannot refuse");
+        assert_eq!(probes.get(), 1);
+        cache("0.146.0", "gpt-5.6-sol");
+        assert!(preflight_account_auth_with(&specs, logged_in, || None).is_err(), "unknown installed codex keeps the verdict");
+        probes.set(0);
+        cache("0.146.0", &model);
+        preflight_account_auth_with(&specs, logged_in, installed).unwrap();
+        assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
     #[test]
@@ -11957,7 +12002,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "Codex login status reports no authenticated account",
             )
-        })
+        }, || None)
         .expect_err("a logged-out account must refuse the spawn");
         assert!(error.contains("~/.codex-alt"), "{error}");
         assert!(error.contains("codex login"), "{error}");
@@ -11976,7 +12021,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "logged out",
             )
-        })
+        }, || None)
         .expect_err("refusal expected");
         assert!(error.contains("~/.codex"), "{error}");
     }
@@ -11993,13 +12038,13 @@ mod spawn_lifecycle_tests {
                     cas_factory::CapabilityAvailability::Unknown,
                     "Codex login status probe timed out",
                 )
-            })
+            }, || None)
             .is_ok()
         );
         assert!(
             preflight_account_auth_with(&specs, |_, _| {
                 evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-            })
+            }, || None)
             .is_ok()
         );
     }
@@ -12023,7 +12068,7 @@ mod spawn_lifecycle_tests {
             );
             calls.fetch_add(1, Ordering::SeqCst);
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        })
+        }, || None)
         .expect("healthy accounts pass");
         assert_eq!(
             calls.load(Ordering::SeqCst),

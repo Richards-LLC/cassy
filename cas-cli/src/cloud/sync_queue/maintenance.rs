@@ -23,12 +23,6 @@ fn is_transient_network_error(error: &str) -> bool {
         message
     };
     let message = message.to_ascii_lowercase();
-    if ["auth", "401", "403", "unauthorized", "forbidden", "reject"]
-        .iter()
-        .any(|term| message.contains(term))
-    {
-        return false;
-    }
 
     [
         "dns",
@@ -364,9 +358,9 @@ impl SyncQueue {
     }
 
     /// Re-arm exhausted transient network failures for a team after a Cloud
-    /// push succeeds. Each row gets one automatic retry budget; auth,
-    /// rejections and intentional parks remain terminal until an explicit
-    /// retry or a new local mutation.
+    /// push succeeds. Each row gets one automatic retry budget; HTTP auth
+    /// responses, rejections and intentional parks remain terminal until an
+    /// explicit retry or a new local mutation.
     pub fn rearm_transient_network_failures_after_success(
         &self,
         team_id: &str,
@@ -404,7 +398,7 @@ impl SyncQueue {
                 r#"
                 SELECT id, last_error
                 FROM sync_queue
-                WHERE team_id = ?1
+                WHERE (team_id = ?1 OR (?1 = '' AND team_id IS NULL))
                   AND retry_count >= ?2
                   AND auto_rearm_count < ?3
                   AND last_error IS NOT NULL
@@ -428,7 +422,7 @@ impl SyncQueue {
                 UPDATE sync_queue
                 SET retry_count = 0, last_error = NULL, auto_rearm_count = auto_rearm_count + 1
                 WHERE id = ?1
-                  AND team_id = ?2
+                  AND (team_id = ?2 OR (?2 = '' AND team_id IS NULL))
                   AND retry_count >= ?3
                   AND auto_rearm_count < ?4
                   AND last_error = ?5

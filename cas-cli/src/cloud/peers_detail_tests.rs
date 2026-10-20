@@ -800,3 +800,87 @@ fn cas_9f53_a_listed_peer_worker_resolves_to_its_owning_supervisor() {
     assert_eq!(worker.supervisor.name, "rapid-panther-80");
     assert_eq!(worker.supervisor.session.as_deref(), Some("steady-lynx"));
 }
+
+/// cas-47a2: reset retires a dead worker's branch binding; once the new
+/// worker starts, the peer view names the new worker's branch, not the dead
+/// one as a parked delivery, and the old branch survives only as history.
+#[tokio::test]
+async fn cas_47a2_reset_then_new_worker_start_shows_the_new_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = crate::types::Task::new("cas-reset".into(), "Reassigned work".into());
+    task.status = crate::types::TaskStatus::InProgress;
+    task.assignee = Some("dead-worker".into());
+    // The dead worker's commit-time binding (attribution hook).
+    task.deliverables.parked_branch = Some("factory/dead-worker-cas-reset".into());
+    task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    tasks.add(&task).unwrap();
+
+    crate::mcp::CasCore::with_daemon(root.clone(), None, None)
+        .cas_task_reset(rmcp::handler::server::wrapper::Parameters(
+            crate::mcp::tools::TaskReleaseRequest { task_id: "cas-reset".into(), force: None },
+        ))
+        .await
+        .unwrap();
+    let reset = tasks.get("cas-reset").unwrap();
+    assert_eq!(reset.deliverables.parked_branch, None);
+    assert_eq!(reset.deliverables.factory_branch_anchor, None);
+    assert_eq!(reset.deliverables.handoff_branches, ["factory/dead-worker-cas-reset"]);
+    assert_eq!(reset.deliverables.historical_factory_branch_anchors, ["a".repeat(40)]);
+
+    // The new worker starts: assigned, in progress, live lease on its branch.
+    let mut started = reset;
+    started.status = crate::types::TaskStatus::InProgress;
+    started.assignee = Some("new-worker".into());
+    tasks.update(&started).unwrap();
+    let mut worker = agent("new-worker", "worker", "lane", "alpha", REPO, 1);
+    worker
+        .metadata
+        .insert("branch".into(), "factory/new-worker-cas-reset".into());
+    let agents = vec![agent("sup", "supervisor", "lane", "alpha", REPO, 1), worker];
+    let locks = vec![lease("cas-reset", "new-worker", LeaseStatus::Active, 600)];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        Utc::now(),
+    );
+    let work = &details[0].work;
+    let row = work.tasks.iter().find(|t| t.task_id == "cas-reset").unwrap();
+    assert_eq!(row.branch.as_deref(), Some("factory/new-worker-cas-reset"));
+    assert_eq!(row.head_sha, None);
+    assert!(
+        work.waiting_merges.iter().all(|w| w.kind != "parked_delivery"),
+        "{:?}",
+        work.waiting_merges
+    );
+
+    // cas-b28c: the stranded-branch gate still measures the retired lane.
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&["checkout", "-q", "-b", "factory/dead-worker-cas-reset"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "dead worker's stranded work"]);
+    git(&["checkout", "-q", "main"]);
+    let gate = crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses(
+        &[tasks.get("cas-reset").unwrap()],
+        "main",
+        repo.path(),
+    );
+    assert_eq!(gate[0].factory_branch.as_deref(), Some("factory/dead-worker-cas-reset"));
+    assert_eq!(gate[0].unmerged_count, 1, "{:?}", gate[0]);
+}

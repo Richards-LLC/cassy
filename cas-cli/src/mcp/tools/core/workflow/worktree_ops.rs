@@ -1420,21 +1420,39 @@ fn parked_merge_source(
 impl CasCore {
     fn parked_merge_source_for_task(
         &self,
-        _task_store: &dyn cas_store::TaskStore,
+        task_store: &dyn cas_store::TaskStore,
         repo: &Path,
         source: &str,
-        _parent_branch: &str,
+        parent_branch: &str,
         task: &cas_types::Task,
     ) -> Result<Option<String>, String> {
         let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
             return Ok(None);
         };
-        parked_merge_source(
-            &crate::worktree::GitOperations::new(repo.to_path_buf()),
-            source,
-            &task.id,
-            anchor,
-        )
+        let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let original = parked_merge_source(&git, source, &task.id, anchor);
+        if original.is_ok() || task.status != cas_types::TaskStatus::AwaitingMerge {
+            return original;
+        }
+        let Some(tip) = git.resolve_commit(source) else {
+            return original;
+        };
+        let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            parent_branch.to_string()
+        } else {
+            crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(repo, parent_branch)
+        };
+        if !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+            repo, anchor, &tip, &target, &task.id,
+        ) {
+            return original;
+        }
+        self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip));
+        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload rebased delivery anchor: {error}"))?;
+        let Some(anchor) = rebound.deliverables.factory_branch_anchor.as_deref() else {
+            return original;
+        };
+        parked_merge_source(&git, source, &task.id, anchor)
     }
 }
 
@@ -3131,7 +3149,7 @@ impl CasCore {
         let task_id = task_id.or(inferred_task_id.as_deref());
         // cas-bebc (GH #1023 finding 9): never integrate another live factory
         // session's worker branch or task from this session.
-        let scoped_task =
+        let mut scoped_task =
             task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
@@ -3444,6 +3462,13 @@ impl CasCore {
                     });
                 }
             }
+            // Later dirty-checkout and merge-intent handling use the same
+            // durable anchor that the source guard just validated.
+            scoped_task = Some(store.get(task_id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Cannot reload parked delivery after source validation: {error}")),
+                data: None,
+            })?);
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy

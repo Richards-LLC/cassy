@@ -8,6 +8,9 @@ pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
 mod snapshot_approval;
+mod rebased_delivery;
+pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_patches;
+pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
 mod epic_autoclose;
@@ -6306,6 +6309,14 @@ impl CasCore {
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
+        let rebase_target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            parent_branch.to_string()
+        } else {
+            freshest_target_ref(repo_path, parent_branch)
+        };
+        if rebased_delivery_has_same_patches(repo_path, recorded, &candidate, &rebase_target, &task.id) {
+            return Some(candidate);
+        }
         if self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &candidate, &target) {
             return Some(candidate);
         }
@@ -6678,7 +6689,19 @@ impl CasCore {
             return;
         };
         if rebound {
-            let reason = " The prior anchor was never on origin, so this close re-anchored to the pushed tip.";
+            let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+                parent_branch.to_string()
+            } else {
+                freshest_target_ref(repo_path, parent_branch)
+            };
+            let equivalent_rebase = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|recorded| {
+                rebased_delivery_has_same_patches(repo_path, recorded, factory_branch_anchor, &target, &task.id)
+            });
+            let reason = if equivalent_rebase {
+                " Rebase preserved the complete parked delivery patch set."
+            } else {
+                " The prior anchor was never on origin, so this close re-anchored to the pushed tip."
+            };
             audit.push_str(reason);
             advanced.notes.push_str(reason);
         }

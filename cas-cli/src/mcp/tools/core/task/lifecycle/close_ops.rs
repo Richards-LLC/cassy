@@ -14,6 +14,7 @@ pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_pat
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
@@ -8230,6 +8231,10 @@ impl CasCore {
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && (close_repo_verified || worker_worktree_path.is_some())
         {
+            self.prepare_merged_verification_dispatch(
+                &task, &req, &close_project_root, &resolved_parent_branch,
+                declared_repo_context.as_ref().map(|context| context.target_branch.as_str()),
+            )?;
             match run_factory_branch_merge_gate_for_delivery(
                 &task,
                 &req,
@@ -9299,11 +9304,11 @@ impl CasCore {
                             );
                             format!(
                                 "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
-                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}\")\n\n\
+                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}; dispatch_id={}\")\n\n\
                                      Or record verification directly:\n\
                                      {sup_ver} action=add task_id={} dispatch_id={} \
                                      status=approved summary=\"Self-verified: <reason>\"",
-                                verifier_agent, req.id, req.id, dispatch.id
+                                verifier_agent, req.id, dispatch.id, req.id, dispatch.id
                             )
                         } else {
                             let bound_head = dispatch
@@ -9315,13 +9320,14 @@ impl CasCore {
                                 "Task {} close is pending verification dispatch {} owned by {} \
                                      until {}.{bound_head}\n\n\
                                      Use the Task tool to spawn a task-verifier subagent: \
-                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
+                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}; dispatch_id={}\")",
                                 req.id,
                                 dispatch.id,
                                 dispatch.owner_agent_id,
                                 dispatch.deadline_at,
                                 verifier_agent,
-                                req.id
+                                req.id,
+                                dispatch.id
                             )
                         };
                         let sup_ver = format!(

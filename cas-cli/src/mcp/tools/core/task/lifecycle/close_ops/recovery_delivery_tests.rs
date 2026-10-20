@@ -814,110 +814,135 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
 
 #[tokio::test]
 async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
-    let mut env = TestEnvGuard::temp_home();
-    let mut f = fixture(&mut env);
-    let cas_dir = f.dir.path().join(".cas");
-    let agents = open_agent_store(&cas_dir).unwrap();
-    env.set("CAS_FACTORY_SESSION", "qa-reround-fixture");
-    for mut agent in agents.list(None).unwrap() {
-        agent.factory_session = Some("qa-reround-fixture".into());
-        agents.update(&agent).unwrap();
+    for busy in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env);
+        let cas_dir = f.dir.path().join(".cas");
+        let agents = open_agent_store(&cas_dir).unwrap();
+        env.set("CAS_FACTORY_SESSION", "qa-reround-fixture");
+        for mut agent in agents.list(None).unwrap() {
+            agent.factory_session = Some("qa-reround-fixture".into());
+            agents.update(&agent).unwrap();
+        }
+        let mut reviewer = Agent::new_with_role(
+            "qa-review-session".into(),
+            "qa-reviewer".into(),
+            AgentRole::Worker,
+        );
+        reviewer.status = cas_types::AgentStatus::Idle;
+        reviewer.factory_session = Some("qa-reround-fixture".into());
+        agents.register(&reviewer).unwrap();
+        close(&f).await;
+        let first = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        cas_store::claim_qa_pass(&cas_dir, TASK, &reviewer.name, chrono::Utc::now()).unwrap();
+        cas_store::resolve_qa_pass(
+            &cas_dir,
+            TASK,
+            &reviewer.name,
+            cas_types::QaVerdict::Rejected,
+            "Correct the spacing",
+            None,
+            "fixture/LEDGER.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut qa_task = tasks.get(first.qa_task_id.as_deref().unwrap()).unwrap();
+        qa_task.assignee = Some(reviewer.name.clone());
+        qa_task.status = TaskStatus::Closed;
+        tasks.update(&qa_task).unwrap();
+        if busy {
+            let mut other = Task::new("cas-review-other".into(), "Other accepted review".into());
+            other.status = TaskStatus::InProgress;
+            other.assignee = Some(reviewer.name.clone());
+            tasks.add(&other).unwrap();
+            agents
+                .try_claim(&other.id, &reviewer.id, 1800, Some("unrelated review"))
+                .unwrap();
+        }
+        let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-session".into());
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        supervisor
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+                id: TASK.into(),
+                reason: "Address the independent QA rejection".into(),
+            }))
+            .await
+            .unwrap();
+        std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+        git(&f.worker_path, &["add", "footer.css"]);
+        git(
+            &f.worker_path,
+            &[
+                "commit",
+                "-qm",
+                "fix(cas-c6e1-fixture): address independent QA",
+            ],
+        );
+        f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(
+            f.dir.path(),
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{BRANCH}"),
+                &f.final_tip,
+            ],
+        );
+        env.set("CAS_AGENT_ROLE", "worker");
+        f.core
+            .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+                id: TASK.into(),
+                brief: Some(true),
+                force: None,
+            }))
+            .await
+            .unwrap();
+        close(&f).await;
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(
+            passes.len(),
+            2,
+            "re-park must open round2 without manual qa_request"
+        );
+        let next = passes.iter().find(|pass| pass.round == 2).unwrap();
+        assert_eq!(next.bound_head, f.final_tip);
+        let assigned = tasks.get(next.qa_task_id.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            assigned.assignee.as_deref(),
+            (!busy).then_some(reviewer.name.as_str()),
+            "reuse only an available independent reviewer"
+        );
+        assert_eq!(
+            next.state,
+            cas_types::QaPassState::Pending,
+            "reviewer must still accept and claim the new round"
+        );
+        let queued = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .poll_for_target_with_session(&reviewer.name, Some("qa-reround-fixture"), 100)
+            .unwrap();
+        assert_eq!(
+            queued.iter().any(|row| row.prompt.contains(&assigned.id)),
+            !busy,
+            "only the idle reused reviewer receives the new assignment"
+        );
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .poll_for_target_with_session("supervisor", Some("qa-reround-fixture"), 100)
+            .unwrap();
+        let handoff = prompts
+            .iter()
+            .find(|row| row.source == format!("qa-dispatch:{}", next.id))
+            .unwrap();
+        assert_eq!(
+            handoff.prompt.contains("Spawn a reviewer"),
+            busy,
+            "handoff must match actual reviewer assignment"
+        );
     }
-    let mut reviewer = Agent::new_with_role(
-        "qa-review-session".into(),
-        "qa-reviewer".into(),
-        AgentRole::Worker,
-    );
-    reviewer.status = cas_types::AgentStatus::Idle;
-    reviewer.factory_session = Some("qa-reround-fixture".into());
-    agents.register(&reviewer).unwrap();
-    close(&f).await;
-    let first = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
-        .unwrap()
-        .unwrap();
-    cas_store::claim_qa_pass(&cas_dir, TASK, &reviewer.name, chrono::Utc::now()).unwrap();
-    cas_store::resolve_qa_pass(
-        &cas_dir,
-        TASK,
-        &reviewer.name,
-        cas_types::QaVerdict::Rejected,
-        "Correct the spacing",
-        None,
-        "fixture/LEDGER.md",
-        chrono::Utc::now(),
-    )
-    .unwrap();
-    let tasks = open_task_store(&cas_dir).unwrap();
-    let mut qa_task = tasks.get(first.qa_task_id.as_deref().unwrap()).unwrap();
-    qa_task.assignee = Some(reviewer.name.clone());
-    qa_task.status = TaskStatus::Closed;
-    tasks.update(&qa_task).unwrap();
-    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
-    supervisor.set_agent_id_for_testing("supervisor-session".into());
-    env.set("CAS_AGENT_ROLE", "supervisor");
-    supervisor
-        .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
-            id: TASK.into(),
-            reason: "Address the independent QA rejection".into(),
-        }))
-        .await
-        .unwrap();
-    std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
-    git(&f.worker_path, &["add", "footer.css"]);
-    git(
-        &f.worker_path,
-        &[
-            "commit",
-            "-qm",
-            "fix(cas-c6e1-fixture): address independent QA",
-        ],
-    );
-    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(
-        f.dir.path(),
-        &[
-            "update-ref",
-            &format!("refs/remotes/origin/{BRANCH}"),
-            &f.final_tip,
-        ],
-    );
-    env.set("CAS_AGENT_ROLE", "worker");
-    f.core
-        .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
-            id: TASK.into(),
-            brief: Some(true),
-            force: None,
-        }))
-        .await
-        .unwrap();
-    close(&f).await;
-    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
-    assert_eq!(
-        passes.len(),
-        2,
-        "re-park must open round2 without manual qa_request"
-    );
-    let next = passes.iter().find(|pass| pass.round == 2).unwrap();
-    assert_eq!(next.bound_head, f.final_tip);
-    let assigned = tasks.get(next.qa_task_id.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        assigned.assignee.as_deref(),
-        Some(reviewer.name.as_str()),
-        "reuse the same available independent reviewer"
-    );
-    assert_eq!(
-        next.state,
-        cas_types::QaPassState::Pending,
-        "reviewer must still accept and claim the new round"
-    );
-    let queued = crate::store::open_prompt_queue_store(&cas_dir)
-        .unwrap()
-        .poll_for_target_with_session(&reviewer.name, Some("qa-reround-fixture"), 100)
-        .unwrap();
-    assert!(
-        queued.iter().any(|row| row.prompt.contains(&assigned.id)),
-        "reused reviewer needs the real assignment prompt"
-    );
 }
 
 #[tokio::test]
@@ -981,6 +1006,17 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         .as_ref()
         .expect("bind the merged target, never infer an unbound pass");
     assert_eq!(proof.head_commit, git(f.dir.path(), &["rev-parse", "main"]));
+    assert_eq!(proof.target_branch.as_deref(), Some("main"));
+    let repeated = close_output(&f).await;
+    assert!(repeated.contains("DELIVERY CONTENT DROPPED"), "{repeated}");
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
+            .unwrap()
+            .unwrap()
+            .id,
+        dispatch.id,
+        "retry must keep the same exact dispatch"
+    );
     assert!(proof.anchor_commits.contains(&f.final_tip));
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());

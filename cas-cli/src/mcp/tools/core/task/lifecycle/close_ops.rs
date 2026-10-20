@@ -18931,16 +18931,33 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         } else {
             Vec::new()
         };
+        // cas-2b10: a reset retires a dead holder's old-style shared lane into
+        // handoff history (cas-47a2); it is still a lane this child may have
+        // stranded work on, judged by the same cas-dbbf attribution below.
+        let handoff_shared_lanes: Vec<&str> = if has_delivery {
+            t.deliverables
+                .handoff_branches
+                .iter()
+                .map(String::as_str)
+                .filter(|branch| {
+                    branch.starts_with("factory/")
+                        && !branch.ends_with(&task_branch_suffix)
+                        && git_snapshot.read_ref(branch).read_ref().is_some()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // cas-b28c: reassignment can leave work on multiple task lanes.
         // Measure them all; the loop below takes the highest unmerged count.
         if fallback_branches.is_empty() {
             if let Some(branch) = parked_branch.as_ref() {
                 fallback_branches.push(branch.clone());
             }
-            if let Some(branch) = live_factory_branch.as_ref()
-                && !fallback_branches.contains(branch)
-            {
-                fallback_branches.push(branch.clone());
+            for branch in live_factory_branch.iter().map(String::as_str).chain(handoff_shared_lanes.iter().copied()) {
+                if !fallback_branches.iter().any(|known| known == branch) {
+                    fallback_branches.push(branch.to_string());
+                }
             }
         }
         let factory_branch = fallback_branches.first().cloned().or(parked_branch);
@@ -19096,14 +19113,16 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     .unwrap_or_else(|| {
                         count_unmerged_factory_commits(repo_path, refname, parent_branch)
                     });
-                // cas-dbbf: the assignee's bare `factory/<assignee>` lane is
+                // cas-dbbf: the assignee's bare `factory/<assignee>` lane (or a
+                // retired holder's, cas-2b10) is
                 // reused for later tasks. When every commit it holds beyond
                 // the target claims another task, none of them is this
                 // child's work, so they strand nothing here (cas-73b8 and
                 // cas-93db applied the same rule to a single task's close).
                 // An unnamed commit, or one naming this child, still counts.
                 let count = if count > 0
-                    && live_factory_branch.as_deref() == Some(commit)
+                    && (live_factory_branch.as_deref() == Some(commit)
+                        || handoff_shared_lanes.contains(&commit))
                     && task_attribution::lane_commits_all_claim_other_tasks(
                         repo_path,
                         refname,

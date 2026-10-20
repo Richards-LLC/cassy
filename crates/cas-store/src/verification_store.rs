@@ -1277,6 +1277,91 @@ pub fn expired_verification_dispatches(
         .collect()
 }
 
+/// Adopt only the latest unresolved proof for an orphaned owner. The caller
+/// supplies positively dead process snapshots; status/PID/fingerprint are
+/// compared again under the write lock so a revived owner is never displaced.
+/// Missing registry rows require a single live supervisor in this project.
+pub fn adopt_orphaned_verification_dispatches(
+    cas_dir: &Path,
+    supervisor_id: &str,
+    dead_owners: &[Agent],
+    deadline_at: DateTime<Utc>,
+) -> Result<usize> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let has_tasks: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_tasks {
+        tx.commit()?;
+        return Ok(0);
+    }
+    let session: Option<String> = tx.query_row(
+        "SELECT factory_session FROM agents WHERE id = ?1 AND role = 'supervisor' AND status IN ('active', 'idle')",
+        [supervisor_id], |row| row.get(0),
+    )?;
+    let live_supervisors: i64 = tx.query_row(
+        "SELECT count(*) FROM agents WHERE role = 'supervisor' AND status IN ('active', 'idle')",
+        [],
+        |row| row.get(0),
+    )?;
+    let ids = {
+        let mut stmt = tx.prepare(
+            "SELECT d.id FROM verification_dispatches d JOIN tasks t ON t.id = d.task_id
+             WHERE d.state IN ('pending', 'claimed', 'timed_out')
+               AND t.status IN ('in_progress', 'awaiting_merge', 'blocked')
+               AND d.owner_agent_id != ?1
+               AND d.id = (SELECT newest.id FROM verification_dispatches newest
+                           WHERE newest.task_id = d.task_id ORDER BY newest.requested_at DESC, newest.id DESC LIMIT 1)
+               AND NOT EXISTS (SELECT 1 FROM verifications v WHERE v.dispatch_id = d.id)",
+        )?;
+        stmt.query_map([supervisor_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let now = Utc::now().to_rfc3339();
+    let mut adopted = 0;
+    for id in ids {
+        let dispatch = get_verification_dispatch_with_conn(&tx, &id)?;
+        let prior: Option<(String, Option<u32>, Option<i64>, Option<String>)> = tx
+            .query_row(
+                "SELECT status, pid, pid_starttime, factory_session FROM agents WHERE id = ?1",
+                [&dispatch.owner_agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let may_adopt = match prior {
+            Some((status, pid, fingerprint, prior_session)) => {
+                prior_session == session
+                    && session.is_some()
+                    && dead_owners.iter().any(|agent| {
+                        agent.id == dispatch.owner_agent_id
+                            && agent.status.to_string() == status
+                            && agent.pid == pid
+                            && agent.pid_starttime.map(|value| value as i64) == fingerprint
+                    })
+            }
+            None => live_supervisors == 1,
+        };
+        if !may_adopt {
+            continue;
+        }
+        // Old children and bearer material remain auditable but cannot attest
+        // after the new supervisor takes responsibility for this exact proof.
+        tx.execute("UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE dispatch_id = ?1", params![id, now])?;
+        tx.execute("UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
+                    WHERE capability_id IN (SELECT id FROM verification_capabilities WHERE dispatch_id = ?1) AND state IN ('pending', 'bound')", params![id, now])?;
+        adopted += tx.execute(
+            "UPDATE verification_dispatches SET owner_agent_id = ?2, state = 'pending',
+             verifier_agent_id = NULL, capability_id = NULL, deadline_at = ?3, resolved_at = NULL WHERE id = ?1",
+            params![id, supervisor_id, deadline_at.to_rfc3339()],
+        )?;
+    }
+    tx.commit()?;
+    Ok(adopted)
+}
+
 /// Mark one exact due dispatch timed out. Other tasks are never touched.
 pub fn timeout_verification_dispatch(
     cas_dir: &Path,

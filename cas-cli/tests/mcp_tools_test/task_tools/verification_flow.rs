@@ -356,8 +356,12 @@ async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060()
     let mut env = TestEnvGuard::temp_home();
     let (_temp, _worker, root, task_id, worker_dir) =
         delivered_worktree_fixture(&mut env, "factory/orphaned-review").await;
-    let head = Command::new("git").arg("-C").arg(worker_dir.path())
-        .args(["rev-parse", "HEAD"]).output().unwrap();
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
     assert!(head.status.success());
     let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
     let tasks = open_task_store(&root).unwrap();
@@ -366,24 +370,71 @@ async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060()
     task.deliverables.parked_branch = Some("factory/orphaned-review".into());
     task.deliverables.factory_branch_anchor = Some(head.clone());
     tasks.update(&task).unwrap();
-    assert!(cas_store::get_latest_verification_dispatch(&root, &task_id).unwrap().is_none());
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
 
     let supervisor = registered_supervisor(&root, "restarted-review-owner").await;
-    supervisor.cas_verification_add(Parameters(VerificationAddRequest {
-        task_id: task_id.clone(), status: "approved".into(),
+    let request = || VerificationAddRequest {
+        task_id: task_id.clone(),
+        status: "approved".into(),
         summary: "Reviewed the immutable parked delivery after restart".into(),
-        confidence: Some(0.9), issues: None, files_reviewed: Some("delivered.txt".into()),
-        duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: None,
-    })).await.expect("parked review must mint its exact boundary without task close");
-    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id).unwrap().unwrap();
-    assert_eq!(dispatch.state, cas::types::VerificationDispatchState::Resolved);
+        confidence: Some(0.9),
+        issues: None,
+        files_reviewed: Some("delivered.txt".into()),
+        duration_ms: None,
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: None,
+    };
+    let parent = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD^"])
+        .output()
+        .unwrap();
+    assert!(parent.status.success());
+    task.deliverables.factory_branch_anchor =
+        Some(String::from_utf8(parent.stdout).unwrap().trim().into());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect_err("a parked branch that differs from its recorded tip cannot mint proof");
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect("parked review must mint its exact boundary without task close");
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatch.state,
+        cas::types::VerificationDispatchState::Resolved
+    );
     assert_eq!(dispatch.owner_agent_id, "restarted-review-owner");
     let proof = dispatch.repository.unwrap();
     assert_eq!(proof.head_commit, head);
     assert_eq!(proof.anchor_commits, vec![head]);
-    let verdict = open_verification_store(&root).unwrap().get_latest_for_task(&task_id).unwrap().unwrap();
+    let verdict = open_verification_store(&root)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
-    assert_eq!(verdict.provenance, cas::types::VerificationProvenance::SupervisorDirect);
+    assert_eq!(
+        verdict.provenance,
+        cas::types::VerificationProvenance::SupervisorDirect
+    );
 }
 
 /// cas-5c7a closed external ops while the supervisor checkout carried other

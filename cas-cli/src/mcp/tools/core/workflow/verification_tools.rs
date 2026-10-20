@@ -443,6 +443,11 @@ impl CasCore {
             dispatch_id
         } else if let Some(dispatch_id) = req.dispatch_id.clone() {
             dispatch_id
+        } else if supervisor_direct && task.status == TaskStatus::AwaitingMerge {
+            // A restart can leave an immutable parked delivery without an
+            // active review cycle. Factory verifiers use this authenticated
+            // supervisor context; recover the boundary without a close attempt.
+            self.recover_parked_verification_dispatch(&task, &caller)?.id
         } else {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -1207,9 +1212,68 @@ impl CasCore {
         }
     }
 
-    // ========================================================================
-    // Worktree Operations
-    // ========================================================================
+    fn recover_parked_verification_dispatch(
+        &self,
+        task: &Task,
+        caller: &cas_types::Agent,
+    ) -> Result<cas_types::VerificationDispatch, McpError> {
+        let refuse = |message: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Parked verification recovery refused: {message}")),
+            data: None,
+        };
+        if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
+            &caller.metadata,
+        ) {
+            return Err(refuse("the supervisor's task work is halted".into()));
+        }
+        let context = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| {
+                crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.cas_root,
+                    target,
+                )
+            })
+            .transpose()
+            .map_err(&refuse)?;
+        let root = context
+            .as_ref()
+            .map(|context| context.repo_root.as_path())
+            .or_else(|| self.cas_root.parent())
+            .ok_or_else(|| refuse("repository root unavailable".into()))?;
+        let proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_parked_delivery_proof(
+            root, task, context.as_ref().map(|context| context.target_branch.as_str()),
+        ).map_err(&refuse)?;
+        let boundary = match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+            .map_err(|error| refuse(error.to_string()))?
+        {
+            Some((receipt, transaction)) => {
+                if proof.anchor_commits != vec![receipt.commit_sha.clone()] {
+                    return Err(refuse(
+                        "delivery receipt no longer matches the parked anchor".into(),
+                    ));
+                }
+                cas_types::VerificationProofBoundary::delivery(receipt.id, transaction.id)
+            }
+            None => cas_types::VerificationProofBoundary::task_at(proof),
+        };
+        let now = chrono::Utc::now();
+        cas_store::timeout_verification_dispatch(&self.cas_root, &task.id, now)
+            .map_err(|error| refuse(error.to_string()))?;
+        cas_store::create_verification_dispatch_bound(
+            &self.cas_root,
+            &task.id,
+            &caller.id,
+            &caller.id,
+            &boundary,
+            now + chrono::Duration::minutes(10),
+            true,
+        )
+        .map_err(|error| refuse(error.to_string()))
+    }
 }
 
 fn verification_status_emoji(status: VerificationStatus) -> &'static str {

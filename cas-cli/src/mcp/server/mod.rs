@@ -788,6 +788,26 @@ impl CasCore {
 
         self.bind_agent_identity(canonical_id.clone(), source)?;
 
+        if source == AgentIdentitySource::ServerInternal {
+            let registered = agent_store.get(&canonical_id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to inspect registered agent: {error}")),
+                data: None,
+            })?;
+            crate::mcp::daemon::recover_supervisor_verification_dispatches(
+                &self.cas_root,
+                agent_store.as_ref(),
+                &registered,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to recover supervisor verification dispatches: {error}"
+                )),
+                data: None,
+            })?;
+        }
+
         info!(
             agent_id = %canonical_id,
             agent_name = %agent.name,

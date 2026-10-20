@@ -797,12 +797,7 @@ impl Config {
     /// Refresh the user-scoped managed Viktor default without copying a
     /// credential into configuration.
     pub fn refresh_viktor_managed_default(path: &Path) -> Result<bool> {
-        let mut config = Self::load_from(path)?;
-        let changed = config.ensure_viktor_managed_default();
-        if changed {
-            config.save_to(path)?;
-        }
-        Ok(changed)
+        Self::reconcile_viktor_managed_default(path, true)
     }
 }
 

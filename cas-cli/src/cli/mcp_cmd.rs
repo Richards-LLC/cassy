@@ -225,6 +225,9 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     guard_supervisor_only(&raw_name, Some(&server_config), &config, cas_root)?;
     config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
+    if scope.eq_ignore_ascii_case("user") && raw_name.eq_ignore_ascii_case("viktor") {
+        crate::cli::viktor::set_enabled(true)?;
+    }
     let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {
@@ -1190,6 +1193,7 @@ fn extract_auth_header(
 mod tests {
     use super::*;
     use cmcp_core::config::ServerConfig;
+    use cas_store::PromptQueueStore;
     use std::collections::HashMap;
 
     fn agent_context() -> crate::config::operator_policy::InvocationContext {
@@ -1432,5 +1436,80 @@ mod tests {
             cmcp_core::config::VIKTOR_CONVERSATION_TOOLS.len()
         );
         assert!(crate::mcp::viktor_watch::session_start_warning(&project_root).is_some());
+
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("false"));
+
+        let agents = crate::store::open_agent_store(&project_root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "supervisor".to_string(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("factory-1".to_string());
+        agents.register(&supervisor).unwrap();
+        cas_store::SqliteViktorWatchStore::open(&project_root)
+            .unwrap()
+            .record(
+                "thread-before-opt-out",
+                "run-before-opt-out",
+                "worker-session",
+                "worker-1",
+                "worker",
+                Some("factory-1"),
+                None,
+                None,
+                cas_store::DEFAULT_VIKTOR_WATCH_TTL_SECS,
+            )
+            .unwrap();
+        let alert_engine = cmcp_core::ProxyEngine::from_configs(HashMap::from([(
+            "viktor".to_string(),
+            ServerConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                auth: Some("env:CAS_TEST_MISSING_VIKTOR_KEY".to_string()),
+                headers: HashMap::new(),
+                oauth: false,
+            },
+        )]))
+        .await
+        .unwrap();
+        assert!(!alert_engine.upstream_connected("viktor").await);
+        assert_eq!(
+            crate::mcp::viktor_watch::alert_unpollable_watches(&project_root, &alert_engine)
+                .await
+                .unwrap(),
+            0,
+            "the opted-out daemon must not queue an absent-upstream prompt"
+        );
+        let queue = cas_store::SqlitePromptQueueStore::open(&project_root).unwrap();
+        queue.init().unwrap();
+        assert!(queue.poll_for_target("supervisor", 10).unwrap().is_empty());
+        alert_engine.shutdown().await;
+
+        let add_args = [
+            "--scope".to_string(),
+            "user".to_string(),
+            "viktor".to_string(),
+            "https://operator.example.invalid/mcp".to_string(),
+        ];
+        execute_add(&add_args, &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("true"),
+            "explicitly adding user Viktor must clear the managed opt-out"
+        );
+        cmcp_core::config::Config::reconcile_viktor_managed_default(
+            &user_path,
+            host_config.viktor_enabled(),
+        )
+        .unwrap();
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(matches!(
+            user_config.servers.get("viktor"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://operator.example.invalid/mcp"
+        ));
     }
 }

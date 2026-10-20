@@ -29,8 +29,12 @@ from pathlib import Path
 
 STATUSES = ("Met (live)", "Met (measured)", "Partial", "Gap", "Gap → PM")
 HYGIENE = [
-    # Ticket labels such as abc-12f4; a year after a hyphen (mid-2026) is prose.
-    ("ticket label", r"\b[a-z]{2,6}-(?![0-9]{4}\b)[0-9a-f]{4}\b"),
+    # CAS ids include all-digit and longer collision suffixes. Numeric tracker
+    # keys use uppercase prefixes; lowercase years such as mid-2026 are prose.
+    # Other legacy hex keys need a digit and a hex letter, unlike self-feed.
+    ("ticket label", re.compile(
+        r"\b(?:(?i:cas-[0-9a-f]{4,})|[A-Z][A-Z0-9]+-[0-9]+|"
+        r"[A-Za-z]{2,6}-(?=[0-9a-fA-F]*[0-9])(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4,})\b")),
     ("issue or PR number", r"#[0-9]{2,5}\b"),
     ("process word", r"\bPR\b|pull request|\bbranch\b|\bcommit\b|\bagent\b|\bworker\b"
                      r"|\bsupervisor\b|\bepic\b|\bsprint\b|\bticket\b"),
@@ -83,7 +87,7 @@ def hygiene(path, allow):
         for pattern in allowed:
             scrubbed = pattern.sub("", scrubbed)
         for label, pattern in HYGIENE:
-            match = re.search(pattern, scrubbed, re.I)
+            match = pattern.search(scrubbed) if isinstance(pattern, re.Pattern) else re.search(pattern, scrubbed, re.I)
             if match:
                 hits += 1
                 print(f"{path}:{number}: {label} {match.group(0)!r}: {line.strip()}")

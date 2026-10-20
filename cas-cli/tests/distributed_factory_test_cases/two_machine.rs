@@ -636,6 +636,7 @@ fn two_supervisors_discover_claim_message_reply_and_release() {
         "sup-a",
         "done with it; releasing now",
         Some("releasing cas-t100"),
+        None,
     )
     .unwrap()
     .expect("a peer message row");

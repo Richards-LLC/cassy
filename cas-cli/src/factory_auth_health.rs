@@ -318,15 +318,32 @@ pub fn claude_transcript_auth_failure(tail: &str) -> AuthFailureEvidence {
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        if kind == "assistant" {
+        // GH #1319: a logged-out Claude writes its refusal as a synthetic
+        // assistant record (`isApiErrorMessage: true`, `error:
+        // "authentication_failed"`, text "Login expired · Please run
+        // /login"). It is not an answer, so it must not read as healthy.
+        let api_error = kind == "assistant"
+            && record
+                .get("isApiErrorMessage")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+        if kind == "assistant" && !api_error {
             // The model answered, so whatever the credential state was, it
             // worked. This is the guard against killing a worker over a
             // transient 401 the harness retried past.
             latest = Some(AuthFailureEvidence::Healthy);
             continue;
         }
-        let text = claude_record_text(&record);
-        if text.is_empty() || !claude_text_is_auth_failure(&text) {
+        let auth_error = api_error
+            && record.get("error").and_then(serde_json::Value::as_str)
+                == Some("authentication_failed");
+        let text = match api_error {
+            true => Some(claude_api_error_text(&record))
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| claude_record_text(&record)),
+            false => claude_record_text(&record),
+        };
+        if text.is_empty() || !(auth_error || claude_text_is_auth_failure(&text)) {
             continue;
         }
         let occurrence = record
@@ -354,6 +371,20 @@ fn claude_record_text(record: &serde_json::Value) -> String {
         }
     }
     String::new()
+}
+
+/// The visible text of a synthetic API-error assistant record.
+fn claude_api_error_text(record: &serde_json::Value) -> String {
+    record
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn claude_text_is_auth_failure(text: &str) -> bool {

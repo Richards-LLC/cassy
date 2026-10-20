@@ -1521,6 +1521,9 @@ pub struct PeerReply {
 /// `sender_agent_id` / `sender_name`. The row must be a Daemon-stamped peer
 /// envelope addressed to that supervisor; the reply goes to the original
 /// sender with `in_reply_to` = the original cloud id, and the row is acked.
+/// `successor` redirects it to the supervisor now holding the original
+/// sender's slot (GH #1319).
+#[allow(clippy::too_many_arguments)]
 pub fn reply_to_peer_row(
     cas_root: &Path,
     queue: &dyn PromptQueueStore,
@@ -1529,6 +1532,7 @@ pub fn reply_to_peer_row(
     sender_name: &str,
     body: &str,
     summary: Option<&str>,
+    successor: Option<&Peer>,
 ) -> Result<Option<PeerReply>, String> {
     let Some(row) = queue
         .queued_prompt(row_id)
@@ -1563,14 +1567,23 @@ pub fn reply_to_peer_row(
     // scope; the cloud refuses it unless both share the user.
     let recipient_project =
         (envelope.scope == PeerScope::User).then(|| envelope.repo.clone());
+    // GH #1319: the original sender ended or cannot read; its successor holds
+    // the slot. The reply still names the message it answers.
+    let (recipient_id, to) = match successor {
+        Some(peer) => (peer.agent_id.clone(), format!("{}@{}", peer.name, peer.machine)),
+        None => (
+            envelope.sender_agent_id.clone(),
+            format!("{}@{}", envelope.sender_name, envelope.machine),
+        ),
+    };
     let receipt = send_scoped(
         cas_root,
         sender_agent_id,
-        &envelope.sender_agent_id,
+        &recipient_id,
         body,
         summary,
         Some(&envelope.id),
-        &format!("{}@{}", envelope.sender_name, envelope.machine),
+        &to,
         envelope.scope,
         recipient_project,
     )
@@ -1578,10 +1591,7 @@ pub fn reply_to_peer_row(
     queue
         .ack(row_id)
         .map_err(|error| format!("reply sent, but acking message {row_id} failed: {error}"))?;
-    Ok(Some(PeerReply {
-        receipt,
-        to: format!("{}@{}", envelope.sender_name, envelope.machine),
-    }))
+    Ok(Some(PeerReply { receipt, to }))
 }
 
 /// The HTTP mailbox for a project, from its own cloud config.

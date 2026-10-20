@@ -163,6 +163,20 @@ pub(crate) fn presence_agent(root: &Path, agent: &crate::types::Agent) -> crate:
     agent
         .metadata
         .insert(PR_META.into(), read_snapshot(root).unwrap_or_default());
+    // GH #1319: a supervisor whose harness is logged out still heartbeats,
+    // so peers would read it as live and their mail as delivered. Publish the
+    // harness's own refusal; its next answered turn clears it.
+    let auth_failure =
+        match crate::mcp::tools::service::factory_ops::supervisor_auth_failure_evidence(
+            root, &agent,
+        ) {
+            crate::factory_auth_health::AuthFailureEvidence::Failed { message, .. } => message,
+            _ => String::new(),
+        };
+    agent.metadata.insert(
+        crate::cloud::peers::META_HARNESS_AUTH_FAILED.into(),
+        auth_failure,
+    );
     // Split records are existing repository collaboration records, never
     // private task lock payloads or titles. An unreadable inventory clears
     // old metadata rather than publishing a fresh empty section.

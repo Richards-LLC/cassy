@@ -456,6 +456,14 @@ async fn epic_split_reject_notifies_and_releases_requester_cas_ae81() {
     assert_eq!(prowl.tick().await.delivered, 1);
     assert_eq!(cloud_holder(&cloud, "cas-d1"), None, "rejection releases the requester's own claim");
     assert_split_decision(&prowl, &id, "reject");
+    // Crash after release but before its settlement write: prevent a new
+    // supervisor-owned split claim until that older cleanup is settled.
+    rusqlite::Connection::open(prowl.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET cleanup_pending=1 WHERE id=?1", [&id]).unwrap();
+    let held = prowl.factory(json!({"id": EPIC, "target": "soundwave", "mine": "cas-d1"}))
+        .await.unwrap_err();
+    assert!(held.contains(&id), "{held}");
+    assert!(prowl.tick().await.errors.is_empty());
     soundwave.start("cas-d1", false).await.unwrap();
 }
 

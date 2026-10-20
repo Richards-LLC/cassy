@@ -32,7 +32,7 @@ nothing was uploaded, so the next attempt is informed rather than a guess.
 
 ## Critique
 
-```
+```text
 terminal-qa: PASS cas-artifact-list · 12 runs · 0 fail · 0 warn · 0 allowed
 terminal-qa: PASS cas-artifact-show · 12 runs · 0 fail · 0 warn · 0 allowed
 ```

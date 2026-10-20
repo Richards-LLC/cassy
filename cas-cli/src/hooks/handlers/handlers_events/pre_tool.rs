@@ -8098,6 +8098,15 @@ mod workspace_contract_tests {
             ("sh -c \"printf x $UNKNOWN_SCRIPT\"", true),
             ("sh -c 'printf \"%s\" \"$(cat src/new.rs)\"'", false),
             ("sh -c 'printf \"%s\" \"$(touch ../../config.toml)\"'", true),
+            // cas-74b2: nested double quotes belong to the substitution's
+            // shell, including parentheses that are merely filename data.
+            (r#"printf '%s\n' "$(cat "status).txt")""#, false),
+            (r#"printf '%s\n' "$(printf x > "../../outside).txt")""#, true),
+            (r#"for file in "$(cat "status).txt")"; do cat "$file"; done"#, false),
+            (r#"for file in "$(cat "status).txt")"; do rm ../../config.toml; done"#, true),
+            (r#"while [ "$(cat "status).txt")" = waiting ]; do cat status.txt; done"#, false),
+            (r#"while [ "$(cat "status).txt")" = waiting ]; do git -C ../.. push origin main; done"#, true),
+            (r#"printf '%s\n' "$(cat"#, true),
             // cas-9623: a quoted cat heredoc is literal argument data. Its
             // quotes, substitutions and parentheses must not become syntax.
             ("gh issue comment 1290 --body \"$(cat <<'EOF'\nIt's done: $(touch /etc/cas-literal) (\nEOF\n)\"", false),

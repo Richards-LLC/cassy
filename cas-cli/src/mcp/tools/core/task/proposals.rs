@@ -968,10 +968,10 @@ mod tests {
             }
             // cas-11ba: the board, ready and the QA batch show exactly the
             // tasks this project may start.
-            let empty = || serde_json::from_value(serde_json::json!({})).unwrap();
+            let empty = || serde_json::json!({});
             for (view, shown) in [
-                ("ready", core.cas_task_ready(Parameters(empty())).await),
-                ("list", core.cas_task_list(Parameters(empty())).await),
+                ("ready", core.cas_task_ready(Parameters(serde_json::from_value(empty()).unwrap())).await),
+                ("list", core.cas_task_list(Parameters(serde_json::from_value(empty()).unwrap())).await),
             ] {
                 let shown = shown.unwrap();
                 let rmcp::model::RawContent::Text(text) = &shown.content[0].raw else {

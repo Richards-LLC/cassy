@@ -112,10 +112,46 @@ impl SlackConfig {
     }
 }
 
+/// Persistent host policy for Commander publication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HubTransportMode {
+    /// Try Tailscale Serve, retaining loopback with a warning on failure.
+    #[default]
+    Auto,
+    /// Refuse startup unless Tailscale Serve publishes successfully.
+    Required,
+    /// Never request Tailscale Serve.
+    Loopback,
+}
+
+impl HubTransportMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Required => "required",
+            Self::Loopback => "loopback",
+        }
+    }
+
+    pub fn publishes(self) -> bool {
+        self != Self::Loopback
+    }
+
+    pub fn require_publication(self, published: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(self != Self::Required || published,
+            "Hub transport required: Tailscale Serve is unavailable.\nRun `tailscale status`, then `cas hub restart`.");
+        Ok(())
+    }
+}
+
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {
-    /// Publish the machine hub through Tailscale Serve by default. Explicit false opts out.
+    /// Host transport intent, preserved across restart, service launch and update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_mode: Option<HubTransportMode>,
+    /// Legacy setting, used only when transport_mode is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale_serve: Option<bool>,
     /// Public origin used when authorizing a Commander page.
@@ -128,6 +164,18 @@ pub struct HubConfig {
     /// An explicit empty list disables browsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_roots: Option<Vec<String>>,
+}
+
+impl HubConfig {
+    pub fn transport_mode(&self) -> HubTransportMode {
+        self.transport_mode.unwrap_or_else(|| {
+            if self.tailscale_serve == Some(false) {
+                HubTransportMode::Loopback
+            } else {
+                HubTransportMode::Auto
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

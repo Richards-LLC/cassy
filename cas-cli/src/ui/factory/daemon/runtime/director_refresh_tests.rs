@@ -28,6 +28,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         std::slice::from_ref(&fixture.event),
     );
     assert_eq!(prompts.len(), 1);
+    // pin: the incident's CI-success teammate emitter is the route under test.
     assert!(prompts[0].text.contains("CI completed successfully for delivery"));
     assert!(prompts[0].retract_task.is_some());
     let verdicts = fixture.app.deliverability_request().read(None, &prompts);

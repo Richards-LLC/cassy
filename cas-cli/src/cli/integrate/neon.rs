@@ -598,16 +598,45 @@ pub fn detect(repo_root: &Path) -> NeonDetection {
         }
     }
 
-    if let Ok(pkg) = super::fs::read_capped(&repo_root.join(PACKAGE_JSON)) {
+    // cas-ac94: monorepos declare the driver in a workspace package
+    // (`apps/backend/package.json`), not the root, so probe the root and then
+    // one level of `apps/*` and `packages/*`, bounded and capped.
+    out.package_neon_dep = package_manifests(repo_root).iter().any(|path| {
         // Cheap structural check: any `"@neondatabase/...": ` or
         // `"@prisma/adapter-neon": ` is enough — we don't care about which
         // dep section.
-        if pkg.contains(NEONDATABASE_DEP_PREFIX) || pkg.contains(NEON_PRISMA_ADAPTER_DEP) {
-            out.package_neon_dep = true;
-        }
-    }
+        super::fs::read_capped(path).is_ok_and(|pkg| {
+            pkg.contains(NEONDATABASE_DEP_PREFIX) || pkg.contains(NEON_PRISMA_ADAPTER_DEP)
+        })
+    });
 
     out
+}
+
+/// Workspace directories whose immediate children may hold a `package.json`.
+const WORKSPACE_DIRS: &[&str] = &["apps", "packages"];
+/// At most this many workspace children are probed per directory.
+const MAX_WORKSPACE_CHILDREN: usize = 64;
+
+/// The root `package.json` plus `apps/*/package.json` and
+/// `packages/*/package.json`, in a stable order. Symlinked workspace
+/// directories are skipped, and each directory is capped at
+/// [`MAX_WORKSPACE_CHILDREN`] entries.
+fn package_manifests(repo_root: &Path) -> Vec<PathBuf> {
+    let mut manifests = vec![repo_root.join(PACKAGE_JSON)];
+    for dir in WORKSPACE_DIRS {
+        let Ok(entries) = fs::read_dir(repo_root.join(dir)) else {
+            continue;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path().join(PACKAGE_JSON))
+            .collect();
+        children.sort();
+        manifests.extend(children.into_iter().take(MAX_WORKSPACE_CHILDREN));
+    }
+    manifests
 }
 
 // --- Branch heuristic ------------------------------------------------------
@@ -677,16 +706,60 @@ pub struct RefreshOpts {
 
 // --- Public CLI dispatch ---------------------------------------------------
 
+/// `cas integrate neon` verbs. `init` accepts explicit org and project ids so
+/// it runs without prompts (cas-ac94).
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum NeonAction {
+    /// First-time setup: detect Neon, pick org and project, write SKILL files.
+    Init {
+        /// Neon organization id; skips the org prompt (and detection).
+        #[arg(long, value_name = "ORG_ID")]
+        org_id: Option<String>,
+        /// Neon project id; skips the project prompt.
+        #[arg(long, value_name = "PROJECT_ID")]
+        project_id: Option<String>,
+    },
+    /// Re-run detection; update outer content, preserve user-owned keep blocks.
+    Refresh,
+    /// Read recorded IDs, query Neon, return a staleness report.
+    Verify,
+}
+
+impl From<NeonAction> for IntegrationAction {
+    fn from(action: NeonAction) -> Self {
+        match action {
+            NeonAction::Init { .. } => IntegrationAction::Init,
+            NeonAction::Refresh => IntegrationAction::Refresh,
+            NeonAction::Verify => IntegrationAction::Verify,
+        }
+    }
+}
+
+impl NeonAction {
+    /// The init choices the flags supply; empty for other verbs.
+    pub fn init_choices(&self) -> InitChoices {
+        match self {
+            NeonAction::Init { org_id, project_id } => InitChoices {
+                org_id: org_id.clone(),
+                project_id: project_id.clone(),
+                ..Default::default()
+            },
+            _ => InitChoices::default(),
+        }
+    }
+}
+
 /// CLI entrypoint. Constructs a [`LiveNeonClient`] and dispatches.
 ///
 /// Repo-root resolution goes through [`super::fs::locate_repo_root`] so the
 /// handler operates on the inner repo when invoked from a submodule or
 /// nested-worktree directory (cas-fc38).
-pub fn execute(action: IntegrationAction) -> Result<IntegrationOutcome> {
+pub fn execute(action: NeonAction) -> Result<IntegrationOutcome> {
     let repo_root = super::fs::locate_repo_root().context("locating repo root")?;
     let client = LiveNeonClient::new();
-    match action {
-        IntegrationAction::Init => init(&repo_root, &client, InitChoices::default()),
+    let choices = action.init_choices();
+    match action.into() {
+        IntegrationAction::Init => init(&repo_root, &client, choices),
         IntegrationAction::Refresh => refresh(&repo_root, &client, RefreshOpts::default()),
         IntegrationAction::Verify => verify(&repo_root, &client),
     }
@@ -1307,6 +1380,16 @@ fn parse_kv_row(line: &str) -> Option<(String, String)> {
 
 fn pick_org_interactively(orgs: &[NeonOrg]) -> Result<String> {
     use inquire::Select;
+    use std::io::IsTerminal;
+    // cas-ac94: no terminal means no prompt; name the flag that answers it.
+    if !std::io::stdin().is_terminal() {
+        let ids: Vec<&str> = orgs.iter().map(|org| org.id.as_str()).collect();
+        return Err(anyhow!(
+            "{} Neon organizations are available and there is no terminal to choose one; rerun with --org-id <id> (one of: {})",
+            orgs.len(),
+            ids.join(", ")
+        ));
+    }
     let display: Vec<String> = orgs
         .iter()
         .map(|o| format!("{} — {}", o.name, o.id))
@@ -1357,6 +1440,13 @@ fn pick_project(projects: &[NeonProject], basename: &str) -> Result<String> {
     }
 
     use inquire::Select;
+    use std::io::IsTerminal;
+    // cas-ac94: no terminal means no prompt; name the flag that answers it.
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "no Neon project clearly matches repo {basename:?} and there is no terminal to choose one; rerun with --project-id <id> (see `neonctl projects list --org-id <org>`)"
+        ));
+    }
     let display: Vec<String> = projects
         .iter()
         .map(|p| format!("{} — {}", p.name, p.id))
@@ -1672,6 +1762,49 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(detect(repo.path()).detected());
+    }
+
+    /// cas-ac94: a monorepo that declares the driver only in
+    /// `apps/backend/package.json` is detected.
+    #[test]
+    fn detect_finds_a_workspace_neon_dep_cas_ac94() {
+        let repo = make_repo();
+        fs::write(repo.path().join("package.json"), r#"{ "workspaces": ["apps/*"] }"#).unwrap();
+        fs::create_dir_all(repo.path().join("apps/web")).unwrap();
+        fs::write(repo.path().join("apps/web/package.json"), r#"{ "dependencies": { "next": "15" } }"#).unwrap();
+        fs::create_dir_all(repo.path().join("apps/backend")).unwrap();
+        fs::write(
+            repo.path().join("apps/backend/package.json"),
+            r#"{ "dependencies": { "@prisma/adapter-neon": "^6.0.0" } }"#,
+        )
+        .unwrap();
+        let d = detect(repo.path());
+        assert!(d.package_neon_dep && d.detected(), "{d:?}");
+    }
+
+    /// cas-ac94: with two orgs and no terminal, init refuses and names
+    /// `--org-id`; the parsed `--org-id`/`--project-id` flags then configure
+    /// it without any prompt.
+    #[test]
+    fn init_without_a_terminal_names_org_id_and_the_flags_configure_it_cas_ac94() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            action: NeonAction,
+        }
+        let repo = make_repo();
+        fs::create_dir_all(repo.path().join("apps/backend")).unwrap();
+        write_pkg_with_neon_dep(&repo.path().join("apps/backend"));
+        let client = fixture_with_two_orgs();
+        let refusal = init(repo.path(), &client, InitChoices::default()).unwrap_err().to_string();
+        assert!(refusal.contains("--org-id") && refusal.contains("org-a"), "{refusal}");
+        assert!(!repo.path().join(CLAUDE_SKILL).exists());
+
+        let parsed = Cli::parse_from(["neon", "init", "--org-id", "org-a", "--project-id", "proj-a"]);
+        let outcome = init(repo.path(), &client, parsed.action.init_choices()).unwrap();
+        assert_eq!(outcome.status, IntegrationStatus::Configured);
+        assert!(fs::read_to_string(repo.path().join(CLAUDE_SKILL)).unwrap().contains("proj-a"));
     }
 
     #[test]

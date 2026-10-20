@@ -86,7 +86,7 @@ pub enum IntegrateCommands {
     /// Integrate the project with Neon (project, branches, org).
     Neon {
         #[command(subcommand)]
-        action: PlatformAction,
+        action: neon::NeonAction,
     },
     /// Integrate the project with GitHub (repo path from `git remote -v`).
     ///
@@ -135,7 +135,7 @@ impl From<PlatformAction> for IntegrationAction {
 pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
     let outcome = match cmd {
         IntegrateCommands::Vercel { action } => vercel::execute((*action).into())?,
-        IntegrateCommands::Neon { action } => neon::execute((*action).into())?,
+        IntegrateCommands::Neon { action } => neon::execute(action.clone())?,
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
         IntegrateCommands::Violet(args) => {
@@ -184,7 +184,7 @@ mod tests {
     fn dispatch(cmd: &IntegrateCommands) -> anyhow::Result<IntegrationOutcome> {
         match cmd {
             IntegrateCommands::Vercel { action } => vercel::execute((*action).into()),
-            IntegrateCommands::Neon { action } => neon::execute((*action).into()),
+            IntegrateCommands::Neon { action } => neon::execute(action.clone()),
             IntegrateCommands::Github { action } => github::execute(action.clone()),
             // Deliberately not dispatched here: `violet` writes to
             // machine-scoped paths outside the repo, so the parser-level tests

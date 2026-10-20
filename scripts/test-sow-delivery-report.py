@@ -53,7 +53,7 @@ class SowGateTests(unittest.TestCase):
                                      '--base', 'https://example.invalid', '--out', tmp,
                                      '--login', '--credentials', str(Path(tmp) / 'not-a-credential-file')],
                                     capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 2)
             self.assertIn('login failed:', result.stderr)
             self.assertIn('--success-url', result.stderr)
             self.assertFalse((Path(tmp) / 'manifest.json').exists())

@@ -106,7 +106,7 @@ async function main() {
     process.exit(2);
   }
   if (o.login && (typeof o['success-url'] !== 'string' || !o['success-url'].trim())) {
-    console.error('login failed: --login requires --success-url <regex> matching the signed-in URL');
+    console.error("login failed: --login requires --success-url <regex>.\nExample: --success-url '^https://[^/]+/admin/' (use your signed-in route).");
     process.exit(2);
   }
   const shots = JSON.parse(readFileSync(o.shots, 'utf8'));

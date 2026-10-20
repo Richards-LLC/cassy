@@ -87,6 +87,14 @@ request fields naming another worker do not credit that worker. Open harness
 tool calls and live worker-owned child processes continue to count as activity;
 unrelated process trees and persistent MCP sidecars do not.
 
+Claude MCP responses append factory mail only when the call's tool-use id
+belongs to the registered parent's top-level transcript. Subagent and untagged
+Claude calls preserve the parent mailbox. Transport handoff remains provisional:
+the parent's next turn can surface the body without an explicit poll. Overflow
+notes name the unread message id and summary; the next eligible turn or tool
+boundary retries bodies that did not fit. `message_status` reports
+`recipient_receipt` separately for transport handoff and rendered context.
+
 Abandoned queue messages report `undelivered` in the `message_status` header
 and JSON `legacy_status`, even though their queue rows are processed. A sender
 notice preserves the wake-gate refusal when one was recorded. Authenticated

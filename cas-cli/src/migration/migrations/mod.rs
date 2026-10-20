@@ -256,6 +256,7 @@ mod m277_communication_slos;
 mod m278_external_work_request_journal;
 pub mod m279_prompt_queue_health_schema;
 pub mod m280_rule_candidates;
+pub mod m281_accepted_proposal_targets;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -549,6 +550,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m278_external_work_request_journal::MIGRATION,
     m279_prompt_queue_health_schema::MIGRATION,
     m280_rule_candidates::MIGRATION,
+    m281_accepted_proposal_targets::MIGRATION,
 ];
 
 #[cfg(test)]

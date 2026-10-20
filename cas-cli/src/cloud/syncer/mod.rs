@@ -20,7 +20,8 @@ pub use knowledge::{
 pub(crate) mod pull;
 pub(crate) use pull::{
     SyncWarningSummary, collect_sync_warnings, entity_matches_project,
-    accepted_proposal_target_project, render_task_proposal_provenance,
+    contains_proposal_provenance_marker, record_pulled_accepted_proposal,
+    render_task_proposal_provenance,
 };
 mod push;
 mod team_push;

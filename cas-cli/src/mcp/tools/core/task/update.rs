@@ -447,6 +447,17 @@ impl CasCore {
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        if [req.notes.as_deref(), proof_scope_fix_reason]
+            .into_iter()
+            .flatten()
+            .any(crate::cloud::syncer::contains_proposal_provenance_marker)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556)."),
+                data: None,
+            });
+        }
         let task_store = self.open_task_store()?;
         let mut requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());

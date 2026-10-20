@@ -93,6 +93,32 @@ impl VioletError {
 impl std::fmt::Display for VioletError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
+        // cas-d47fd750acf1df00: a `format_unreadable` refusal (from the hub or
+        // the local draft check) lists each violation as given, so the agent
+        // can apply its fix without a second round trip.
+        let violations = self
+            .envelope
+            .as_ref()
+            .and_then(|envelope| envelope.pointer("/error/detail/violations"))
+            .and_then(Value::as_array);
+        for violation in violations.into_iter().flatten() {
+            let field = |key: &str| match violation.get(key) {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            let place = match violation.get("message") {
+                Some(_) => format!("{}, line {}", field("message"), field("line")),
+                None => format!("line {}", field("line")),
+            };
+            write!(
+                f,
+                "\n  - {} ({place}): {}\n    fix: {}",
+                field("rule"),
+                field("excerpt"),
+                field("fix")
+            )?;
+        }
         if !self.file_ids.is_empty() {
             write!(
                 f,

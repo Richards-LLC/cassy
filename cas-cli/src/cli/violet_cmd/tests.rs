@@ -898,3 +898,115 @@ fn every_local_code_is_documented_in_the_violet_skill() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// cas-d47fd750acf1df00: readable posts (format_unreadable)
+// ---------------------------------------------------------------------------
+
+/// The hub's documented refusal: retryable false, detail.violations[] with
+/// rule, line, excerpt and fix.
+fn format_unreadable_receipt() -> Value {
+    json!({
+        "ok": false, "schema_version": 1,
+        "error": {
+            "code": "format_unreadable",
+            "message": "the post is hard to read; nothing was sent",
+            "retryable": false,
+            "detail": {"violations": [
+                {"rule": "first_line_too_long", "line": 1,
+                 "excerpt": "Missed snapshots: checked every post since 5 Oct and the scheduler is solid",
+                 "fix": "Make the first line one sentence of at most 100 characters."},
+                {"rule": "bold_sentence", "line": 3,
+                 "excerpt": "*Snapshot health, posts published 5-19 Oct*",
+                 "fix": "Bold only a 2-4 word label."}
+            ]}
+        }
+    })
+}
+
+#[test]
+fn a_format_unreadable_refusal_prints_every_violation_and_fails() {
+    for json_output in [false, true] {
+        let hub = ScriptedHub::with(vec![format_unreadable_receipt()]);
+        let (out, result) = run_cli(
+            &["post", "--channel", "cas-internal", "--text", "Snapshots are healthy."],
+            &hub,
+            json_output,
+            &no_gate,
+        );
+        let error = result.expect_err("an unreadable post exits non-zero");
+        assert_eq!(error.code, "format_unreadable");
+        assert!(!error.retryable);
+        let expected = format_unreadable_receipt();
+        if json_output {
+            let printed: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(printed["error"]["detail"]["violations"], expected["error"]["detail"]["violations"]);
+        } else {
+            let text = error.to_string();
+            for violation in expected["error"]["detail"]["violations"].as_array().unwrap() {
+                let line = format!(
+                    "  - {} (line {}): {}\n    fix: {}",
+                    violation["rule"].as_str().unwrap(),
+                    violation["line"],
+                    violation["excerpt"].as_str().unwrap(),
+                    violation["fix"].as_str().unwrap()
+                );
+                assert!(text.contains(&line), "missing {line:?} in {text}");
+            }
+        }
+    }
+}
+
+/// The operator's hard rules: a draft naming a file it does not attach, or
+/// showing a UTC time, is refused before anything reaches the hub. Code
+/// blocks and Slack links are exempt, and an attached file may be named.
+#[test]
+fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
+    let refused = ScriptedHub::default();
+    let (_, result) = run_cli(
+        &["post", "--channel", "cas-internal", "--text",
+          "Deploy finished at 14:42Z.\n\nFull breakdown in ~/reports/summary.md"],
+        &refused,
+        false,
+        &no_gate,
+    );
+    let error = result.expect_err("hard rules refuse the draft");
+    assert_eq!(error.code, "format_unreadable");
+    let rules: Vec<String> = error.envelope.as_ref().unwrap()["error"]["detail"]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|violation| violation["rule"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(rules, ["utc_time", "unattached_file"]);
+    assert_eq!(refused.connects(), 0, "nothing reaches the hub");
+
+    let dir = TempDir::new().unwrap();
+    let path = write_file(&dir, "summary.md", b"# summary\n");
+    let allowed = ScriptedHub::with(vec![file_receipt("F1", "summary.md", b"# summary\n")]);
+    let (_, result) = run_cli(
+        &["post", "--channel", "cas-internal", "--file", path.to_str().unwrap(), "--text",
+          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>"],
+        &allowed,
+        false,
+        &no_gate,
+    );
+    result.expect("CT times, attached files, code blocks and Slack links pass");
+    assert_eq!(allowed.calls().len(), 1);
+
+    let thread = ScriptedHub::default();
+    let (_, result) = run_cli(
+        &["thread", "--channel", "cas-internal", "--text", "Release is live.",
+          "--reply", "Report is art-1234abcd.", "--idempotency-key", "k1"],
+        &thread,
+        false,
+        &no_gate,
+    );
+    let error = result.expect_err("a reply naming an unattached artifact is refused");
+    let violation = &error.envelope.as_ref().unwrap()["error"]["detail"]["violations"][0];
+    assert_eq!(violation["rule"], "unattached_file");
+    assert_eq!(violation["message"], "reply 1");
+    // pin: the plain refusal names the rule, message and line so an agent can apply the fix without --json
+    assert!(error.to_string().contains("unattached_file (reply 1, line 1): Report is art-1234abcd."));
+    assert_eq!(thread.connects(), 0);
+}

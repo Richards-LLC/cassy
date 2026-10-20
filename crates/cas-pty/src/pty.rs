@@ -7132,6 +7132,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn supervisor_epic_status_instructions_include_required_id() {
+        // pin: factory_epic_status rejects calls without the epic id.
+        for (harness, tool_prefix) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+        ] {
+            let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
+            let expected = format!("{tool_prefix}factory action=epic_status id=<epic-id>");
+            let bare_call = format!("{tool_prefix}factory action=epic_status`");
+            assert!(surface.contains(&expected), "{harness} is missing {expected}");
+            assert!(
+                !surface.contains(&bare_call),
+                "{harness} still includes an epic_status call without its required id"
+            );
+        }
+    }
+
     /// AC-3 (AGENTS.md decision): the Codex role contract is supplied entirely by
     /// the launch instruction string injected via `--config
     /// developer_instructions` — NO AGENTS.md file is written or required. The

@@ -103,9 +103,12 @@ that supervisor receives each original source, summary and complete body in an
 ordinary inbox row. These recovery notices do not fold into the routine
 ended-worker digest. Large originals remain readable through `inbox_poll`.
 Recovery rows require daemon origin, the delivery-watchdog source and their
-recovery dedupe marker; assignment checks in the daemon and inbox poll treat
-these original bodies as history. A caller-supplied watchdog name cannot claim
-that exemption.
+recovery dedupe marker; assignment checks in daemon delivery, inbox poll and
+turn-start hooks use the same store predicate to treat these bodies as history.
+A caller-supplied watchdog name cannot claim that exemption. Recovery rows use
+the queue delivery and hook lane. The director's separate event-generated
+prompts have no queue provenance; their ordinary stale-assignment recheck
+continues to refuse closed work.
 
 For delivery diagnosis, the `prompt_queue` and its receipt tables live in the
 project's `.cas/cas.db`. Open it read-only to avoid creating a misleading empty

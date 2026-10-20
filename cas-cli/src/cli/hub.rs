@@ -3965,6 +3965,9 @@ mod tests {
         let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
         assert!(rendered.contains("last pid 42 exited"), "{rendered}");
+        assert!(rendered.contains("cas hub start"), "{rendered}");
+        assert!(!rendered.contains("version drift"), "{rendered}");
+        assert!(!rendered.contains("cas hub service install"), "{rendered}");
         assert!(
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"

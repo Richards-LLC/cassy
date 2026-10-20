@@ -154,6 +154,88 @@ async fn cas_f265_idle_supervisor_time_reminder_wakes_once_even_with_recent_chec
     }
 }
 
+/// cas-3866: give the fixture's idle Claude supervisor a real transcript whose
+/// last turn ran one tool call to completion and ended. Claude Code replays the
+/// call's `tool_use` in an `api-request-blob` record after its `tool_result`;
+/// the transcript has been quiet for ten minutes, as an idle pane's is.
+fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &FactoryDaemon) {
+    let agents = open_agent_store(daemon.app.cas_dir()).unwrap();
+    let mut supervisor = agents.get("single-sup").unwrap();
+    let clone = root.path().to_str().unwrap().to_string();
+    supervisor.metadata.insert("clone_path".into(), clone.clone());
+    agents.register(&supervisor).unwrap();
+    let slug: String = clone.chars().map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
+    let dir = dirs::home_dir().unwrap().join(".claude/projects").join(slug);
+    std::fs::create_dir_all(&dir).unwrap();
+    let call = r#"{"type":"tool_use","id":"toolu_3866","name":"Bash","input":{"command":"gh run view 42"}}"#;
+    let lines = [
+        format!(r#"{{"type":"assistant","timestamp":"2026-10-19T22:39:34Z","message":{{"role":"assistant","content":[{call}],"stop_reason":"tool_use"}}}}"#),
+        r#"{"type":"user","timestamp":"2026-10-19T22:39:35Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3866","content":"completed"}]}}"#.to_string(),
+        format!(r#"{{"type":"api-request-blob","hash":"h","sessionId":"single-sup","message":{{"role":"assistant","content":[{call}]}}}}"#),
+        r#"{"type":"assistant","timestamp":"2026-10-19T22:41:28Z","message":{"role":"assistant","content":[{"type":"text","text":"Waiting on the merge queue."}],"stop_reason":"end_turn"}}"#.to_string(),
+    ];
+    let path = dir.join("single-sup.jsonl");
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+        .unwrap();
+}
+
+/// cas-3866: an idle Claude supervisor is woken by a fired `ci_completed`
+/// reminder or a `supervisor_stalled` relay although its transcript replays a
+/// finished tool call. Before the fix the replay read as "recipient has a tool
+/// call in flight" and the gate declined both kinds for 12.6 h.
+async fn idle_supervisor_with_replayed_call_wakes(stalled: bool) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    idle_transcript_replaying_a_finished_call(&root, &daemon);
+    let body = if stalled {
+        let body = crate::prompt_revalidation::attach_blocker_envelope(
+            "<worker-attention kind=\"supervisor_stalled\" worker=\"supervisor\" notification_id=\"21387\">\n\
+             Supervisor actionable-idle for 10m. Merge cas-675a.\n\
+             Run `factory action=worker_status` and reassign or recover the worker as needed.\n\
+             </worker-attention>",
+            "ready work",
+            None,
+        );
+        open_prompt_queue_store(daemon.app.cas_dir())
+            .unwrap()
+            .enqueue_idempotent(
+                "lifecycle-wake:worker-attention:21387",
+                daemon.app.supervisor_name(),
+                &body,
+                Some(&daemon.session_name),
+                Some("supervisor_stalled: supervisor"),
+                None,
+                "worker-attention:21387",
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap();
+        body
+    } else {
+        dispatch(&mut daemon, true, false).1
+    };
+    daemon.process_prompt_queue().await.unwrap();
+    typed_once(&root, &mut daemon, &body).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3866_idle_claude_supervisor_wakes_for_ci_reminder_past_replayed_tool_call() {
+    if child("cas_3866_idle_claude_supervisor_wakes_for_ci_reminder_past_replayed_tool_call") {
+        idle_supervisor_with_replayed_call_wakes(false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_tool_call() {
+    if child("cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_tool_call") {
+        idle_supervisor_with_replayed_call_wakes(true).await;
+    }
+}
+
 /// Also when the reminder's owner is a replaced supervisor (takeover).
 async fn busy_self_reminder_is_never_abandoned(takeover: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();

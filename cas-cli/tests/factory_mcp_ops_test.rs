@@ -10046,6 +10046,11 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     let worker = "c54f-idle-worker";
     // The worker's clean branch is one real commit behind its task's epic.
     let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"c54f-fixture\"\n",
+    )
+    .unwrap();
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
 
     {
@@ -10064,7 +10069,7 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     let store = env.task_store();
     let mut targeted = store.get(&task_b).unwrap();
     targeted.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:active-project".to_string(),
+        repo_selector: "project:c54f-fixture".to_string(),
         target_branch: "epic/requested".to_string(),
     });
     store.update(&targeted).unwrap();

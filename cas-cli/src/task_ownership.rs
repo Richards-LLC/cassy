@@ -9,7 +9,10 @@
 //! The host's global store (`~/.cas/cas.db`, global-scope tasks) is one of
 //! the other stores (cas-2191).
 //!
-//! Other projects' stores are never written. Each store is read in one
+//! Other projects' stores are never written. Raw reads, immutable SQLite and
+//! lock probes run in fresh exec children: closing any inode descriptor in
+//! this process could release another thread's SQLite POSIX locks (cas-5a02).
+//! Each store is read in one
 //! consistent pass (cas-6162): its `-wal` bytes first, then its main database
 //! with SQLite's `immutable=1` (no locks; nothing created, checkpointed or
 //! deleted), then both are re-checked. The check covers the WAL header and
@@ -27,6 +30,7 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Other projects' task stores, consulted read-only.
 pub trait OtherProjects {
@@ -52,6 +56,7 @@ struct StoreSpec {
 /// How many times a store that changed while it was read is read again
 /// before it counts as unproven (cas-2191).
 const STORE_READ_ATTEMPTS: u32 = 3;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Task ids of every other store on the host, read on first lookup.
 pub struct KnownProjects {
@@ -136,8 +141,9 @@ fn read_stores(cas_root: &Path, specs: Vec<StoreSpec>, between: &dyn Fn()) -> St
 /// changing under the read, up to [`STORE_READ_ATTEMPTS`] times.
 fn store_task_ids_retrying(db: &Path, between: &dyn Fn()) -> Result<HashSet<String>, String> {
     let mut attempt = 1;
+    let deadline = crate::bounded_process::Deadline::after(PROBE_TIMEOUT);
     loop {
-        match store_task_ids(db, between) {
+        match store_task_ids_with_deadline(db, between, deadline) {
             Err(ReadError::Changed) if attempt < STORE_READ_ATTEMPTS => {
                 std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
                 attempt += 1;
@@ -151,6 +157,7 @@ fn store_task_ids_retrying(db: &Path, between: &dyn Fn()) -> Result<HashSet<Stri
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 enum ReadError {
     /// The store was written during the read.
     Changed,
@@ -182,7 +189,7 @@ impl OtherProjects for KnownProjects {
 }
 
 /// What must not change while one store is read.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Fingerprint {
     db_len: u64,
     db_mtime: Option<std::time::SystemTime>,
@@ -222,8 +229,8 @@ fn file_bytes(path: &Path, start: u64, len: usize) -> Result<(u64, Vec<u8>), Str
 
 /// Observe SQLite's exclusive WAL_CKPT_LOCK (shm byte 121), without
 /// acquiring it or opening a SQLite connection that might recover the WAL.
-/// F_GETLK observes other processes; same-process raw-reader safety is
-/// tracked separately in cas-5a02.
+/// This runs only in an exec child, so F_GETLK also observes the caller's
+/// locks, and closing this descriptor cannot release them (cas-5a02).
 #[cfg(unix)]
 fn checkpoint_in_progress(shm: &Path) -> Result<bool, String> {
     use std::os::fd::AsRawFd;
@@ -272,28 +279,170 @@ fn fingerprint(db: &Path, wal: &Path) -> Result<Fingerprint, String> {
     })
 }
 
-/// Every task id a store holds: WAL bytes first, then the immutable main
-/// database, then a re-check that neither changed in between.
-fn store_task_ids(db: &Path, between: &dyn Fn()) -> Result<HashSet<String>, ReadError> {
+/// Raw inspection is confined to a fresh exec process. In particular, even
+/// an immutable SQLite read or a raw header read may close an inode on which
+/// the caller owns POSIX locks; doing that in the caller releases those locks.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum ProbeSnapshot {
+    Before {
+        fingerprint: Fingerprint,
+        ids: HashSet<String>,
+        wal_len: u64,
+    },
+    After {
+        fingerprint: Fingerprint,
+        ids: HashSet<String>,
+    },
+}
+
+fn probe_snapshot(phase: &str, db: &Path) -> Result<ProbeSnapshot, ReadError> {
     if !db.is_file() {
         return Err(ReadError::Failed("no cas.db".into()));
     }
     let wal = PathBuf::from(format!("{}-wal", db.display()));
-    let before = fingerprint(db, &wal)?;
-    if before.checkpointing {
-        return Err(ReadError::Changed);
+    match phase {
+        "before" => {
+            let fingerprint = fingerprint(db, &wal)?;
+            if fingerprint.checkpointing {
+                return Err(ReadError::Changed);
+            }
+            let bytes = match std::fs::read(&wal) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => {
+                    return Err(ReadError::Failed(format!(
+                        "write-ahead log unreadable: {error}"
+                    )));
+                }
+            };
+            Ok(ProbeSnapshot::Before {
+                fingerprint,
+                ids: wal_task_ids(&bytes),
+                wal_len: bytes.len() as u64,
+            })
+        }
+        "after" => {
+            let ids = main_task_ids(db)?;
+            Ok(ProbeSnapshot::After {
+                fingerprint: fingerprint(db, &wal)?,
+                ids,
+            })
+        }
+        _ => Err(ReadError::Failed("unknown ownership probe phase".into())),
     }
-    let wal_bytes = match std::fs::read(&wal) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(ReadError::Failed(format!("write-ahead log unreadable: {error}"))),
+}
+
+/// Internal executable entry point. Dispatch before logging/configuration or
+/// normal store startup; the only written inode is the private response file.
+#[doc(hidden)]
+pub fn run_internal_ownership_probe(phase: &str, db: &Path, output: &Path) -> Result<(), String> {
+    if !matches!(phase, "before" | "after") {
+        return Err("ownership probe requires before or after".into());
+    }
+    let result = probe_snapshot(phase, db);
+    let file = std::fs::File::create(output).map_err(|error| error.to_string())?;
+    serde_json::to_writer(file, &result).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+const PROBE_TEST: &str = "task_ownership::tests::ownership_probe_child";
+
+fn isolated_probe(
+    phase: &str,
+    db: &Path,
+    deadline: crate::bounded_process::Deadline,
+) -> Result<ProbeSnapshot, ReadError> {
+    let response = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+    let mut command =
+        std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?);
+    #[cfg(not(test))]
+    command
+        .arg("--internal-task-ownership-probe")
+        .arg(phase)
+        .arg(db)
+        .arg(response.path());
+    #[cfg(test)]
+    command
+        .args([
+            "--exact",
+            PROBE_TEST,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("CAS_OWNERSHIP_PROBE_PHASE", phase)
+        .env("CAS_OWNERSHIP_PROBE_DB", db)
+        .env("CAS_OWNERSHIP_PROBE_OUTPUT", response.path());
+    let output = crate::bounded_process::run_command(&mut command, deadline, PROBE_TIMEOUT)
+        .map_err(|error| ReadError::Failed(format!("ownership probe failed: {error:?}")))?;
+    if !output.status.success() {
+        return Err(ReadError::Failed(format!(
+            "ownership probe exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    #[cfg(test)]
+    crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), PROBE_TEST);
+    // A truncated, absent or oversized response is uncertainty, never an empty
+    // set. The response inode is distinct from every inspected store inode.
+    if response
+        .as_file()
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len()
+        > 64 * 1024 * 1024
+    {
+        return Err(ReadError::Failed(
+            "ownership probe response exceeds 64 MiB".into(),
+        ));
+    }
+    let bytes = std::fs::read(response.path()).map_err(|error| error.to_string())?;
+    serde_json::from_slice::<Result<ProbeSnapshot, ReadError>>(&bytes)
+        .map_err(|error| ReadError::Failed(format!("ownership probe response invalid: {error}")))?
+}
+
+#[cfg(test)]
+fn store_task_ids(db: &Path, between: &dyn Fn()) -> Result<HashSet<String>, ReadError> {
+    store_task_ids_with_deadline(
+        db,
+        between,
+        crate::bounded_process::Deadline::after(PROBE_TIMEOUT),
+    )
+}
+
+/// WAL snapshot first, then immutable main database and a fresh fingerprint.
+/// Two exec phases retain the existing parent-side race callback without
+/// running any Rust or SQLite code in an unexeced fork of the caller.
+fn store_task_ids_with_deadline(
+    db: &Path,
+    between: &dyn Fn(),
+    deadline: crate::bounded_process::Deadline,
+) -> Result<HashSet<String>, ReadError> {
+    let ProbeSnapshot::Before {
+        fingerprint: before,
+        mut ids,
+        wal_len,
+    } = isolated_probe("before", db, deadline)?
+    else {
+        return Err(ReadError::Failed(
+            "ownership probe returned the wrong phase".into(),
+        ));
     };
     between();
-    let mut ids = main_task_ids(db)?;
-    if fingerprint(db, &wal)? != before || wal_bytes.len() as u64 != before.wal_len {
+    let ProbeSnapshot::After {
+        fingerprint: after,
+        ids: main_ids,
+    } = isolated_probe("after", db, deadline)?
+    else {
+        return Err(ReadError::Failed(
+            "ownership probe returned the wrong phase".into(),
+        ));
+    };
+    if after != before || wal_len != before.wal_len {
         return Err(ReadError::Changed);
     }
-    ids.extend(wal_task_ids(&wal_bytes));
+    ids.extend(main_ids);
     Ok(ids)
 }
 
@@ -356,6 +505,15 @@ pub fn is_task_id(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "exec entry point for isolated ownership inspection"]
+    fn ownership_probe_child() {
+        let phase = std::env::var("CAS_OWNERSHIP_PROBE_PHASE").unwrap();
+        let db = std::env::var_os("CAS_OWNERSHIP_PROBE_DB").unwrap();
+        let output = std::env::var_os("CAS_OWNERSHIP_PROBE_OUTPUT").unwrap();
+        run_internal_ownership_probe(&phase, Path::new(&db), Path::new(&output)).unwrap();
+    }
 
     /// cas-6162: another project's store with a leftover write-ahead log is
     /// never written (database, WAL and the absent -shm are unchanged), and
@@ -515,6 +673,81 @@ mod tests {
         drop(recovered);
     }
 
+    #[test]
+    fn ownership_inspection_preserves_local_sqlite_locks_cas_5a02() {
+        let dir = tempfile::tempdir().unwrap();
+        let this = tempfile::tempdir().unwrap();
+        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+        let db = root.join(".cas/cas.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE; UPDATE tasks SET title='pending';",
+            )
+            .unwrap();
+        let observe = || {
+            let output = std::process::Command::new("python3")
+                .args([
+                    "-I",
+                    "-S",
+                    "-c",
+                    r#"
+import fcntl, json, sys
+held = []
+for path, offset in [(sys.argv[1], 1073741826), (sys.argv[1] + '-shm', 120)]:
+    with open(path, 'r+b') as file:
+        try:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, offset)
+        except BlockingIOError:
+            held.append(True)
+        else:
+            held.append(False)
+print(json.dumps(held))
+"#,
+                ])
+                .arg(&db)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap()
+        };
+        assert_eq!(
+            observe(),
+            vec![true, true],
+            "real SQLite shared and WAL write locks are held"
+        );
+        let before = (
+            std::fs::metadata(&db).unwrap().len(),
+            std::fs::metadata(root.join(".cas/cas.db-wal"))
+                .unwrap()
+                .len(),
+        );
+        let projects = KnownProjects::from_roots(&this.path().join(".cas"), vec![root.clone()]);
+        assert_eq!(
+            projects.holders("cas-aaaa").unwrap(),
+            vec![root.display().to_string()]
+        );
+        assert_eq!(
+            observe(),
+            vec![true, true],
+            "inspection must preserve the caller's SQLite locks"
+        );
+        assert_eq!(
+            before,
+            (
+                std::fs::metadata(&db).unwrap().len(),
+                std::fs::metadata(root.join(".cas/cas.db-wal"))
+                    .unwrap()
+                    .len(),
+            )
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
     /// cas-69b5: a checkpoint already copying frames when the read starts
     /// (and still copying when it ends) leaves every fingerprint field as it
     /// was, so the store is unproven rather than trusted.
@@ -528,41 +761,29 @@ mod tests {
         shm[128..132].copy_from_slice(&1u32.to_ne_bytes());
         let path = root.join(".cas/cas.db-shm");
         std::fs::write(&path, shm).unwrap();
-        // Hold SQLite's actual checkpointer byte in another process. Counters
-        // alone must not decide whether a checkpoint is running.
-        let mut child = std::process::Command::new("python3")
-            .args([
-                "-I",
-                "-S",
-                "-c",
-                r#"
-import fcntl, sys
-with open(sys.argv[1], 'r+b') as shm:
-    fcntl.lockf(shm, fcntl.LOCK_EX, 1, 121)
-    print('locked', flush=True)
-    sys.stdin.buffer.read(1)
-"#,
-            ])
-            .arg(&path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
+        // Hold the checkpointer lock in this process, as a local connection
+        // may do. An isolated observer must see it as a conflicting lock.
+        use std::os::fd::AsRawFd;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
             .unwrap();
-        let mut ready = String::new();
-        std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
-            &mut ready,
-        )
-        .unwrap();
-        assert_eq!(ready.trim(), "locked");
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        lock.l_start = 121;
+        lock.l_len = 1;
+        assert_eq!(
+            unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETLK, &lock) },
+            0
+        );
         let projects = KnownProjects::from_specs_with(
             &this.path().join(".cas"),
             vec![repo_spec(root)],
             &|| {},
         );
         let result = projects.holders("cas-aaaa");
-        drop(child.stdin.take());
-        assert!(child.wait().unwrap().success());
         assert!(result.unwrap_err().contains("changed while it was read"));
     }
 

@@ -2682,7 +2682,7 @@ pub(crate) struct OperatorReplyRetry {
 }
 
 /// Read one selected row's [`RowFacts`] on the selecting job's thread.
-fn read_row_facts(
+pub(crate) fn read_row_facts(
     cas_dir: &std::path::Path,
     queue: &dyn cas_store::PromptQueueStore,
     tasks: Option<&dyn cas_store::TaskStore>,

@@ -5078,6 +5078,84 @@ mod cas_89e1_post_merge_message_type_tests {
     use std::path::Path;
     use std::process::Command;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cas_f17b_successor_reads_abandoned_content() {
+        use cas_store::{HookDrain, QueueOrigin, HOOK_SURFACE_BUDGET_CHARS};
+        use crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts;
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "new-factory");
+        env.set("CAS_AGENT_NAME", "zealous-tiger");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut old_task = Task::new("cas-0f17".into(), "Old assignment".into());
+        old_task.status = TaskStatus::Closed;
+        tasks.add(&old_task).unwrap();
+        let mut sender = Agent::new("original-sender".into(), "vivid-dolphin".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("old-factory".into());
+        agents.register(&sender).unwrap();
+        let bodies = [
+            "You are assigned task cas-0f17. Keep the pending branch until review finishes.".to_owned(),
+            "Second decision needs all of this body: ".to_owned() + &"detail ".repeat(800),
+        ];
+        let mut ids = Vec::new();
+        for body in &bodies {
+            let id = queue.enqueue_urgent_with_outcome(
+                &sender.name, "swift-heron", body, Some("old-factory"),
+                Some("pending decision"), None, false,
+                Some(&QueueOrigin::RegisteredAgent { agent_id: sender.id.clone() }),
+            ).unwrap().id();
+            queue.record_wake_gate_decline(id, "inline pane has an active composer").unwrap();
+            rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339(), id],
+            ).unwrap();
+            ids.push(id);
+        }
+        agents.unregister(&sender.id).unwrap();
+        let mut successor = Agent::new("successor".into(), "zealous-tiger".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("new-factory".into());
+        agents.register(&successor).unwrap();
+        assert_eq!(queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS).unwrap().len(), 2);
+        let ordinary = queue.peek_for_targets(&[&successor.name], Some("new-factory"), 10).unwrap();
+        assert_eq!(ordinary.len(), 2, "each inherited message must be an ordinary row");
+        for row in &ordinary {
+            assert!(read_row_facts(&root, queue.as_ref(), Some(tasks.as_ref()), &[], row).assignment_stale.is_none(),
+                "a recovered assignment is history, not a fresh start instruction");
+        }
+        // A caller's spoofed watchdog source/dedupe cannot acquire the daemon exemption.
+        let spoof = match queue.enqueue_idempotent(
+            "delivery-watchdog", &successor.name, &bodies[0], Some("new-factory"), None, None,
+            "delivery-abandoned-recovery:spoof",
+            Some(&QueueOrigin::RegisteredAgent { agent_id: successor.id.clone() }),
+        ).unwrap() {
+            cas_store::EnqueueIdempotentResult::Created(id) | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        let spoof_row = queue.queued_prompt(spoof).unwrap().unwrap();
+        assert!(read_row_facts(&root, queue.as_ref(), Some(tasks.as_ref()), &[], &spoof_row).assignment_stale.is_some());
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(successor.id.clone());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action": "inbox_poll", "limit": 10})).unwrap();
+        let text = response_text(service.inbox_poll(request).await.unwrap());
+        for (id, body) in ids.iter().zip(&bodies) {
+            assert!(text.contains(&id.to_string()) && text.contains(&sender.name) && text.contains(body),
+                "successor must read complete source/body of {id}: {text}");
+        }
+        // pin: the original summary must also remain readable through the real MCP handler.
+        assert!(text.contains("pending decision"));
+        assert!(queue.surface_for_recipient_within_budget(&successor.name, Some("new-factory"),
+            HookDrain::NoticeDigest, 10, HOOK_SURFACE_BUDGET_CHARS).unwrap().rows.is_empty());
+    }
+
     fn git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")

@@ -88,6 +88,9 @@ async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
     let launch_cwd = Scratch::new("launch-cwd");
     let mut env = TestEnvGuard::temp_home();
     let source_cwd = std::env::current_dir().unwrap();
+    // Launch-time version probes inherit the process cwd rather than a pane's
+    // workdir. Keep their mock receipts out of the source checkout too.
+    env.set_current_dir(launch_cwd.path());
     codex_worker_pane_pre_trusts_workdir_before_launch(&mut env).await;
     codex_supervisor_pane_pre_trusts_workdir_before_launch(&mut env).await;
     claude_worker_pane_does_not_touch_codex_config(&mut env).await;

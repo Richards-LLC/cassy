@@ -22,8 +22,10 @@ python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
 ```
 
 The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
-`receipt.json` with the page count, out-of-bounds text blocks and link targets,
-and exits non-zero on a bounds finding.
+`receipt.json` with the page count, out-of-bounds text blocks, a
+`footer_only_last_page` flag and link targets. It exits non-zero on a bounds
+finding or when the last page holds only the closing folio. The template keeps
+that folio inside the final section so print never starts a page with it.
 
 Inspect every PNG, including the final page; contact sheets aid scanning but do
 not replace reading suspicious full-size pages. Check orphan headings, repeated

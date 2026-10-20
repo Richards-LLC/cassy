@@ -1749,7 +1749,7 @@ fn assemble_markdown(
             },
         ));
     } else {
-        zero_notes.push("No GitHub issues were closed with this release.".to_string());
+        zero_notes.push("No GitHub issues are counted in this report's fixes ledger.".to_string());
     }
     let green_timing =
         if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
@@ -1940,7 +1940,7 @@ fn assemble_markdown(
     };
     output.push('\n');
     if sources.issues.is_empty() {
-        output.push_str("No GitHub issues were closed with this release.\n\n");
+        output.push_str("No GitHub issues are counted in this report's fixes ledger.\n\n");
     }
     if !sources.issues_still_open.is_empty() {
         output.push_str(&format!(
@@ -3465,7 +3465,8 @@ mod tests {
         let page_one = &report[..report.find("## What you can do now").unwrap()];
         assert!(!page_one.contains("| 0 |"), "{page_one}");
         assert!(!page_one.contains("unavailable |"), "{page_one}");
-        assert!(report.contains("No GitHub issues were closed with this release."));
+        assert!(report.contains("No GitHub issues are counted in this report"));
+        assert!(!report.contains("No GitHub issues were closed with this release."));
         assert!(report.contains("Not measured for this release: green to published"));
     }
 

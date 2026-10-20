@@ -273,7 +273,7 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
     if by_change:
         legend = ('One dot, one shipped change. ' +
                   (f'{issues_closed} GitHub issue{"" if issues_closed == 1 else "s"} closed with this release, listed in the fixes ledger.'
-                   if issues_closed else 'No GitHub issues were closed with this release.'))
+                   if issues_closed else "No GitHub issues are counted in this report's fixes ledger."))
     else:
         legend = 'One dot, one closed GitHub issue.'
     leading, glance_table, method = split_table(sections['Release at a glance'])

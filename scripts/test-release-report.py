@@ -210,6 +210,21 @@ Source: release assets.
         for jargon in ('issue-bearing', 'verified closure', 'closure stitch', 'no listed issues'):
             self.assertNotIn(jargon, output.lower())
 
+        # Later reconciliation belongs in prose, outside the counted table.
+        source = BY_AREA.replace(
+            '| [#1215](https://example.org/issues/1215) | Peer report | 2026-10-16T13:03:40Z | Sessions |\n'
+            '| [#1222](https://example.org/issues/1222) | Receipts | 2026-10-16T13:03:41Z | Tasks and merges |',
+            '\nLater reconciliation: [#1215](https://example.org/issues/1215) closed after the counting window.')
+        source = source.replace('| GitHub issues closed | 2 |', '| GitHub issues closed | 0 |')
+        output = renderer.render(source)
+        hero = output[output.index('data-section="hero"'):output.index('data-section="glance"')]
+        self.assertEqual(hero.count('data-change="'), 3)
+        self.assertIn('data-total="3"', hero)
+        self.assertIn('No GitHub issues are counted in this report', hero)
+        self.assertNotIn('No GitHub issues were closed with this release.', output)
+        self.assertIn('GitHub issues closed with this release · 0', output)
+        self.assertIn('closed after the counting window.', output)
+
     def test_changes_by_area_rejects_zero_rows_miscounts_and_repeated_issues(self):
         row = '| Sessions | 2 | Typing during cleanup; Peer ownership board |'
         for name, bad in {

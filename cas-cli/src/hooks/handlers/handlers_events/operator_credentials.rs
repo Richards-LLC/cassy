@@ -9,12 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use cas_core::hooks::types::HookInput;
 use serde_json::Value;
 
-const STORE_SUFFIXES: &[&str] = &[
-    ".config/neonctl",
-    ".local/share/com.vercel.cli",
-    "Library/Application Support/com.vercel.cli",
-    ".config/com.vercel.cli",
-];
+use cas_pty::store_isolation::HOME_STORE_SUFFIXES as STORE_SUFFIXES;
 
 const PATH_KEYS: &[&str] = &[
     "file_path",
@@ -674,28 +669,7 @@ fn bracket_class_matches(class: &[char], value: char) -> bool {
 }
 
 fn store_roots(cwd: &Path) -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".config")));
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
-    let mut roots = Vec::new();
-    if let Some(home) = &home {
-        roots.extend(STORE_SUFFIXES.iter().map(|suffix| home.join(suffix)));
-    }
-    if let Some(config_home) = config_home {
-        roots.push(config_home.join("neonctl"));
-        roots.push(config_home.join("com.vercel.cli"));
-    }
-    if let Some(data_home) = data_home {
-        roots.push(data_home.join("com.vercel.cli"));
-    }
-    if let Some(vercel_root) = std::env::var_os("VERCEL_CONFIG_DIR") {
-        roots.push(PathBuf::from(vercel_root));
-    }
-    roots
+    cas_pty::store_isolation::operator_credential_stores(|name| std::env::var_os(name))
         .into_iter()
         .map(|root| lexical_absolute(&root, cwd))
         .collect()

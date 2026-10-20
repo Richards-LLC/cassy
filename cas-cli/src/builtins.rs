@@ -175,6 +175,46 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -845,6 +885,46 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1560,6 +1640,46 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",

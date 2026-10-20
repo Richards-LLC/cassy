@@ -2145,6 +2145,28 @@ task-only investigation proofs as well as merged code deliveries. Ordinary close
 proofs still apply: declaring `no-code` never hides delivered code. Correct only
 one of methodology, work target, proof targets or risk in each update.
 
+A registered supervisor's first `verification action=add` may omit
+`dispatch_id` when exactly one unexpired active dispatch exists for the task.
+Child verifiers retain their sealed handoff binding; explicit IDs remain
+supported. Terminal or expired dispatches are never inferred or silently
+replaced: supervisor recovery must name the exact expired dispatch. Verifier
+spawn briefs carry the dispatch ID directly.
+
+A merged parked delivery gets an exact target-bound verification dispatch before
+its content check can refuse close. This lets the independent verifier record a
+verdict while integration proof still blocks close; an approval never waives
+missing delivery content. After a failed review, a supervisor can use
+`task action=request_changes` from AwaitingMerge or Blocked with a recorded
+parked delivery. It preserves the assignee and historical merge facts and
+invalidates the declined proof before the next implementation cycle.
+
+Re-parking a rejected QA delivery opens the next round automatically within the
+configured round limit. Cassy reuses the prior reviewer only when its current
+registration is live in this factory, independent of the implementer, and has
+no assigned active work or lease. The reviewer gets a new QA task assignment
+and still has to start/claim the round. Busy/unavailable reviewers leave the
+normal supervisor spawn handoff in place; maximum-round escalation remains.
+
 A passed or waived independent QA round remains bound to its reviewed tip after
 a squash merge. Close proves that the integrated receipt carries the same trees
 over the aggregate delivered paths, or the same stable aggregate patch ID.

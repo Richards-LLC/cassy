@@ -1346,7 +1346,7 @@ pub(crate) fn verification_dispatch_envelope(
          Task {task} is ready to close and is parked on verification dispatch {dispatch}, \
          delivered by {worker}.\n\
          {reason}\
-         Record the verdict, then close {task}.\n\
+         Hand the verifier dispatch_id={dispatch}. Record with verification action=add task_id={task} dispatch_id={dispatch}, then close {task}.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",
         dispatch = xml_attribute_value(dispatch_id),
         task = xml_attribute_value(task_id),
@@ -1404,6 +1404,7 @@ pub(crate) fn qa_dispatch_envelope(
     implementer: &str,
     reasons: &str,
     location: QaDeliveryLocation<'_>,
+    reviewer: Option<&str>,
 ) -> String {
     let head8 = &bound_head[..bound_head.len().min(8)];
     let (stage, gate) = match location {
@@ -1429,12 +1430,18 @@ pub(crate) fn qa_dispatch_envelope(
             "merge",
         ),
     };
+    let assignment = reviewer.map(|reviewer| format!(
+        "Reviewer {} is assigned to QA task {}. Reuse this reviewer; do not spawn a replacement. Check the assignment delivery if it is not acknowledged.",
+        xml_attribute_value(reviewer), xml_attribute_value(qa_task_id),
+    )).unwrap_or_else(|| format!(
+        "Spawn a reviewer who is not {}: mcp__cas__factory action=spawn_workers lane=taste task_id={}",
+        xml_attribute_value(implementer), xml_attribute_value(qa_task_id),
+    ));
     format!(
         "{QA_DISPATCH_ENVELOPE_OPEN}pass_id=\"{pass}\" task_id=\"{task}\" qa_task_id=\"{qa}\" \
          round=\"{round}\" bound_head=\"{head}\" deadline=\"{deadline}\">\n\
          {task} (delivered by {implementer}) is user-facing ({reasons}) and {stage}.\n\
-         Spawn a reviewer who is not {implementer}: \
-         mcp__cas__factory action=spawn_workers lane=taste task_id={qa}\n\
+         {assignment}\n\
          Do not {gate} {task} until the pass records a verdict for {head}; \
          to skip it, waive with a reason: mcp__cas__verification action=qa_waive task_id={task} summary=\"...\"\n\
          {QA_DISPATCH_ENVELOPE_CLOSE}",
@@ -3226,6 +3233,7 @@ mod cas_3dcb_worker_died_relay_tests {
             "swift-fox",
             "label:ui",
             QaDeliveryLocation::ParkedForMerge,
+            None,
         );
         assert!(body.contains("and parked for merge"), "{body}");
         assert!(body.contains("Do not merge cas-619f"), "{body}");
@@ -3241,6 +3249,7 @@ mod cas_3dcb_worker_died_relay_tests {
             "swift-fox",
             "demo_statement",
             QaDeliveryLocation::ContainedIn("epic/burn-down"),
+            None,
         );
         assert!(!merged.contains("parked for merge"), "{merged}");
         assert!(
@@ -3259,6 +3268,7 @@ mod cas_3dcb_worker_died_relay_tests {
             "swift-fox",
             "demo_statement",
             QaDeliveryLocation::UnmergedFrom("epic/burn-down"),
+            None,
         );
         assert!(
             unmerged.contains("delivered tip @eeee5555 not contained in epic/burn-down"),

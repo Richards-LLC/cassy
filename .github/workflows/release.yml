@@ -148,6 +148,7 @@ jobs:
     needs: lookup
     if: needs.lookup.result == 'success' && needs.lookup.outputs.found != 'true'
     uses: ./.github/workflows/release-prebuild.yml
+    secrets: inherit
 
   audit-linux:
     name: Audit packaged Linux asset
@@ -215,11 +216,17 @@ jobs:
       # Mach-O signatures can be verified only on macOS; this is the archive
       # that ships, not the one the build job signed before upload.
       - name: Signature check of the packaged executable
+        env:
+          MACOS_SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_SIGNING_CERT_P12_BASE64 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          MACOS_SIGNING_TEAM_ID: ${{ secrets.MACOS_SIGNING_TEAM_ID }}
         run: |
           set -euo pipefail
           mkdir -p asset
           tar -xzf release/cas-aarch64-apple-darwin.tar.gz -C asset
-          codesign --verify --verbose=4 asset/cas
+          # Both adopted and fallback archives must already carry the expected
+          # Developer ID. Verify exact shipped bytes; never repair/re-sign here.
+          ./scripts/sign-macos.sh verify-release asset/cas
           shasum -a 256 release/cas-aarch64-apple-darwin.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Operator launch smoke of the packaged executable

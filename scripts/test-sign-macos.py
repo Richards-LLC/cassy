@@ -91,7 +91,7 @@ fi
         self.assertIn('delete-keychain', self.log.read_text())
 
     def test_candidate_prefers_developer_id_then_development_then_warns_once(self):
-        identities = (f'  1) {DEVELOPMENT} "Apple Development: Someone ({TEAM})"\n'
+        identities = (f'  1) {DEVELOPMENT} "Apple Development: Someone (PERSONID99)"\n'
                       f'  2) {DEV_ID} "Developer ID Application: Petra Stella ({TEAM})"')
         for present, expected in ((identities, DEV_ID), (identities.splitlines()[0], DEVELOPMENT), ('', '-')):
             with self.subTest(identity=expected):

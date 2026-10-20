@@ -2227,6 +2227,47 @@ branch, `gh workflow run release-prebuild.yml --ref <branch>` followed by
 throwaway `dryrun-` prerelease that it deletes at the end; `cas update` never
 sees a prerelease.
 
+macOS signing (`cas-fe62` / GH #1299): the existing prebuild Package step
+signs the stripped executable with Developer ID Application, hardened runtime,
+a secure timestamp and identifier `dev.petrastella.cas`, using a temporary
+keychain that is deleted on success or failure. The fallback workflow inherits
+repository secrets. Prebuilds without all three secrets stay green but report
+`unsigned candidate, not publishable` and use ad-hoc signing. The publishing
+workflow (including throwaway prereleases) requires all three secrets and checks
+the exact archived signature, Apple certificate anchor, identifier and expected
+TeamIdentifier. Apple Development and unsigned archives fail publication.
+Gatekeeper assessment is recorded but does not gate this internal, unnotarized
+distribution. Signing elapsed seconds appear in each run's step summary; no
+additional job is added. PR CI and queue validation do not need signing secrets.
+
+The operator provisions the Petra Stella Developer ID Application certificate
+on prowl and sets repository Actions secrets `MACOS_SIGNING_CERT_P12_BASE64`,
+`MACOS_SIGNING_CERT_PASSWORD` and `MACOS_SIGNING_TEAM_ID`. The interactive
+`provision-macos-signing.sh` wizard is published with task `cas-fe62`: download
+that artifact and run it from your own terminal on prowl. It walks through CSR,
+Apple portal issuance, login-keychain import, encrypted `.p12` export and secret
+upload to `Richards-LLC/cassy`; it never exports all keychain keys. Confirm the
+team against the Petra Stella membership page before uploading.
+
+Factory candidates have no central build entry point. After the supervisor
+builds and strips a candidate, before running or packaging it, run:
+
+```bash
+MACOS_SIGNING_TEAM_ID=<Petra-Stella-team-ID> \
+  bash scripts/sign-macos.sh candidate /absolute/path/to/candidate/cas
+```
+
+The helper uses the login keychain: Developer ID first, Apple Development as
+an internal candidate fallback, otherwise ad-hoc signing with one visible
+warning. Omit the team variable only to inspect an available identity: the
+helper prints the actual signed TeamIdentifier. An Apple Development label's
+parenthesized ID may identify the person rather than the team. A supplied team
+must match the signed bytes. Never sign an installed binary or repoint the hub
+service to a candidate just to collect this proof. Keep the team and identifier
+stable on future updates. TCC grant persistence is not proved by codesign:
+grant Documents access once to a signed release on prowl and update to the
+next signed release to prove it. Notarization remains an optional later step.
+
 The release train and gate scripts (`release-train.sh`, `release-gate.sh`) stay
 on disk while hosts still run binaries that call them; the release path above
 does not call them.

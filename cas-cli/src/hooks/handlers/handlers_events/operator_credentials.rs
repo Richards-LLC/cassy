@@ -189,12 +189,7 @@ fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> boo
     if executable == "eval" {
         return shell_references_store(&args.join(" "), cwd, depth + 1);
     }
-    if executable == "env" {
-        let Some((command_cwd, command)) = env_command(args, cwd) else {
-            return false;
-        };
-        return statement_references_store(&command, &command_cwd, depth + 1);
-    }
+    let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
     let recursive = invocation_recursively_reads_directories(&executable, args);
     let recursive_operands = recursive_path_operand_indices(&executable, args);
@@ -223,50 +218,41 @@ fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> boo
             .any(|arg| script_constructs_store_path(arg, cwd))
 }
 
-fn env_command(args: &[String], cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
-    let mut command_cwd = cwd.to_path_buf();
+/// The directory the command runs in after its wrapper prefix: `env -C DIR`
+/// and `sudo -D DIR` (or `--chdir`) move it. `unwrapped_command_index` skips
+/// these wrappers, so their directory change is applied here from the
+/// skipped words.
+fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
+    let mut cwd = cwd.to_path_buf();
+    let mut chdir_flag = None;
     let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg == "--" {
+    while index < prefix.len() {
+        let word = prefix[index].as_str();
+        index += 1;
+        match Path::new(word).file_name().and_then(|name| name.to_str()) {
+            Some("env") => {
+                chdir_flag = Some("-C");
+                continue;
+            }
+            Some("sudo") => {
+                chdir_flag = Some("-D");
+                continue;
+            }
+            _ => {}
+        }
+        let Some(short) = chdir_flag else { continue };
+        let target = if word == short || word == "--chdir" {
             index += 1;
-            break;
+            prefix.get(index - 1).map(String::as_str)
+        } else {
+            word.strip_prefix("--chdir=")
+                .or_else(|| word.strip_prefix(short).filter(|dir| !dir.is_empty()))
+        };
+        if let Some(next) = target.and_then(|dir| resolve_path(dir, &cwd)) {
+            cwd = next;
         }
-        if matches!(arg, "-C" | "--chdir") {
-            command_cwd = resolve_path(args.get(index + 1)?, &command_cwd)?;
-            index += 2;
-            continue;
-        }
-        if let Some(target) = arg
-            .strip_prefix("--chdir=")
-            .or_else(|| arg.strip_prefix("-C").filter(|value| !value.is_empty()))
-        {
-            command_cwd = resolve_path(target, &command_cwd)?;
-            index += 1;
-            continue;
-        }
-        if matches!(
-            arg,
-            "-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug"
-        ) {
-            index += 1;
-            continue;
-        }
-        if matches!(arg, "-u" | "--unset" | "-S" | "--split-string") {
-            index += 2;
-            continue;
-        }
-        if arg.starts_with("--unset=") || arg.starts_with("--split-string=") {
-            index += 1;
-            continue;
-        }
-        if arg.starts_with('-') || arg.contains('=') {
-            index += 1;
-            continue;
-        }
-        break;
     }
-    (index < args.len()).then(|| (command_cwd, args[index..].to_vec()))
+    cwd
 }
 
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {
@@ -445,8 +431,8 @@ fn tar_input_indices(args: &[String]) -> Vec<usize> {
             index += 1;
             continue;
         }
+        // A separate option value is the next word; skip exactly that word.
         if matches!(arg, "--file" | "-f" | "--directory" | "-C") {
-            archive_next = matches!(arg, "--file" | "-f");
             index += 2;
             continue;
         }
@@ -567,16 +553,28 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
 
 fn normalize_path_operand(reference: &str) -> &str {
     let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
-    let reference = ["-d", "-T", "-F"]
-        .iter()
-        .find_map(|prefix| reference.strip_prefix(prefix))
-        .unwrap_or(reference);
+    let reference = attached_file_value(reference).unwrap_or(reference);
     let reference = reference
         .split_once('=')
         .filter(|(_, value)| !value.is_empty())
         .map(|(_, value)| value)
         .unwrap_or(reference);
     reference.strip_prefix('@').unwrap_or(reference)
+}
+
+/// The value attached to a short-flag cluster such as `-d@x`, `-sSd@x` or
+/// `-sT~/x`: everything after the first flag that takes a file value. These
+/// are curl's file-reading short flags (data, upload, form, config, header,
+/// cookie).
+fn attached_file_value(word: &str) -> Option<&str> {
+    let flags = word
+        .strip_prefix('-')
+        .filter(|flags| !flags.starts_with('-'))?;
+    let (index, flag) = flags
+        .char_indices()
+        .take_while(|(_, flag)| flag.is_ascii_alphabetic())
+        .find(|(_, flag)| matches!(flag, 'd' | 'T' | 'F' | 'K' | 'H' | 'b'))?;
+    Some(&flags[index + flag.len_utf8()..])
 }
 
 fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -> bool {

@@ -1926,6 +1926,100 @@ async fn team_pull_preserves_live_started_owner_cas_c4a52() {
 }
 
 #[tokio::test]
+async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
+    let project = "park-owner";
+    let parked_at = chrono::DateTime::parse_from_rfc3339("2026-10-20T11:55:00Z")
+        .unwrap().with_timezone(&chrono::Utc);
+    let mut local = Task::new("cas-96ce4".into(), "delivered work".into());
+    local.status = TaskStatus::AwaitingMerge;
+    local.updated_at = parked_at;
+    local.pending_worktree_merge = true;
+    local.deliverables.parked_branch = Some("factory/replay-cas-96ce4".into());
+    local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    let old_reset = "[2026-10-20 11:30] reset: force-transitioned Open→Open (prior assignee: <none>, lease released: false) — dead-session recovery";
+    local.notes = format!("{old_reset}\n\n[2026-10-20 11:55] Close rejected: MERGE REQUIRED. Task parked as awaiting_merge; worker lease released until supervisor merge completes.");
+    let mut stale = team_task_fixture(
+        &local.id, TaskStatus::Open, project, project,
+        parked_at + chrono::Duration::minutes(3),
+    );
+    stale["notes"] = serde_json::json!(old_reset);
+    for status in [TaskStatus::InProgress, TaskStatus::Open] {
+        let mut projection = stale.clone();
+        projection["status"] = serde_json::json!(status);
+        let (_temp, result, store, queue) = pull_team_task_fixtures(
+            project, vec![projection], Some(local.clone()),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert!(retained.lifecycle_matches(&local), "11:58 projection must not undo 11:55 park: {retained:?}");
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
+        assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+
+        // cas-f268: suppressing a merge as moot must not follow a stale pull.
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        let envelope = MergeRequestEnvelope {
+            task_id: local.id.clone(),
+            branch_tip: "a".repeat(40),
+            target_branch: "main".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&retained), &envelope,
+                &MergeRequestDecision::Pending { target_tip: "b".repeat(40) },
+            ),
+            MergeRequestDelivery::Deliver,
+        );
+    }
+
+    // A previous cycle's closed_at must not replace the current park boundary.
+    let mut previous_cycle = local.clone();
+    previous_cycle.closed_at = Some(parked_at - chrono::Duration::hours(1));
+    let mut old_action = stale.clone();
+    old_action["notes"] = serde_json::json!(format!(
+        "{old_reset}\n\n[2026-10-20 11:54] Reopened: actor=peer reason=earlier cycle",
+    ));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(
+        project, vec![old_action], Some(previous_cycle.clone()),
+    ).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(store.get(&local.id).unwrap().lifecycle_matches(&previous_cycle));
+
+    // New, explicit lifecycle actions still authorize rework on the replica.
+    for event in [
+        "Reopened: actor=remote-supervisor reason=regression found",
+        "Decision: changes requested by supervisor. Correct the delivery",
+        "reset: force-transitioned AwaitingMerge→Open (prior assignee: worker, lease released: false) — dead-session recovery",
+    ] {
+        let mut reopened = stale.clone();
+        // A later sync-apply annotation is a projection, not a new park.
+        let mut projected = local.clone();
+        projected.updated_at = parked_at + chrono::Duration::minutes(6);
+        projected.notes.push_str("\n\n[2026-10-20 12:01] [CAS_SYNC_STATUS] source=team_pull applied_status=awaiting_merge");
+        reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(7));
+        let minute = if event.starts_with("Decision:") { "11:55" } else { "11:59" };
+        reopened["notes"] = serde_json::json!(format!("{}\n\n[2026-10-20 {minute}] {event}", local.notes));
+        let (_temp, result, store, _queue) = pull_team_task_fixtures(
+            project, vec![reopened], Some(projected),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pulled_tasks, 1, "{event}");
+        let reopened = store.get(&local.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open, "{event}");
+        assert!(reopened.notes.contains("prior_status=awaiting_merge"));
+    }
+}
+
+#[tokio::test]
 async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
     for (before, after) in [
         (TaskStatus::Open, TaskStatus::InProgress),
@@ -1947,6 +2041,12 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
             project,
             local.updated_at + chrono::Duration::minutes(1),
         );
+        if before == TaskStatus::AwaitingMerge {
+            raw["notes"] = serde_json::json!(format!(
+                "[{}] Decision: changes requested by supervisor. Correct delivery",
+                (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+            ));
+        }
         if !matches!(after, TaskStatus::Closed | TaskStatus::Cancelled) {
             raw["assignee"] = serde_json::json!(local.assignee);
         }
@@ -1976,13 +2076,18 @@ async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     local.pending_worktree_merge = true;
     local.deliverables.parked_branch = Some("factory/replay".into());
-    let raw = team_task_fixture(
+    let mut raw = team_task_fixture(
         &local.id,
         TaskStatus::InProgress,
         project,
         project,
         local.updated_at + chrono::Duration::minutes(1),
     );
+    // A valid remote action reaches the independent live-delivery veto.
+    raw["notes"] = serde_json::json!(format!(
+        "[{}] Decision: changes requested by supervisor. Correct delivery",
+        (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+    ));
     let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
         project,
         vec![raw],

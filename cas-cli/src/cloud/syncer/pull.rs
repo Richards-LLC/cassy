@@ -1485,54 +1485,69 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
         .join("\n\n")
 }
 
-/// A terminal row is a durable outcome, not merely the latest version of a
-/// mutable task body. An incoming active row may replace it only when the
-/// remote task carries the audit event written by Cassy's authorised `reopen`
-/// action after the local terminal timestamp.
-fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
-    if !local.is_terminal() || remote.is_terminal() {
-        return false;
-    }
-
-    !has_explicit_remote_reopen(remote, local.closed_at)
+/// Parked and terminal deliveries are lifecycle outcomes, not whole-row LWW
+/// projections. A newer body/replica clock alone cannot authorize rework.
+fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
+    let regresses = (local.is_terminal() && !remote.is_terminal())
+        || (local.status == crate::types::TaskStatus::AwaitingMerge
+            && matches!(remote.status, crate::types::TaskStatus::Open | crate::types::TaskStatus::InProgress));
+    regresses && !has_explicit_remote_reopen(local, remote)
 }
 
-/// Cassy's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened:
-/// actor=<agent> reason=<reason>` into the task's replicated note timeline.
-/// Treat that timestamped, attributed record as the reopening event; a bare
-/// active task row, even one with a newer `updated_at`, is not authorization to
-/// undo a close/cancellation.
-fn has_explicit_remote_reopen(
-    remote: &Task,
-    local_closed_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
-    let Some(local_closed_at) = local_closed_at else {
-        return false;
-    };
-    remote.notes.split("\n\n").any(|note| {
-        let Some((timestamp, event)) = note.strip_prefix('[').and_then(|note| note.split_once(']'))
-        else {
-            return false;
+fn lifecycle_audit_note(note: &str) -> Option<(chrono::DateTime<chrono::Utc>, &str)> {
+    let (timestamp, event) = note.trim().strip_prefix('[')?.split_once(']')?;
+    let timestamp = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M").ok()?;
+    Some((timestamp.and_utc(), event.trim_start()))
+}
+
+/// The replicated timeline is the existing authorization contract: reopen
+/// names an actor/reason, request_changes a supervisor/reason, reset its
+/// explicit transition/recovery reason. Previously observed actions cannot
+/// undo a later park, even if a replica uploads them under a newer row clock.
+fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
+    let local_boundary = local.notes.split("\n\n").filter_map(|block| {
+        let (at, event) = lifecycle_audit_note(block)?;
+        let is_boundary = if local.is_terminal() {
+            event.starts_with("Closed:") || event.starts_with("Cancelled:")
+        } else {
+            event.starts_with("Close rejected:") && event.contains("Task parked as awaiting_merge;")
         };
-        let Some(audit) = event.trim_start().strip_prefix("Reopened:") else {
-            return false;
-        };
-        let Some((actor, reason)) = audit
-            .trim()
-            .strip_prefix("actor=")
-            .and_then(|audit| audit.split_once(" reason="))
-        else {
-            return false;
-        };
-        if actor.trim().is_empty() || reason.trim().is_empty() {
+        is_boundary.then_some((at, block.trim()))
+    }).max_by_key(|(at, _)| *at);
+    // A prior cycle can leave closed_at on a reset row. Only a terminal
+    // state uses it; a current park is anchored to its own lifecycle note.
+    // CAS_SYNC_STATUS is apply provenance and never establishes a new park.
+    let boundary = (local.is_terminal().then_some(local.closed_at).flatten())
+        .or(local_boundary.map(|(at, _)| at))
+        .unwrap_or(local.updated_at);
+    remote.notes.split("\n\n").any(|block| {
+        let Some((at, event)) = lifecycle_audit_note(block) else { return false; };
+        if local.notes.split("\n\n").any(|known| known.trim() == block.trim()) {
             return false;
         }
-        let Ok(timestamp) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
-        else {
+        let reopen = event.strip_prefix("Reopened:")
+            .and_then(|audit| audit.trim().strip_prefix("actor="))
+            .and_then(|audit| audit.split_once(" reason="))
+            .is_some_and(|(actor, reason)| !actor.trim().is_empty() && !reason.trim().is_empty());
+        let request_changes = event.strip_prefix("Decision: changes requested by supervisor. ")
+            .is_some_and(|reason| !reason.trim().is_empty());
+        let reset = event.strip_prefix("reset: force-transitioned ")
+            .and_then(|audit| audit.split_once("→Open (prior assignee: "))
+            .and_then(|(_, audit)| audit.split_once(") — "))
+            .is_some_and(|(_, reason)| !reason.trim().is_empty());
+        if !(reopen || request_changes || reset) {
             return false;
-        };
-        let timestamp = timestamp.and_utc();
-        timestamp >= local_closed_at - chrono::Duration::minutes(1)
+        }
+        // Notes have minute precision. At an equal minute require causal
+        // ordering in the remote timeline, rather than an arbitrary grace.
+        match at.timestamp().div_euclid(60).cmp(&boundary.timestamp().div_euclid(60)) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => local_boundary.is_some_and(|(_, prior)| {
+                remote.notes.find(prior).zip(remote.notes.find(block.trim()))
+                    .is_some_and(|(prior, action)| prior < action)
+            }),
+        }
     })
 }
 
@@ -1740,8 +1755,8 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
@@ -1867,6 +1882,14 @@ impl CloudSyncer {
             None,
             None,
         )
+    }
+
+    fn record_delivery_regression_conflict(&self, local: &Task, remote: &Task) -> Result<(), CasError> {
+        if local.is_terminal() {
+            self.record_terminal_regression_conflict(local, remote)
+        } else {
+            self.record_task_lifecycle_conflict(local, remote, "delivery_lifecycle_event")
+        }
     }
 
     fn record_terminal_regression_conflict(
@@ -2654,8 +2677,8 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
@@ -2880,8 +2903,8 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {

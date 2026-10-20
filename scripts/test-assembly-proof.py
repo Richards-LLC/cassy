@@ -281,6 +281,44 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(found)
         self.assertIn("key=code_input reason=different", miss)
 
+    def test_row_commands_validate_and_honor_the_requested_row(self):
+        expected = dict(self.expected, target="fixture-target")
+        receipt = ({"head": "fixture-head", "tree": "fixture-tree"}, self.path)
+        with mock.patch.object(proof, "prove_rows", return_value={"macos-check": "PASS"}) as produce, \
+                mock.patch.object(proof, "row_inputs", return_value=(expected, {})) as inputs, \
+                mock.patch.object(proof, "row_matching", return_value=receipt) as check:
+            for action in ("prove-rows", "check-row"):
+                for row in ("archive-mode", "unknown-row"):
+                    with self.subTest(action=action, row=row), \
+                            mock.patch.object(proof.sys, "argv", ["assembly-proof.py", action, str(self.root), row]), \
+                            contextlib.redirect_stdout(io.StringIO()) as out, \
+                            contextlib.redirect_stderr(io.StringIO()) as error:
+                        with self.assertRaises(SystemExit) as rejected:
+                            proof.main()
+                        self.assertNotEqual(rejected.exception.code, 0)
+                        self.assertIn(row, error.getvalue())
+                        for accepted in proof.ROW_PROOF_ROWS:
+                            self.assertIn(accepted, error.getvalue())
+                        self.assertEqual(out.getvalue(), "")
+                        produce.assert_not_called()
+                        inputs.assert_not_called()
+                        check.assert_not_called()
+            produce.reset_mock()
+            inputs.reset_mock()
+            check.reset_mock()
+            for requested in ([], ["macos-check"]):
+                with self.subTest(requested=requested), \
+                        mock.patch.object(proof.sys, "argv", ["assembly-proof.py", "prove-rows", str(self.root), *requested]), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(proof.main(), 0)
+                    produce.assert_called_once_with(self.root, tuple(requested) or proof.ROW_PROOF_ROWS)
+                    produce.reset_mock()
+            with mock.patch.object(proof.sys, "argv", ["assembly-proof.py", "check-row", str(self.root), "macos-check"]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(proof.main(), 0)
+            inputs.assert_called_once_with(self.root, "macos-check")
+            check.assert_called_once_with(self.root, expected, diagnostic=True)
+
     def test_cas_398c_failed_row_proof_is_never_reused(self):
         env = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
         results, _ = self.row_proof(env, proof.prove_rows, self.root, ("macos-check",), passed=False)

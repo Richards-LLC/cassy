@@ -52,6 +52,15 @@ class ChangedStrings(unittest.TestCase):
         hits = GUARDS.changed_string_matches(self.repo, base)
         self.assertEqual([name for _, _, name in hits], ['multiline_receipt'])
 
+    def test_first_token_docstring_uses_test_file_label(self):
+        product = self.repo / 'product.rs'
+        product.write_text('fn receipt() { "old receipt"; }\n')
+        (self.repo / 'test_receipt.py').write_text('"""old receipt"""\n')
+        base = self.commit()
+        product.write_text('fn receipt() { "new receipt"; }\n')
+        self.assertEqual(GUARDS.changed_string_matches(self.repo, base),
+                         [('test_receipt.py', 1, '<test file>')])
+
     def test_unchanged_literals_comments_and_production_functions_do_not_warn(self):
         product = self.repo / 'product.rs'
         product.write_text('fn receipt() { "old receipt"; "keep"; }\n')

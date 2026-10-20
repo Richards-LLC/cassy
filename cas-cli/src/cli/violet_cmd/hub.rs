@@ -107,14 +107,11 @@ impl std::fmt::Display for VioletError {
                 Some(other) => other.to_string(),
                 None => String::new(),
             };
-            let place = match violation.get("message") {
-                Some(_) => format!("{}, line {}", field("message"), field("line")),
-                None => format!("line {}", field("line")),
-            };
             write!(
                 f,
-                "\n  - {} ({place}): {}\n    fix: {}",
+                "\n  - {} (line {}): {}\n    fix: {}",
                 field("rule"),
+                field("line"),
                 field("excerpt"),
                 field("fix")
             )?;

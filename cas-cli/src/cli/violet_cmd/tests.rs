@@ -875,6 +875,7 @@ fn every_local_code_is_documented_in_the_violet_skill() {
         include_str!("mod.rs"),
         include_str!("hub.rs"),
         include_str!("files.rs"),
+        include_str!("draft_check.rs"),
     ];
     let pattern = regex::Regex::new(r#"VioletError::local\(\s*"([a-z_]+)""#).unwrap();
     let mut codes: Vec<&str> = sources
@@ -903,22 +904,23 @@ fn every_local_code_is_documented_in_the_violet_skill() {
 // cas-d47fd750acf1df00: readable posts (format_unreadable)
 // ---------------------------------------------------------------------------
 
-/// The hub's documented refusal: retryable false, detail.violations[] with
-/// rule, line, excerpt and fix.
+/// The hub's final `format_unreadable` refusal (violet_ps cas-dbea,
+/// 4b6fd1143c70), verbatim in shape: the sample's first_line violation plus a
+/// file violation whose fix names the token.
 fn format_unreadable_receipt() -> Value {
     json!({
-        "ok": false, "schema_version": 1,
+        "ok": false,
         "error": {
             "code": "format_unreadable",
-            "message": "the post is hard to read; nothing was sent",
+            "message": "Rewrite the post for readability, then submit it again.",
             "retryable": false,
             "detail": {"violations": [
-                {"rule": "first_line_too_long", "line": 1,
-                 "excerpt": "Missed snapshots: checked every post since 5 Oct and the scheduler is solid",
-                 "fix": "Make the first line one sentence of at most 100 characters."},
-                {"rule": "bold_sentence", "line": 3,
-                 "excerpt": "*Snapshot health, posts published 5-19 Oct*",
-                 "fix": "Bold only a 2-4 word label."}
+                {"rule": "first_line", "line": 1,
+                 "excerpt": "Missed snapshots: checked every post since 5 Oct and the scheduler is solid…",
+                 "fix": "Start with a short, plain verdict sentence."},
+                {"rule": "unattached_file", "line": 4,
+                 "excerpt": "Full breakdown in ~/reports/summary.md",
+                 "fix": "Attach \"~/reports/summary.md\" to this message, or describe it without naming a path."}
             ]}
         }
     })
@@ -940,7 +942,7 @@ fn a_format_unreadable_refusal_prints_every_violation_and_fails() {
         let expected = format_unreadable_receipt();
         if json_output {
             let printed: Value = serde_json::from_str(&out).unwrap();
-            assert_eq!(printed["error"]["detail"]["violations"], expected["error"]["detail"]["violations"]);
+            assert_eq!(printed, expected, "--json prints the hub's refusal verbatim");
         } else {
             let text = error.to_string();
             for violation in expected["error"]["detail"]["violations"].as_array().unwrap() {
@@ -957,41 +959,53 @@ fn a_format_unreadable_refusal_prints_every_violation_and_fails() {
     }
 }
 
-/// The operator's hard rules: a draft naming a file it does not attach, or
-/// showing a UTC time, is refused before anything reaches the hub. Code
-/// blocks and Slack links are exempt, and an attached file may be named.
+/// The operator's hard rules, matched as the hub matches them: a draft naming
+/// a file it does not attach, even in backticks, or showing a UTC time, is
+/// refused before anything reaches the hub. Code blocks, URLs, a stack pair
+/// such as React/Next.js and a case-insensitive attachment name all pass.
 #[test]
 fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let refused = ScriptedHub::default();
     let (_, result) = run_cli(
         &["post", "--channel", "cas-internal", "--text",
-          "Deploy finished at 14:42Z.\n\nFull breakdown in ~/reports/summary.md"],
+          "Deploy finished at 14:42Z.\n\nSee `notes.md` and ~/reports/summary.md"],
         &refused,
         false,
         &no_gate,
     );
     let error = result.expect_err("hard rules refuse the draft");
     assert_eq!(error.code, "format_unreadable");
-    let rules: Vec<String> = error.envelope.as_ref().unwrap()["error"]["detail"]["violations"]
-        .as_array()
-        .unwrap()
+    let envelope = error.envelope.as_ref().unwrap();
+    // pin: the local refusal reuses the hub's format_unreadable message verbatim (violet_ps cas-dbea contract)
+    assert_eq!(envelope["error"]["message"], "Rewrite the post for readability, then submit it again.");
+    assert_eq!(envelope["error"]["retryable"], false);
+    let violations = envelope["error"]["detail"]["violations"].as_array().unwrap();
+    let found: Vec<(String, u64)> = violations
         .iter()
-        .map(|violation| violation["rule"].as_str().unwrap().to_string())
+        .map(|v| (v["rule"].as_str().unwrap().to_string(), v["line"].as_u64().unwrap()))
         .collect();
-    assert_eq!(rules, ["utc_time", "unattached_file"]);
+    assert_eq!(
+        found,
+        [("utc_time".to_string(), 1), ("unattached_file".to_string(), 3), ("unattached_file".to_string(), 3)]
+    );
+    assert_eq!(violations[0]["fix"], "Show \"14:42Z\" in CT (or labelled ET), never UTC.");
+    assert_eq!(
+        violations[1]["fix"],
+        "Attach \"notes.md\" to this message, or describe it without naming a path."
+    );
     assert_eq!(refused.connects(), 0, "nothing reaches the hub");
 
     let dir = TempDir::new().unwrap();
-    let path = write_file(&dir, "summary.md", b"# summary\n");
-    let allowed = ScriptedHub::with(vec![file_receipt("F1", "summary.md", b"# summary\n")]);
+    let path = write_file(&dir, "Summary.md", b"# summary\n");
+    let allowed = ScriptedHub::with(vec![file_receipt("F1", "Summary.md", b"# summary\n")]);
     let (_, result) = run_cli(
         &["post", "--channel", "cas-internal", "--file", path.to_str().unwrap(), "--text",
-          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on Node.js and Next.js."],
+          "summary.md attached: deploy finished at 9:42 AM CT.\n\n```\n2026-10-20T14:42:00Z deploy ok\n```\nDashboard: <https://hub.example/runs/1.json|run 1>, also https://hub.example/docs/notes.md\nBuilt on React/Next.js and Node.js."],
         &allowed,
         false,
         &no_gate,
     );
-    result.expect("CT times, attached files, code blocks and Slack links pass");
+    result.expect("CT times, attached files, code blocks, URLs and stack names pass");
     assert_eq!(allowed.calls().len(), 1);
 
     let thread = ScriptedHub::default();
@@ -1005,9 +1019,7 @@ fn a_draft_with_utc_times_or_unattached_files_is_refused_before_sending() {
     let error = result.expect_err("a reply naming an unattached artifact is refused");
     let violation = &error.envelope.as_ref().unwrap()["error"]["detail"]["violations"][0];
     assert_eq!(violation["rule"], "unattached_file");
-    assert_eq!(violation["message"], "reply 1");
-    assert!(violation["fix"].as_str().unwrap().contains("`art-1234abcd`"), "the fix names the token: {violation}");
-    // pin: the plain refusal names the rule, message and line so an agent can apply the fix without --json
-    assert!(error.to_string().contains("unattached_file (reply 1, line 1): Report is art-1234abcd."));
+    // pin: the plain refusal names the thread message and prints the hub's violation fields so an agent can apply the fix without --json
+    assert!(error.to_string().contains("(reply 1)\n  - unattached_file (line 1): Report is art-1234abcd."), "{error}");
     assert_eq!(thread.connects(), 0);
 }

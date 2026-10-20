@@ -1,21 +1,25 @@
 //! The operator's two hard Slack rules, checked on a `cas violet post|thread`
 //! draft before anything is sent (cas-d47fd750acf1df00).
 //!
-//! The rules and their matching follow the Violet hub's `format_unreadable`
-//! rules of the same names, so a draft refused here is refused the same way
-//! there, and a refusal prints the same `detail.violations[]` shape:
+//! This is a port of the Violet hub's own lint for those two rules
+//! (violet_ps `apps/violet/lib/readability.ts`, `lintSlackText`, at
+//! 4b6fd1143c70), so a draft refused here is refused there, with the same
+//! `format_unreadable` envelope, violation fields, excerpt and fix text:
 //!
 //! - `unattached_file`: a post never names a file the reader cannot open from
-//!   Slack. It catches absolute or `~/` paths, relative paths (a slash plus a
-//!   known extension), bare filenames with a document or data extension (so
-//!   `Node.js` passes), and `art-xxxxxxxx` artifact ids, and passes only when
-//!   the same message attaches a file of that name.
+//!   Slack. It catches `~/` paths and paths under `/home`, `/tmp`, `/mnt`,
+//!   `/Users` or `/var`; relative paths (a slash plus a known extension); bare
+//!   filenames with a document or data extension; and `art-xxxxxxxx` artifact
+//!   ids. A relative code path (`.ts`, `.js`, `.py`, `.rs`) counts only with
+//!   two or more slashes or a lowercase basename, so `React/Next.js` passes.
+//!   It passes when the same message attaches a file of that name, compared
+//!   case-insensitively. Backticks do not exempt a name.
 //! - `utc_time`: times are shown in CT (ET when labelled). It catches `UTC`,
 //!   `GMT`, `HH:MMZ`, and ISO timestamps ending in `Z` or `+00:00`.
 //!
-//! Both apply to prose only: fenced code blocks and Slack `<url|label>` links
-//! are exempt, and so are bare URLs, so this check is never stricter than the
-//! hub.
+//! Fenced code is never checked, and URLs (bare or in `<…>`) never count as
+//! file names. The hub's other seven rules are enforced by the hub; their
+//! refusals print through the same envelope.
 
 use std::sync::LazyLock;
 
@@ -23,6 +27,13 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::hub::VioletError;
+
+/// The hub's `format_unreadable` message, verbatim.
+pub const FORMAT_UNREADABLE_MESSAGE: &str = "Rewrite the post for readability, then submit it again.";
+
+const EXCERPT: usize = 80;
+const EXCERPT_CONTEXT: usize = 20;
+const CODE_PATH_SLASHES: usize = 2;
 
 /// One message of a draft: its text and the names of the files it attaches.
 pub struct DraftMessage<'a> {
@@ -32,109 +43,225 @@ pub struct DraftMessage<'a> {
     pub attached: Vec<String>,
 }
 
-static LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<[^<>\s|]+(?:\|[^<>]*)?>").expect("link pattern"));
-static URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"https?://\S+").expect("url pattern"));
+const DOCUMENT_EXTENSIONS: &str = "md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml";
+const FILE_EXTENSIONS: &str = "md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml|ts|js|py|rs";
+
+static LABELLED_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^<>\n|]+\|([^<>\n]*)>").expect("link pattern"));
+static URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)<[a-z][\w+.\-]*:[^<>\n]+>|\b[a-z][\w+.\-]*://[^\s<>`]+|\b(?:mailto|tel):[^\s<>`]+|\b(?:[a-z0-9\-]+\.)+[a-z]{2,}(?::\d+)?/[^\s<>`]*",
+    )
+    .expect("url pattern")
+});
 static UTC_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\b(?:UTC|GMT)\b|\b\d{1,2}:\d{2}(?::\d{2})?Z\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)",
+        r"(?i)\b(?:UTC|GMT)\b|\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z\b|\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)\b",
     )
     .expect("utc pattern")
 });
-static FILE_REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(
-        // absolute (two or more segments) or home-relative paths
-        r"(?:^|[^\w/~.])(?P<abs>(?:~|/[\w.\-]+)/[\w.\-]+(?:/[\w.\-]+)*)",
-        // relative paths: a slash plus a known extension
-        r"|\b(?P<rel>[\w.\-]+(?:/[\w.\-]+)+\.(?:md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml|ts|js|py|rs))\b",
-        // bare filenames with a document or data extension only, so that
-        // `Node.js` and `Next.js` are not file references
-        r"|\b(?P<bare>[\w\-]+(?:\.[\w\-]+)*\.(?:md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml))\b",
-        // Cassy artifact ids
-        r"|\b(?P<art>art-[0-9a-f]{8})\b",
-    ))
-    .expect("file pattern")
+static CODE_EXTENSION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\.(?:ts|js|py|rs)$").expect("code extension pattern"));
+
+/// The four `unattachedFile` alternatives, in the hub's order, each with the
+/// characters its lookbehind refuses before the match (`regex` has no
+/// lookbehind, so it is checked by hand).
+static FILE_ALTERNATIVES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    vec![
+        (
+            Regex::new(r#"(?i)(?:~/|/(?:home|tmp|mnt|Users|var)/)[^\s`<>"'()\[\]{},;!?]*"#)
+                .expect("absolute path pattern"),
+            "",
+        ),
+        (
+            Regex::new(&format!(
+                r"(?i)[A-Za-z0-9_@.\-]+(?:/[A-Za-z0-9_@.\-]+)+\.(?:{FILE_EXTENSIONS})\b(?::\d+(?::\d+)?)?"
+            ))
+            .expect("relative path pattern"),
+            ".",
+        ),
+        (
+            Regex::new(&format!(
+                r"(?i)[A-Za-z0-9_@\-][A-Za-z0-9_@.\-]*\.(?:{DOCUMENT_EXTENSIONS})\b(?::\d+(?::\d+)?)?"
+            ))
+            .expect("bare filename pattern"),
+            "./",
+        ),
+        (
+            Regex::new(r"(?i)\bart-[0-9a-f]{8}\b").expect("artifact id pattern"),
+            "",
+        ),
+    ]
 });
 
-fn fix_file(token: &str) -> String {
-    format!(
-        "attach `{token}` to this message (--file or --reply-file), or describe what it shows without naming it"
-    )
+fn is_ascii_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn fix_time(token: &str) -> String {
-    format!(
-        "replace `{token}` with US Central time, for example 2:08 PM CT (ET is fine when labelled); never UTC, GMT or Z"
-    )
+/// The next match of one alternative at or after `from` whose preceding
+/// character passes its lookbehind (`(?<![\w<extra>])`, when `extra` is set).
+fn next_alternative(text: &str, from: usize, pattern: &Regex, extra: &str) -> Option<(usize, usize)> {
+    let mut start = from;
+    while start <= text.len() {
+        let found = pattern.find_at(text, start)?;
+        let refused = !extra.is_empty()
+            && text[..found.start()]
+                .chars()
+                .next_back()
+                .is_some_and(|c| is_ascii_word(c) || extra.contains(c));
+        if !refused {
+            return Some((found.start(), found.end()));
+        }
+        start = found.start() + text[found.start()..].chars().next().map_or(1, char::len_utf8);
+    }
+    None
 }
 
-/// Every hard-rule violation in `message`, in line order, as hub-shaped
-/// violation objects.
-pub fn violations(message: &DraftMessage<'_>) -> Vec<Value> {
+/// Every `unattachedFile` match in `text`, scanning left to right the way a
+/// global JavaScript regex does: at each position the earliest-starting
+/// alternative wins, ties going to the earlier alternative.
+fn file_references(text: &str) -> Vec<(usize, &str)> {
     let mut found = Vec::new();
-    let mut in_fence = false;
-    for (index, line) in message.text.lines().enumerate() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        let prose = URL.replace_all(&LINK.replace_all(line, " "), " ").into_owned();
-        let mut push = |rule: &str, fix: String| {
-            let mut violation = json!({
-                "rule": rule,
-                "line": index + 1,
-                "excerpt": line.trim(),
-                "fix": fix,
-            });
-            if let Some(label) = &message.label {
-                violation["message"] = json!(label);
-            }
-            found.push(violation);
+    let mut position = 0;
+    while position <= text.len() {
+        let next = FILE_ALTERNATIVES
+            .iter()
+            .filter_map(|(pattern, extra)| next_alternative(text, position, pattern, extra))
+            .min_by_key(|(start, _)| *start);
+        let Some((start, end)) = next else { break };
+        found.push((start, &text[start..end]));
+        position = if end > start {
+            end
+        } else {
+            end + text[end..].chars().next().map_or(1, char::len_utf8)
         };
-        if let Some(token) = UTC_TIME.find(&prose) {
-            push("utc_time", fix_time(token.as_str()));
+    }
+    found
+}
+
+/// The hub's `basename`: drop trailing dots, a `:line[:col]` suffix and
+/// trailing slashes, then keep the last path segment.
+fn basename(reference: &str) -> String {
+    static POSITION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r":\d+(?::\d+)?$").expect("position pattern"));
+    let trimmed = reference.trim_end_matches('.');
+    let without_position = POSITION.replace(trimmed, "").into_owned();
+    let without_slashes = without_position.trim_end_matches('/');
+    without_slashes.rsplit('/').next().unwrap_or(without_slashes).to_string()
+}
+
+fn excerpt(source: &str, byte_index: usize) -> String {
+    let start = source[..byte_index].chars().count().saturating_sub(EXCERPT_CONTEXT);
+    source.chars().skip(start).take(EXCERPT).collect()
+}
+
+/// One physical line, as the hub lints it.
+struct LintLine {
+    number: usize,
+    text: String,
+    file_prose: String,
+}
+
+fn lint_lines(text: &str) -> Vec<LintLine> {
+    let leading = &text[..text.len() - text.trim_start().len()];
+    let offset = leading.matches('\n').count();
+    let mut in_code = false;
+    text.trim()
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .enumerate()
+        .map(|(index, original)| {
+            let mut visible = String::new();
+            let mut start = 0;
+            for (fence, _) in original.match_indices("```") {
+                if !in_code {
+                    visible.push_str(&original[start..fence]);
+                }
+                in_code = !in_code;
+                start = fence + 3;
+            }
+            if !in_code {
+                visible.push_str(&original[start..]);
+            }
+            LintLine {
+                number: index + offset + 1,
+                text: LABELLED_LINK.replace_all(&visible, "$1").into_owned(),
+                file_prose: URL.replace_all(&visible, "").into_owned(),
+            }
+        })
+        .collect()
+}
+
+/// The `unattached_file` and `utc_time` violations in `message`, in the hub's
+/// order and shape.
+pub fn violations(message: &DraftMessage<'_>) -> Vec<Value> {
+    let attached: Vec<String> = message
+        .attached
+        .iter()
+        .map(|name| basename(name).to_lowercase())
+        .collect();
+    let mut found = Vec::new();
+    for line in lint_lines(message.text) {
+        if line.text.trim().is_empty() {
+            continue;
         }
-        let unattached = FILE_REFERENCE.captures_iter(&prose).find_map(|captures| {
-            let reference = ["abs", "rel", "bare", "art"]
-                .iter()
-                .find_map(|name| captures.name(name))
-                .map(|matched| matched.as_str())
-                .unwrap_or_default();
-            let name = reference.rsplit('/').next().unwrap_or(reference);
-            (!message.attached.iter().any(|attached| attached == name)).then_some(reference)
-        });
-        if let Some(token) = unattached {
-            push("unattached_file", fix_file(token));
+        for (index, reference) in file_references(&line.file_prose) {
+            let name = basename(reference);
+            let explicit = reference.starts_with("~/") || reference.starts_with('/');
+            let lowercase = name.starts_with(|c: char| c.is_ascii_lowercase());
+            if CODE_EXTENSION.is_match(&name)
+                && !explicit
+                && reference.matches('/').count() < CODE_PATH_SLASHES
+                && !lowercase
+            {
+                continue;
+            }
+            if !attached.contains(&name.to_lowercase()) {
+                found.push(json!({
+                    "rule": "unattached_file",
+                    "line": line.number,
+                    "excerpt": excerpt(&line.file_prose, index),
+                    "fix": format!("Attach \"{reference}\" to this message, or describe it without naming a path."),
+                }));
+            }
+        }
+        for time in UTC_TIME.find_iter(&line.text) {
+            found.push(json!({
+                "rule": "utc_time",
+                "line": line.number,
+                "excerpt": excerpt(&line.text, time.start()),
+                "fix": format!("Show \"{}\" in CT (or labelled ET), never UTC.", time.as_str()),
+            }));
         }
     }
     found
 }
 
-/// Refuse the draft before it is sent when any message breaks a hard rule.
-/// The error carries the hub's `format_unreadable` envelope, so `--json` and
-/// the plain output report it exactly as they report a hub refusal.
+/// Refuse the draft before it is sent when a message breaks a hard rule. The
+/// error carries the hub's `format_unreadable` envelope for the first such
+/// message, so `--json` and the plain output read exactly like a hub refusal;
+/// the plain message also names which thread message it was.
 pub fn check(messages: &[DraftMessage<'_>]) -> Result<(), VioletError> {
-    let found: Vec<Value> = messages.iter().flat_map(violations).collect();
-    if found.is_empty() {
-        return Ok(());
-    }
-    let message = format!(
-        "the draft breaks {} Slack formatting rule(s); nothing was sent",
-        found.len()
-    );
-    let mut error = VioletError::local("format_unreadable", message.clone());
-    error.envelope = Some(json!({
-        "ok": false,
-        "error": {
-            "code": "format_unreadable",
-            "message": message,
-            "retryable": false,
-            "detail": { "violations": found },
+    for message in messages {
+        let found = violations(message);
+        if found.is_empty() {
+            continue;
         }
-    }));
-    Err(error)
+        let summary = match &message.label {
+            Some(label) => format!("{FORMAT_UNREADABLE_MESSAGE} ({label})"),
+            None => FORMAT_UNREADABLE_MESSAGE.to_string(),
+        };
+        let mut error = VioletError::local("format_unreadable", summary);
+        error.envelope = Some(json!({
+            "ok": false,
+            "error": {
+                "code": "format_unreadable",
+                "message": FORMAT_UNREADABLE_MESSAGE,
+                "retryable": false,
+                "detail": { "violations": found },
+            }
+        }));
+        return Err(error);
+    }
+    Ok(())
 }

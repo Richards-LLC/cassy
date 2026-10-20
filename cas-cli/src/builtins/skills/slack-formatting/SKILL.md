@@ -24,7 +24,7 @@ People scan; they do not read. In NN/g eyetracking studies 79% of users scanned 
 
 The operator set these two, and they are never traded for brevity or tone. They apply to prose: text inside a fenced code block and inside a Slack `<url|label>` link is exempt. `cas violet post|thread` refuses a draft that breaks them before sending, and the hub refuses it with `format_unreadable` (`unattached_file`, `utc_time`).
 
-**Rule 9 catches** absolute or `~/` paths, relative paths (a slash plus a known extension), bare filenames with a document or data extension (`notes.md`, `report.pdf`, `data.csv`; `Node.js` and `Next.js` pass), and `art-xxxxxxxx` artifact ids. Every URL is exempt. It passes only when the same message attaches a file of that name.
+**Rule 9 catches** `~/` paths and paths under `/home`, `/tmp`, `/mnt`, `/Users` or `/var`; relative paths (a slash plus a known extension); bare filenames with a document or data extension (`notes.md`, `report.pdf`, `data.csv`); and `art-xxxxxxxx` artifact ids. A relative path to code (`.ts`, `.js`, `.py`, `.rs`) counts only with two or more slashes or a lowercase file name, so `React/Next.js` and `Node.js` pass while `src/app.ts` does not. Backticks do not exempt a name, but every URL is exempt. It passes only when the same message attaches a file of that name (compared case-insensitively).
 
 - Don't: `Full breakdown in ~/reports/stall-summary.md`
 - Don't: `See docs/postmortem.md and art-1234abcd for details`
@@ -102,20 +102,23 @@ Follow the project's `docs/release-notes/RUBRIC.md`; these rules govern the layo
 
 ## Before you post — self-check
 
-Refuse to send and rewrite if any of these is true:
+The rules above are the target. The Violet hub refuses a post outright, with `format_unreadable`, when it breaks any of these nine limits. Fenced code blocks and URLs are exempt from all of them; thread replies are exempt from `first_line` and `long_top_level`.
 
-- A path, filename or artifact id is named that is not attached to this message (rule 9).
-- A time is in UTC or GMT, or ends in `Z` or `+00:00`, rather than CT or labelled ET (rule 10).
-- The first line is over ~100 characters, bold, or two sentences.
-- The top-level message is over 8 lines or ~600 characters and has no thread replies.
-- Any bullet or paragraph line is over ~200 characters.
-- More than 5 consecutive lines with no blank line.
-- A whole sentence is bold, or there is `**`, a `#` heading or a `-` bullet.
-- Columns are aligned with spaces outside a code block, or a section is figures with no takeaway sentence.
-- An emoji is decoration, not a status marker.
-- The figures on screen do not add up without reading another section.
+| Hub rule | Refused when |
+| --- | --- |
+| `first_line` | the top-level message's first line is over 160 characters, or is wholly bold and over 60 |
+| `long_line` | any line is over 300 characters |
+| `no_breathing_room` | more than 6 non-blank lines run together without a blank line |
+| `long_top_level` | the top-level message is over 900 characters |
+| `markdown_syntax` | a line has `**`, starts with a heading (`#` to `######` then a space; `#channel` is fine), or starts with a `-` or `*` bullet |
+| `fake_table` | 3 or more lines each have 2 or more gaps of 3+ spaces between words |
+| `bold_sentence` | a bold span is over 80 characters |
+| `unattached_file` | rule 9: a path, filename or artifact id is named and no file of that name is attached |
+| `utc_time` | rule 10: a time shows UTC, GMT, `HH:MMZ`, or an ISO timestamp ending in `Z` or `+00:00` |
 
-`cas violet post|thread` refuses a draft that breaks rule 9 or 10, and the hub refuses unreadable text with `format_unreadable`. Both print each violation's rule, line, excerpt and fix: apply the fix and post again.
+Before you send, also check what the hub cannot: the first line is the verdict, sections lead with a takeaway, figures add up, and emoji are status markers, not decoration.
+
+`cas violet post|thread` refuses a draft that breaks rule 9 or 10 before sending, and the hub refuses the other limits. Both print each violation's rule, line, excerpt and fix, and the fix for a file or time names the exact token. Apply the fixes and post again.
 
 ## Over-correction (also don't)
 

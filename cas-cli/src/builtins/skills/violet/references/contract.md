@@ -193,6 +193,7 @@ non-zero, and the hub's own codes (`not_member`, `file_too_large`,
 | `publication_blocked` | the post shares a file while its epic's verification is open ([publication](publication.md)) |
 | `violet_upload_failed` | the direct upload was refused; nothing was shared |
 | `violet_post_failed` | the hub refused without a code of its own |
+| `format_unreadable` | the draft names a file it does not attach, or shows a UTC time; refused before sending, in the hub's own `format_unreadable` shape (the hub's other readability rules arrive as the same code from the hub). Each violation prints its `rule`, `line`, `excerpt` and `fix`; apply the fixes ([slack-formatting](../../slack-formatting/SKILL.md)) and post again |
 
 An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet

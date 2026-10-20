@@ -267,10 +267,26 @@ fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
     for command in [
         "python3 -c 'from pathlib import Path; print((Path.home() / \".config\" / \"neonctl\" / \"credentials.json\").read_text())'",
         "node -e 'require(\"fs\").readFileSync(process.env.HOME + \"/.local/share/com.vercel.cli/auth.json\")'",
+        "python3 <<'PY'\nimport os\nfrom pathlib import Path\nPath(os.path.join(os.environ['HOME'], '.config', 'neonctl', 'credentials.json')).read_text()\nPY",
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);
     }
+}
+
+#[test]
+fn worker_shell_keeps_separate_argv_paths_separate_cas_da9a() {
+    let (_env, cwd) = role_env("worker");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let command = format!(
+        "printf '%s %s\\n' '{}' '/.config/neonctl/credentials.json'",
+        home.display()
+    );
+    let output = handle_pre_tool_use(&bash(&command, cwd.path()), None).unwrap();
+    assert!(
+        denial(output).is_none(),
+        "separate argv entries were incorrectly joined into a protected path"
+    );
 }
 
 #[test]

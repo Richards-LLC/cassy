@@ -124,6 +124,12 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
+    if let Some(reason) =
+        super::worker_denied_tools::credential_store_access_denial(input, tool_name)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     // cas-d757 (GH #1219): operator-authenticated CLIs (vercel/neonctl) and their
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
@@ -963,13 +969,6 @@ fn handle_pre_tool_use_inner(
 
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
-    // `credentials.json` is a generic filename rule, but these two operator
-    // stores remain supervisor-readable. The worker-only path gate above is
-    // authoritative for them; retain every other configured protection.
-    let supervisor_operator_credential_read = crate::harness_policy::is_supervisor(input)
-        && matches!(tool_name, "Read" | "Grep")
-        && file_path.is_some_and(super::worker_denied_tools::is_operator_credential_reference);
-
     if protection.enabled {
         // Bash has no file_path. Reuse the structural destination recognizer
         // from workspace containment; credential reads and quoted command text
@@ -1009,9 +1008,6 @@ fn handle_pre_tool_use_inner(
 
             // Block access to credential files
             for pattern in &protection.patterns {
-                if supervisor_operator_credential_read && pattern == "credentials.json" {
-                    continue;
-                }
                 if path.ends_with(pattern) || path.contains(pattern) {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
@@ -3267,7 +3263,7 @@ fn shell_command_without_heredoc_bodies(command: &str) -> String {
     shell_command
 }
 
-fn shell_heredoc_bodies(command: &str) -> Vec<String> {
+pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
     let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
         std::collections::VecDeque::new();
     let mut bodies = Vec::new();

@@ -238,6 +238,13 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
                 child.deliverables.commit_hash = Some(tip.clone());
                 tasks.update(&child).unwrap();
             }
+            if delivered && !in_trunk {
+                // An archived branch named master is not the authoritative
+                // trunk. Its copy of this work must not authorize a reset.
+                git(&f.repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+                git(&f.repo, &["branch", "master", &tip]);
+                git(&f.repo, &["push", "origin", "master"]);
+            }
             git(&f.repo, &["checkout", "main"]);
             if in_trunk {
                 git(&f.repo, &["merge", "--ff-only", "epic/round2"]);

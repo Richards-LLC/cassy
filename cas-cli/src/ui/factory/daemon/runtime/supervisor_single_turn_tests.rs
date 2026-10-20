@@ -239,6 +239,15 @@ async fn codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b
             cas_store::EnqueueIdempotentResult::Created(id) => id,
             _ => panic!("fresh reminder/reply"),
         };
+        // Peer replies share 3.67's 20-second directed-message debounce. Set
+        // the fixture's persisted clock past it instead of waiting or bypassing
+        // the real selection path (as peer_mailbox_wake_tests does).
+        if source.is_some() {
+            rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339(), id],
+            ).unwrap();
+        }
         let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = output.clone();
         let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
@@ -249,7 +258,7 @@ async fn codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b
         let deadline = Instant::now() + Duration::from_secs(10);
         while !daemon.queue_jobs.has_claim(id, &name) {
             daemon.process_prompt_queue().await.unwrap();
-            assert!(Instant::now() < deadline, "claim must be submitted: {prompt}");
+            assert!(Instant::now() < deadline, "claim must be submitted: {prompt}\n{}", log());
             tokio::task::yield_now().await;
         }
         assert_eq!(daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0), 0,

@@ -426,6 +426,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
+                        crate::coordination::stakeholder_contacts::install(&engine, &cas_root).await;
                         engine
                             .set_call_observer(std::sync::Arc::new(
                                 crate::mcp::viktor_watch::ViktorWatchRecorder::new(

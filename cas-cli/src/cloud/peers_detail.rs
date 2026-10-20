@@ -114,6 +114,8 @@ pub struct PeerEpicSplit {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
+    #[cfg(feature = "mcp-proxy")]
+    pub stakeholder_contacts: serde_json::Value,
     pub status: String,
     /// Original Cloud activation read for this registration; status-only, never authority.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +176,8 @@ impl PeerReport {
             })
             .collect();
         Self {
+            #[cfg(feature = "mcp-proxy")]
+            stakeholder_contacts: serde_json::json!({"state":"not_requested"}),
             activation: None,
             observed_at: now,
             limitations: vec![
@@ -440,6 +444,10 @@ pub fn discover_peer_report(
 ) -> Result<PeerReport, CasError> {
     let detail = detail || selected.is_some();
     let mut report = PeerReport::new(cas_root, self_id, detail);
+    #[cfg(feature = "mcp-proxy")]
+    if detail {
+        report.stakeholder_contacts = crate::coordination::stakeholder_contacts::StakeholderContacts::from_project(cas_root).status();
+    }
     let Some(repo) = report.canonical_id.as_deref() else {
         report.status = "no_project_identity".into();
         report.error = Some("project has no canonical id; configure [project] canonical_id".into());
@@ -864,6 +872,12 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| "unknown".into())
             ));
+        }
+    }
+    #[cfg(feature = "mcp-proxy")]
+    if report.detail {
+        for contact_line in crate::coordination::stakeholder_contacts::render_status(&report.stakeholder_contacts) {
+            line(contact_line);
         }
     }
     for mailbox_line in report.mailbox_status.lines() {

@@ -273,6 +273,33 @@ impl SqliteRequestJournal {
         load_operation(&*conn, request_id)
     }
 
+    /// Local evidence for degraded stakeholder warnings, never shared authority.
+    pub fn read_stakeholder_contact_evidence(cas_dir: &Path) -> Result<Vec<Value>, JournalError> {
+        let path = cas_dir.join("cas.db");
+        if !path.exists() { return Ok(Vec::new()); }
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| JournalError::Storage(error.to_string()))?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_work_operations')", [], |row| row.get(0)
+        ).map_err(|error| JournalError::Storage(error.to_string()))?;
+        if !exists { return Ok(Vec::new()); }
+        Self { conn: Arc::new(Mutex::new(conn)) }.stakeholder_contact_evidence()
+    }
+
+    /// Existing journal rows only; does not create a second evidence store.
+    pub fn stakeholder_contact_evidence(&self) -> Result<Vec<Value>, JournalError> {
+        let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let mut query = conn.prepare(
+            "SELECT response_json FROM external_work_operations WHERE kind='stakeholder_contact' AND response_json IS NOT NULL ORDER BY updated_at DESC, rowid DESC"
+        ).map_err(|error| JournalError::Storage(error.to_string()))?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| JournalError::Storage(error.to_string()))?;
+        rows.map(|row| {
+            let row = row.map_err(|error| JournalError::Storage(error.to_string()))?;
+            serde_json::from_str(&row).map_err(|error| JournalError::Storage(error.to_string()))
+        }).collect()
+    }
+
     pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
         let conn = self
             .conn
@@ -281,7 +308,8 @@ impl SqliteRequestJournal {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM external_work_operations
-                WHERE stage IN ('prepared','retry_wait','dispatching')
+                WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                  AND stage IN ('prepared','retry_wait','dispatching')
                   AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                   AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
              )",
@@ -311,7 +339,8 @@ impl SqliteRequestJournal {
             let mut statement = transaction
                 .prepare(
                     "SELECT request_id FROM external_work_operations
-                     WHERE stage IN ('prepared','retry_wait','dispatching')
+                 WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                   AND stage IN ('prepared','retry_wait','dispatching')
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
                      ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2",

@@ -11792,11 +11792,11 @@ impl CasCore {
                 format!("Task not found: {error}"),
             )
         })?;
-        if task.status != TaskStatus::AwaitingMerge {
+        if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action declines a parked delivery; a task that is not parked is already actionable.",
+                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
                     task.id, task.status
                 ),
             ));

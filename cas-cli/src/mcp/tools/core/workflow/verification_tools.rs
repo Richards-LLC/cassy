@@ -443,11 +443,25 @@ impl CasCore {
             dispatch_id
         } else if let Some(dispatch_id) = req.dispatch_id.clone() {
             dispatch_id
-        } else if supervisor_direct && task.status == TaskStatus::AwaitingMerge {
-            // A restart can leave an immutable parked delivery without an
-            // active review cycle. Factory verifiers use this authenticated
-            // supervisor context; recover the boundary without a close attempt.
-            self.recover_parked_verification_dispatch(&task, &caller)?.id
+        } else if supervisor_direct {
+            // The active-task unique index guarantees one live boundary. Infer
+            // only for this authenticated supervisor; child handoffs above stay
+            // sealed, and expired/terminal cycles require explicit recovery.
+            let live = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .filter(|dispatch| matches!(dispatch.state,
+                    cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                    && dispatch.deadline_at > chrono::Utc::now());
+            match live {
+                Some(dispatch) => dispatch.id,
+                // A restart can leave an immutable parked delivery without an
+                // active review cycle; recover the boundary without a close attempt.
+                None if task.status == TaskStatus::AwaitingMerge => {
+                    self.recover_parked_verification_dispatch(&task, &caller)?.id
+                }
+                None => return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.")),
+            }
         } else {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,

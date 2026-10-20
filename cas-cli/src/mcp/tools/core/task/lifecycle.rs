@@ -945,14 +945,14 @@ impl CasCore {
         confirm_warning: bool,
         delivery_mode: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
-        if req
-            .notes
-            .as_deref()
-            .is_some_and(crate::artifacts::proof::contains_proof_marker)
+        if let Some(message) = [req.notes.as_deref(), req.reason.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(super::caller_note_marker_rejection)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references."),
+                message: Cow::from(message),
                 data: None,
             });
         }

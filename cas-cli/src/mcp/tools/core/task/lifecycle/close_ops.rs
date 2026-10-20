@@ -7078,6 +7078,13 @@ impl CasCore {
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let caller_task = format!("{}task", self.guidance_prefix());
+        if let Some(message) = req
+            .reason
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -11300,12 +11307,21 @@ impl CasCore {
                 "TASK CANCEL REJECTED: reason is required and must not be blank.",
             ));
         }
+        if let Some(message) = crate::mcp::tools::core::task::caller_note_marker_rejection(reason) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let superseded_by = req
             .superseded_by
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        if let Some(message) = superseded_by
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         if let Some(pointer) = superseded_by.as_deref()
             && (pointer.len() > 512 || !delivery_audit_text_is_portable(pointer))
         {
@@ -11444,6 +11460,13 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReopenRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = req
+            .reason
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+        }
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -11738,6 +11761,11 @@ impl CasCore {
                 ErrorCode::INVALID_PARAMS,
                 "task request_changes rejected: reason must explain what must change and whether prior commits should stand or be reverted",
             ));
+        }
+        if let Some(message) =
+            crate::mcp::tools::core::task::caller_note_marker_rejection(&req.reason)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
 
         let task_store = self.open_task_store()?;

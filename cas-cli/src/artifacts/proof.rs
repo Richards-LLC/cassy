@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const MARKER: &str = "ARTIFACT_PROOF: ";
 
 pub fn contains_proof_marker(note: &str) -> bool {
-    note.contains("ARTIFACT_PROOF:")
+    note.lines().any(|line| line.starts_with("ARTIFACT_PROOF:"))
 }
 
 fn same_artifact(a: &PublishedArtifact, b: &PublishedArtifact) -> bool {

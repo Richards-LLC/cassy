@@ -10,6 +10,18 @@ mod query;
 pub(crate) mod repo_context;
 mod update;
 
+/// Caller text appended to the task timeline cannot forge the marker lines
+/// emitted by artifact publication or server-attested proposal sync.
+pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
+    if crate::cloud::syncer::contains_proposal_provenance_marker(text) {
+        Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).")
+    } else if crate::artifacts::proof::contains_proof_marker(text) {
+        Some("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.")
+    } else {
+        None
+    }
+}
+
 /// Return the canonical identity of the project represented by a Cassy root.
 pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
     crate::cloud::resolve_canonical_id(cas_root)

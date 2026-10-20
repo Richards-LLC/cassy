@@ -2214,7 +2214,6 @@ async fn team_pull_keeps_one_provenance_block_across_received_at_formats_cas_a8e
     assert_eq!(task.notes.matches("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
     assert_eq!(task.notes.matches("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
     assert!(task.notes.contains("[2026-10-17 21:30] accepted"), "ordinary notes survive: {}", task.notes);
-    assert_eq!(accepted_proposal_execution_project(&task).as_deref(), Some("target-project"));
 }
 
 #[tokio::test]

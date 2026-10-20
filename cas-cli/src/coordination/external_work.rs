@@ -358,6 +358,100 @@ impl SqliteRequestJournal {
     }
 }
 
+impl SqliteRequestJournal {
+    /// cas-8239 (GH #1300): the `violet_post` fields of `registration_id`'s
+    /// current reply intent for the thread rooted at `reply_to`, so a reply
+    /// can be posted without copying claim fields by hand. Only completed
+    /// operations count, in the order they were made. A reply intent stays
+    /// current until a later release, transfer, or a claim or accept at
+    /// another generation retires it; a renewal extends its claim's expiry.
+    /// An expired claim, another session's intent, or none yields `None`.
+    pub fn current_reply_post(
+        &self,
+        registration_id: &str,
+        reply_to: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Value>, JournalError> {
+        let operations: Vec<(String, String, String)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+            let mut statement = conn
+                .prepare(
+                    "SELECT kind, input_json, response_json FROM external_work_operations
+                     WHERE stage = 'terminal' AND response_json IS NOT NULL
+                     ORDER BY created_at, rowid",
+                )
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            rows.collect::<Result<_, _>>().map_err(|error| JournalError::Storage(error.to_string()))?
+        };
+        // resource id -> (violet_post block, claim generation, claim expiry)
+        let mut current: std::collections::HashMap<String, (Value, u64, Option<DateTime<Utc>>)> =
+            std::collections::HashMap::new();
+        let expiry = |receipt: &Value| {
+            receipt["expires_at"]
+                .as_str()
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&Utc))
+        };
+        for (kind, input, response) in operations {
+            let (Ok(input), Ok(response)) =
+                (serde_json::from_str::<Value>(&input), serde_json::from_str::<Value>(&response))
+            else {
+                continue;
+            };
+            if input["actor"]["registration_id"] != registration_id || response["code"] != "completed" {
+                continue;
+            }
+            let receipt = &response["receipt"];
+            let Some(resource) = input["resource_id"].as_str().or(receipt["resource"]["id"].as_str()) else {
+                continue;
+            };
+            let resource = resource.to_string();
+            let generation = receipt["generation"].as_u64();
+            match kind.as_str() {
+                "reply_intent" => {
+                    let Some(expected) = input["expected_generation"].as_u64() else { continue };
+                    // Expiry is judged below, after any later renewal.
+                    let ready = with_reply_ready(response.clone(), &resource, expected, DateTime::<Utc>::MIN_UTC);
+                    match ready.get("violet_post") {
+                        Some(block) => {
+                            current.insert(resource, (block.clone(), expected, expiry(receipt)));
+                        }
+                        None => {
+                            current.remove(&resource);
+                        }
+                    }
+                }
+                "renew_claim" => {
+                    if let Some(entry) = current.get_mut(&resource)
+                        && generation == Some(entry.1)
+                    {
+                        entry.2 = expiry(receipt).or(entry.2);
+                    }
+                }
+                "release_claim" | "transfer_claim" => {
+                    current.remove(&resource);
+                }
+                _ => {
+                    if current.get(&resource).is_some_and(|entry| generation != Some(entry.1)) {
+                        current.remove(&resource);
+                    }
+                }
+            }
+        }
+        Ok(current
+            .into_values()
+            .filter(|(block, _, expires)| block["reply_to"] == reply_to && expires.is_some_and(|at| at > now))
+            .map(|(block, _, _)| block)
+            .next())
+    }
+}
+
 fn load_operation(
     conn: &Connection,
     request_id: &str,
@@ -2389,6 +2483,41 @@ mod tests {
     /// cas-f869: Cloud's refusals pass through with their next step and no
     /// post fields; renew follows the fixture wire, and a lapsed claim is a
     /// named refusal with no automatic reclaim.
+    /// cas-8239 (GH #1300): `cas violet post` takes a managed reply's claim
+    /// fields from the caller's own live reply intent in the journal. Another
+    /// session's intent, another thread, a lapsed claim or a released claim
+    /// yields none, so the hub still refuses the reply.
+    #[test]
+    fn current_reply_post_is_only_the_callers_live_intent_cas_8239() {
+        let case = &fixture("reply_intents")["cases"][0];
+        let journal = journal();
+        let cloud = Arc::new(FakeCloud::new(journal.clone()));
+        *cloud.post_result.lock().unwrap() = Ok(case["response"]["payload"].clone());
+        let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal.clone());
+        service.now = before_expiry;
+        let request_id = case["request"]["payload"]["request_id"].as_str().unwrap();
+        service.execute(reply_intent(request_id, Some("00000cc2-1111-4111-8111-000000000cc2"))).unwrap();
+        let (me, root) = ("reg-supervisor-alpha-01", "1760616000.123456");
+
+        let post = journal.current_reply_post(me, root, before_expiry()).unwrap().expect("the live intent");
+        assert_eq!(post["coordination_operation_id"], "00007e91-1111-4111-8111-000000007e91");
+        assert_eq!(post["expected_generation"], 1);
+        assert!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).unwrap().is_none());
+        assert!(journal.current_reply_post(me, "1760616999.000001", before_expiry()).unwrap().is_none());
+        assert!(journal.current_reply_post(me, root, at_expiry()).unwrap().is_none(), "lapsed claim");
+
+        let release = &fixture("release")["cases"][0];
+        *cloud.post_result.lock().unwrap() = Ok(release["response"]["payload"].clone());
+        service
+            .execute(ExternalWorkCommand::ReleaseClaim {
+                resource_id: RESOURCE_ID.into(),
+                expected_generation: 1,
+                request_id: Some(release["request"]["payload"]["request_id"].as_str().unwrap().into()),
+            })
+            .unwrap();
+        assert!(journal.current_reply_post(me, root, before_expiry()).unwrap().is_none(), "released claim");
+    }
+
     #[test]
     fn reply_intent_refusals_and_renew_never_reclaim_cas_f869() {
         for (n, case) in ["stale pre-claim wake cannot reply", "unresolved reply pins the thread"].into_iter().enumerate() {

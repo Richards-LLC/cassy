@@ -1581,6 +1581,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
 
     let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "qa-between-rounds")]);
     let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(temp_dir.path().join("config.toml"), "[qa]\nmax_rounds = 2\n").unwrap();
     let stores = DirectorStores::open(temp_dir.path()).unwrap();
     stores.task_store.init().unwrap();
     stores.agent_store.init().unwrap();
@@ -1599,6 +1600,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
 
     let mut delivery = Task::new("cas-521d-delivery".into(), "Awaiting a fix round".into());
     delivery.status = TaskStatus::AwaitingMerge;
+    delivery.assignee = Some("implementer-session".into());
     stores.task_store.add(&delivery).unwrap();
     let head = "a".repeat(40);
     let pass = open_qa_pass(
@@ -1618,11 +1620,12 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
         cas_store::QaPassOpen::Dispatched(pass) => pass.id,
         other => panic!("first QA round should dispatch: {other:?}"),
     };
-    claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.id, now).unwrap();
-    resolve_qa_pass(
+    // qa_caller_identity supplies the registered name to qa_record.
+    claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.name, now).unwrap();
+    let rejected = resolve_qa_pass(
         temp_dir.path(),
         &delivery.id,
-        &reviewer.id,
+        &reviewer.name,
         QaVerdict::Rejected,
         "fix needed",
         None,
@@ -1630,6 +1633,16 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
         now,
     )
     .unwrap();
+
+    let core = crate::mcp::CasCore::with_daemon(temp_dir.path().to_path_buf(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::CasService::new(core);
+    let routed = service.route_qa_rejection(&rejected, &reviewer.name, "fix needed");
+    let reopened = stores.task_store.get(&delivery.id).unwrap();
+    assert_eq!(reopened.status, TaskStatus::Open, "{routed}");
+    assert_eq!(reopened.assignee, delivery.assignee);
 
     let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
     let mut detector = DirectorEventDetector::new(
@@ -1650,6 +1663,25 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
             "a reviewer between a rejected pass and the next round is not idle for assignment: {events:?}"
         );
     }
+
+    let mut fixing = stores.task_store.get(&delivery.id).unwrap();
+    fixing.status = TaskStatus::InProgress;
+    stores.task_store.update(&fixing).unwrap();
+    let fixing = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(
+        fixing.agents.iter().find(|agent| agent.id == reviewer.id)
+            .unwrap().qa_reviewer_between_rounds
+    );
+
+    // Exhausting the configured limit must release the reviewer even while
+    // the delivery remains non-terminal.
+    std::fs::write(temp_dir.path().join("config.toml"), "[qa]\nmax_rounds = 1\n").unwrap();
+    let exhausted = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(
+        !exhausted.agents.iter().find(|agent| agent.id == reviewer.id)
+            .unwrap().qa_reviewer_between_rounds
+    );
+    std::fs::write(temp_dir.path().join("config.toml"), "[qa]\nmax_rounds = 2\n").unwrap();
 
     // The suppression is scoped to the interval between rounds. Once the
     // delivery is terminal, the former reviewer becomes an ordinary idle worker.
@@ -1686,78 +1718,84 @@ fn cas_521d_open_gate_blocking_epic_suppresses_epic_close_prompt() {
     use crate::test_support::TestEnvGuard;
 
     let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
-    let temp_dir = tempfile::tempdir().unwrap();
-    let stores = DirectorStores::open(temp_dir.path()).unwrap();
-    stores.task_store.init().unwrap();
-    stores.agent_store.init().unwrap();
-    stores.event_store.init().unwrap();
+    for blocking_gate in [true, false] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
 
-    let mut epic = Task::new("cas-521d-epic".into(), "Rollout epic".into());
-    epic.task_type = TaskType::Epic;
-    stores.task_store.add(&epic).unwrap();
+        let mut epic = Task::new("cas-521d-epic".into(), "Rollout epic".into());
+        epic.task_type = TaskType::Epic;
+        stores.task_store.add(&epic).unwrap();
 
-    let mut child = Task::new("cas-521d-child".into(), "Last implementation task".into());
-    child.status = TaskStatus::InProgress;
-    stores.task_store.add(&child).unwrap();
-    stores
-        .task_store
-        .add_dependency(&Dependency::new(
-            child.id.clone(),
-            epic.id.clone(),
-            DependencyType::ParentChild,
-        ))
-        .unwrap();
+        let mut child = Task::new("cas-521d-child".into(), "Last implementation task".into());
+        child.status = TaskStatus::InProgress;
+        stores.task_store.add(&child).unwrap();
+        stores
+            .task_store
+            .add_dependency(&Dependency::new(
+                child.id.clone(),
+                epic.id.clone(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
 
-    let mut gate = Task::new("cas-521d-gate".into(), "Operator rollout gate".into());
-    gate.task_type = TaskType::Gate;
-    stores.task_store.add(&gate).unwrap();
-    // A rollout decision can block epic completion without being a child task.
-    stores
-        .task_store
-        .add_dependency(&Dependency::new(
-            epic.id.clone(),
-            gate.id.clone(),
-            DependencyType::Blocks,
-        ))
-        .unwrap();
+        if blocking_gate {
+            let mut gate = Task::new("cas-521d-gate".into(), "Operator rollout gate".into());
+            gate.task_type = TaskType::Gate;
+            stores.task_store.add(&gate).unwrap();
+            // A rollout decision can block epic completion without being a child task.
+            stores
+                .task_store
+                .add_dependency(&Dependency::new(
+                    epic.id.clone(),
+                    gate.id.clone(),
+                    DependencyType::Blocks,
+                ))
+                .unwrap();
+        }
 
-    let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
-    let mut detector = DirectorEventDetector::new(Vec::new(), "supervisor".into());
-    detector.initialize(&before);
+        let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        let mut detector = DirectorEventDetector::new(Vec::new(), "supervisor".into());
+        detector.initialize(&before);
 
-    let mut completed = stores.task_store.get(&child.id).unwrap();
-    completed.status = TaskStatus::Closed;
-    completed.closed_at = Some(chrono::Utc::now());
-    completed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
-    stores.task_store.update(&completed).unwrap();
+        let mut completed = stores.task_store.get(&child.id).unwrap();
+        completed.status = TaskStatus::Closed;
+        completed.closed_at = Some(chrono::Utc::now());
+        completed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
+        stores.task_store.update(&completed).unwrap();
 
-    let after = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
-    let events = detector.detect_changes_at(
-        &after,
-        Some(&epic.id),
-        std::time::Instant::now(),
-        chrono::Utc::now(),
-    );
-    assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            DirectorEvent::EpicAllSubtasksClosed { epic_id, .. } if epic_id == &epic.id
-        )),
-        "an open Gate task that blocks the epic must keep its close prompt suppressed: {events:?}"
-    );
-    assert_eq!(
-        supervisor_actionable_state(
+        let after = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        let events = detector.detect_changes_at(
             &after,
             Some(&epic.id),
-            "supervisor",
-            &HashSet::new(),
+            std::time::Instant::now(),
             chrono::Utc::now(),
-            600,
-            |_| None,
-        ),
-        None,
-        "the assembly/close nudge must also wait while the rollout gate is open"
-    );
+        );
+        assert_eq!(
+            events.iter().any(|event| matches!(
+                event,
+                DirectorEvent::EpicAllSubtasksClosed { epic_id, .. } if epic_id == &epic.id
+            )),
+            !blocking_gate,
+            "only an open rollout gate suppresses the epic close prompt: {events:?}"
+        );
+        assert_eq!(
+            supervisor_actionable_state(
+                &after,
+                Some(&epic.id),
+                "supervisor",
+                &HashSet::new(),
+                chrono::Utc::now(),
+                600,
+                |_| None,
+            )
+            .is_none(),
+            blocking_gate,
+            "the assembly/close nudge must follow the same gate boundary"
+        );
+    }
 }
 
 #[test]

@@ -935,6 +935,39 @@ mod tests {
         }
     }
 
+    /// cas-3556: the server may fold a requested alias into another project
+    /// id only when the projects registry confirms that alias; otherwise the
+    /// receipt is still refused.
+    #[tokio::test]
+    async fn create_refuses_a_folded_target_the_registry_does_not_confirm() {
+        let server = MockServer::start().await;
+        let mut request = create_request();
+        request.target_project_canonical_id = "github.com/acme/unrelated".to_string();
+        Mock::given(method("POST"))
+            .and(path("/api/teams/team-1/task-proposals"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "state": "proposed",
+                "provenance": provenance()
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "projects": [{ "canonical_id": "target-project", "aliases": [] }]
+            })))
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::spawn_blocking(move || client(&server).create(&request))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, TaskProposalError::Contract(_)), "{error}");
+    }
+
     #[tokio::test]
     async fn inbox_follows_opaque_cursor_to_exhaustion() {
         let server = MockServer::start().await;

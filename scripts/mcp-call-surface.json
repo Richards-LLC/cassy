@@ -183,6 +183,7 @@
         "theirs",
         "to_slot_id",
         "ttl_secs",
+        "wake",
         "worker_names",
         "workers"
       ]

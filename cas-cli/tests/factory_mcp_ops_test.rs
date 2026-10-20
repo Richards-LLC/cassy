@@ -5870,6 +5870,99 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+#[tokio::test]
+async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
+    const AGENT_COUNT: usize = 240;
+    const NAME_PADDING: usize = 1_500;
+
+    let env = FactoryTestEnv::new();
+    let old_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+    for index in 0..AGENT_COUNT {
+        let last_heartbeat = old_heartbeat + chrono::Duration::seconds(index as i64);
+        let mut agent = Agent::new(
+            Agent::generate_fallback_id(),
+            format!("stale-report-{index:03}-{}", "x".repeat(NAME_PADDING)),
+        );
+        agent.role = AgentRole::Worker;
+        agent.last_heartbeat = last_heartbeat;
+        agent.registered_at = last_heartbeat;
+        env.agent_store()
+            .register(&agent)
+            .expect("register stale agent");
+    }
+
+    let default_req: FactoryRequest =
+        serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
+    let default_report = env
+        .service
+        .factory_request(Parameters(default_req))
+        .await
+        .expect("bounded gc report");
+    let summary = get_text(&default_report);
+    assert!(
+        summary.len() < 24_000,
+        "default gc_report should stay compact, got {} bytes",
+        summary.len()
+    );
+    assert!(summary.contains("Stale agents: 240"), "{summary}");
+    assert!(summary.contains("Stale agents: 240 items"), "{summary}");
+    let stale_category = summary
+        .lines()
+        .find(|line| line.starts_with("- Stale agents: 240 items, "))
+        .expect("stale-agent category count and byte summary");
+    let stale_bytes: usize = stale_category
+        .split(" items, ")
+        .nth(1)
+        .unwrap()
+        .split(" bytes")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(stale_bytes > 350_000, "{stale_category}");
+    assert!(summary.contains("first up to 3 items per category"), "{summary}");
+    assert!(
+        summary.contains("stale-report-000-"),
+        "top stale-agent sample missing: {summary}"
+    );
+
+    let mut offset = 0;
+    let mut found_last_agent = false;
+    loop {
+        let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "gc_report",
+            "limit": 100,
+            "offset": offset,
+        }))
+        .unwrap();
+        let page = env
+            .service
+            .factory_request(Parameters(page_req))
+            .await
+            .expect("gc report detail page");
+        let page_text = get_text(&page);
+        found_last_agent |= page_text.contains("stale-report-239-");
+        if found_last_agent {
+            break;
+        }
+        let Some(next_offset) = page_text.lines().find_map(|line| {
+            line.strip_prefix("Next offset: ")
+                .and_then(|value| value.parse::<usize>().ok())
+        }) else {
+            break;
+        };
+        assert!(
+            next_offset > offset,
+            "pagination did not advance: {page_text}"
+        );
+        offset = next_offset;
+    }
+    assert!(
+        found_last_agent,
+        "last inventory item was not reachable through pages"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_gc_report_names_dangling_primary_node_modules_link() {

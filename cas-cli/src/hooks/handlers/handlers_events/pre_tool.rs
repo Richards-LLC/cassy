@@ -4749,7 +4749,7 @@ const COMMAND_WRAPPERS: &[&str] = &[
 
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
-fn unwrapped_command_index(words: &[String]) -> Option<usize> {
+pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
     let mut index = executable_word_index(words)?;
     for _ in 0..16 {
         let name = shell_word_basename(&words[index]);

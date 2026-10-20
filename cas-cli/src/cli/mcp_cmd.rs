@@ -1432,5 +1432,34 @@ mod tests {
             cmcp_core::config::VIKTOR_CONVERSATION_TOOLS.len()
         );
         assert!(crate::mcp::viktor_watch::session_start_warning(&project_root).is_some());
+
+        execute_remove("viktor", "user", &cli, &project_root).unwrap();
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(host_config.get("viktor.enabled").as_deref(), Some("false"));
+
+        let add_args = [
+            "--scope".to_string(),
+            "user".to_string(),
+            "viktor".to_string(),
+            "https://operator.example.invalid/mcp".to_string(),
+        ];
+        execute_add(&add_args, &cli, &project_root).unwrap();
+
+        let host_config = crate::config::Config::load(&home.join(".cas")).unwrap();
+        assert_eq!(
+            host_config.get("viktor.enabled").as_deref(),
+            Some("true"),
+            "explicitly adding user Viktor must clear the managed opt-out"
+        );
+        cmcp_core::config::Config::reconcile_viktor_managed_default(
+            &user_path,
+            host_config.viktor_enabled(),
+        )
+        .unwrap();
+        let user_config = Config::load_from(&user_path).unwrap();
+        assert!(matches!(
+            user_config.servers.get("viktor"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://operator.example.invalid/mcp"
+        ));
     }
 }

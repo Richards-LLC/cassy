@@ -374,6 +374,58 @@ async fn epic_split_cancel_releases_only_the_cancellers_own_claims() {
     assert!(again.contains("already cancelled"), "{again}");
 }
 
+/// One task changes hands without an unrelated filler share. Exercise both
+/// directions through MCP, the mailbox and the real start guard.
+async fn one_sided_handover(request: bool) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let (proposer, recipient, shares) = if request {
+        // Prowl requests one child from soundwave, omitting theirs.
+        (&prowl, &soundwave, json!({"mine": "cas-d1"}))
+    } else {
+        // Soundwave grants one child to prowl with an explicit empty mine.
+        (&soundwave, &prowl, json!({"mine": "", "theirs": "cas-d1"}))
+    };
+    let mut proposal = shares;
+    proposal["id"] = json!(EPIC);
+    proposal["target"] = json!(if request { "soundwave" } else { "prowl" });
+    let proposed = proposer.factory(proposal).await.unwrap();
+    let id = split_id(&proposed);
+    assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), request.then_some("pr"));
+    assert_eq!(recipient.tick().await.delivered, 1);
+
+    let accepted = recipient.factory(json!({"id": id, "decision": "accept"})).await.unwrap();
+    assert!(accepted.contains("Accepted epic split"), "{accepted}");
+    assert_eq!(proposer.tick().await.delivered, 1);
+    for child in SOUNDWAVE_TAKES.iter().chain(PROWL_TAKES.iter()) {
+        assert_eq!(
+            cloud_holder(&cloud, child).as_deref(),
+            (*child == "cas-d1").then_some("pr"),
+            "only the handed-over task is claimed: {child}"
+        );
+    }
+    let refused = soundwave.start("cas-d1", false).await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
+
+    let cancelled = prowl.factory(json!({"id": id, "decision": "cancel"})).await.unwrap();
+    assert!(cancelled.contains("released 1 of your own claim"), "{cancelled}");
+    assert_eq!(cloud_holder(&cloud, "cas-d1"), None);
+    assert_eq!(soundwave.tick().await.delivered, 1);
+    soundwave.start("cas-d1", false).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_one_sided_request() {
+    one_sided_handover(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_one_sided_grant() {
+    one_sided_handover(false).await;
+}
+
 /// An unaccepted proposal expires; a proposal whose own share cannot all be
 /// claimed is refused and leaves no claim or proposal behind.
 #[tokio::test(flavor = "multi_thread")]
@@ -382,6 +434,13 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     let cloud = FakeCloud::start();
     let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
     let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+
+    let empty = soundwave
+        .factory(json!({"id": EPIC, "target": "prowl", "mine": "", "theirs": ""}))
+        .await
+        .unwrap_err();
+    assert!(empty.contains("mine") && empty.contains("theirs"), "{empty}");
+    assert!(cloud.messages_to("pr").is_empty());
 
     // All or nothing: prowl already works cas-a2, so soundwave's proposal to
     // take A–C fails, and cas-a1 (claimable) is not left claimed.

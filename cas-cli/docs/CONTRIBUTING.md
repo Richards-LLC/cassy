@@ -549,6 +549,12 @@ from the health-only `mailbox_status`. Each split retains its stored `state` and
 an effective `display_state` (`expired` for a lapsed pending proposal), its task
 shares, peer, reason, expiry and decision time.
 
+For a single-child handover, request it with `factory action=epic_split
+id=<epic> target=<owner> mine=<child>`; the owner accepts or rejects the proposal.
+Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
+omitted, but not both. The proposer claims only `mine`; acceptance claims only
+the recipient's share. Existing expiry, cancel and start guards apply.
+
 ## Adding Features
 
 **New CLI command**: Add variant to `Commands` enum in `cas-cli/src/cli/mod.rs`, create handler file in `cli/`. Prefer a dedicated integration test file at `tests/<feature>_test.rs` (e.g. `team_sync_test.rs`, `memory_share_test.rs`, `team_memories_e2e_test.rs`) over piling into `cli_test.rs` — isolated files surface regressions per-feature and keep compile times down. Shared fixtures (UUIDs, Cli/CloudConfig builders) go in `cas-cli/tests/common/mod.rs`; include via `mod common;` at the top of each test file.

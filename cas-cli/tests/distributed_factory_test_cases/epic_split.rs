@@ -489,6 +489,92 @@ async fn epic_split_decided_reminder_is_supported_cas_ae81() {
         "remind_filter": "{\"split_id\":\"split-12345678\"}", "remind_message": "continue after decision"}))
         .await.unwrap();
     assert!(result.contains("Reminder"), "{result}");
+    let reminders = cas::store::open_reminder_store(&soundwave.machine.cas_dir).unwrap()
+        .get_event_reminders("epic_split_decided").unwrap();
+    assert_eq!(reminders.len(), 1);
+    assert_eq!(reminders[0].trigger_event.as_deref(), Some("epic_split_decided"));
+    assert_eq!(reminders[0].trigger_filter, Some(json!({"split_id": "split-12345678"})));
+}
+
+fn expire(side: &Side, id: &str, seconds_ago: i64) {
+    rusqlite::Connection::open(side.machine.cas_dir.join("cas.db")).unwrap()
+        .execute("UPDATE epic_splits SET expires_at=?1 WHERE id=?2",
+            rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(seconds_ago)).to_rfc3339(), id])
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_reconcile_filters_owner_before_limit_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    expire(&soundwave, &id, 1);
+    let mut dead = Agent::new("dead-owner".into(), "dead-owner".into());
+    dead.role = AgentRole::Supervisor;
+    dead.factory_session = Some("ended-session".into());
+    dead.status = cas::types::AgentStatus::Shutdown;
+    open_agent_store(&soundwave.machine.cas_dir).unwrap().register(&dead).unwrap();
+    let original = cas_store::get_epic_split(&soundwave.machine.cas_dir, &id).unwrap().unwrap();
+    // Fill the entire work budget with earlier rows this session cannot own.
+    for index in 0..64 {
+        let mut orphan = original.clone();
+        orphan.id = format!("split-orphan-{index:02}");
+        orphan.local_agent_id = if index % 2 == 0 { "missing-owner" } else { "dead-owner" }.into();
+        orphan.expires_at -= chrono::Duration::minutes(1);
+        cas_store::insert_epic_split(&soundwave.machine.cas_dir, &orphan).unwrap();
+    }
+    let report = soundwave.tick().await;
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "other sessions must not exhaust this session's work budget");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_reconcile_continues_after_failure_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let _prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let first = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    let second = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a2"}))
+        .await.unwrap());
+    expire(&soundwave, &first, 2);
+    expire(&soundwave, &second, 1);
+    cloud.inject_failure("POST", "/release", 403, 1);
+    let report = soundwave.tick().await;
+    assert!(!report.errors.is_empty(), "the first cleanup must fail: {report:?}");
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw"));
+    assert_eq!(cloud_holder(&cloud, "cas-a2"), None, "one failed split must not stop later work");
+    assert!(soundwave.tick().await.errors.is_empty());
+    assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "failed work remains retryable");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn epic_split_independent_expiry_notifies_each_side_once_cas_537c() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+    let id = split_id(&soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"}))
+        .await.unwrap());
+    assert_eq!(prowl.tick().await.delivered, 1);
+    for side in [&soundwave, &prowl] {
+        expire(side, &id, 1);
+        // Reconcile both clocks before either daemon pulls the other's notice.
+        cas::cloud::epic_split::reconcile(&side.machine.cas_dir, &format!("factory-{}", side.id), chrono::Utc::now())
+            .unwrap();
+    }
+    for side in [&soundwave, &prowl] {
+        let report = side.tick().await;
+        assert!(report.errors.is_empty(), "{report:?}");
+        let rows = cas::store::open_prompt_queue_store(&side.machine.cas_dir).unwrap().peek_all(100).unwrap();
+        // pin: count the protocol decision, independent of human expiry wording.
+        let notices = rows.iter().filter(|row| row.prompt.contains(&id) && row.prompt.contains("kind=\"expired\""));
+        assert_eq!(notices.count(), 1, "one logical expiry notice for {}: {rows:?}", side.id);
+    }
 }
 
 /// An unaccepted proposal expires; a proposal whose own share cannot all be
@@ -538,6 +624,10 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
             .unwrap();
     }
 
+    let gap = soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await;
+    assert!(gap.as_ref().is_err_and(|error| error.contains(&id)),
+        "unprocessed expiry must reserve its old claim before a new proposal: {gap:?}");
+
     let expiry = soundwave.tick().await;
     assert!(expiry.errors.is_empty(), "{expiry:?}");
     assert_eq!(cloud_holder(&cloud, "cas-a1"), None, "expiry releases the proposer's own claim");
@@ -565,6 +655,9 @@ async fn epic_split_expires_unaccepted_and_claims_all_or_nothing() {
     }
     // The gate lifts with the proposal.
     soundwave.start("cas-a3", false).await.unwrap();
+    soundwave.factory(json!({"id": EPIC, "target": "prowl", "mine": "cas-a1"})).await.unwrap();
+    assert!(soundwave.tick().await.errors.is_empty());
+    assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw"), "the new split keeps its claim after old expiry cleanup");
 }
 
 /// cas-0078 no-theft for split claims: a split never takes a cloud claim from

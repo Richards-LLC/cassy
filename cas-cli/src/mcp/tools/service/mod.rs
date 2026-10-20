@@ -802,7 +802,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked."
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked. publish with notes and note_type attaches a portable proof receipt; fetch with task_id and id downloads and verifies its bytes on any machine."
     )]
     pub async fn artifact(
         &self,
@@ -812,12 +812,13 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = action == "publish" || action == "post";
+            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch");
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
+                "fetch" => this.inner.artifact_fetch(Parameters(req)).await,
                 #[cfg(feature = "mcp-proxy")]
                 "post" => this.artifact_post(req).await,
                 #[cfg(not(feature = "mcp-proxy"))]
@@ -827,7 +828,7 @@ impl CasService {
                 )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list, post"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post"),
                 )),
             };
 

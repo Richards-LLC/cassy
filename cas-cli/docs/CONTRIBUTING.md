@@ -648,6 +648,29 @@ no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
 
 Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
+### Portable proof artifacts
+
+`artifact action=publish task_id=<id> path=<log> note_type=platform_proof
+notes="<platform, command, revision, result>"` publishes and appends a proof note
+in one MCP call. Use `loaded_proof` for loaded evidence. A failed Cloud commit
+keeps the local artifact record but does not append a portable proof claim.
+The note carries the committed record (including Cloud id, size and SHA-256),
+so normal task sync transports it without syncing machine-local paths or a
+new artifact store. An existing committed id cited in `task action=notes` is
+attached the same way. Citing an unpublished artifacts-root path warns the
+writer without discarding the note.
+
+On the receiving machine, `artifact action=fetch task_id=<id> id=<art-id>` or
+`cas artifact fetch --task <id> <art-id>` resolves that note through the existing
+Cloud signed-view endpoint, verifies size and SHA-256 using the artifact
+relay's download path, and atomically writes a local copy under the receiving
+task's scoped artifacts directory. It imports the record into the existing
+artifact ledger, making `show`, `list` and close citations usable there too.
+`--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
+or bearer is included in the note, output or saved record. Fetch requires the
+synced task and Cloud credentials; proof interpretation remains the verifier's
+responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
+
 ### Evidence-only task close
 
 Close reasons claiming third-party or future proof must cite a receipt beside

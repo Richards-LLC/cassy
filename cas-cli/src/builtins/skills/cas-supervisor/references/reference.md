@@ -24,6 +24,11 @@ base has a queue, otherwise one assembly build + test of the epic tip and its
 note on the epic. Child closes reference that proof. A non-Rust
 `risk=platform` task still carries its worker `platform_proof` receipt.
 
+For a proof produced on another machine, use the worker's
+[cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs):
+attach a published artifact, then fetch and read the hash-verified copy on the
+owning machine before relying on the receipt.
+
 Two of those are supervisor-specific and easy to confuse:
 
 - **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.

@@ -22,6 +22,7 @@
 
 pub mod cloud;
 pub mod paths;
+pub mod proof;
 pub mod retention;
 pub mod slack;
 

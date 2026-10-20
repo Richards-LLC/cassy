@@ -164,7 +164,7 @@ pub(crate) fn safe_url(raw: &str) -> bool {
     })
 }
 
-fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
+pub(crate) fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
     let artifact = &view.artifact;
     if artifact.size_bytes == 0 || artifact.size_bytes > ARTIFACT_MAX_BYTES {
         return Err(PostError::new(
@@ -183,7 +183,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_size_mismatch",
             format!(
-                "Cloud reports {} bytes but the published record says {}; nothing was posted",
+                "Cloud reports {} bytes but the published record says {}; artifact bytes were rejected",
                 view.view.size_bytes.unwrap_or_default(),
                 artifact.size_bytes
             ),
@@ -218,7 +218,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_size_mismatch",
             format!(
-                "downloaded {} bytes but the published record says {}; nothing was posted",
+                "downloaded {} bytes but the published record says {}; artifact bytes were rejected",
                 bytes.len(),
                 artifact.size_bytes
             ),
@@ -229,7 +229,7 @@ fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
         return Err(PostError::new(
             "artifact_checksum_mismatch",
             format!(
-                "downloaded SHA-256 {actual} differs from the published {}; nothing was posted",
+                "downloaded SHA-256 {actual} differs from the published {}; artifact bytes were rejected",
                 artifact.sha256
             ),
         ));

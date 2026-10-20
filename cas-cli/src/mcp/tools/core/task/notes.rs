@@ -88,6 +88,16 @@ impl CasCore {
             data: None,
         })?;
 
+        let config = self.load_config();
+        let base = crate::config::resolved_factory_artifacts_root(
+            config.factory().artifacts_root.as_deref(),
+        );
+        let artifacts = cas_store::SqliteArtifactStore::open(&self.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let (note, warnings) =
+            crate::artifacts::proof::prepare_note(&artifacts, &req.id, &req.note, &base)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+
         // Format the note with type prefix and timestamp
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let type_prefix = match req.note_type.to_lowercase().as_str() {
@@ -100,7 +110,7 @@ impl CasCore {
             _ => "📝 PROGRESS",
         };
 
-        let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, req.note);
+        let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
 
         task_store
             .append_note(&req.id, &formatted_note)
@@ -124,10 +134,11 @@ impl CasCore {
             );
         }
 
-        Ok(Self::success(format!(
-            "Added {} note to task {}",
-            req.note_type, req.id
-        )))
+        let mut response = format!("Added {} note to task {}", req.note_type, req.id);
+        for warning in warnings {
+            response.push_str(&format!("\nWarning: {warning}"));
+        }
+        Ok(Self::success(response))
     }
 
     fn record_task_note_activity(

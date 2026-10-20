@@ -452,9 +452,15 @@ fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
         None
     };
     let linked = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).ok();
-    let held_personal = linked.as_ref().filter(|c| c.active_team_id().is_some())
-        .and_then(|_| SyncQueue::open_read_only(cas_root).ok())
-        .and_then(|queue| queue.personal_row_count().ok()).unwrap_or(0);
+    let held_personal = linked
+        .as_ref()
+        .and_then(|config| config.active_team_id())
+        .and_then(|team| {
+            let project = crate::cloud::resolve_canonical_id_for_sync(cas_root).ok()?;
+            let queue = SyncQueue::open_read_only(cas_root).ok()?;
+            queue.migratable_personal_row_count(team, &project).ok()
+        })
+        .unwrap_or(0);
     CloudQueueFacts {
         held_personal,
         team_only: linked.is_some_and(|c| c.team_only),

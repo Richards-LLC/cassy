@@ -6325,7 +6325,7 @@ mod tests {
         queue.enqueue(crate::cloud::EntityType::Task, "delete", crate::cloud::SyncOperation::Delete, None).unwrap();
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("1 personal row(s) held"));
+        assert!(check.message.contains("1 migratable personal row(s) held"));
         assert!(check.message.contains("cas config set cloud.team_only true"));
         assert!(check.message.contains("cas cloud queue migrate-to-team"));
         assert!(!check.message.contains("cas cloud queue --retry"));

@@ -668,17 +668,30 @@ fn lane_lock_path(cas_root: &Path, repo: &Path) -> std::io::Result<PathBuf> {
 
 /// Positive, read-only evidence of a capped check waiting for admission or
 /// executing in this worktree. A leftover lock file is not a running build.
+/// Never take even a shared lock here: it can refuse a concurrent builder.
+#[cfg(target_os = "linux")]
 pub(crate) fn lane_is_busy(cas_root: &Path, repo: &Path) -> std::io::Result<bool> {
-    let file = match OpenOptions::new().read(true).open(lane_lock_path(cas_root, repo)?) {
-        Ok(file) => file,
+    use std::os::unix::fs::MetadataExt;
+    let metadata = match std::fs::metadata(lane_lock_path(cas_root, repo)?) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    match FileExt::try_lock_shared(&file) {
-        Ok(()) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
-        Err(error) => Err(error),
-    }
+    let identity = format!("{:02x}:{:02x}:{}",
+        libc::major(metadata.dev()), libc::minor(metadata.dev()), metadata.ino());
+    Ok(std::fs::read_to_string("/proc/locks")?.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        // Waiters have `->` before FLOCK; only actual holders count.
+        fields.next().is_some() && fields.next() == Some("FLOCK")
+            && fields.nth(3) == Some(identity.as_str())
+    }))
+}
+
+/// No passive lock table is available on these platforms. Unknown evidence
+/// leaves the idle signal alone rather than competing for build admission.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn lane_is_busy(_cas_root: &Path, _repo: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(unix)]

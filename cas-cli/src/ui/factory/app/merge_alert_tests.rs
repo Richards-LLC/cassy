@@ -252,8 +252,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     reminders.cancel(long, "merge-w").unwrap();
     // The real reminder store is reloaded by the delivery read, not the cached panel.
     let reminder = reminders.create_with_scope("merge-w", Some("merge-w"), "check build",
-        cas_store::ReminderTriggerType::Time, Some(Utc::now() + chrono::Duration::minutes(3)),
-        None, None, 3600, None, Some("merge-w"), false, Some("cas-9efb-test")).unwrap();
+        cas_store::ReminderTriggerType::Time, Some(now + chrono::Duration::days(7)),
+        None, None, 604800, None, Some("merge-w"), false, Some("cas-9efb-test")).unwrap();
     assert!(f.relay().is_empty(), "a pending self-reminder owes the worker its next wake");
     reminders.cancel(reminder, "merge-w").unwrap();
 
@@ -266,6 +266,7 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     // Use the same OS lane lock the real runner holds during admission and
     // execution. Its release leaves a file behind, which must not hide idle.
     let lane = crate::factory_worker_check::try_lock_lane(&f.app.cas_dir, f.repo.path()).unwrap().unwrap();
+    #[cfg(target_os = "linux")]
     assert!(f.relay().is_empty(), "queued/admitted build owns the worker lane");
     drop(lane);
     // A reminder for an old task and another worker's build are not this wait.

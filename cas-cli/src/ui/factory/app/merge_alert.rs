@@ -10,11 +10,12 @@ use std::path::Path;
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
 const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
+const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
 
 #[derive(PartialEq, Eq)]
 struct IdleSignal {
     task: String,
-    tip: String,
+    tip: Option<String>,
     ci: &'static str,
 }
 
@@ -40,8 +41,7 @@ impl Retries {
 
     /// Consume only a rendered, live relay. Suppressed waits never consume it.
     pub fn admit_idle(&mut self, worker: &str, read: &WorkerWait, now: DateTime<Utc>) -> bool {
-        let Some(tip) = &read.tip else { return true; };
-        let signal = IdleSignal { task: read.task.clone(), tip: tip.clone(), ci: read.ci };
+        let signal = IdleSignal { task: read.task.clone(), tip: read.tip.clone(), ci: read.ci };
         if let Some((previous, sent_at)) = self.idle_signals.get(worker)
             && previous == &signal && now.signed_duration_since(*sent_at) < IDLE_RELAY_BACKOFF
         {
@@ -162,6 +162,7 @@ pub(super) struct WorkerWait {
 
 /// A self-reminder is a promised wake, not a stalled worker. Old-task,
 /// cancelled, fired and expired reminders cannot hide the current idle signal.
+/// An unbound reminder covers only a near wake/expiry, never a distant promise.
 pub(super) fn worker_has_pending_reminder(
     data: &DirectorData,
     worker: &str,
@@ -172,10 +173,23 @@ pub(super) fn worker_has_pending_reminder(
     let owns = |id: &str| id == agent.id || id == agent.name;
     data.reminders.iter().any(|reminder| {
         let ttl_start = reminder.trigger_at.unwrap_or(reminder.created_at);
+        let horizon = UNBOUND_REMINDER_HORIZON.num_seconds();
+        let bound_or_soon = match reminder.task_id.as_deref() {
+            Some(id) => Some(id) == task,
+            None => match reminder.trigger_type {
+                cas_store::ReminderTriggerType::Time => reminder.trigger_at.is_some_and(|due| {
+                    (-horizon..=horizon).contains(&due.signed_duration_since(now).num_seconds())
+                }),
+                cas_store::ReminderTriggerType::Event => reminder.ttl_secs > 0 &&
+                    (0..=horizon).contains(&reminder.ttl_secs.saturating_sub(
+                        now.signed_duration_since(reminder.created_at).num_seconds(),
+                    )),
+            },
+        };
         reminder.status == cas_store::ReminderStatus::Pending
             && owns(&reminder.owner_id) && owns(&reminder.target_id)
             && reminder.origin_session_id.as_deref().is_none_or(owns)
-            && reminder.task_id.as_deref().is_none_or(|id| Some(id) == task)
+            && bound_or_soon
             && (reminder.ttl_secs == 0 || now.signed_duration_since(ttl_start).num_seconds() <= reminder.ttl_secs)
     })
 }

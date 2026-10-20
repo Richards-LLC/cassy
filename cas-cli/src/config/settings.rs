@@ -1028,11 +1028,12 @@ fn default_supervisor_stall_after_secs() -> u64 {
 }
 
 fn default_delivery_stalled_priority_secs() -> u64 {
-    10 * 60
+    // cas-badb (GH #1302): an unread message escalates within five minutes.
+    5 * 60
 }
 
 fn default_delivery_stalled_normal_secs() -> u64 {
-    30 * 60
+    5 * 60
 }
 
 fn default_target_cache_high_watermark_percent() -> u8 {
@@ -2180,11 +2181,12 @@ mod tests {
         assert_eq!(fc.delivery_stalled_normal_secs, 120);
         assert_eq!(
             FactoryConfig::default().delivery_stalled_priority_secs,
-            10 * 60
+            5 * 60,
+            "cas-badb: an unread message escalates within five minutes"
         );
         assert_eq!(
             FactoryConfig::default().delivery_stalled_normal_secs,
-            30 * 60
+            5 * 60
         );
     }
 

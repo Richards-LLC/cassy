@@ -230,6 +230,8 @@ impl ServerHandler for CasService {
             // from an unknown write when the response deadline wins the race.
             // `ToolCallContext` consumes `request` below.
             let timeout_arguments = request.arguments.clone();
+            let caller_tool_use =
+                claude_tool_use_id(request.meta.as_ref()).or_else(|| claude_tool_use_id(Some(&context.meta)));
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
             // cas-b1dd: the handler owns its service clone so it can outlive an
             // early answer; a deadline never drops work past its commit.
@@ -255,13 +257,72 @@ impl ServerHandler for CasService {
                 )
                 .await;
             let remaining = budget.saturating_sub(start.elapsed());
-            self.append_factory_context_with_budget(
+            self.append_factory_context_for_caller(
                 result,
                 remaining.min(std::time::Duration::from_millis(500)),
+                caller_tool_use,
             )
             .await
         }
     }
+}
+
+/// cas-badb (GH #1302): Claude Code tags every MCP call with the id of the
+/// `tool_use` that issued it. Subagents share the parent's MCP server, so this
+/// id is the only per-call evidence of who is calling.
+fn claude_tool_use_id(meta: Option<&rmcp::model::Meta>) -> Option<String> {
+    meta?
+        .get("claudecode/toolUseId")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// Whether `tool_use_id` was issued by the session's own top-level turn: a
+/// non-sidechain assistant record in its main transcript. A subagent's calls
+/// are written to `<session>/subagents/` (or, in older builds, as sidechain
+/// records), so they never match. Claude flushes the record about 50-100 ms
+/// after the call starts; wait up to `wait` for it.
+fn top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str, wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if transcript_tail_has_top_level_tool_use(transcript, tool_use_id) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn transcript_tail_has_top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 512 * 1024;
+    let Ok(mut file) = std::fs::File::open(transcript) else {
+        return false;
+    };
+    let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(size.saturating_sub(TAIL))).is_err() {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter(|line| line.contains(tool_use_id))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|record| {
+            record["type"] == "assistant"
+                && record["isSidechain"] != true
+                && record["message"]["content"].as_array().is_some_and(|content| {
+                    content
+                        .iter()
+                        .any(|block| block["type"] == "tool_use" && block["id"] == tool_use_id)
+                })
+        })
 }
 
 /// This MCP process belongs to the caller's cwd/account. A supervisor has no
@@ -530,6 +591,49 @@ impl CasService {
             .await
     }
 
+    /// The registered agent this MCP process speaks for, when it is the
+    /// factory identity in this process's environment.
+    fn registered_factory_agent(&self) -> Option<crate::types::Agent> {
+        let id = self.inner.get_registered_agent_id_read_only().ok()?;
+        let agent = self.inner.open_agent_store().ok()?.get(&id).ok()?;
+        let name = std::env::var("CAS_AGENT_NAME").ok()?;
+        (agent.name == name).then_some(agent)
+    }
+
+    /// cas-badb (GH #1302): the response fallback reads and acknowledges the
+    /// registered session's own mail, so it runs only when the call came from
+    /// that session's top-level turn. A Claude call tagged with a tool-use id
+    /// that its top-level transcript does not show (a subagent, such as a
+    /// task-verifier, sharing this server) neither surfaces nor consumes mail,
+    /// and never receives mail deferred from an earlier response.
+    async fn append_factory_context_for_caller(
+        &self,
+        result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+        mut budget: std::time::Duration,
+        caller_tool_use: Option<String>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        if let (Ok(_), Some(tool_use)) = (&result, caller_tool_use) {
+            if budget.is_zero() || crate::internal_llm::is_internal_invocation() {
+                return result;
+            }
+            let started = std::time::Instant::now();
+            let wait = (budget / 2).min(std::time::Duration::from_millis(300));
+            let this = self.clone();
+            let proven = tokio::task::spawn_blocking(move || {
+                this.registered_factory_agent()
+                    .and_then(|agent| caller_transcript_path(&agent))
+                    .is_some_and(|path| top_level_tool_use(&path, &tool_use, wait))
+            })
+            .await
+            .unwrap_or(false);
+            if !proven {
+                return result;
+            }
+            budget = budget.saturating_sub(started.elapsed());
+        }
+        self.append_factory_context_with_budget(result, budget).await
+    }
+
     async fn append_factory_context_with_budget(
         &self,
         result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
@@ -551,12 +655,7 @@ impl CasService {
                 if crate::internal_llm::is_internal_invocation() {
                     return None;
                 }
-                let id = this.inner.get_registered_agent_id_read_only().ok()?;
-                let agent = this.inner.open_agent_store().ok()?.get(&id).ok()?;
-                let name = std::env::var("CAS_AGENT_NAME").ok()?;
-                if agent.name != name {
-                    return None;
-                }
+                let agent = this.registered_factory_agent()?;
                 let role = match agent.role {
                     crate::types::AgentRole::Supervisor => "supervisor",
                     crate::types::AgentRole::Worker => "worker",
@@ -1413,6 +1512,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repeated.content.len(), 1);
+    }
+
+    /// cas-badb (GH #1302): a subagent (here a task-verifier) shares its
+    /// parent's MCP server. Its CAS tool calls must neither show nor consume
+    /// the parent's mail; the parent's own next call still receives it.
+    #[tokio::test]
+    async fn subagent_mcp_call_does_not_consume_parent_mail_cas_badb() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("parent-supervisor")),
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_SESSION", Some("badb-factory")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.register_agent("parent-session".into(), "parent-supervisor".into(), None)
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let account = temp.path().join("account");
+        let slug: String = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if matches!(c, '/' | '.') { '-' } else { c })
+            .collect();
+        let transcripts = account.join("projects").join(slug);
+        let subagents = transcripts.join("parent-session").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let tool_use = |id: &str, sidechain: bool| {
+            serde_json::json!({
+                "type": "assistant",
+                "isSidechain": sidechain,
+                "message": {"content": [{"type": "tool_use", "id": id, "name": "mcp__cas__task"}]},
+            })
+            .to_string()
+        };
+        // The parent's transcript names the verifier's call only inside a
+        // sidechain record and a tool result, never as its own tool_use.
+        let parent = [
+            r#"{"type":"user","promptId":"parent-turn","message":{"content":"continue"}}"#.to_string(),
+            tool_use("toolu_parent", false),
+            tool_use("toolu_sidechain", true),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_verifier"}]}})
+            .to_string(),
+        ]
+        .join("\n");
+        std::fs::write(transcripts.join("parent-session.jsonl"), parent).unwrap();
+        std::fs::write(subagents.join("agent-verifier.jsonl"), tool_use("toolu_verifier", false)).unwrap();
+        let store = service.inner.open_agent_store().unwrap();
+        let mut agent = store.get("parent-session").unwrap();
+        agent.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into_owned());
+        agent.metadata.insert("worker_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue_with_session("worker-a", "parent-supervisor", "peer ask for the parent", "badb-factory")
+            .unwrap();
+        let budget = std::time::Duration::from_millis(500);
+
+        for caller in ["toolu_verifier", "toolu_sidechain", "toolu_unknown"] {
+            let output = service
+                .append_factory_context_for_caller(
+                    Ok(CasCore::success("verifier result")),
+                    budget,
+                    Some(caller.into()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.content.len(), 1, "{caller} must not see the parent's mail");
+        }
+        let output = service
+            .append_factory_context_for_caller(Ok(CasCore::success("parent result")), budget, Some("toolu_parent".into()))
+            .await
+            .unwrap();
+        assert_eq!(output.content.len(), 2, "the parent's own call still receives its mail");
+        assert!(serde_json::to_string(&output).unwrap().contains("peer ask for the parent"));
+    }
+
+    #[test]
+    fn claude_tool_use_id_reads_call_meta_cas_badb() {
+        let meta: rmcp::model::Meta =
+            serde_json::from_value(serde_json::json!({"claudecode/toolUseId": "toolu_1"})).unwrap();
+        assert_eq!(super::claude_tool_use_id(Some(&meta)).as_deref(), Some("toolu_1"));
+        assert_eq!(super::claude_tool_use_id(None), None);
+        let empty: rmcp::model::Meta = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(super::claude_tool_use_id(Some(&empty)), None);
     }
 
     #[tokio::test]

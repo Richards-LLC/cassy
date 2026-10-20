@@ -7599,9 +7599,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
         let item_count = item_lines.len();
+        let section_bytes = lines
+            .iter()
+            .filter(|line| !gc_report_is_machine_status_line(line))
+            .map(|line| line.len().saturating_add(1))
+            .sum::<usize>();
         summary.push_str(&format!(
-            "- {label}: {item_count} items, {} bytes\n",
-            section.len()
+            "- {label}: {item_count} items, {section_bytes} bytes\n"
         ));
 
         if let Some(context) = detail_lines
@@ -7853,7 +7857,7 @@ mod gc_report_render_tests {
             "lane_previews": [],
         });
         let report = format!(
-            "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\n\nTARGET_CACHE_STATUS_JSON={status}\n"
+            "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
         );
 
         let summary = render_gc_report_response(&report, None, None);
@@ -7874,6 +7878,16 @@ mod gc_report_render_tests {
             .find(|line| line.starts_with("- Cargo target cache pressure:"))
             .unwrap();
         assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
+        let category_bytes = category
+            .split(" items, ")
+            .nth(1)
+            .unwrap()
+            .split(" bytes")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert!(category_bytes < 1_000, "{category}");
         assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
     }
 }

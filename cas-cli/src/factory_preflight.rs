@@ -1903,18 +1903,39 @@ mod tests {
     fn cas_db92_team_linked_personal_backlog_names_team_only_and_backfill() {
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
         let mut cloud = crate::cloud::CloudConfig::default();
         cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "test");
         cloud.save_to_cas_dir(&root).unwrap();
         let queue = SyncQueue::open(&root).unwrap();
         queue.init().unwrap();
-        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (id, private) in [("held", false), ("private", true)] {
+            let mut task = crate::types::Task::new(id.into(), id.into());
+            task.origin_project = Some("p".into());
+            if private {
+                task.share = Some(crate::types::ShareScope::Private);
+            }
+            tasks.add(&task).unwrap();
+            queue.enqueue(
+                crate::cloud::EntityType::Task,
+                id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&serde_json::to_string(&task).unwrap()),
+            ).unwrap();
+        }
+        queue.enqueue(crate::cloud::EntityType::Task, "deleted", crate::cloud::SyncOperation::Delete, None).unwrap();
         let mut findings = Vec::new();
         classify_cloud_queue(collect_cloud_queue_facts(&root), &mut findings);
         let finding = findings.iter().find(|f| f.code == "cloud.personal_queue_held").expect("small held backlog must warn before age/size thresholds");
         assert!(finding.message.contains("1 personal"));
         assert!(finding.remediation.contains("cas config set cloud.team_only true"));
         assert!(finding.remediation.contains("cas cloud queue migrate-to-team"));
+
+        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
+        let mut after_migration = Vec::new();
+        classify_cloud_queue(collect_cloud_queue_facts(&root), &mut after_migration);
+        assert!(!after_migration.iter().any(|f| f.code == "cloud.personal_queue_held"));
     }
 
     #[test]

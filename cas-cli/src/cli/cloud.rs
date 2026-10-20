@@ -8454,6 +8454,14 @@ mod team_cmd_tests {
         assert_eq!(value["push"]["held_personal_rejected"]["team_owned_project"], 2);
         assert_eq!(value["push"]["team_backlog_pending"], 0);
         assert_eq!(value["recovery_command"], "cas cloud queue migrate-to-team");
+
+        let mut empty_summary = team_only_push_summary();
+        empty_summary.held_personal_pending = 0;
+        empty_summary.held_personal_failed = 0;
+        let mut empty_output = Vec::new();
+        write_sync_summaries(&mut empty_output, &[empty_summary], true, false).unwrap();
+        let empty: serde_json::Value = serde_json::from_slice(&empty_output).unwrap();
+        assert!(empty.get("recovery_command").is_none(), "{empty}");
     }
 
     /// cas-25c1 fixture: a team-linked checkout whose personal queue holds

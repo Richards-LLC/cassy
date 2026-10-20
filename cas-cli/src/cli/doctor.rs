@@ -6277,17 +6277,47 @@ mod tests {
     fn cas_db92_doctor_explains_held_personal_rows_without_retrying_the_wrong_endpoint() {
         let temp = TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
         let mut cloud = crate::cloud::CloudConfig::default();
         cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
         cloud.save_to_cas_dir(&root).unwrap();
-        let queue = crate::cloud::SyncQueue::open(&root).unwrap(); queue.init().unwrap();
-        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let enqueue_task = |id: &str, private: bool| {
+            let mut task = crate::types::Task::new(id.into(), id.into());
+            task.origin_project = Some("p".into());
+            if private {
+                task.share = Some(crate::types::ShareScope::Private);
+            }
+            tasks.add(&task).unwrap();
+            queue.enqueue(
+                crate::cloud::EntityType::Task,
+                id,
+                crate::cloud::SyncOperation::Upsert,
+                Some(&serde_json::to_string(&task).unwrap()),
+            ).unwrap();
+        };
+        enqueue_task("held", false);
+        enqueue_task("registration-conflict", true);
+        enqueue_task("rejected", true);
+        let conflict = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "registration-conflict").unwrap();
+        queue.record_row_outcome(conflict.id, "parked", Some("project_registration_conflict")).unwrap();
+        let rejected = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "rejected").unwrap();
+        queue.record_row_outcome(rejected.id, "rejected", Some("team_owned_project")).unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "delete", crate::cloud::SyncOperation::Delete, None).unwrap();
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("1 personal row(s) held"));
         assert!(check.message.contains("cas config set cloud.team_only true"));
         assert!(check.message.contains("cas cloud queue migrate-to-team"));
         assert!(!check.message.contains("cas cloud queue --retry"));
+        assert!(check.message.contains("project_registration_conflict"), "{}", check.message);
+        assert!(check.message.contains("team_owned_project"), "{}", check.message);
+
+        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
+        let after_migration = cloud_queue_check(&root);
+        assert!(!after_migration.message.contains("personal row(s) held"), "{}", after_migration.message);
     }
 
     #[test]

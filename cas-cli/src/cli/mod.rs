@@ -907,7 +907,7 @@ const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::fro
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli, hub_tracing_root};
+    use super::{CASSY_WORDMARK, Cli, hub_tracing_root, run};
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
@@ -998,5 +998,61 @@ mod tests {
         let help = error.to_string();
 
         assert!(help.contains("Full sync (push then pull)"));
+    }
+
+    #[test]
+    fn cas_5aeb_migrate_preview_dispatch_does_not_cache_user_credentials() {
+        use std::collections::BTreeMap;
+
+        fn snapshot(root: &std::path::Path, base: &std::path::Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    snapshot(&path, base, files);
+                } else {
+                    files.insert(path.strip_prefix(base).unwrap().to_path_buf(), std::fs::read(path).unwrap());
+                }
+            }
+        }
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set_current_dir(&project);
+        crate::cloud::set_canonical_id_in_config_toml(&root, "project").unwrap();
+        let mut linked = crate::cloud::CloudConfig::default();
+        linked.set_team("team-id", "fixture");
+        linked.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        drop(queue);
+
+        let user_cloud = env.home().join("machine-cloud.json");
+        let user = crate::cloud::CloudConfig {
+            token: Some("machine-token".into()),
+            ..Default::default()
+        };
+        user.save_to(&user_cloud).unwrap();
+        env.set("CAS_USER_CLOUD_JSON", &user_cloud);
+
+        assert_eq!(crate::cloud::CloudConfig::load_effective().token.as_deref(), Some("machine-token"));
+        assert_eq!(
+            crate::cloud::CloudConfig::load_from_cas_dir(&root).unwrap().token.as_deref(),
+            Some("machine-token"),
+            "the fixture confirms auth preflight's cache-write path"
+        );
+        linked.save_to_cas_dir(&root).unwrap();
+
+        let mut before = BTreeMap::new();
+        snapshot(&root, &root, &mut before);
+        let cli = Cli::try_parse_from(["cas", "cloud", "queue", "migrate-to-team"]).unwrap();
+        run(cli).unwrap();
+        let mut after = BTreeMap::new();
+        snapshot(&root, &root, &mut after);
+        assert_eq!(after.keys().collect::<Vec<_>>(), before.keys().collect::<Vec<_>>(), "preview must not create a project .cas file");
+        assert!(after.get(std::path::Path::new("cloud.json")) == before.get(std::path::Path::new("cloud.json")), "preview must not cache machine credentials into project cloud.json");
     }
 }

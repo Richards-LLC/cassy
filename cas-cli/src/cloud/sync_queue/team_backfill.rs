@@ -188,6 +188,43 @@ mod tests {
     use crate::cloud::{EntityType, SyncOperation};
 
     #[test]
+    fn cas_5aeb_backfill_preview_and_apply_agree_for_duplicate_personal_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let mut task = crate::types::Task::new("duplicate".into(), "duplicate".into());
+        task.origin_project = Some("p".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        queue.enqueue(
+            EntityType::Task,
+            "duplicate",
+            SyncOperation::Upsert,
+            Some(&serde_json::to_string(&task).unwrap()),
+        ).unwrap();
+        let personal_id = queue.list_all(10).unwrap()[0].id;
+        {
+            let conn = queue.conn.lock().unwrap();
+            conn.execute_batch("DROP INDEX idx_sync_queue_entity_team_project;").unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count)
+                 SELECT entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count FROM sync_queue WHERE id=?1",
+                [personal_id],
+            ).unwrap();
+        }
+
+        let preview = SyncQueue::open_read_only(&root).unwrap()
+            .migrate_personal_to_team("t", "p", false).unwrap();
+        let applied = queue.migrate_personal_to_team("t", "p", true).unwrap();
+        let count = |rows: &[TeamBackfillRow]| rows.iter().filter(|row| row.eligible).count();
+        assert_eq!(count(&preview), 1);
+        assert_eq!(count(&applied), count(&preview));
+        assert_eq!(queue.pending_for_team("t", 10, 5).unwrap().len(), 1);
+        assert_eq!(queue.personal_row_count().unwrap(), 2, "both legacy rows remain until delivery");
+    }
+
+    #[test]
     fn cas_db92_backfill_preserves_scope_and_retires_only_itemized_acknowledged_snapshots() {
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();

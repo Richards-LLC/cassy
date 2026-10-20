@@ -87,7 +87,7 @@ Lint (`npx @google/design.md lint DESIGN.md`) is clean: no colours means no cont
 - **Was → Now.** Was on `card` in `ink-muted`; Now on `surface` with a 2px inset `action` edge, as Commander marks the open conversation. Each label is a mono eyebrow, Now's in `verdict`.
 - **Ledger.** Mono uppercase header, `line` row rules, `line-strong` closing rule, tabular figures.
 - **Code well.** `card` fill, 3px `verdict` left rule, mono; install commands large enough to copy by eye.
-- **Folio.** A closing line inside the last card (product, version, source and print links in mono `ink-muted`, above a `line-strong` rule) and, in print, a running footer with the document title and page "n / N" in the same face and colour.
+- **Folio.** A closing line inside the last card (product, version, source and print links in mono `ink-muted`, above a `line-strong` rule) and, in print, a running footer with the document title and page "n / N" in the `font-mono` stack (the first face installed on the printing machine) and `ink-muted`.
 
 ## Do's & Don'ts
 

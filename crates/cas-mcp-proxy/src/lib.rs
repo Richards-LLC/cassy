@@ -794,9 +794,7 @@ impl ProxyEngine {
                     .next_retry_at_ms
                     .map(|retry| retry.saturating_sub(now_ms()).div_ceil(1000))
                     .unwrap_or(0);
-                format!(
-                    "MCP upstream '{public}' is absent: its connection dropped ({code}); Cassy reconnects with backoff on the next call after {wait}s. Retry then; if it stays absent, restart the session (inspect proxy_health)"
-                )
+                reconnecting_absent_message(public, &code, wait)
             }
             _ => format!(
                 "MCP upstream '{public}' is absent: it is configured but not connected; inspect proxy_health and restore its credential before retrying"
@@ -1612,7 +1610,7 @@ impl ProxyEngine {
                 let error = anyhow::Error::from(error);
                 let error = if timed_out {
                     error.context(format!(
-                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and reconnects with backoff",
+                        "tool call '{resolved_public_tool}' on '{resolved_public}' timed out after {}s (client timeout); the connection was dropped and {RECONNECTING_UPSTREAM_MARKER}",
                         timeout.as_secs_f64()
                     ))
                 } else {
@@ -1861,6 +1859,31 @@ fn classify_error(error: &anyhow::Error) -> String {
     } else {
         "connection_failed".to_string()
     }
+}
+
+/// cas-8ccd (GH #1292): the phrase every "dropped and reconnecting" upstream
+/// error carries, so callers can recognise it without matching free text.
+pub const RECONNECTING_UPSTREAM_MARKER: &str = "reconnects with backoff";
+
+/// The absent-upstream text for a connection in reconnect backoff.
+fn reconnecting_absent_message(public: &str, code: &str, wait_secs: u64) -> String {
+    format!(
+        "MCP upstream '{public}' is absent: its connection dropped ({code}); Cassy {RECONNECTING_UPSTREAM_MARKER} on the next call after {wait_secs}s. Retry then; if it stays absent, restart the session (inspect proxy_health)"
+    )
+}
+
+/// cas-8ccd (GH #1292): whether a failed upstream call is a dropped
+/// connection the proxy is reconnecting, so a read-only caller may retry it
+/// shortly. True for a transport-level `rmcp` failure in the error chain
+/// (closed, send failure, unexpected response) and for the proxy's own
+/// absent-in-backoff and client-timeout errors. Credential, executable,
+/// configuration and application errors are false.
+pub fn upstream_call_is_reconnectable(error: &anyhow::Error) -> bool {
+    let transport = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
+        .any(|cause| classify_live_failure(cause) == Some("connection_failed"));
+    transport || error.chain().any(|cause| cause.to_string().contains(RECONNECTING_UPSTREAM_MARKER))
 }
 
 fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static str> {
@@ -3921,6 +3944,26 @@ for line in sys.stdin:
             classify_live_failure(&rmcp::service::ServiceError::TransportClosed),
             Some("connection_failed")
         );
+    }
+
+    /// cas-8ccd: the reconnect signal survives the proxy's own wording, so a
+    /// change to the absent message or the transport mapping fails here.
+    #[test]
+    fn reconnectable_upstream_errors_are_recognised_without_text_matching_cas_8ccd() {
+        let closed = anyhow::Error::from(rmcp::service::ServiceError::TransportClosed)
+            .context("tool call 'violet_read' on 'violet' failed");
+        assert!(upstream_call_is_reconnectable(&closed));
+        let absent = anyhow::anyhow!(reconnecting_absent_message("violet", "connection_failed", 3));
+        assert!(upstream_call_is_reconnectable(&absent));
+        let application = anyhow::Error::from(rmcp::service::ServiceError::McpError(
+            rmcp::ErrorData::invalid_params("bad permalink", None),
+        ))
+        .context("tool call 'violet_read' on 'violet' failed");
+        assert!(!upstream_call_is_reconnectable(&application));
+        let credential = anyhow::anyhow!(
+            "MCP upstream 'violet' is absent: its credential is unavailable or was rejected (authentication_required); restore its credential, then retry"
+        );
+        assert!(!upstream_call_is_reconnectable(&credential));
     }
 
     #[test]

@@ -214,6 +214,8 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     };
 
     let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
+    config.normalize_viktor_server_names();
+    let name = normalize_viktor_server_name(&name);
     let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
     let (raw_name, is_update) = match resolved {
         Some((raw_name, _)) => (raw_name, true),
@@ -225,9 +227,7 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     guard_supervisor_only(&raw_name, Some(&server_config), &config, cas_root)?;
     config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
-    if scope.eq_ignore_ascii_case("user") && raw_name.eq_ignore_ascii_case("viktor") {
-        crate::cli::viktor::set_enabled(true)?;
-    }
+    enable_viktor_for_user_scope(&scope, &raw_name)?;
     let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {
@@ -248,6 +248,25 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
         fmt.field("Config", &path.display().to_string())?;
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn normalize_viktor_server_name(name: &str) -> String {
+    if name.eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER) {
+        cmcp_core::config::VIKTOR_SERVER.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn enable_viktor_for_user_scope(scope: &str, name: &str) -> Result<()> {
+    if scope.eq_ignore_ascii_case("user")
+        && name.eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER)
+    {
+        crate::cli::viktor::set_enabled(true)?;
+    }
     Ok(())
 }
 
@@ -470,7 +489,9 @@ fn parse_envs(raw: &[String]) -> HashMap<String, String> {
 #[cfg(feature = "mcp-proxy")]
 fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) -> Result<()> {
     let (mut config, path) = load_config_for_scope(scope, cas_root)?;
-    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(name, &config, cas_root)?
+    config.normalize_viktor_server_names();
+    let name = normalize_viktor_server_name(name);
+    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(&name, &config, cas_root)?
     else {
         if cli.json {
             println!(
@@ -680,6 +701,13 @@ enum ImportSource {
 }
 
 #[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportScope {
+    User,
+    Project,
+}
+
+#[cfg(feature = "mcp-proxy")]
 impl std::fmt::Display for ImportSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -694,6 +722,7 @@ struct ImportedServer {
     name: String,
     config: ServerConfig,
     source: ImportSource,
+    scope: ImportScope,
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -738,9 +767,11 @@ fn execute_import(
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
     let mut config = load_config(cas_root)?;
+    config.normalize_viktor_server_names();
     let mut added = 0usize;
     let mut skipped = 0usize;
     let mut updated = 0usize;
+    let mut imported_user_viktor = false;
     let public_discovered =
         cas_types::public_upstream_ids(discovered.iter().map(|server| server.name.as_str()));
 
@@ -778,6 +809,10 @@ fn execute_import(
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
+                imported_user_viktor |= server.scope == ImportScope::User
+                    && server
+                        .name
+                        .eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER);
             }
             updated += 1;
         } else {
@@ -791,6 +826,10 @@ fn execute_import(
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
+                imported_user_viktor |= server.scope == ImportScope::User
+                    && server
+                        .name
+                        .eq_ignore_ascii_case(cmcp_core::config::VIKTOR_SERVER);
             }
             added += 1;
         }
@@ -807,6 +846,9 @@ fn execute_import(
     } else {
         let path = project_config_path(cas_root);
         config.save_to(&path)?;
+        if imported_user_viktor {
+            enable_viktor_for_user_scope("user", cmcp_core::config::VIKTOR_SERVER)?;
+        }
 
         if cli.json {
             let names: Vec<String> = discovered
@@ -888,20 +930,20 @@ fn discover_claude() -> Result<Vec<ImportedServer>> {
     // User-scoped: ~/.claude.json
     let user_config = home.join(".claude.json");
     if user_config.exists() {
-        servers.extend(parse_claude_json(&user_config)?);
+        servers.extend(parse_claude_json(&user_config, ImportScope::User)?);
     }
 
     // Project-scoped: .mcp.json
     let project_config = PathBuf::from(".mcp.json");
     if project_config.exists() {
-        servers.extend(parse_claude_json(&project_config)?);
+        servers.extend(parse_claude_json(&project_config, ImportScope::Project)?);
     }
 
     Ok(servers)
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
+fn parse_claude_json(path: &Path, scope: ImportScope) -> Result<Vec<ImportedServer>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -914,7 +956,7 @@ fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
 
     let mut servers = Vec::new();
     for (name, value) in mcp_servers {
-        match parse_claude_server(name, value) {
+        match parse_claude_server(name, value, scope) {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
@@ -930,7 +972,11 @@ fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_claude_server(name: &str, value: &serde_json::Value) -> Result<Option<ImportedServer>> {
+fn parse_claude_server(
+    name: &str,
+    value: &serde_json::Value,
+    scope: ImportScope,
+) -> Result<Option<ImportedServer>> {
     let obj = value
         .as_object()
         .context("server config is not an object")?;
@@ -997,9 +1043,10 @@ fn parse_claude_server(name: &str, value: &serde_json::Value) -> Result<Option<I
     };
 
     Ok(Some(ImportedServer {
-        name: name.to_string(),
+        name: normalize_viktor_server_name(name),
         config,
         source: ImportSource::Claude,
+        scope,
     }))
 }
 
@@ -1013,20 +1060,20 @@ fn discover_codex() -> Result<Vec<ImportedServer>> {
     // User-scoped: ~/.codex/config.toml
     let user_config = home.join(".codex").join("config.toml");
     if user_config.exists() {
-        servers.extend(parse_codex_toml(&user_config)?);
+        servers.extend(parse_codex_toml(&user_config, ImportScope::User)?);
     }
 
     // Project-scoped: .codex/config.toml
     let project_config = PathBuf::from(".codex").join("config.toml");
     if project_config.exists() {
-        servers.extend(parse_codex_toml(&project_config)?);
+        servers.extend(parse_codex_toml(&project_config, ImportScope::Project)?);
     }
 
     Ok(servers)
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
+fn parse_codex_toml(path: &Path, scope: ImportScope) -> Result<Vec<ImportedServer>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -1040,7 +1087,7 @@ fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
 
     let mut servers = Vec::new();
     for (name, value) in mcp_servers {
-        match parse_codex_server(name, value) {
+        match parse_codex_server(name, value, scope) {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
@@ -1056,7 +1103,11 @@ fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
 }
 
 #[cfg(feature = "mcp-proxy")]
-fn parse_codex_server(name: &str, value: &toml::Value) -> Result<Option<ImportedServer>> {
+fn parse_codex_server(
+    name: &str,
+    value: &toml::Value,
+    scope: ImportScope,
+) -> Result<Option<ImportedServer>> {
     let table = value.as_table().context("server config is not a table")?;
 
     // Skip disabled servers.
@@ -1133,9 +1184,10 @@ fn parse_codex_server(name: &str, value: &toml::Value) -> Result<Option<Imported
     };
 
     Ok(Some(ImportedServer {
-        name: name.to_string(),
+        name: normalize_viktor_server_name(name),
         config,
         source: ImportSource::Codex,
+        scope,
     }))
 }
 

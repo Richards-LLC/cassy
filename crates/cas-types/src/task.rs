@@ -1518,6 +1518,15 @@ mod tests {
             Some("deadbeef")
         );
         assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
+
+        // A takeover may be the only deliverable. It must survive the same
+        // persistence boundary without relying on human task notes for authority.
+        let authorization = serde_json::json!({"split_id": "split-test", "worker_id": "worker-1",
+            "supervisor_id": "supervisor-1", "reason": "peer handed back the child"});
+        let mut encoded = serde_json::to_value(Task::new("cas-takeover".into(), "takeover".into())).unwrap();
+        encoded["deliverables"] = serde_json::json!({"split_takeover": authorization});
+        let task: Task = serde_json::from_value(encoded).unwrap();
+        assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["split_takeover"], authorization);
     }
 
     #[test]

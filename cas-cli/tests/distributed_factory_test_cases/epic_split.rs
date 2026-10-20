@@ -322,7 +322,8 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
             "action": action, "id": "cas-d3", "assignee": "soundwave-worker",
             "supervisor_override": true, "force": true, "reason": "worker cannot take over"
         })).unwrap())).await.unwrap_err();
-        assert!(refused.message.contains("registered supervisor"), "{refused}");
+        let expected = if action == "update" { "registered supervisor" } else { "SPLIT TO A PEER" };
+        assert!(refused.message.contains(expected), "{refused}");
     }
 
     let reason = "peer agreed to hand this child back";
@@ -333,6 +334,16 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     assert_eq!(task.assignee.as_deref(), Some("soundwave-worker"), "{assigned}");
     assert!(task.notes.contains(&id) && task.notes.contains(reason)
         && task.notes.contains("soundwave"), "{}", task.notes);
+    let mut other = Agent::new_with_role("sw-other".into(), "other-worker".into(), AgentRole::Worker);
+    other.factory_session = Some("factory-sw".into());
+    register(&soundwave.machine, &other);
+    let other_core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    other_core.set_agent_id_for_testing(other.id);
+    let refused = other_core.cas_task_start_with_options(Parameters(TaskStartRequest {
+        id: "cas-d3".into(), brief: Some(true), force: Some(true),
+    })).await.unwrap_err();
+    assert!(refused.message.contains("SPLIT TO A PEER") && refused.message.contains(&id), "{refused}");
+    assert_eq!(tasks.get("cas-d3").unwrap().status, TaskStatus::Open);
 
     // Each side is refused on the other's children: start, claim and spawn.
     for child in PROWL_TAKES {
@@ -376,18 +387,15 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
     assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr-w"));
 
-    // Force alone cannot take a split child; a reasoned supervisor decision can.
-    let refused = soundwave.start("cas-d3", true).await.unwrap_err();
+    // Force alone cannot take a split child; only the bound worker consumes the decision.
+    let refused = soundwave.start("cas-d2", true).await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
-    let refused = soundwave.task(json!({"action": "start", "id": "cas-d3",
-        "supervisor_override": true})).await.unwrap_err();
-    assert!(refused.contains("reason"), "{refused}");
-    let forced = soundwave.task(json!({"action": "start", "id": "cas-d3",
-        "force": true, "supervisor_override": true, "reason": reason})).await.unwrap();
+    let forced = soundwave.start("cas-d3", false).await.unwrap();
     assert!(forced.contains("SPLIT OVERRIDE"), "{forced}");
     let task = tasks.get("cas-d3").unwrap();
     assert_eq!(task.status, TaskStatus::InProgress);
     assert!(task.notes.contains(reason) && task.notes.contains(&id), "{}", task.notes);
+    assert!(serde_json::to_value(&task).unwrap()["deliverables"].get("split_takeover").is_none());
 
     // The peers detail view shows the split on both sides.
     for supervisor in [&soundwave, &prowl] {

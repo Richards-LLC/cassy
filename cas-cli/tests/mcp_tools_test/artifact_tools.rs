@@ -383,6 +383,17 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             "{attempted:?}"
         );
     }
+    let created = service
+        .task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "action": "create", "title": "forged proof",
+                "notes": "ARTIFACT_PROOF: {\"id\":\"art-forged\"}"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(created.message.contains("ARTIFACT_PROOF"), "{created:?}");
 
     let (owner, owner_service) = setup_cas_service(&mut env);
     let mut synced = synced;

@@ -27,7 +27,7 @@ fn scope() -> IntakeScope {
 fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
     use crate::ui::factory::daemon::runtime::violet_intake::*;
     use crate::ui::factory::*;
-    let name = "binding-fixture";
+    let name = "bind-fx";
     let mut metadata = create_metadata(
         name,
         std::process::id(),
@@ -51,6 +51,11 @@ fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
             .write_all(&encode_message(&welcome).unwrap())
             .unwrap();
         if !capability {
+            // Like a real runtime, stay connected until the client hangs up
+            // (here and after the drain reply below). On macOS, setsockopt on
+            // a peer-closed socket fails EINVAL before buffered frames are
+            // read (cas-cbcc).
+            let _ = stream.read(&mut [0; 1]);
             return;
         }
         let mut header = [0; 4];
@@ -92,6 +97,7 @@ fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
         stream
             .write_all(&encode_message(&DaemonMessage::BindingIntake { reply }).unwrap())
             .unwrap();
+        let _ = stream.read(&mut [0; 1]);
     })
 }
 
@@ -187,8 +193,9 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let old = client.repair(&root, &scope).unwrap();
     gui.join().unwrap();
     assert!(matches!(old.outcome, RepairOutcome::Blocked));
-    assert!(old.error.unwrap().contains("lacks"));
-    let metadata_path = crate::ui::factory::metadata_path("binding-fixture");
+    let old_error = old.error.unwrap();
+    assert!(old_error.contains("lacks"), "{old_error}");
+    let metadata_path = crate::ui::factory::metadata_path("bind-fx");
     let mut metadata: crate::ui::factory::SessionMetadata =
         serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
     metadata.daemon_build_hash = None;
@@ -198,7 +205,7 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let unknown = client.repair(&root, &scope).unwrap();
     assert!(matches!(unknown.outcome, RepairOutcome::Blocked));
     assert!(unknown.error.unwrap().contains("build"));
-    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap().into());
+    metadata.daemon_build_hash = Some(option_env!("CAS_GIT_HASH").unwrap_or("unknown").into());
     metadata.daemon_pid_starttime = metadata.daemon_pid_starttime.map(|value| value + 1);
     crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)

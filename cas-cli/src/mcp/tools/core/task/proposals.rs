@@ -970,11 +970,29 @@ mod tests {
             let agents = crate::store::open_agent_store(&cas_root).unwrap();
             let worker = cas_types::Agent::new("worker-8a252".into(), "worker-8a252".into());
             agents.register(&worker).unwrap();
-            let core = CasCore::with_daemon(cas_root, None, None);
+            let core = CasCore::with_daemon(cas_root.clone(), None, None);
             core.set_agent_id_for_testing(worker.id);
             if has_acceptance {
                 core.store_accepted_proposal(&proposal, TARGET).unwrap();
             }
+            // cas-11ba: the board, ready and the QA batch show exactly the
+            // tasks this project may start.
+            let empty = || serde_json::json!({});
+            for (view, shown) in [
+                ("ready", core.cas_task_ready(Parameters(serde_json::from_value(empty()).unwrap())).await),
+                ("list", core.cas_task_list(Parameters(serde_json::from_value(empty()).unwrap())).await),
+            ] {
+                let shown = shown.unwrap();
+                let rmcp::model::RawContent::Text(text) = &shown.content[0].raw else {
+                    panic!("{view} returns text");
+                };
+                assert_eq!(text.text.contains(&task.id), starts, "{view} in {project}: {}", text.text);
+            }
+            assert_eq!(
+                super::super::task_owned_by_project(task, &cas_root, Some(project)),
+                starts,
+                "QA batch ownership in {project}"
+            );
             let started = core.cas_task_start(Parameters(IdRequest { id: task.id.clone() })).await;
             assert_eq!(started.is_ok(), starts, "{project}, notes={}: {:?}", !task.notes.is_empty(), started.err());
             let stored = store.get(&task.id).unwrap();

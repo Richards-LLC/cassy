@@ -60,3 +60,14 @@ pub fn accepted_proposal_target(root: &Path, task_id: &str) -> Result<Option<Str
         )
         .optional()?)
 }
+
+/// Every accepted proposal: `(task_id, target project)` pairs, read once so a
+/// board view need not query per task (cas-11ba).
+pub fn accepted_proposal_targets(root: &Path) -> Result<Vec<(String, String)>> {
+    let conn = connection(root)?;
+    let guard = crate::shared_db::lock_connection(&conn)?;
+    let mut stmt =
+        guard.prepare("SELECT task_id, target_project_canonical_id FROM accepted_proposal_targets")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}

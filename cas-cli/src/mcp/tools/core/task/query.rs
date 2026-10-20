@@ -100,10 +100,9 @@ impl CasCore {
             .origin_project
             .as_deref()
             .unwrap_or("unassigned legacy row");
-        let origin = if project_id
-            .as_deref()
-            .is_some_and(|project_id| task.origin_project.as_deref() != Some(project_id))
+        let origin = if project_id.is_some()
             && task.origin_project.is_some()
+            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref())
         {
             format!("{origin} — this task is owned elsewhere")
         } else {
@@ -596,17 +595,17 @@ impl CasCore {
             })?
         };
 
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             blocked
                 .iter()
-                .filter(|(task, _)| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|(task, _)| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            blocked.retain(|(task, _)| super::task_visible_in_project(task, project_id.as_deref()));
+            blocked.retain(|(task, _)| project_scope.shows(task));
         }
 
         // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
@@ -690,7 +689,8 @@ impl CasCore {
                 "Task scope must be `project` or `all`; global tasks are unsupported.",
             ));
         }
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
+        let project_id = project_scope.project_id();
 
         let task_store = self.open_task_store()?;
 
@@ -770,11 +770,11 @@ impl CasCore {
         } else {
             filtered
                 .iter()
-                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|task| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            filtered.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+            filtered.retain(|task| project_scope.shows(task));
         }
 
         // Apply sorting

@@ -153,7 +153,8 @@ pub use rule_candidate_store::{
     list_rule_candidates, observe_rule_candidate, rule_candidate_similarity, similar_rule_candidates,
 };
 pub use accepted_proposal_store::{
-    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, record_accepted_proposal_target,
+    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, accepted_proposal_targets,
+    record_accepted_proposal_target,
 };
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,

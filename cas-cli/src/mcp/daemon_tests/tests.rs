@@ -500,17 +500,31 @@ fn liveness_prefers_newest_same_name_worker_row_for_claude_and_codex() {
 }
 
 #[test]
-fn supervisor_hook_registration_persists_role_and_resolves_owner() {
-    let _env = TestEnvGuard::with_optional_vars(&[
-        ("CAS_AGENT_ROLE", Some("supervisor")),
-        (
-            "CAS_FACTORY_SESSION",
-            Some("factory-supervisor-registration"),
-        ),
-    ]);
+fn supervisor_hook_registration_rebinds_orphaned_dispatches_cas_9060() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_FACTORY_SESSION", "factory-supervisor-registration");
     let temp = TempDir::new().expect("temp project");
     let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
     let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+    let mut previous = Agent::new("dead-supervisor".into(), "previous-owner".into());
+    previous.role = AgentRole::Supervisor;
+    previous.status = AgentStatus::Shutdown;
+    previous.factory_session = Some("factory-supervisor-registration".into());
+    agent_store.register(&previous).unwrap();
+    let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+    let mut task = Task::new("cas-9060-review".into(), "orphaned parked delivery".into());
+    task.status = cas_types::TaskStatus::AwaitingMerge;
+    task.pending_verification = true;
+    tasks.add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_root,
+        &task.id,
+        "worker",
+        &previous.id,
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    )
+    .unwrap();
 
     let (supervisor, reused) = register_session_start_agent(
         &cas_root,
@@ -538,6 +552,60 @@ fn supervisor_hook_registration_persists_role_and_resolves_owner() {
         .expect("registered supervisor resolves as factory owner");
     assert_eq!(owner.agent_id, "supervisor-hook-session");
     assert_eq!(owner.name, "lively-supervisor-11");
+    let recovered = cas_store::get_verification_dispatch(&cas_root, &dispatch.id).unwrap();
+    assert_eq!(recovered.owner_agent_id, supervisor.id);
+    assert_eq!(
+        recovered.state,
+        cas_types::VerificationDispatchState::Pending
+    );
+    assert!(recovered.deadline_at > chrono::Utc::now());
+    assert_eq!(recovered.repository, dispatch.repository);
+
+    // Native MCP bootstrap also recovers a deleted owner, while a known
+    // owner from another factory keeps its exact proof and deadline.
+    let mut foreign = previous.clone();
+    foreign.id = "foreign-owner".into();
+    foreign.factory_session = Some("another-factory".into());
+    agent_store.register(&foreign).unwrap();
+    let mut boundaries = Vec::new();
+    for (id, owner) in [
+        ("cas-9060-missing", "deleted-owner"),
+        ("cas-9060-foreign", "foreign-owner"),
+    ] {
+        let mut task = Task::new(id.into(), "parked review".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        tasks.add(&task).unwrap();
+        boundaries.push(
+            cas_store::create_verification_dispatch(
+                &cas_root,
+                id,
+                "worker",
+                owner,
+                chrono::Utc::now() - chrono::Duration::minutes(1),
+            )
+            .unwrap(),
+        );
+    }
+    let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+    core.register_agent_with_hints(
+        supervisor.id.clone(),
+        supervisor.name,
+        None,
+        None,
+        Some(AgentRole::Supervisor),
+        crate::mcp::server::AgentIdentitySource::ServerInternal,
+    )
+    .unwrap();
+    for boundary in boundaries {
+        let after = cas_store::get_verification_dispatch(&cas_root, &boundary.id).unwrap();
+        if boundary.owner_agent_id == "deleted-owner" {
+            assert_eq!(after.owner_agent_id, supervisor.id);
+            assert!(after.deadline_at > chrono::Utc::now());
+        } else {
+            assert_eq!(after.owner_agent_id, boundary.owner_agent_id);
+            assert_eq!(after.deadline_at, boundary.deadline_at);
+        }
+    }
 }
 
 /// cas-921f (P1 fix-round): the real env→register→resolve chain for a

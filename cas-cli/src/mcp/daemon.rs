@@ -304,7 +304,39 @@ pub(crate) fn register_session_start_agent(
         persisted.registered_at = Utc::now();
         store.update(&persisted)?;
     }
+    recover_supervisor_verification_dispatches(cas_root, store, &persisted)?;
     Ok((persisted, reused))
+}
+
+/// Both trusted hook registration and native MCP bootstrap use this path.
+/// Public registration never grants dispatch recovery authority.
+pub(crate) fn recover_supervisor_verification_dispatches(
+    cas_root: &std::path::Path,
+    store: &dyn crate::store::AgentStore,
+    supervisor: &Agent,
+) -> crate::store::Result<()> {
+    if supervisor.role == AgentRole::Supervisor {
+        let dead_owners: Vec<_> = store
+            .list(None)?
+            .into_iter()
+            .filter(|prior| {
+                prior.id != supervisor.id
+                    && prior.role == AgentRole::Supervisor
+                    && (prior.status == AgentStatus::Shutdown
+                        || matches!(
+                            evaluate_liveness(prior, pid_alive, pid_matches_fingerprint),
+                            LivenessOutcome::Dead { .. }
+                        ))
+            })
+            .collect();
+        cas_store::adopt_orphaned_verification_dispatches(
+            cas_root,
+            &supervisor.id,
+            &dead_owners,
+            Utc::now() + chrono::Duration::minutes(10),
+        )?;
+    }
+    Ok(())
 }
 
 /// Extension trait for EmbeddedDaemonConfig to convert to DaemonConfig

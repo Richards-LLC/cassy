@@ -1064,6 +1064,8 @@ async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
     task.status = TaskStatus::AwaitingMerge;
     task.deliverables.factory_branch_anchor = Some(anchor.clone());
     task.deliverables.parked_branch = Some(lane.clone());
+    // Parked: the worker lease is released, as on cas-d47f's close.
+    task.assignee = None;
     tasks.update(&task).unwrap();
     merge_into_main(&fx, &tip);
     let _supervisor = cas_6f10_supervisor(&fx);

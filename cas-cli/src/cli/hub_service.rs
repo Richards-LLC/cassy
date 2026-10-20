@@ -2114,6 +2114,32 @@ exit 0
     }
 
     #[test]
+    fn systemd_update_accepts_deleted_process_path_cas_94fb() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("hub.service");
+        let definition = include_str!("../../tests/fixtures/hub-service-systemd.service");
+        fs::write(&path, definition).unwrap();
+        assert!(
+            !refresh_installed_service_at(
+                ServicePlatform::Systemd,
+                &path,
+                true,
+                Path::new("/opt/cas/bin/cas (deleted)"),
+            )
+            .expect("a renamed process image still identifies the installed cas")
+        );
+        let error = refresh_installed_service_at(
+            ServicePlatform::Systemd,
+            &path,
+            true,
+            Path::new("/different/cas (deleted)"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cas hub service install"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), definition);
+    }
+
+    #[test]
     fn service_activation_reports_starting_until_ready_cas_94fb() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let report = report(

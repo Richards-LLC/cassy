@@ -451,11 +451,22 @@ pub(super) fn inventory(
     }
     for task in records.into_values().filter(|t| !t.is_terminal()) {
         let claim = detail.claims.iter().find(|c| c.task_id == task.id).cloned();
+        // cas-47a2: before its first commit, a claimed task's branch is the
+        // one its live claimant has checked out.
         let branch = task
             .deliverables
             .parked_branch
             .clone()
-            .or_else(|| task.branch.clone());
+            .or_else(|| task.branch.clone())
+            .or_else(|| {
+                let claim = claim.as_ref()?;
+                detail
+                    .workers
+                    .iter()
+                    .find(|worker| worker.agent_id == claim.agent_id)?
+                    .branch
+                    .clone()
+            });
         let pr = branch
             .as_ref()
             .and_then(|b| work.prs.iter().find(|p| &p.branch == b))

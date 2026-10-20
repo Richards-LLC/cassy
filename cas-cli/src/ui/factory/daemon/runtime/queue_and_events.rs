@@ -2692,7 +2692,13 @@ pub(crate) fn read_row_facts(
     let mut facts = RowFacts {
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
-        assignment_stale: if queue.is_abandonment_recovery(row.id).unwrap_or(false) {
+        assignment_stale: if match queue.is_abandonment_recovery(row.id) {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                tracing::warn!(prompt_id = row.id, %error, "could not classify abandonment recovery");
+                false
+            }
+        } {
             None
         } else {
             super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target)

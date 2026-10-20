@@ -99,9 +99,14 @@ Abandoned queue messages report `undelivered` in the `message_status` header
 and JSON `legacy_status`, even though their queue rows are processed. A sender
 notice preserves the wake-gate refusal when one was recorded. Authenticated
 messages whose sender has ended use the existing local supervisor fallback;
-that supervisor receives each original source, summary and complete body in an
-ordinary inbox row. These recovery notices do not fold into the routine
-ended-worker digest. Large originals remain readable through `inbox_poll`.
+that supervisor receives each original source, summary and complete body.
+Each sweep emits at most three full-body recovery notices per recipient and
+one folded reference list for the rest. Each listed `notification_id` names a
+recipient-owned card: an explicit `inbox_poll notification_id=<id>` hydrates its
+retained abandoned original after the usual recipient/session checks. Cards
+stay out of automatic drains and unread counts. Recovery notices do not fold
+into the routine ended-worker digest. Large originals remain readable through
+`inbox_poll`.
 Recovery rows require daemon origin, the delivery-watchdog source and their
 recovery dedupe marker; assignment checks in the daemon and inbox poll treat
 these original bodies as history. A caller-supplied watchdog name cannot claim

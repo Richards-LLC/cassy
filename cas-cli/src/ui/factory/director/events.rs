@@ -86,11 +86,19 @@ impl SupervisorActionableState {
             Self::AssignReadyWork {
                 task_ids,
                 idle_workers,
-            } => format!(
-                "Drive to the exit: assign ready/open task(s) {} to idle worker(s) {} now.",
-                task_ids.join(", "),
-                idle_workers.join(", ")
-            ),
+            } => {
+                // A session-wide ready queue can be long (134 tasks in GH
+                // #1302); name the first few and count the rest.
+                const NAMED: usize = 10;
+                let mut tasks = task_ids.iter().take(NAMED).cloned().collect::<Vec<_>>().join(", ");
+                if task_ids.len() > NAMED {
+                    tasks.push_str(&format!(" and {} more", task_ids.len() - NAMED));
+                }
+                format!(
+                    "Drive to the exit: assign ready/open task(s) {tasks} to idle worker(s) {} now.",
+                    idle_workers.join(", ")
+                )
+            }
             Self::AssembleGatePipeline { epic_id } => format!(
                 "Drive to the exit: all children of {epic_id} are terminal -> assemble the epic branch, run the integration gate, and queue the release/PR pipeline."
             ),
@@ -606,18 +614,129 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
     ) -> Option<MergedCloseBlockedTask>,
     mut classify_delivery_hold: impl FnMut(&TaskSummary, &str) -> Option<DeliveryHold>,
 ) -> Option<SupervisorActionableState> {
-    let epic_id = focused_epic_id?;
-    let epic_is_open = data.epic_tasks.iter().any(|epic| {
-        epic.id == epic_id
-            && matches!(
-                epic.status,
-                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
-            )
+    let focused_open_epic = focused_epic_id.filter(|epic_id| {
+        data.epic_tasks.iter().any(|epic| {
+            epic.id == *epic_id
+                && matches!(
+                    epic.status,
+                    TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
+                )
+        })
     });
-    if !epic_is_open {
+    if let Some(epic_id) = focused_open_epic
+        && let Some(state) = focused_epic_exit_state(
+            data,
+            epic_id,
+            supervisor_name,
+            held_workers,
+            &mut resolve_delivery,
+            &mut classify_merged_close_blocked,
+            &mut classify_delivery_hold,
+        )
+    {
+        return Some(state);
+    }
+
+    // cas-6577: only name work `task action=start` would accept. A task
+    // behind an open `requires_start` prerequisite is refused at start, so
+    // recommending it produces a false wake and a wrong instruction.
+    let dispatchable = |task: &&TaskSummary| {
+        task.status == TaskStatus::Open
+            && task.assignee.is_none()
+            && !data.start_gated_task_ids.contains(&task.id)
+    };
+    let ready_ids = |in_scope: &dyn Fn(&TaskSummary) -> bool| {
+        let mut ids = data
+            .ready_tasks
+            .iter()
+            .filter(dispatchable)
+            .filter(|task| in_scope(task))
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    let mut task_ids = focused_open_epic
+        .map(|epic_id| ready_ids(&|task| task.epic.as_deref() == Some(epic_id)))
+        .unwrap_or_default();
+    // cas-7456 (GH #1302 E): idle workers must never sit beside a non-empty
+    // ready queue. When the focused epic has no ready work, or no epic is
+    // focused, offer the session's own ready tasks (the snapshot is already
+    // project-scoped, cas-0c98).
+    if task_ids.is_empty() {
+        task_ids = ready_ids(&|_| true);
+    }
+    if task_ids.is_empty() {
         return None;
     }
 
+    // cas-7456 (GH #1302 C): a Blocked task waits on someone else, so it does
+    // not keep its worker busy. Counting it hid that worker from the idle list
+    // and silenced the ready-work page.
+    let assigned_workers = data
+        .ready_tasks
+        .iter()
+        .chain(data.in_progress_tasks.iter())
+        .filter(|task| task.status != TaskStatus::Blocked)
+        .filter_map(|task| task.assignee.as_deref())
+        .flat_map(|assignee| {
+            std::iter::once(assignee.to_string()).chain(
+                data.agent_id_to_name
+                    .get(assignee)
+                    .cloned()
+                    .into_iter(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let mut idle_workers = data
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent.name != supervisor_name
+                && agent.current_task.is_none()
+                && !held_workers.contains(&agent.name)
+                && !assigned_workers.contains(&agent.name)
+                && !assigned_workers.contains(&agent.id)
+        })
+        .filter(|agent| {
+            let baseline = agent
+                .latest_activity
+                .as_ref()
+                .map(|(_, at)| *at)
+                .unwrap_or(agent.registered_at)
+                .max(agent.registered_at);
+            (now - baseline).num_seconds() >= idle_after_secs as i64
+        })
+        .map(|agent| agent.name.clone())
+        .collect::<Vec<_>>();
+    idle_workers.sort();
+    if idle_workers.is_empty() {
+        return None;
+    }
+
+    Some(SupervisorActionableState::AssignReadyWork {
+        task_ids,
+        idle_workers,
+    })
+}
+
+/// The focused epic's own exit steps, in priority order: its parked
+/// deliveries (merge or close), then assembly once every child is terminal.
+#[allow(clippy::too_many_arguments)]
+fn focused_epic_exit_state(
+    data: &DirectorData,
+    epic_id: &str,
+    supervisor_name: &str,
+    held_workers: &HashSet<String>,
+    resolve_delivery: &mut impl FnMut(&TaskSummary, &str) -> (String, Option<String>),
+    classify_merged_close_blocked: &mut impl FnMut(
+        &TaskSummary,
+        &str,
+        &str,
+        Option<&str>,
+    ) -> Option<MergedCloseBlockedTask>,
+    classify_delivery_hold: &mut impl FnMut(&TaskSummary, &str) -> Option<DeliveryHold>,
+) -> Option<SupervisorActionableState> {
     let mut mergeable = Vec::new();
     let mut merged_close_blocked = Vec::new();
     for task in data.in_progress_tasks.iter().filter(|task| {
@@ -694,70 +813,7 @@ pub(crate) fn supervisor_actionable_state_with_classifiers(
             epic_id: epic_id.to_string(),
         });
     }
-
-    // cas-6577: only name work `task action=start` would accept. A task
-    // behind an open `requires_start` prerequisite is refused at start, so
-    // recommending it produces a false wake and a wrong instruction.
-    let mut task_ids = data
-        .ready_tasks
-        .iter()
-        .filter(|task| {
-            task.epic.as_deref() == Some(epic_id)
-                && task.status == TaskStatus::Open
-                && task.assignee.is_none()
-                && !data.start_gated_task_ids.contains(&task.id)
-        })
-        .map(|task| task.id.clone())
-        .collect::<Vec<_>>();
-    task_ids.sort();
-    if task_ids.is_empty() {
-        return None;
-    }
-
-    let assigned_workers = data
-        .ready_tasks
-        .iter()
-        .chain(data.in_progress_tasks.iter())
-        .filter_map(|task| task.assignee.as_deref())
-        .flat_map(|assignee| {
-            std::iter::once(assignee.to_string()).chain(
-                data.agent_id_to_name
-                    .get(assignee)
-                    .cloned()
-                    .into_iter(),
-            )
-        })
-        .collect::<HashSet<_>>();
-    let mut idle_workers = data
-        .agents
-        .iter()
-        .filter(|agent| {
-            agent.name != supervisor_name
-                && agent.current_task.is_none()
-                && !held_workers.contains(&agent.name)
-                && !assigned_workers.contains(&agent.name)
-                && !assigned_workers.contains(&agent.id)
-        })
-        .filter(|agent| {
-            let baseline = agent
-                .latest_activity
-                .as_ref()
-                .map(|(_, at)| *at)
-                .unwrap_or(agent.registered_at)
-                .max(agent.registered_at);
-            (now - baseline).num_seconds() >= idle_after_secs as i64
-        })
-        .map(|agent| agent.name.clone())
-        .collect::<Vec<_>>();
-    idle_workers.sort();
-    if idle_workers.is_empty() {
-        return None;
-    }
-
-    Some(SupervisorActionableState::AssignReadyWork {
-        task_ids,
-        idle_workers,
-    })
+    None
 }
 
 /// Debounce duration for events (don't emit same event within this window)

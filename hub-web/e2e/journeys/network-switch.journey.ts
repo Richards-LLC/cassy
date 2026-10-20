@@ -285,6 +285,9 @@ test("HUB-J12 network switch: slow session attach keeps machine connected and se
     const attaches = hub.attaches.length;
     await sendNow(page, "While daemon reconnects");
     await expect(held).toHaveCount(1);
+    await banner.getByRole("button", { name: "Connection details" }).click();
+    await expect(page.locator(".connection-log-summary")).toContainText("Next retry in 1s.");
+    await page.getByRole("button", { name: "Close connection log" }).click();
     await clock.advance(1_000);
     await hub.waitFor(() => hub.attaches.length > attaches);
     // The sentence is the banner's live words; its Details button sits beside them (cas-2b3a5).
@@ -657,6 +660,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
   const log = page.getByRole("log");
   const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
   const stored = async () => JSON.stringify(await journalRows(page, "sends"));
+  const waitingSendState = async () => (await journalRows(page, "sends")).find((row) => row.send?.text === "Send this when it's back")?.send?.state;
   let releaseAttach: (() => void) | undefined;
   await journey.stage("One message goes out and its receipt never comes; the next waits for the session", async () => {
     const first = hub.nextSend();
@@ -667,12 +671,15 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     hub.upstreamLost(PELICAN);
     await sendNow(page, "Send this when it's back");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect.poll(waitingSendState, { message: "the waiting send is persisted before the tab reloads" }).toBe("held");
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
   await journey.stage("The tab reloads: both are still there, saying what they are", async () => {
+    const attachesBeforeReload = hub.attaches.filter((session) => session === PELICAN).length;
     releaseAttach = hub.holdAttach(PELICAN);
     await page.reload();
     await chooseConversation(page);
+    await hub.waitFor(() => hub.attaches.filter((session) => session === PELICAN).length > attachesBeforeReload);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(bubble("Send this when it's back")).not.toContainText(/Sending…|Delivered/);
     await expect(bubble("Did this one land?")).toContainText("Not confirmed");

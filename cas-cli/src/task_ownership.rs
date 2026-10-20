@@ -243,7 +243,7 @@ fn checkpoint_in_progress(shm: &Path) -> Result<bool, String> {
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
         return Err(std::io::Error::last_os_error().to_string());
     }
-    Ok(lock.l_type != libc::F_UNLCK as _)
+    Ok(lock.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 #[cfg(not(unix))]

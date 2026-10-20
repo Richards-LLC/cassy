@@ -141,6 +141,7 @@ it("documents the shipped Glass tokens in DESIGN.md frontmatter by name and valu
   const { light, dark } = shipped();
   const design = frontmatter("DESIGN.md");
   const maps = design.maps as Record<string, string>;
+  // pin: `source` is the doc's freshness anchor; it must name glass.css, the file whose values this test resolves.
   expect(design.source).toContain("hub-web/src/glass.css");
   let checked = 0;
   // Every colour names the CSS variable that carries it; the plain key is light, `-dark` is dark.

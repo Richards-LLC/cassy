@@ -509,15 +509,35 @@ fn cleanup_decision(cas_root: &Path, split: &EpicSplit) -> Result<(), String> {
     finish_epic_split_work(cas_root, split, true).map_err(|error| error.to_string())
 }
 
+fn expiry_notice_id(owner: &str, split_id: &str) -> String {
+    format!("split-expiry:{owner}:{split_id}")
+}
+
+/// The same expiry observed locally and through its authenticated peer is one
+/// queue event. Unrelated senders retain their ordinary message identity.
+pub(crate) fn expiry_notice_key(
+    root: &Path, recipient: &Agent, message: &ClaimedPeerMessage,
+) -> Result<Option<String>, String> {
+    let Some(line) = SplitMessage::parse(&message.body).filter(|line| line.kind == SplitKind::Expired)
+        else { return Ok(None) };
+    let split = get_epic_split(root, &line.id).map_err(|error| error.to_string())?;
+    Ok(split.filter(|split| split.local_agent_id == recipient.id
+        && split.peer_agent_id == message.sender_agent_id && line.at >= split.expires_at)
+        .map(|split| expiry_notice_id(&recipient.id, &split.id)))
+}
+
 /// Reconcile durable split work on the existing mailbox duty. No Cloud calls
 /// hold the SQLite lock. Failed cleanup/expiry delivery remains pending.
 pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(), String> {
     if !has_store(cas_root) { return Ok(()) }
     let agents = crate::store::open_agent_store(cas_root).map_err(|error| error.to_string())?;
+    let owners: std::collections::HashMap<_, _> = agents.list(None).map_err(|error| error.to_string())?
+        .into_iter().filter(|owner| owner.factory_session.as_deref() == Some(session))
+        .map(|owner| (owner.id.clone(), owner)).collect();
+    let owner_ids: Vec<_> = owners.keys().map(String::as_str).collect();
     let mut errors = Vec::new();
-    for mut split in pending_epic_split_work(cas_root, now).map_err(|error| error.to_string())? {
-        let Ok(owner) = agents.get(&split.local_agent_id) else { continue };
-        if owner.factory_session.as_deref() != Some(session) { continue }
+    for mut split in pending_epic_split_work(cas_root, now, &owner_ids).map_err(|error| error.to_string())? {
+        let owner = &owners[&split.local_agent_id];
         let mut work = || -> Result<(), String> {
             if split.state == SplitState::Pending {
                 decide_epic_split_by(cas_root, &split.id, &[SplitState::Pending], SplitState::Expired,
@@ -538,7 +558,7 @@ pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(
                 // The local notice is authored by this daemon's own supervisor,
                 // never presented as a statement from the remote peer.
                 let message = ClaimedPeerMessage {
-                    id: format!("split-expiry:{}:{}", owner.id, split.id),
+                    id: expiry_notice_id(&owner.id, &split.id),
                     project_id: crate::cloud::resolve_canonical_id(cas_root).ok_or("project has no canonical id")?,
                     recipient_agent_id: owner.id.clone(), sender_agent_id: owner.id.clone(),
                     sender_name: owner.name.clone(), sender_machine_id: owner.machine_id.clone(),
@@ -560,7 +580,7 @@ pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(
             if let Some(error) = cleanup_error { return Err(error) }
             Ok(())
         };
-        if let Err(error) = work() { errors.push(error); break; }
+        if let Err(error) = work() { errors.push(error); }
     }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
 }
@@ -630,8 +650,9 @@ fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<
     Ok(splits
         .into_iter()
         .filter(|split| Some(split.id.as_str()) != except)
-        .filter(|split| split.cleanup_pending || matches!(split.state, SplitState::Pending | SplitState::Accepted))
-        .filter(|split| !split.is_expired(now))
+        .filter(|split| split.cleanup_pending || split.state == SplitState::Accepted
+            || (split.state == SplitState::Pending
+                && (split.direction == SplitDirection::Outgoing || !split.is_expired(now))))
         .find_map(|split| {
             ids.iter()
                 .find(|id| split.mine.contains(id) || split.theirs.contains(id))

@@ -389,16 +389,22 @@ pub fn decide_epic_split_by(
     Ok(changed == 1)
 }
 
-/// Bounded durable work for the existing mailbox duty, including missed expiries.
-pub fn pending_epic_split_work(cas_dir: &Path, now: DateTime<Utc>) -> Result<Vec<EpicSplit>> {
+/// Bounded durable work for the duty's owners, including missed expiries.
+/// Filter ownership before the limit so another session cannot consume its budget.
+pub fn pending_epic_split_work(cas_dir: &Path, now: DateTime<Utc>, owners: &[&str]) -> Result<Vec<EpicSplit>> {
+    if owners.is_empty() { return Ok(Vec::new()) }
     let conn = open_conn(cas_dir)?;
     let conn = crate::shared_db::lock_connection(&conn)?;
+    let placeholders = (0..owners.len()).map(|index| format!("?{}", index + 2)).collect::<Vec<_>>().join(",");
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM epic_splits WHERE cleanup_pending=1 OR expiry_notice_pending=1
-         OR (state='pending' AND julianday(expires_at)<=julianday(?1))
+        "SELECT {COLUMNS} FROM epic_splits WHERE local_agent_id IN ({placeholders})
+         AND (cleanup_pending=1 OR expiry_notice_pending=1
+         OR (state='pending' AND julianday(expires_at)<=julianday(?1)))
          ORDER BY expires_at, id LIMIT 64"
     ))?;
-    Ok(stmt.query_map([now.to_rfc3339()], parse_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
+    let at = now.to_rfc3339();
+    let parameters = std::iter::once(at.as_str()).chain(owners.iter().copied());
+    Ok(stmt.query_map(rusqlite::params_from_iter(parameters), parse_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Settle only the work belonging to this exact decision, never a newer state.
@@ -445,7 +451,7 @@ mod tests {
         assert!(expired.cleanup_pending && expired.expiry_notice_pending);
         finish_epic_split_work(dir.path(), &expired, true).unwrap();
         finish_epic_split_work(dir.path(), &expired, false).unwrap();
-        assert!(pending_epic_split_work(dir.path(), now).unwrap().is_empty());
+        assert!(pending_epic_split_work(dir.path(), now, &["local"]).unwrap().is_empty());
     }
 
     fn split(id: &str) -> EpicSplit {

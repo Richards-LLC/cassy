@@ -171,6 +171,7 @@ impl PeerMailboxRuntime {
                 &self.factory_session,
                 &self.consumer_id,
                 &history,
+                &|recipient, message| crate::cloud::epic_split::expiry_notice_key(&self.cas_dir, recipient, message),
                 &move |recipient, message| {
                     match crate::cloud::epic_split::ingest(&cas_dir, recipient, message)? {
                         crate::cloud::epic_split::Ingested::Ignored(why) => {

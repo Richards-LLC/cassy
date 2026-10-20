@@ -1360,6 +1360,7 @@
       "a98ff49654099f442fb46d42ab424c9f5be2dc595c82a40b9d3f926d281e5c10"
     ],
     "skills/cas-sow-delivery-report/references/report-contract.md": [
+      "0b9e229d548a5fa5a7103675fbe7813acf664a4e36ca1472705687accd281de7",
       "3f05945d49c31a31b97bf35a20b8acaae0c21edebe3951fcaf9c4131c9f991c8",
       "72290d0d0fd680e1755c8582b07a70c4508e774013ce77af8900ca971aa02602",
       "b60d28e42689c0d83243525536e83ce00b74c23fe93b4aae622dfee6439cb9f9"
@@ -1367,6 +1368,7 @@
     "skills/cas-sow-delivery-report/references/report-skeleton.html": [
       "0c62038a4074f487b1a5919a4315c3e32ec30b8f64e3af8b5f6c797bb348add3",
       "3b5766f00b4459c7f97e7a05f5f81f65f7693b388acdeae6474fb713bca53181",
+      "3bc3fc5be08df57e4e458e168ab83ac8bbc57a4fa56deb5cefe7d06c1c2ce246",
       "e5ffa61346e76ea6f109be767c78ab52d1fbdda8f28774fedec44b97e096f5f6"
     ],
     "skills/cas-sow-delivery-report/references/rounds.md": [
@@ -1381,6 +1383,7 @@
     ],
     "skills/cas-sow-delivery-report/scripts/check-sow.py": [
       "05effcb651e318034fed2f2c0b242b0666255593d6c34f216ea331d043d29ab4",
+      "17a48d3405299cda332c0685f1ccca4d68ea0738d8cc77f26b52b19f6826cebb",
       "aba70fb1de09b1b336759eb986d0f09e47a63c5e7c60a43f22419013b477152f"
     ],
     "skills/cas-sow-delivery-report/scripts/inline-images.py": [

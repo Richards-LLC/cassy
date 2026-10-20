@@ -25,6 +25,20 @@ pub(crate) use pull::{
 mod push;
 mod team_push;
 
+pub(crate) fn strip_task_note_nuls(value: &mut serde_json::Value) -> bool {
+    let Some(notes) = value.get("notes").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if !notes.contains('\0') {
+        return false;
+    }
+    let notes = notes.replace('\0', "");
+    if let Some(object) = value.as_object_mut() {
+        object.insert("notes".into(), serde_json::Value::String(notes));
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -1101,7 +1115,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
         }
         "invalid_json_nul" => {
-            "PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul`"
+            "PostgreSQL jsonb cannot store U+0000 in task notes; repair the local task and queued payload with `cas cloud queue --repair-task-note-nuls --apply`, then `cas cloud sync`"
         }
         "version_gate" => {
             "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"

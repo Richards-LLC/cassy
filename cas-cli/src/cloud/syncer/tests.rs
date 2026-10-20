@@ -738,7 +738,7 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         decode_push_body(&requests[0])["tasks"][0]["notes"],
-        "original\0text"
+        "originaltext"
     );
     assert!(
         queue.intentional_park_counts(None, 5).unwrap().is_empty(),
@@ -4703,6 +4703,9 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         } else {
             EntityType::Task
         };
+        if id == "different" {
+            value["notes"] = "team\0note".into();
+        }
         queue
             .enqueue(kind, id, SyncOperation::Upsert, Some(&value.to_string()))
             .unwrap();
@@ -4727,6 +4730,17 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             let body = decode_push_body(request);
             if body.get("skills").is_some() {
                 return ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{"skills":1}}));
+            }
+            if let Some(tasks) = body["tasks"].as_array() {
+                let notes = tasks
+                    .iter()
+                    .find(|task| task["id"] == "different")
+                    .and_then(|task| task["notes"].as_str());
+                assert_eq!(
+                    notes,
+                    Some("teamnote"),
+                    "legacy team task notes must be sanitized before push"
+                );
             }
             let replacement = serde_json::json!({"id":"raced", "scope":"project", "origin_project":"p", "title":"newer mutation"}).to_string();
             race_queue.enqueue(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement)).unwrap();

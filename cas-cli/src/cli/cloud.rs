@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use crate::cli::Cli;
 use crate::cloud::{
-    BackfillOutcome, CloudConfig, CloudSyncerConfig, FetchTeamsOutcome, PersonalScopeNotice,
-    SyncQueue, TeamInfo, fetch_and_cache_teams, maybe_apply_team_backfill,
-    maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
+    BackfillOutcome, CloudConfig, CloudSyncerConfig, EntityType, FetchTeamsOutcome,
+    PersonalScopeNotice, SyncOperation, SyncQueue, TeamInfo, fetch_and_cache_teams,
+    maybe_apply_team_backfill, maybe_mark_personal_scope_notice, teams_cache_stale,
+    user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
@@ -399,7 +400,7 @@ pub struct CloudQueueArgs {
     pub command: Option<CloudQueueCommand>,
     /// Remove selected rejected personal copies with proven team delivery.
     /// Ownership rejection alone is not proof; unproven transport is retained.
-    #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
+    #[arg(long, conflicts_with_all = ["prune", "clear", "retry", "repair_task_note_nuls"])]
     pub purge_team_owned: bool,
     /// Preview IDs and delivery-proof eligibility without deleting queue rows.
     #[arg(long, requires = "purge_team_owned")]
@@ -432,6 +433,26 @@ pub struct CloudQueueArgs {
     /// Clear all items from the queue
     #[arg(long)]
     pub clear: bool,
+
+    /// Preview local and queued task notes containing U+0000; pair with --apply to repair.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "command",
+            "purge_team_owned",
+            "dry_run",
+            "ids",
+            "prune",
+            "retry",
+            "retry_reason",
+            "clear"
+        ]
+    )]
+    pub repair_task_note_nuls: bool,
+
+    /// Apply the planned task-note NUL repair.
+    #[arg(long, requires = "repair_task_note_nuls", conflicts_with = "command")]
+    pub apply: bool,
 }
 
 #[derive(Subcommand)]
@@ -2625,6 +2646,122 @@ fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: 
     Ok(())
 }
 
+fn execute_queue_task_note_nul_repair(
+    queue: &SyncQueue,
+    cas_root: &Path,
+    json: bool,
+    apply: bool,
+    limit: usize,
+    out: &mut dyn io::Write,
+) -> anyhow::Result<()> {
+    let task_store = open_task_store_local(cas_root)?;
+    let mut local_repairs = Vec::new();
+    let (visible, suppressed) = task_store.list_with_suppressed(None)?;
+    for original in visible.into_iter().chain(suppressed) {
+        if !original.notes.contains('\0') {
+            continue;
+        }
+        let mut repaired = original.clone();
+        repaired.notes.retain(|character| character != '\0');
+        local_repairs.push((original, repaired));
+    }
+
+    let mut queued_repairs = Vec::new();
+    for row in queue.list_all(usize::MAX / 2)? {
+        if row.entity_type != EntityType::Task || row.operation != SyncOperation::Upsert {
+            continue;
+        }
+        let Some(payload) = row.payload.as_deref() else {
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        if !crate::cloud::syncer::strip_task_note_nuls(&mut value) {
+            continue;
+        }
+        queued_repairs.push((row, serde_json::to_string(&value)?));
+    }
+
+    let planned_local = local_repairs.len();
+    let planned_queued = queued_repairs.len();
+    let candidate_task_ids = local_repairs
+        .iter()
+        .take(limit)
+        .map(|(task, _)| task.id.clone())
+        .collect::<Vec<_>>();
+    let candidate_queue_ids = queued_repairs
+        .iter()
+        .take(limit)
+        .map(|(row, _)| row.id)
+        .collect::<Vec<_>>();
+
+    let mut repaired_local = 0;
+    let mut repaired_queue = 0;
+    let mut changed_since_plan = 0;
+    if apply {
+        // Every candidate is read and normalized above before the first write.
+        for (original, repaired) in &local_repairs {
+            if task_store.update_from_sync(repaired, original)?.is_some() {
+                repaired_local += 1;
+            } else {
+                changed_since_plan += 1;
+            }
+        }
+        for (row, payload) in &queued_repairs {
+            let previous_payload = row.payload.as_deref().unwrap_or_default();
+            if queue.repair_task_note_nul_payload(row.id, previous_payload, payload)? {
+                repaired_queue += 1;
+            } else {
+                changed_since_plan += 1;
+            }
+        }
+    }
+
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "status": "ok",
+                "action": "repair-task-note-nuls",
+                "mode": if apply { "apply" } else { "preview" },
+                "planned": {
+                    "local_tasks": planned_local,
+                    "queued_rows": planned_queued,
+                    "task_ids": candidate_task_ids,
+                    "queue_ids": candidate_queue_ids,
+                },
+                "repaired": { "local_tasks": repaired_local, "queued_rows": repaired_queue },
+                "changed_since_plan": changed_since_plan,
+            })
+        )?;
+    } else {
+        writeln!(
+            out,
+            "Plan: {planned_local} local task(s), {planned_queued} queued task row(s) contain U+0000 in notes."
+        )?;
+        for (task, _) in local_repairs.iter().take(limit) {
+            writeln!(out, "  local task: {}", task.id)?;
+        }
+        for (row, _) in queued_repairs.iter().take(limit) {
+            writeln!(out, "  queued row: {} ({})", row.id, row.entity_id)?;
+        }
+        if apply {
+            writeln!(
+                out,
+                "Repaired {repaired_local} local task(s) and {repaired_queue} queued row(s); {changed_since_plan} changed since the plan."
+            )?;
+        } else {
+            writeln!(
+                out,
+                "No rows changed. Apply with `cas cloud queue --repair-task-note-nuls --apply`."
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use crate::cloud::SyncQueue;
 
@@ -2635,6 +2772,17 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     }
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
+
+    if args.repair_task_note_nuls {
+        return execute_queue_task_note_nul_repair(
+            &queue,
+            cas_root,
+            cli.json,
+            args.apply,
+            args.limit,
+            &mut io::stdout(),
+        );
+    }
 
     if args.purge_team_owned {
         let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;

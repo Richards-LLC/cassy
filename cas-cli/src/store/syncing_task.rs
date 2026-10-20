@@ -29,6 +29,10 @@ struct TaskDependencyPayload<'a> {
     origin_project: Option<&'a str>,
 }
 
+fn strip_task_note_nuls(task: &mut Task) {
+    task.notes.retain(|character| character != '\0');
+}
+
 /// After a clean scheduled reconcile, the next one waits this long. It is the
 /// safety net for intents a crashed process left behind; a mutator fulfills
 /// its own intent.
@@ -178,6 +182,7 @@ impl SyncingTaskStore {
         // inner.get plus in-memory policy/serialization. It cannot reopen a
         // syncing store, acquire the mutation flock, or call back into queue.
         let mut task = self.inner.get(&intent.entity_id)?;
+        strip_task_note_nuls(&mut task);
         task.scope = if intent.global_scope {
             Scope::Global
         } else {
@@ -490,6 +495,8 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn add(&self, task: &Task) -> Result<()> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
@@ -514,6 +521,8 @@ impl TaskStore for SyncingTaskStore {
         epic_id: Option<&str>,
         created_by: Option<&str>,
     ) -> Result<()> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
@@ -554,6 +563,8 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        let mut task = task.clone();
+        strip_task_note_nuls(&mut task);
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[&task.id])
@@ -596,6 +607,7 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let formatted_note = formatted_note.replace('\0', "");
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[task_id])
@@ -610,7 +622,7 @@ impl TaskStore for SyncingTaskStore {
         )?;
         let persisted_at = match self.inner.append_note_with_mutation_receipt(
             task_id,
-            formatted_note,
+            &formatted_note,
             &intent.mutation_id,
         ) {
             Ok(persisted_at) => persisted_at,

@@ -732,7 +732,7 @@ pub struct FactoryRequest {
     /// Target agent for hold_worker, release_worker, recycle_worker, clear_context, or remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
+        description = "Agent for hold_worker/release_worker/clear_context/message/remind; hold/release also accept worker_names. all_workers where supported; remind defaults to self."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -881,7 +881,7 @@ pub struct FactoryRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn request."
+        description = "spawn_workers effort: minimal, low, medium, high, xhigh, max. max requires a supporting registry recipe (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to every worker."
     )]
     #[serde(default)]
     pub effort: Option<String>,
@@ -889,7 +889,7 @@ pub struct FactoryRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue and never crossed between providers."
+        description = "spawn_workers: Claude CLAUDE_CONFIG_DIR (explicit drops inherited ANTHROPIC_API_KEY for OAuth); Codex CODEX_HOME (auth.json required); Grok warns, unsupported. Default: supervisor's harness directory, captured at enqueue; never shared across providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -907,28 +907,28 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
     )]
     #[serde(default)]
     pub command: Option<String>,
 
     /// Working directory for `server_start`.
     #[schemars(
-        description = "server_start: working directory to run the command in (defaults to the current directory)"
+        description = "server_start working directory (default current)."
     )]
     #[serde(default)]
     pub cwd: Option<String>,
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+        description = "server_start expected port (advisory); server_list reports actual bound ports."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
 
     /// Whether a registered server outlives its worker.
     #[schemars(
-        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+        description = "server_start: true outlives worker teardown outside containment; false stays contained (default)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
@@ -936,28 +936,28 @@ pub struct FactoryRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
+        description = "epic_split: CSV child ids you claim now in Cloud, all or nothing. Optional for grants; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
+        description = "epic_split: CSV child ids offered to target, claimed on accept. Optional for requests; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
+        description = "epic_split id=<split>: accept (claim your share), reject (with reason), cancel (release own claims, notify peer), status (decision, decider, observed claims)."
     )]
     #[serde(default)]
     pub decision: Option<String>,
 
     /// Lifetime of an unanswered epic split proposal.
     #[schemars(
-        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+        description = "epic_split proposal TTL seconds (default 1800, max 86400)."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub ttl_secs: Option<i64>,
@@ -1133,7 +1133,7 @@ pub struct CoordinationRequest {
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
+        description = "Agent for hold_worker/release_worker/clear_context/message/remind; hold/release also accept worker_names. all_workers where supported; remind defaults to self."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -1367,7 +1367,7 @@ pub struct CoordinationRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn_workers request."
+        description = "spawn_workers effort: minimal, low, medium, high, xhigh, max. max requires a supporting registry recipe (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to every worker."
     )]
     #[serde(default)]
     pub effort: Option<String>,
@@ -1375,7 +1375,7 @@ pub struct CoordinationRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue, never crossed between providers."
+        description = "spawn_workers: Claude CLAUDE_CONFIG_DIR (explicit drops inherited ANTHROPIC_API_KEY for OAuth); Codex CODEX_HOME (auth.json required); Grok warns, unsupported. Default: supervisor's harness directory, captured at enqueue; never shared across providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -1491,28 +1491,28 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
     )]
     #[serde(default)]
     pub command: Option<String>,
 
     /// Working directory for `server_start`.
     #[schemars(
-        description = "server_start: working directory to run the command in (defaults to the current directory)"
+        description = "server_start working directory (default current)."
     )]
     #[serde(default)]
     pub cwd: Option<String>,
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+        description = "server_start expected port (advisory); server_list reports actual bound ports."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
 
     /// Whether a registered server outlives its worker.
     #[schemars(
-        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+        description = "server_start: true outlives worker teardown outside containment; false stays contained (default)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
@@ -1520,28 +1520,28 @@ pub struct CoordinationRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cloud now, all or nothing. Omit or leave empty for a grant; at least one of mine/theirs is required"
+        description = "epic_split: CSV child ids you claim now in Cloud, all or nothing. Optional for grants; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); claimed only on accept. Omit or leave empty for a request; at least one of mine/theirs is required"
+        description = "epic_split: CSV child ids offered to target, claimed on accept. Optional for requests; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), 'cancel' (releases only your own claims and tells the peer), or 'status' (read the decision, decider and observed claims)"
+        description = "epic_split id=<split>: accept (claim your share), reject (with reason), cancel (release own claims, notify peer), status (decision, decider, observed claims)."
     )]
     #[serde(default)]
     pub decision: Option<String>,
 
     /// Lifetime of an unanswered epic split proposal.
     #[schemars(
-        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+        description = "epic_split proposal TTL seconds (default 1800, max 86400)."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub ttl_secs: Option<i64>,

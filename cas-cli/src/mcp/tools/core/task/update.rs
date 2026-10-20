@@ -505,25 +505,14 @@ impl CasCore {
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
-        if [req.notes.as_deref(), proof_scope_fix_reason]
+        if let Some(message) = [req.notes.as_deref(), proof_scope_fix_reason]
             .into_iter()
             .flatten()
-            .any(crate::cloud::syncer::contains_proposal_provenance_marker)
+            .find_map(super::caller_note_marker_rejection)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556)."),
-                data: None,
-            });
-        }
-        if [req.notes.as_deref(), proof_scope_fix_reason]
-            .into_iter()
-            .flatten()
-            .any(crate::artifacts::proof::contains_proof_marker)
-        {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references."),
+                message: Cow::from(message),
                 data: None,
             });
         }

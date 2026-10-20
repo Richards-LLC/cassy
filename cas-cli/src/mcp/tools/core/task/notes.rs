@@ -52,21 +52,10 @@ impl CasCore {
             data: None,
         })?;
 
-        if crate::cloud::syncer::contains_proposal_provenance_marker(&req.note) {
+        if let Some(message) = super::caller_note_marker_rejection(&req.note) {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).",
-                ),
-                data: None,
-            });
-        }
-        if crate::artifacts::proof::contains_proof_marker(&req.note) {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    "Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.",
-                ),
+                message: Cow::from(message),
                 data: None,
             });
         }

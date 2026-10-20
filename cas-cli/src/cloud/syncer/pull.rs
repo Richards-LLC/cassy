@@ -979,10 +979,16 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
 /// `render_task_proposal_provenance` writes the block; agent note writes that
 /// contain a marker are refused so a forged block never reaches the notes.
 pub(crate) fn contains_proposal_provenance_marker(text: &str) -> bool {
-    text.contains(PROPOSAL_PROVENANCE_BEGIN)
-        || text.contains(PROPOSAL_PROVENANCE_END)
-        || text.contains("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")
-        || text.contains("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---")
+    text.lines().any(|line| {
+        [
+            PROPOSAL_PROVENANCE_BEGIN,
+            PROPOSAL_PROVENANCE_END,
+            "--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---",
+            "--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---",
+        ]
+        .iter()
+        .any(|marker| line.starts_with(marker))
+    })
 }
 
 /// cas-3556: remember a pulled, server-attested accepted proposal as this

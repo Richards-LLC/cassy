@@ -36925,61 +36925,75 @@ mod epic_status_gate_tests {
         );
     }
 
-    /// cas-dbbf: a worker reuses its bare `factory/<worker>` lane for later
-    /// tasks. A closed child that delivered on its per-task branch, now
-    /// merged, must not be stranded by the lane's later commits when every
-    /// one of them claims a different task (cas-c5b8 triage: cas-cfd6 and
-    /// cas-c577 on epic cas-829b). The lane is still measured for the
-    /// child's own work: an unmerged commit naming the child keeps blocking.
+    /// cas-6d70 extends cas-dbbf: shared-lane history need not name another
+    /// task. A merged per-task branch alone determines the child's lane state.
     #[test]
-    fn a_reused_lane_holding_another_tasks_commits_does_not_strand_a_delivered_child_cas_dbbf() {
-        let dir = tempfile::tempdir().unwrap();
+    fn merged_per_task_lanes_ignore_shared_worker_history_cas_6d70() {
+        let dir = init_epic_repo(&[]);
+        let bare = tempfile::tempdir().unwrap();
         let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
-        git(p, &["add", "seed.txt"]);
-        git(p, &["commit", "-q", "-m", "seed"]);
-        git(p, &["checkout", "-q", "-b", "factory/worker-cas-d0e1"]);
-        std::fs::write(p.join("delivered.rs"), "fn delivered() {}\n").unwrap();
-        git(p, &["add", "delivered.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: the delivery (cas-d0e1)"]);
-        git(p, &["checkout", "-q", "main"]);
-        git(p, &["merge", "--no-ff", "-q", "-m", "land cas-d0e1", "factory/worker-cas-d0e1"]);
-        // The worker's bare lane, reused for the next task and not merged.
-        git(p, &["checkout", "-q", "-b", "factory/worker", "main"]);
-        std::fs::write(p.join("next.rs"), "fn next_task() {}\n").unwrap();
-        git(p, &["add", "next.rs"]);
-        git(p, &["commit", "-q", "-m", "feat: next task's work (cas-0be7)"]);
-        git(p, &["checkout", "-q", "main"]);
+        add_origin(p, bare.path());
+        let mut children = Vec::new();
+        for (id, worker) in [("cas-b47c", "solid-newt-84"), ("cas-5f3b", "keen-otter-36")] {
+            let branch = crate::factory_isolation::worker_task_branch(worker, id);
+            git(p, &["checkout", "-q", "-b", &branch, "main"]);
+            commit_returning_sha(p, &format!("{id}.rs"), "fn delivered() {}\n");
+            git(p, &["checkout", "-q", "main"]);
+            git(p, &["merge", "--no-ff", "-q", "-m", "land task", &branch]);
+            git(p, &["push", "-q", "origin", &branch]);
 
-        let mut delivered = child("cas-d0e1", TaskStatus::Closed, Some("worker"));
-        delivered.deliverables.parked_branch = Some("factory/worker-cas-d0e1".to_string());
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
-        assert_eq!(
-            statuses[0].unmerged_count, 0,
-            "another task's commits on the reused lane strand nothing for this child"
-        );
-        let task = epic("cas-epic-reused-lane");
-        let req = base_req(&task.id);
-        assert!(
-            matches!(
-                run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&delivered)),
-                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
-            ),
-            "a reused lane must not block the epic close"
-        );
+            let shared = format!("factory/{worker}");
+            git(p, &["checkout", "-q", "-b", &shared, "main"]);
+            // Unlabelled unrelated history defeats the old attribution heuristic.
+            commit_returning_sha(p, &format!("{worker}.rs"), "fn unrelated() {}\n");
+            git(p, &["checkout", "-q", "main"]);
+            assert_eq!(count_unmerged_factory_commits(p, &shared, "main"), 1);
 
-        // The child's own unmerged work on the same lane is still reported.
-        git(p, &["checkout", "-q", "factory/worker"]);
-        std::fs::write(p.join("delivered.rs"), "fn delivered() { follow_up() }\n").unwrap();
-        git(p, &["add", "delivered.rs"]);
-        git(p, &["commit", "-q", "-m", "fix: follow-up (cas-d0e1)"]);
-        git(p, &["checkout", "-q", "main"]);
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&delivered), "main", p);
-        assert!(
-            statuses[0].unmerged_count > 0,
-            "this child's own unmerged commit on the bare lane must keep blocking"
+            let mut delivered = child(id, TaskStatus::Closed, Some(worker));
+            if id == "cas-b47c" {
+                delivered.deliverables.parked_branch = Some(branch.clone());
+                git(p, &["branch", "-q", "-D", &branch]);
+            } // cas-5f3b leaves the legacy bare receipt; discover its local task ref.
+            children.push(delivered);
+        }
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        for (row, delivered) in statuses.iter().zip(&children) {
+            let branch = crate::factory_isolation::worker_task_branch(
+                delivered.assignee.as_deref().unwrap(), &delivered.id,
+            );
+            assert_eq!(row.unmerged_count, 0, "shared history must not strand {row:?}");
+            assert_eq!(row.factory_branch.as_deref(), Some(branch.as_str()));
+            assert!(row.additional_factory_branches.is_empty(), "{row:?}");
+            assert_eq!(row.checked_ref_reads.len(), 1, "{row:?}");
+            assert!(!row.refs_unresolved, "{row:?}");
+        }
+        assert!(matches!(statuses[0].checked_ref_reads[0], CheckedRefRead::Origin { .. }));
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert!(report.contains("All child factory branches are merged"), "{report}");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
         );
+        assert!(matches!(out, EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)), "{out:?}");
+    }
+
+    #[test]
+    fn unmerged_per_task_commit_still_blocks_epic_close_cas_6d70() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let branch = "factory/worker-cas-b47c";
+        git(p, &["branch", "factory/worker", "main"]);
+        git(p, &["checkout", "-q", "-b", branch]);
+        commit_returning_sha(p, "undelivered.rs", "fn undelivered() {}\n");
+        git(p, &["checkout", "-q", "main"]);
+        let mut delivered = child("cas-b47c", TaskStatus::Closed, Some("worker"));
+        delivered.deliverables.parked_branch = Some(branch.to_string());
+        let children = [delivered];
+        let statuses = collect_epic_branch_statuses(&children, "main", p);
+        assert_eq!(statuses[0].unmerged_count, 1, "{statuses:?}");
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"), &base_req("cas-epic"), "main", p, &children,
+        );
+        assert!(matches!(out, EpicCloseGateOutcome::Reject(_)), "{out:?}");
     }
 
     #[test]

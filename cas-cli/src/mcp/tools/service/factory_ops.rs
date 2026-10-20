@@ -10634,6 +10634,12 @@ pub(crate) fn supervisor_auth_failure_evidence(
     }
     let evidence = auth_failure_evidence_at(Some(&path), cli);
     if let (Some((modified, len)), Ok(mut scans)) = (stamp, SCANS.lock()) {
+        // cas-ceeb: one entry per supervisor transcript this process has
+        // seen; a session churn past the bound starts the cache afresh.
+        const MAX_SCANS: usize = 64;
+        if scans.len() >= MAX_SCANS && !scans.contains_key(&path) {
+            scans.clear();
+        }
         scans.insert(path, (modified, len, evidence.clone()));
     }
     evidence
@@ -10679,9 +10685,17 @@ fn read_transcript_tail(path: &std::path::Path) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     use std::io::{Read, Seek, SeekFrom};
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail).ok()?;
-    Some(tail)
+    // cas-ceeb: the seek point can land inside a UTF-8 character (and is
+    // always inside a line), so read bytes, decode lossily and drop the cut
+    // first line. A strict `read_to_string` failed on long transcripts, and
+    // the logged-out supervisor went undetected.
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let after_first_line = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |i| i + 1);
+        bytes.drain(..after_first_line);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn codex_rollout_reports_usage_limit(
@@ -18052,6 +18066,30 @@ effort = "high"
         assert!(ambiguous_output.contains(&first_rel));
         assert!(ambiguous_output.contains(&second_rel));
         assert!(ambiguous_output.contains("Likely synthesized:"));
+    }
+
+    /// cas-ceeb: a supervisor transcript over 256 KiB whose tail starts in the
+    /// middle of a UTF-8 character still reads, and its last record — the real
+    /// "Login expired" refusal — classifies as an account failure.
+    #[test]
+    fn a_long_transcript_cut_mid_character_still_detects_the_logout() {
+        const TAIL: usize = 256 * 1024;
+        let record = r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#;
+        let run = "界".repeat(100_000);
+        // Pad so the seek point lands one byte into a three-byte character.
+        let pad = (0..3)
+            .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
+            .unwrap();
+        let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
+        let start = body.len() - TAIL;
+        assert!(!body.is_char_boundary(start), "the fixture must cut a character");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+        assert!(
+            auth_failure_evidence_at(Some(&path), cas_mux::SupervisorCli::Claude).failed(),
+            "a logged-out supervisor with a long transcript must be detected"
+        );
     }
 
     #[test]

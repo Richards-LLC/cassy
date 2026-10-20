@@ -276,11 +276,72 @@ pub(crate) fn write_bounce(
         Ok(Some(bounce_id)) => {
             tracing::warn!(target: "cas::coordination", stage = "delivery_stalled_bounced",
             message_id = candidate.row.id, bounce_id, sender = %candidate.row.source,
-            recipient = %candidate.row.target, "aged unread message bounced to its sender")
+            recipient = %candidate.row.target, "aged unread message bounced to its sender");
+            page_operator_for_stalled_message(queue.as_ref(), &context.session_name, &candidate, bounce_id);
         }
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(%error, message_id = candidate.row.id, "failed to queue sender-side delivery-stalled bounce")
         }
+    }
+}
+
+/// cas-badb (GH #1302): the operator hears about an unread message at the same
+/// moment its sender does. A sender bounce is written once per recipient
+/// episode (until the recipient next reads), and the operator turn is keyed by
+/// that bounce, so each episode pages the operator exactly once.
+pub(crate) fn page_operator_for_stalled_message(
+    queue: &dyn cas_store::PromptQueueStore,
+    session: &str,
+    candidate: &BounceCandidate,
+    bounce_id: i64,
+) {
+    let row = &candidate.row;
+    if row.target.eq_ignore_ascii_case("operator") {
+        return;
+    }
+    let summary = format!("Message from {} to {} unread", row.source, row.target);
+    let message = format!(
+        "{} has not started a turn with message #{} from {} (sent {}). Its sender has been told. Type in {}'s pane to wake it, or take the work over.\n\n{}",
+        row.target,
+        row.id,
+        row.source,
+        row.created_at.to_rfc3339(),
+        row.target,
+        candidate.notice
+    );
+    let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message,
+        summary: summary.clone(),
+        device_id: "*".to_string(),
+        operator_label: None,
+        kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        attachments: Vec::new(),
+        reply_to_session: None,
+    }) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(%error, "cas-badb: failed to encode the unread-message operator page");
+            return;
+        }
+    };
+    let dedupe_key = format!("delivery-stalled-operator:{bounce_id}");
+    if let Err(error) = queue.record_operator_turn(&cas_store::OperatorTurn {
+        source: "unread-message-watchdog",
+        target: "operator",
+        prompt: &payload,
+        factory_session: (!session.is_empty()).then_some(session),
+        metadata: cas_store::OperatorTurnMetadata {
+            summary: Some(summary.as_str()),
+            priority: Some(cas_store::NotificationPriority::High),
+            origin: Some(&cas_store::QueueOrigin::Daemon),
+            kind: Some("blocker"),
+            dedupe_key: Some(&dedupe_key),
+            ..Default::default()
+        },
+    }) {
+        tracing::warn!(%error, message_id = row.id, "cas-badb: failed to record the unread-message operator page");
     }
 }

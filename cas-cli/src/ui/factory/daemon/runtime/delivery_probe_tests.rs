@@ -604,7 +604,7 @@ async fn cas_cc89_slow_flag_revalidation_does_not_hold_the_store_writer() {
         .unwrap()
         .nudge_sent_at = Some(Instant::now() - NORMAL_DELIVERY_OBSERVE_WINDOW);
     daemon.normal_delivery_probes.get_mut(&row).unwrap().nudges =
-        super::queue_and_events::NORMAL_DELIVERY_MAX_NUDGES;
+        NORMAL_DELIVERY_MAX_NUDGES;
     daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
     let release = hold_lane(&mut daemon, jobs::Lane::External);
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -1943,16 +1943,43 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
         parked_at + chrono::Duration::minutes(3),
     );
     stale["notes"] = serde_json::json!(old_reset);
-    let (_temp, result, store, queue) = pull_team_task_fixtures(
-        project, vec![stale.clone()], Some(local.clone()),
-    ).await;
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    let retained = store.get(&local.id).unwrap();
-    assert!(retained.lifecycle_matches(&local), "11:58 projection must not undo 11:55 park: {retained:?}");
-    assert_eq!(result.pulled_tasks, 0);
-    assert!(result.task_status_transitions.is_empty());
-    assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
-    assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+    for status in [TaskStatus::InProgress, TaskStatus::Open] {
+        let mut projection = stale.clone();
+        projection["status"] = serde_json::json!(status);
+        let (_temp, result, store, queue) = pull_team_task_fixtures(
+            project, vec![projection], Some(local.clone()),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert!(retained.lifecycle_matches(&local), "11:58 projection must not undo 11:55 park: {retained:?}");
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
+        assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+
+        // cas-f268: suppressing a merge as moot must not follow a stale pull.
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        let envelope = MergeRequestEnvelope {
+            task_id: local.id.clone(),
+            branch_tip: "a".repeat(40),
+            target_branch: "main".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&retained), &envelope,
+                &MergeRequestDecision::Pending { target_tip: "b".repeat(40) },
+            ),
+            MergeRequestDelivery::Deliver,
+        );
+    }
 
     // A previous cycle's closed_at must not replace the current park boundary.
     let mut previous_cycle = local.clone();

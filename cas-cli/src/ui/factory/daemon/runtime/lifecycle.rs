@@ -4352,6 +4352,9 @@ impl FactoryDaemon {
         loop_progress.enter(super::loop_watchdog::LoopPhase::RefreshDirector);
         let refresh_started = std::time::Instant::now();
         let cas_dir = self.app.cas_dir().to_path_buf();
+        for completed in refresh.take_merge_alert_inbox(&mut self.queue_jobs) {
+            self.finish_merge_alert_inbox(completed).await;
+        }
         self.relay_jobs.submit_external_work_reconciliation(
             &mut self.queue_jobs,
             move || super::external_work_reconcile_jobs::reconcile_due(&cas_dir),
@@ -4856,7 +4859,7 @@ impl FactoryDaemon {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
             return;
         }
-        if self.submit_merge_alert_inbox(&prompt) {
+        if self.submit_merge_alert_inbox(&prompt, refresh_started) {
             return;
         }
         // cas-f9e8 telemetry: measure director prompt
@@ -4893,8 +4896,6 @@ impl FactoryDaemon {
                 prompt.retract_epic.as_deref(),
             )
             .await;
-        let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
-        let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
         // cas-ae6d: a durable prompt that did not actually land
         // (transport error, or a composer-dirty deferral this
         // lane cannot retry) is re-queued rather than lost. An
@@ -4908,34 +4909,7 @@ impl FactoryDaemon {
         {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_requeued");
         }
-        match inject_result {
-            Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
-                target: "cas::coordination",
-                stage = "delivered",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                refresh_to_deliver_ms = total_ms,
-                "director prompt delivered to inbox"
-            ),
-            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
-                target: "cas::coordination",
-                stage = "composer_inject_deferred",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                "director prompt deferred before any PTY write because the operator composer is dirty"
-            ),
-            Err(e) => tracing::warn!(
-                target: "cas::coordination",
-                stage = "deliver_failed",
-                channel = "director_events",
-                target_agent = %prompt.target,
-                inject_ms,
-                error = %e,
-                "director prompt inject failed"
-            ),
-        }
+        super::delivery::log_director_delivery(&prompt, &inject_result, inject_started, refresh_started);
     }
 }
 

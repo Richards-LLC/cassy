@@ -164,6 +164,22 @@ fn publish_parked_delivery_branch(
     )
 }
 
+/// The declared target eligible for a first-start branch reset. Assignment
+/// passes its proposed final status; start passes the persisted status, so a
+/// batched ownership/status update cannot promise a reset that start will skip.
+pub(crate) fn initial_factory_branch_reset_target(
+    task: &Task,
+    status: TaskStatus,
+) -> Option<&cas_types::WorkTarget> {
+    if status != TaskStatus::Open
+        || task.deliverables.factory_branch_anchor.is_some()
+        || !task.deliverables.historical_factory_branch_anchors.is_empty()
+    {
+        return None;
+    }
+    task.deliverables.work_target.as_ref()
+}
+
 /// Keep a reused worker branch from silently carrying a prior task into a new
 /// target. A branch whose old tip is already reachable from the target is safe
 /// to reset; an unrelated tip is refused with the exact repair command.
@@ -1889,12 +1905,7 @@ impl CasCore {
             .unwrap_or(false);
 
         let reused_factory_branch_reset = if is_worker
-            && task.status == TaskStatus::Open
-            && task.deliverables.factory_branch_anchor.is_none()
-            && task
-                .deliverables
-                .historical_factory_branch_anchors
-                .is_empty()
+            && initial_factory_branch_reset_target(&task, task.status).is_some()
         {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do

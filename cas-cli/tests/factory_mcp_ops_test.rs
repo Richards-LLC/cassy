@@ -10106,6 +10106,18 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     );
     git_stdout(&worker_path, &["reset", "--hard", "main"]);
 
+    let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update", "id": task_b, "assignee": worker, "status": "blocked"
+    }))
+    .unwrap();
+    let blocked = env
+        .service
+        .task(Parameters(blocked_assignment))
+        .await
+        .expect_err("a batched status change must not promise a reset");
+    assert!(blocked.message.contains("commits behind"), "{blocked}");
+    assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+
     // An assignment must not promise a reset that task start would skip.
     let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
     for (label, declared, status, current_anchor, historical_anchor) in [
@@ -10149,6 +10161,14 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         foreign_path.to_string_lossy().into_owned(),
     );
     agents.update(&agent).unwrap();
+    let foreign_assignment = assign(&env, &task_b, worker)
+        .await
+        .expect_err("a different repository cannot receive the clean-idle waiver");
+    assert!(
+        foreign_assignment.contains("commits behind"),
+        "{foreign_assignment}"
+    );
+    assert!(store.get(&task_b).unwrap().assignee.is_none());
     let start: cas_mcp::TaskRequest =
         serde_json::from_value(serde_json::json!({"action":"start", "id": task_b})).unwrap();
     let different_repo = env

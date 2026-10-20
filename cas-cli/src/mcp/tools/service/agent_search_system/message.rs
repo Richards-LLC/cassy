@@ -2405,6 +2405,10 @@ impl CasService {
                         })
                         .collect();
                     match current.as_slice() {
+                        [task] if task.status != cas_types::TaskStatus::Open => {
+                            assignment_solicited_task_id(&message)
+                                .or_else(|| Some(task.id.clone()))
+                        }
                         [task] => Some(task.id.clone()),
                         [] => assignment_solicited_task_id(&message),
                         // Multiple live assignments cannot prove which task this

@@ -790,6 +790,7 @@ pub(crate) fn enqueue_external_message(
     message: &str,
     no_wrap: bool,
 ) -> anyhow::Result<i64> {
+    let message = crate::prompt_revalidation::strip_assignment_envelopes(message);
     let payload = if no_wrap {
         message.to_string()
     } else {

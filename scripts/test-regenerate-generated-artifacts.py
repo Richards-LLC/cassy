@@ -36,6 +36,13 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         shutil.copy2(ROOT / ".gitattributes", self.repo / ".gitattributes")
         self.write("cas-cli/src/builtins/agents/task-verifier.body.md", "Verify the task.\n")
         self.write("cas-cli/src/builtins/skills/demo/SKILL.md", "---\nname: demo\n---\n# Demo\n")
+        # Count generator runs: a wrapper stands in for the real script.
+        generator = self.repo / "scripts" / "gen-builtin-reference-history.sh"
+        generator.rename(self.repo / "scripts" / "gen-real.sh")
+        generator.write_text('#!/usr/bin/env bash\necho run >> "$GEN_RUNS"\nexec bash scripts/gen-real.sh "$@"\n')
+        generator.chmod(0o755)
+        self.runs = self.repo / ".git" / "gen-runs"
+        self.env["GEN_RUNS"] = str(self.runs)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "baseline")
         self.run_script("gen-builtin-reference-history.sh")
@@ -56,11 +63,23 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, env=self.env, check=check,
                               capture_output=True, text=True)
 
-    def run_script(self, name, *args):
+    def run_script(self, name, *args, ok=True):
         result = subprocess.run(["bash", f"scripts/{name}", *args], cwd=self.repo, env=self.env,
                                 capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, f"{name} failed:\n{result.stdout}{result.stderr}")
+        if ok:
+            self.assertEqual(result.returncode, 0, f"{name} failed:\n{result.stdout}{result.stderr}")
         return result
+
+    def generator_runs(self):
+        runs = self.runs.read_text().count("run") if self.runs.exists() else 0
+        self.runs.unlink(missing_ok=True)
+        return runs
+
+    def assert_ledger_fresh(self):
+        self.assertEqual(self.git("status", "--porcelain").stdout, "", "the regenerated ledger is committed")
+        self.run_script("gen-builtin-reference-history.sh")
+        fresh = self.git("diff", "--exit-code", "--", LEDGER, check=False)
+        self.assertEqual(fresh.returncode, 0, "the ledger equals a fresh generator run:\n" + fresh.stdout)
 
     def lane(self, branch, reference):
         """A lane adds a builtin reference and commits its own regenerated ledger."""
@@ -80,13 +99,32 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         merged = self.git("merge", "--no-ff", "-q", "factory/two", "-m", "merge two", check=False)
         self.assertEqual(merged.returncode, 0, "the ledger must not conflict:\n" + merged.stdout + merged.stderr)
         after = self.git("rev-parse", "HEAD").stdout.strip()
+        self.generator_runs()
         self.run_script("regenerate-generated-artifacts.sh", before, after)
-        self.assertEqual(self.git("status", "--porcelain").stdout, "", "the regenerated ledger is committed")
-        self.run_script("gen-builtin-reference-history.sh")
-        fresh = self.git("diff", "--exit-code", "--", LEDGER, check=False)
-        self.assertEqual(fresh.returncode, 0, "the ledger equals a fresh generator run:\n" + fresh.stdout)
+        # The ledger commit adds no builtin content, so no second pass is paid.
+        self.assertEqual(self.generator_runs(), 1)
+        self.assert_ledger_fresh()
         ledger = json.loads((self.repo / LEDGER).read_text())["files"]
         self.assertTrue({"skills/demo/references/first.md", "skills/demo/references/second.md"} <= set(ledger))
+
+    def test_a_failed_hub_web_build_still_regenerates_the_ledger_and_is_reported(self):
+        self.write("hub-web/package.json", '{"scripts": {"build": "echo vite exploded >&2; exit 3"}}\n')
+        (self.repo / "hub-web/node_modules").mkdir(parents=True)
+        self.write(".gitignore", "hub-web/node_modules\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "hub-web")
+        before = self.git("rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/app.ts", "export {};\n")
+        self.write("cas-cli/src/builtins/skills/demo/references/third.md", "# third\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change hub-web and a builtin")
+        after = self.git("rev-parse", "HEAD").stdout.strip()
+        result = self.run_script("regenerate-generated-artifacts.sh", before, after, ok=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(result.stderr.splitlines()[0], r"hub-web/dist.*failed")
+        self.assert_ledger_fresh()
+        ledger = json.loads((self.repo / LEDGER).read_text())["files"]
+        self.assertIn("skills/demo/references/third.md", ledger)
 
 
 if __name__ == "__main__":

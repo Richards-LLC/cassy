@@ -5878,13 +5878,14 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     let env = FactoryTestEnv::new();
     let old_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
     for index in 0..AGENT_COUNT {
+        let last_heartbeat = old_heartbeat + chrono::Duration::seconds(index as i64);
         let mut agent = Agent::new(
             Agent::generate_fallback_id(),
             format!("stale-report-{index:03}-{}", "x".repeat(NAME_PADDING)),
         );
         agent.role = AgentRole::Worker;
-        agent.last_heartbeat = old_heartbeat;
-        agent.registered_at = old_heartbeat;
+        agent.last_heartbeat = last_heartbeat;
+        agent.registered_at = last_heartbeat;
         env.agent_store()
             .register(&agent)
             .expect("register stale agent");
@@ -5905,6 +5906,21 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     );
     assert!(summary.contains("Stale agents: 240"), "{summary}");
     assert!(summary.contains("Stale agents: 240 items"), "{summary}");
+    let stale_category = summary
+        .lines()
+        .find(|line| line.starts_with("- Stale agents: 240 items, "))
+        .expect("stale-agent category count and byte summary");
+    let stale_bytes: usize = stale_category
+        .split(" items, ")
+        .nth(1)
+        .unwrap()
+        .split(" bytes")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(stale_bytes > 350_000, "{stale_category}");
+    assert!(summary.contains("first up to 3 items per category"), "{summary}");
     assert!(
         summary.contains("stale-report-000-"),
         "top stale-agent sample missing: {summary}"

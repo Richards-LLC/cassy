@@ -4202,6 +4202,68 @@ mod related_recall_response_tests {
         );
     }
 
+    /// GH #1316: the reworded cas-04f4 plan must see the peer's cas-e88d
+    /// before any local task is written, even when the epic is only in Cloud.
+    #[tokio::test]
+    async fn reworded_epic_warns_before_write_for_cloud_peer_scope_cas_dea7() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_SESSION_ID", Some("proud-cheetah-76")),
+            ("CAS_AGENT_NAME", Some("proud-cheetah-76")),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        let core = CasCore::with_daemon(root.to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()), ..Default::default()
+        }.save_to_cas_dir(root).unwrap();
+        let scope = "Map the live product and retire superseded legacy flows flags and code paths using 38 removal decisions from the live-product map.";
+        let mut epic = Task::new("cas-e88d".into(), "EPIC: Live-product cleanup — 10 live problems + removal decisions from the live-product map".into());
+        epic.task_type = TaskType::Epic;
+        epic.origin_project = Some("gabber-studio".into());
+        epic.description = scope.into();
+        epic.epic_verification_owner = Some("patient-badger-31".into());
+        let mut child = Task::new("cas-open-child".into(), "Retire superseded legacy routes".into());
+        child.origin_project = Some("gabber-studio".into());
+        let mut closed = child.clone();
+        closed.id = "cas-closed-child".into();
+        closed.status = TaskStatus::Closed;
+        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone()].into_iter().map(|task| {
+            let mut raw = serde_json::to_value(task).unwrap();
+            raw["project_id"] = serde_json::json!("gabber-studio");
+            raw
+        }).collect();
+        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id|
+            crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild)
+        ).collect();
+        for (collection, rows) in [("tasks", serde_json::json!(tasks)), ("task_dependencies", serde_json::json!(edges))] {
+            Mock::given(method("GET")).and(path("/api/teams/team-1/sync/pull"))
+                .and(query_param("project_id", "gabber-studio")).and(query_param("types", collection))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({collection:rows})))
+                .mount(&server).await;
+        }
+        let request = epic_request(
+            "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them",
+            &format!("The current flow is the product. {scope}"),
+        );
+        let warning = core.cas_task_create(Parameters(request.clone())).await
+            .expect_err("the peer's reworded open epic must warn before writing");
+        for required in ["EPIC", "cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
+            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        }
+        assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
+        assert!(store.list(None).unwrap().is_empty(), "warning must not persist the new epic or pulled inventory");
+        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 1, "explicit confirmation permits the intentional epic");
+    }
+
     #[tokio::test]
     async fn recent_other_epic_plan_requires_confirmation_before_creating_child() {
         let temp = TempDir::new().expect("temp project");

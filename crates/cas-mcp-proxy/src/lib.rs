@@ -83,6 +83,33 @@ pub trait ProxyCallObserver: Send + Sync {
     fn call_succeeded(&self, event: ProxyCallEvent<'_>);
 }
 
+/// Awaited preparation shared by every dispatch path. Remote authorization
+/// belongs here, rather than in the synchronous policy or success observer.
+pub trait ProxyCallInterceptor: Send + Sync {
+    fn prepare<'a>(
+        &'a self,
+        caller: &'a ProxyCaller,
+        server: &'a str,
+        tool: &'a str,
+        arguments: Option<serde_json::Map<String, Value>>,
+    ) -> futures::future::BoxFuture<'a, Result<PreparedProxyCall>>;
+
+    /// Non-authoritative local evidence only; a remote gateway owns effects.
+    fn call_succeeded(&self, _event: ProxyCallEvent<'_>) {}
+}
+
+pub struct PreparedProxyCall {
+    pub arguments: Option<serde_json::Map<String, Value>>,
+    pub refusal: Option<rmcp::model::CallToolResult>,
+    pub warning: Option<String>,
+}
+
+impl PreparedProxyCall {
+    pub fn forward(arguments: Option<serde_json::Map<String, Value>>) -> Self {
+        Self { arguments, refusal: None, warning: None }
+    }
+}
+
 /// A policy decision requested before an upstream MCP tool call is forwarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyPolicyDecision {
@@ -545,6 +572,7 @@ pub struct ProxyEngine {
     session_id: String,
     policy: RwLock<Arc<dyn ProxyPolicy>>,
     observer: RwLock<Option<Arc<dyn ProxyCallObserver>>>,
+    interceptor: RwLock<Option<Arc<dyn ProxyCallInterceptor>>>,
     policy_audit: Mutex<VecDeque<ProxyPolicyAuditEntry>>,
     /// Client-side bound on one upstream tool call (cas-53ce).
     call_timeout: std::sync::RwLock<Duration>,
@@ -600,6 +628,7 @@ impl ProxyEngine {
             session_id,
             policy: RwLock::new(Arc::new(AllowAllProxyPolicy)),
             observer: RwLock::new(None),
+            interceptor: RwLock::new(None),
             policy_audit: Mutex::new(VecDeque::new()),
             call_timeout: std::sync::RwLock::new(Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS)),
             reconnect_gate: tokio::sync::Mutex::new(()),
@@ -813,6 +842,10 @@ impl ProxyEngine {
     /// Install the observer for successful upstream calls.
     pub async fn set_call_observer(&self, observer: Arc<dyn ProxyCallObserver>) {
         *self.observer.write().await = Some(observer);
+    }
+
+    pub async fn set_call_interceptor(&self, interceptor: Arc<dyn ProxyCallInterceptor>) {
+        *self.interceptor.write().await = Some(interceptor);
     }
 
     /// Return the bounded, redacted authorization audit trail for this proxy
@@ -1394,7 +1427,18 @@ impl ProxyEngine {
         self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
 
-        let result = self
+        let interceptor = self.interceptor.read().await.clone();
+        let prepared = if let Some(interceptor) = &interceptor {
+            interceptor.prepare(caller, server_name, tool_name, arguments).await?
+        } else {
+            PreparedProxyCall::forward(arguments)
+        };
+        if let Some(refusal) = prepared.refusal {
+            return Ok(refusal);
+        }
+        let arguments = prepared.arguments;
+
+        let mut result = self
             .call_upstream(
                 server_name,
                 CallToolRequestParams {
@@ -1405,6 +1449,17 @@ impl ProxyEngine {
                 },
             )
             .await?;
+
+        if let Some(interceptor) = interceptor {
+            let serialized = serde_json::to_value(&result).unwrap_or(Value::Null);
+            interceptor.call_succeeded(ProxyCallEvent {
+                caller, server: server_name, tool: tool_name,
+                arguments: &arguments, result: &serialized,
+            });
+        }
+        if let Some(warning) = prepared.warning {
+            result.content.push(rmcp::model::Content::text(warning));
+        }
 
         // The receipted external-verification lane owns its own polling and
         // lifecycle. Observing it here would create a second inbound watch and

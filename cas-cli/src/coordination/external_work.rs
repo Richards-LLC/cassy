@@ -273,6 +273,20 @@ impl SqliteRequestJournal {
         load_operation(&*conn, request_id)
     }
 
+    /// Local evidence for degraded stakeholder warnings, never shared authority.
+    pub fn stakeholder_contact_evidence(&self) -> Result<Vec<Value>, JournalError> {
+        let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let mut query = conn.prepare(
+            "SELECT response_json FROM external_work_operations WHERE kind='stakeholder_contact' AND response_json IS NOT NULL ORDER BY updated_at DESC, rowid DESC"
+        ).map_err(|error| JournalError::Storage(error.to_string()))?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| JournalError::Storage(error.to_string()))?;
+        rows.map(|row| {
+            let row = row.map_err(|error| JournalError::Storage(error.to_string()))?;
+            serde_json::from_str(&row).map_err(|error| JournalError::Storage(error.to_string()))
+        }).collect()
+    }
+
     pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {
         let conn = self
             .conn

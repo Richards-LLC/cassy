@@ -328,10 +328,13 @@ impl ProxyHub {
             }
         }
         runtime.block_on(crate::mcp::install_proxy_policy(&engine, &config));
+        if let Some(root) = cas_root {
+            runtime.block_on(crate::coordination::stakeholder_contacts::install(&engine, root));
+        }
         Ok(Self {
             runtime,
             engine: Some(engine),
-            caller: cli_caller(),
+            caller: cli_caller(cas_root),
         })
     }
 }
@@ -339,7 +342,18 @@ impl ProxyHub {
 /// The identity this one-shot process presents to the proxy policy: the
 /// factory role it was spawned with, if any, otherwise a plain session.
 #[cfg(feature = "mcp-proxy")]
-fn cli_caller() -> cmcp_core::ProxyCaller {
+fn cli_caller(cas_root: Option<&std::path::Path>) -> cmcp_core::ProxyCaller {
+    use crate::store::AgentStore;
+    if let Some(agent) = cas_root.and_then(|root| {
+        let session = std::env::var("CAS_SESSION_ID").ok()
+            .or_else(|| crate::agent_id::read_session_for_mcp(root).ok())?;
+        crate::store::open_agent_store(root).ok()?.get(&session).ok()
+    }) {
+        return cmcp_core::ProxyCaller {
+            agent_id: agent.id.clone(), role: agent.role, session_id: agent.id,
+            factory_session: None, active_task_ids: Vec::new(),
+        };
+    }
     let role = std::env::var("CAS_AGENT_ROLE")
         .ok()
         .and_then(|role| role.parse::<crate::types::AgentRole>().ok())

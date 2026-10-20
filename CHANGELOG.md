@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — messages arrive with an acknowledgement
+
+- **Receipt status** — Was: a successful transport handoff could leave the sender unsure whether the recipient saw the message. → Now: status opens with RECEIVED or PENDING based on evidence from the recipient's own session, and names deliveries that ended without receipt.
+- **Idle delivery retries** — Was: a message could wait two minutes for one follow-up wake. → Now: the first check runs after 30 seconds, followed by another normal wake every 60 seconds while no turn has started, up to five nudges.
+- **Five-minute escalation** — Was: an undelivered message could wait two hours before escalation. → Now: the default threshold is five minutes for both priority and ordinary messages, and both the sender and the operator are told.
+- **Separate conversations** — Was: a child tool call could consume mail intended for its parent session. → Now: response fallback checks the caller's identity and leaves that mail for its intended recipient.
+- **Consistent Slack recovery** — Was: the command-line and background paths could classify a Violet reconnect differently. → Now: both use the shared bounded reconnect mapping used by MCP, preserving other refusals.
+
+### Fixed — cleanup proves ownership before removal
+
+- **Global task ownership** — Was: cleanup could miss a matching task in the global store. → Now: both known projects and the global store must rule out another owner before legacy evidence or a simulator is eligible for removal.
+- **Concurrent store changes** — Was: a checkpoint or unreadable global store could leave a misleading ownership result. → Now: bounded re-reads detect checkpoint progress and refuse removal when ownership remains uncertain, without writing to other stores.
+
+### Fixed — Cloud recovery preserves content and shows the next step
+
+- **Credential-free queue preview** — Was: previewing a personal-to-team migration required Cloud credentials. → Now: the local preview works without login; applying the migration still requires authentication.
+- **Complete queue advice** — Was: a held personal backlog could hide a separate queue rejection. → Now: doctor shows both, and retry advice remains specific to the actual rejection.
+- **Accurate migration counts** — Was: duplicate or ineligible personal rows could inflate the suggested migration. → Now: preview, apply and diagnostics share the same eligibility plan and count only rows that can create a new team snapshot.
+- **Lossless task notes** — Was: notes rejected for a NUL character had no usable retry advice, and an interim repair would remove that character. → Now: stored notes and queued payloads retain the exact text, with a reason-specific retry for lossless Cloud round trips; the destructive repair is removed.
+
+### Fixed — Codex setup stays bounded
+
+- **Version probe** — Was: a build suffix or shortened version could confuse model-cache comparisons, and a version probe could add another wait. → Now: versions compare consistently, and the probe runs at most once only when needed within the existing five-second account-check budget.
+
+### Changed — credential isolation design
+
+- **Linux isolation plan** — Was: changing HOME alone left absolute credential paths accessible. → Now: the tested Linux prototype recommends a mount boundary and explicit tool/auth grants; production enforcement and a macOS backend remain unimplemented.
+
 ## [3.64.0] - 2026-10-18
 
 ### Fixed — project and hub diagnostics

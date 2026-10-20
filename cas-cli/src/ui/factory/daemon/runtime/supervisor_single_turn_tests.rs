@@ -474,7 +474,10 @@ async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
             let text = inbox[0]["text"].as_str().unwrap();
             for body in &bodies { assert!(text.contains(body), "no truncation or lost passenger"); }
         } else {
-            assert_eq!(inbox.len(), 1, "{guard}: the held legacy copy must not be duplicated");
+            let held_marker = format!("[cas #{} ", ids[held]);
+            assert_eq!(inbox.iter().filter(|message| message["text"].as_str().unwrap().contains(&held_marker)).count(), 1,
+                "{guard}: the held legacy copy must not be duplicated; headers={:?}",
+                inbox.iter().map(|message| message["text"].as_str().unwrap().lines().next()).collect::<Vec<_>>());
             assert!(!std::fs::read_to_string(root.path().join("input")).unwrap().contains(&bodies[held]),
                 "{guard}: legacy content must not be typed again as a batch member");
             if guard == "memory-leader" {

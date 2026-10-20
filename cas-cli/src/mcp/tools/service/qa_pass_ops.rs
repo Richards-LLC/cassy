@@ -619,7 +619,7 @@ impl CasService {
         "The supervisor was told it may merge this exact tip.".to_string()
     }
 
-    fn route_qa_rejection(&self, pass: &QaPass, reviewer: &str, summary: &str) -> String {
+    pub(crate) fn route_qa_rejection(&self, pass: &QaPass, reviewer: &str, summary: &str) -> String {
         let reason = format!(
             "Independent QA round {} by {reviewer} rejected {} @{}: {} Ledger with evidence: {}. \
              Fix the findings, push, and close again; the next park opens round {}.",

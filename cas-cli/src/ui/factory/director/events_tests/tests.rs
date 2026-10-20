@@ -1581,6 +1581,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
 
     let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "qa-between-rounds")]);
     let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(temp_dir.path().join("config.toml"), "[qa]\nmax_rounds = 2\n").unwrap();
     let stores = DirectorStores::open(temp_dir.path()).unwrap();
     stores.task_store.init().unwrap();
     stores.agent_store.init().unwrap();
@@ -1599,6 +1600,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
 
     let mut delivery = Task::new("cas-521d-delivery".into(), "Awaiting a fix round".into());
     delivery.status = TaskStatus::AwaitingMerge;
+    delivery.assignee = Some("implementer-session".into());
     stores.task_store.add(&delivery).unwrap();
     let head = "a".repeat(40);
     let pass = open_qa_pass(
@@ -1619,7 +1621,7 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
         other => panic!("first QA round should dispatch: {other:?}"),
     };
     claim_qa_pass(temp_dir.path(), &delivery.id, &reviewer.id, now).unwrap();
-    resolve_qa_pass(
+    let rejected = resolve_qa_pass(
         temp_dir.path(),
         &delivery.id,
         &reviewer.id,
@@ -1630,6 +1632,16 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
         now,
     )
     .unwrap();
+
+    let core = crate::mcp::CasCore::with_daemon(temp_dir.path().to_path_buf(), None, None);
+    #[cfg(feature = "mcp-proxy")]
+    let service = crate::mcp::CasService::new(core, None);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let service = crate::mcp::CasService::new(core);
+    let routed = service.route_qa_rejection(&rejected, &reviewer.id, "fix needed");
+    let reopened = stores.task_store.get(&delivery.id).unwrap();
+    assert_eq!(reopened.status, TaskStatus::Open, "{routed}");
+    assert_eq!(reopened.assignee, delivery.assignee);
 
     let before = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
     let mut detector = DirectorEventDetector::new(
@@ -1650,6 +1662,18 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
             "a reviewer between a rejected pass and the next round is not idle for assignment: {events:?}"
         );
     }
+
+    let mut fixing = stores.task_store.get(&delivery.id).unwrap();
+    fixing.status = TaskStatus::InProgress;
+    stores.task_store.update(&fixing).unwrap();
+    let fixing = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(fixing.agents.iter().find(|agent| agent.id == reviewer.id).unwrap().qa_reviewer_between_rounds);
+
+    // Exhausting the configured limit must release the reviewer even while
+    // the delivery remains non-terminal.
+    std::fs::write(temp_dir.path().join("config.toml"), "[qa]\nmax_rounds = 1\n").unwrap();
+    let exhausted = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(!exhausted.agents.iter().find(|agent| agent.id == reviewer.id).unwrap().qa_reviewer_between_rounds);
 
     // The suppression is scoped to the interval between rounds. Once the
     // delivery is terminal, the former reviewer becomes an ordinary idle worker.

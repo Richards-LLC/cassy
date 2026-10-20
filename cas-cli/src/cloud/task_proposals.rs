@@ -902,15 +902,16 @@ mod tests {
     }
 
     /// cas-a968 (GH #1281): Cloud persisted the proposal but attests another
-    /// spelling of the target (a registry alias). The create is still refused,
+    /// origin while the registry confirms an aliased target. The create is refused,
     /// but the refusal carries Cloud's receipt, and a retry with the same
     /// attempt id sends the identical request and gets the same receipt.
     #[tokio::test]
     async fn create_identity_mismatch_refusal_carries_the_persisted_receipt_cas_a968() {
         let server = MockServer::start().await;
-        let request = create_request();
+        let mut request = create_request();
+        request.target_project_canonical_id = "target-alias".into();
         let mut attested = provenance();
-        attested["server_attested"]["target_project_canonical_id"] = json!("target-alias");
+        attested["server_attested"]["origin_project_canonical_id"] = json!("unexpected-origin");
         Mock::given(method("POST"))
             .and(path("/api/teams/team-1/task-proposals"))
             .and(body_json(serde_json::to_value(&request).unwrap()))
@@ -924,6 +925,15 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "projects": [{ "canonical_id": "target-project", "aliases": ["target-alias"] }]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
         let refusals = tokio::task::spawn_blocking(move || {
             let client = client(&server);
             [client.create(&request).unwrap_err(), client.create(&request).unwrap_err()].map(|error| error.to_string())
@@ -931,7 +941,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(refusals[0], refusals[1], "the retry dedupes to the same receipt");
-        for receipt in ["did not match the request", "proposal-1", "cas-0123456789abcdef", "request-1", "target-alias", "target-project"] {
+        for receipt in ["did not match the request", "proposal-1", "cas-0123456789abcdef", "request-1", "target-alias", "target-project", "unexpected-origin", "expected target for identity comparison: target-project"] {
             assert!(refusals[0].contains(receipt), "{receipt} missing: {}", refusals[0]);
         }
     }

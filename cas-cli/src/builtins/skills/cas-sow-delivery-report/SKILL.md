@@ -99,8 +99,8 @@ explicit go. Client messages carry commitments the operator owns.
 6. **Capture headless with the project's QA login.** Run
    `npm exec --yes --package=playwright -- node <skills-dir>/cas-sow-delivery-report/scripts/capture.mjs --shots shots.json --base <env-url> --out <shots-dir> [--login ...]`.
    - `--login` reads the QA test account from the credentials file that
-     `DELIVERY.md` names and keeps the session in memory only. Anchor
-     `--success-url` to the signed-in path, as in `^https://[^/]+/admin/`,
+     `DELIVERY.md` names and keeps the session in memory only. `--success-url`
+     is required with `--login`. Anchor it to the signed-in path, as in `^https://[^/]+/admin/`,
      because an unanchored pattern also matches a sign-in URL that carries a
      `returnUrl`.
    - Never start interactive or third-party auth flows, such as OAuth consent,

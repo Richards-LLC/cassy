@@ -29,7 +29,7 @@
  *
  * A shot whose final path differs from the requested path fails as "redirected to …"
  * unless it sets allowRedirect: that is how an expired or failed login shows.
- * --success-url must match only the signed-in URL: anchor it (^https://[^/]+/admin/),
+ * --success-url is required with --login and must match only the signed-in URL: anchor it (^https://[^/]+/admin/),
  * because a sign-in URL often carries the target in a returnUrl parameter.
  *
  * Writes <out>/<id>.png (full resolution), <out>/<id>.jpg (quality 80,

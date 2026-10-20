@@ -394,6 +394,63 @@ fn parked_assignment_note(
     ))
 }
 
+/// `task start` can reset an idle worker's clean, ancestor factory branch to
+/// the declared target. Apply the same preconditions before waiving assignment
+/// staleness; start checks them again before it changes the branch.
+fn clean_idle_assignment_note(
+    task_store: &dyn cas_store::TaskStore,
+    worker: &cas_types::Agent,
+    target_branch: &str,
+) -> Option<String> {
+    if worker.role != cas_types::AgentRole::Worker
+        || !matches!(
+            worker.status,
+            cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+        )
+    {
+        return None;
+    }
+    let active = task_store
+        .ids_by_assignees_and_statuses(
+            &[&worker.name, &worker.id],
+            &[
+                TaskStatus::Open,
+                TaskStatus::InProgress,
+                TaskStatus::Blocked,
+            ],
+        )
+        .ok()?;
+    if !active.is_empty() {
+        return None;
+    }
+
+    let clone_path = worker.metadata.get("clone_path")?;
+    let path = std::path::Path::new(clone_path);
+    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
+    if crate::factory_isolation::branch_at(path).as_deref() != Some(branch.as_str()) {
+        return None;
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return None;
+    }
+    let git = crate::worktree::GitOperations::new(path.to_path_buf());
+    let tip = git.ref_sha("HEAD").ok()?;
+    let target = git.ref_sha(target_branch).ok()?;
+    if !git.is_ancestor(&tip, &target) {
+        return None;
+    }
+    Some(format!(
+        "ℹ️ Worker '{}' has no active task and its clean {} branch is behind {}. \
+         `task start` will reset that branch to the target before work begins.",
+        worker.name, branch, target_branch
+    ))
+}
+
 fn set_execution_state_patch_field(
     patch: &mut Option<serde_json::Value>,
     field: &str,
@@ -1428,33 +1485,39 @@ impl CasCore {
                                                 )
                                             {
                                                 if behind_count > 0 {
-                                                    let warning_msg = format!(
-                                                        "⚠️ Worker '{assignee}' is {behind_count} \
-                                                         commit(s) behind {branch}. Consider \
-                                                         syncing first."
-                                                    );
-                                                    if factory_config.block_stale_assignment
-                                                        && behind_count
-                                                            >= factory_config
-                                                                .stale_threshold_commits
-                                                    {
-                                                        return Err(McpError {
-                                                            code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(assignee_batch_abort(
-                                                                &requested_fields,
-                                                                format!(
-                                                                    "Cannot assign to worker '{}': {} commits behind {} (threshold: {}). Ask the worker to rebase: `git rebase {}`",
-                                                                    assignee,
-                                                                    behind_count,
-                                                                    branch,
-                                                                    factory_config.stale_threshold_commits,
-                                                                    branch
-                                                                ),
-                                                            )),
-                                                            data: None,
-                                                        });
+                                                    if let Some(note) = clean_idle_assignment_note(
+                                                        task_store.as_ref(), worker, &branch,
+                                                    ) {
+                                                        warnings.push(note);
+                                                    } else {
+                                                        let warning_msg = format!(
+                                                            "⚠️ Worker '{assignee}' is {behind_count} \
+                                                             commit(s) behind {branch}. Consider \
+                                                             syncing first."
+                                                        );
+                                                        if factory_config.block_stale_assignment
+                                                            && behind_count
+                                                                >= factory_config
+                                                                    .stale_threshold_commits
+                                                        {
+                                                            return Err(McpError {
+                                                                code: ErrorCode::INVALID_PARAMS,
+                                                                message: Cow::from(assignee_batch_abort(
+                                                                    &requested_fields,
+                                                                    format!(
+                                                                        "Cannot assign to worker '{}': {} commits behind {} (threshold: {}). Ask the worker to rebase: `git rebase {}`",
+                                                                        assignee,
+                                                                        behind_count,
+                                                                        branch,
+                                                                        factory_config.stale_threshold_commits,
+                                                                        branch
+                                                                    ),
+                                                                )),
+                                                                data: None,
+                                                            });
+                                                        }
+                                                        warnings.push(warning_msg);
                                                     }
-                                                    warnings.push(warning_msg);
                                                 }
                                             }
                                         }
@@ -1490,29 +1553,35 @@ impl CasCore {
                                                 )
                                             {
                                                 if behind_count > 0 {
-                                                    let staleness_msg = format!(
-                                                        "⚠️ Worker '{worker_name}' is \
-                                                         {behind_count} commit(s) behind \
-                                                         {branch}. Consider syncing first."
-                                                    );
-                                                    if factory_config.block_stale_assignment
-                                                        && behind_count
-                                                            >= factory_config
-                                                                .stale_threshold_commits
-                                                    {
-                                                        return Err(McpError {
-                                                            code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(assignee_batch_abort(
-                                                                &requested_fields,
-                                                                format!(
-                                                                    "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `git rebase {branch}`",
-                                                                    factory_config.stale_threshold_commits,
-                                                                ),
-                                                            )),
-                                                            data: None,
-                                                        });
+                                                    if let Some(note) = clean_idle_assignment_note(
+                                                        task_store.as_ref(), worker, &branch,
+                                                    ) {
+                                                        warnings.push(note);
+                                                    } else {
+                                                        let staleness_msg = format!(
+                                                            "⚠️ Worker '{worker_name}' is \
+                                                             {behind_count} commit(s) behind \
+                                                             {branch}. Consider syncing first."
+                                                        );
+                                                        if factory_config.block_stale_assignment
+                                                            && behind_count
+                                                                >= factory_config
+                                                                    .stale_threshold_commits
+                                                        {
+                                                            return Err(McpError {
+                                                                code: ErrorCode::INVALID_PARAMS,
+                                                                message: Cow::from(assignee_batch_abort(
+                                                                    &requested_fields,
+                                                                    format!(
+                                                                        "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `git rebase {branch}`",
+                                                                        factory_config.stale_threshold_commits,
+                                                                    ),
+                                                                )),
+                                                                data: None,
+                                                            });
+                                                        }
+                                                        warnings.push(staleness_msg);
                                                     }
-                                                    warnings.push(staleness_msg);
                                                 }
                                             }
                                         }

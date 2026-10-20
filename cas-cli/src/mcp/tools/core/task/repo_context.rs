@@ -105,7 +105,7 @@ fn canonical(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-fn git_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+pub(crate) fn git_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
     let checkout_root = PathBuf::from(git_output(path, &["rev-parse", "--show-toplevel"])?);
     let common_raw = PathBuf::from(git_output(path, &["rev-parse", "--git-common-dir"])?);
     let common_dir = canonical(if common_raw.is_absolute() {

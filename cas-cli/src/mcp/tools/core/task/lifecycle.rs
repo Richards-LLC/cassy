@@ -1904,10 +1904,31 @@ impl CasCore {
                 if let Some(context) = declared_repo_context.as_ref() {
                     let target_repo_root = &context.repo_root;
                     let target_branch = &context.target_branch;
+                    let worker_checkout = worker
+                        .metadata
+                        .get("clone_path")
+                        .map(std::path::Path::new)
+                        .unwrap_or(target_repo_root);
+                    let (worker_repo_root, _) = super::repo_context::git_layout(worker_checkout)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INVALID_PARAMS,
+                                format!("Cannot inspect worker checkout before task start: {error}"),
+                            )
+                        })?;
+                    if !super::repo_context::repo_answers_to(
+                        &worker_repo_root,
+                        &context.repo_selector,
+                    ) {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            "Cannot start task: worker checkout belongs to another repository",
+                        ));
+                    }
                     let worker_branch =
                         crate::factory_isolation::expected_worker_branch(&worker.name);
                     match reconcile_reused_factory_branch(
-                        target_repo_root,
+                        worker_checkout,
                         &worker_branch,
                         &target_branch,
                         |tip| {
@@ -1932,7 +1953,7 @@ impl CasCore {
                              {worker_branch} was reset to `{target_branch}` for this task. \
                              Don't force-push {worker_branch} while a PR is open on it.{}",
                             publish_parked_delivery_branch(
-                                target_repo_root,
+                                worker_checkout,
                                 &task_id,
                                 delivery_branch.as_deref(),
                             ),

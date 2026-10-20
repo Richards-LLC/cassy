@@ -2003,8 +2003,9 @@ impl CasService {
                             )
                             .ok()?
                             .into_iter()
-                            .filter_map(|id| store.get(&id).ok())
-                            .collect::<Vec<_>>();
+                            .map(|id| store.get(&id))
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .ok()?;
                         let active_task = tasks
                             .iter()
                             .find(|task| {
@@ -6352,7 +6353,6 @@ mod cas_89e1_post_merge_message_type_tests {
                 Some("cas-fba9")
             );
             assert_eq!(row.prompt.matches("<cas-assignment").count(), 1);
-
         }
         // A busy worker can receive its next assignment before the supervisor
         // updates that task's assignee. The started task is context, not binding.
@@ -6399,10 +6399,18 @@ mod cas_89e1_post_merge_message_type_tests {
                 "action": "message", "target": "eager-cobra-57",
                 "summary": "stale next assignment while busy",
                 "message": "You're assigned cas-fba9.",
-            })).unwrap();
-            let error = service.message_send(request).await.expect_err("named closed task must refuse");
-            assert!(error.message.contains("cas-fba9") && error.message.contains("closed")
-                && error.message.contains("pass task_id=<id>"), "{error:?}");
+            }))
+            .unwrap();
+            let error = service
+                .message_send(request)
+                .await
+                .expect_err("named closed task must refuse");
+            assert!(
+                error.message.contains("cas-fba9")
+                    && error.message.contains("closed")
+                    && error.message.contains("pass task_id=<id>"),
+                "{error:?}"
+            );
         }
         // The binding also keeps genuine staleness: once the NEW task closes,
         // every queued variant must be withdrawn for that task, not the old one.

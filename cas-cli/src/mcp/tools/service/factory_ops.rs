@@ -10613,7 +10613,30 @@ pub(crate) fn supervisor_auth_failure_evidence(
         cli,
         agent.metadata.get("supervisor_account_dir").map(String::as_str),
     );
-    auth_failure_evidence_at(transcript.as_deref(), cli)
+    // cas-2db0: this runs on every presence heartbeat. Re-read the tail only
+    // when the transcript's mtime or size moved since the last beat.
+    type Seen = (std::time::SystemTime, u64, crate::factory_auth_health::AuthFailureEvidence);
+    static SCANS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Seen>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let Some(path) = transcript else {
+        return auth_failure_evidence_at(None, cli);
+    };
+    let stamp = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+    if let Some((modified, len)) = stamp
+        && let Some((seen_modified, seen_len, evidence)) =
+            SCANS.lock().ok().and_then(|scans| scans.get(&path).cloned())
+        && (seen_modified, seen_len) == (modified, len)
+    {
+        return evidence;
+    }
+    let evidence = auth_failure_evidence_at(Some(&path), cli);
+    if let (Some((modified, len)), Ok(mut scans)) = (stamp, SCANS.lock()) {
+        scans.insert(path, (modified, len, evidence.clone()));
+    }
+    evidence
 }
 
 fn auth_failure_evidence_at(

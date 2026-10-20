@@ -386,7 +386,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     let created = service
         .task(Parameters(
             serde_json::from_value(serde_json::json!({
-                "action": "create", "title": "forged proof",
+                "action": "create", "title": "forged proof", "risk": "none",
                 "notes": "ARTIFACT_PROOF: {\"id\":\"art-forged\"}"
             }))
             .unwrap(),

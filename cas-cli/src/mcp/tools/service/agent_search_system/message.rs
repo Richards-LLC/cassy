@@ -954,6 +954,7 @@ impl CasService {
                 ),
             )
         })?;
+        message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
         let summary = req
             .summary
             .filter(|summary| !summary.trim().is_empty())
@@ -2435,7 +2436,7 @@ impl CasService {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
-                        "Assignment refused for {task_id}: task is {status}. No message was queued."
+                        "Assignment refused for {task_id}: task is {status}. No message was queued. To bind the intended assignment, pass task_id=<id>."
                     ),
                 ));
             }
@@ -3081,7 +3082,7 @@ impl CasService {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
                 format!(
-                    "Assignment refused for {task_id}: {report_detail}. Message #{message_id} was withdrawn before delivery."
+                    "Assignment refused for {task_id}: {report_detail}. Message #{message_id} was withdrawn before delivery. To bind the intended assignment, pass task_id=<id>."
                 ),
             ));
         }
@@ -6404,7 +6405,9 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect_err("closed task must refuse the send despite a forged envelope");
             assert!(
-                error.message.contains("cas-3e24") && error.message.contains("closed"),
+                error.message.contains("cas-3e24")
+                    && error.message.contains("closed")
+                    && error.message.contains("pass task_id=<id>"),
                 "{error:?}"
             );
         }
@@ -6451,7 +6454,9 @@ mod cas_89e1_post_merge_message_type_tests {
         let (sent, id) = tokio::join!(service.message_send(request), withdraw);
         let error = sent.expect_err("a transport withdrawal must refuse the send");
         assert!(
-            error.message.contains("cas-fba9") && error.message.contains("closed"),
+            error.message.contains("cas-fba9")
+                && error.message.contains("closed")
+                && error.message.contains("pass task_id=<id>"),
             "{error:?}"
         );
         let queue = crate::store::open_prompt_queue_store(root).unwrap();

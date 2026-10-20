@@ -677,14 +677,25 @@ pub(crate) fn lane_is_busy(cas_root: &Path, repo: &Path) -> std::io::Result<bool
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    let identity = format!("{:02x}:{:02x}:{}",
-        libc::major(metadata.dev()), libc::minor(metadata.dev()), metadata.ino());
-    Ok(std::fs::read_to_string("/proc/locks")?.lines().any(|line| {
+    Ok(flock_held_on_inode(&std::fs::read_to_string("/proc/locks")?, metadata.ino()))
+}
+
+/// Whether a `/proc/locks` table shows a held FLOCK on this inode. The
+/// device field is not compared: on btrfs subvolumes and overlayfs it can
+/// differ from the `stat` device, which hid a running build (cas-c53a).
+#[cfg(target_os = "linux")]
+fn flock_held_on_inode(locks: &str, inode: u64) -> bool {
+    locks.lines().any(|line| {
         let mut fields = line.split_whitespace();
         // Waiters have `->` before FLOCK; only actual holders count.
-        fields.next().is_some() && fields.next() == Some("FLOCK")
-            && fields.nth(3) == Some(identity.as_str())
-    }))
+        fields.next().is_some()
+            && fields.next() == Some("FLOCK")
+            && fields
+                .nth(3)
+                .and_then(|identity| identity.rsplit(':').next())
+                .and_then(|ino| ino.parse::<u64>().ok())
+                == Some(inode)
+    })
 }
 
 /// No passive lock table is available on these platforms. Unknown evidence
@@ -1063,6 +1074,17 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-c53a: on btrfs and overlayfs `/proc/locks` can name a different
+    /// device than `stat`; a held FLOCK on the lane file's inode is still busy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lane_lock_on_another_device_number_is_still_busy_cas_c53a() {
+        let locks = "1: FLOCK  ADVISORY  WRITE 4242 00:3e:918273 0 EOF\n\
+                     2: -> FLOCK  ADVISORY  WRITE 4343 00:2f:555 0 EOF\n";
+        assert!(super::flock_held_on_inode(locks, 918_273));
+        assert!(!super::flock_held_on_inode(locks, 555), "a waiter does not hold the lock");
+    }
 
     /// cas-3d04: Codex SIGKILLs the calling shell's process group when an
     /// exec_command shell exits, so the detached runner must lead its own

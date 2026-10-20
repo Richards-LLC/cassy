@@ -172,7 +172,12 @@ pub(super) fn worker_has_pending_reminder(
     let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
     let owns = |id: &str| id == agent.id || id == agent.name;
     data.reminders.iter().any(|reminder| {
-        let ttl_start = reminder.trigger_at.unwrap_or(reminder.created_at);
+        // cas-c53a: the store's TTL anchor, used by both checks below: a time
+        // reminder counts from its due time, an event reminder from creation.
+        let ttl_start = match reminder.trigger_type {
+            cas_store::ReminderTriggerType::Time => reminder.trigger_at.unwrap_or(reminder.created_at),
+            cas_store::ReminderTriggerType::Event => reminder.created_at,
+        };
         let horizon = UNBOUND_REMINDER_HORIZON.num_seconds();
         let bound_or_soon = match reminder.task_id.as_deref() {
             Some(id) => Some(id) == task,
@@ -182,7 +187,7 @@ pub(super) fn worker_has_pending_reminder(
                 }),
                 cas_store::ReminderTriggerType::Event => reminder.ttl_secs > 0 &&
                     (0..=horizon).contains(&reminder.ttl_secs.saturating_sub(
-                        now.signed_duration_since(reminder.created_at).num_seconds(),
+                        now.signed_duration_since(ttl_start).num_seconds(),
                     )),
             },
         };

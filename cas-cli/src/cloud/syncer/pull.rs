@@ -2313,6 +2313,9 @@ impl CloudSyncer {
                 }
             };
             let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -2352,6 +2355,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     if let Some(block) = trusted_provenance.as_deref() {
                         task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
@@ -3501,6 +3507,9 @@ impl CloudSyncer {
                 }
             };
             let trusted_provenance = take_rendered_provenance(&mut remote_task.notes);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -3531,6 +3540,9 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     if let Some(block) = trusted_provenance.as_deref() {
                         task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
                     }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {

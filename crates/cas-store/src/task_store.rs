@@ -572,7 +572,9 @@ impl SqliteTaskStore {
                 let Some((notes, updated_at)) = current else {
                     return Err(StoreError::TaskNotFound(task_id.to_string()));
                 };
-                if notes.contains(formatted_note) {
+                if notes.starts_with(formatted_note)
+                    || notes.contains(&format!("\n{formatted_note}"))
+                {
                     if !receipt_id.is_empty() {
                         Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
                     }

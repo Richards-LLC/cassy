@@ -54,8 +54,15 @@ regenerate_reference_history() {
   # A full run walks all history (~30s), so other builtin changes skip it.
   local -a inputs=(':(glob)cas-cli/src/builtins/**/skills/**'
     ':(glob)cas-cli/src/builtins/**/agents/task-verifier.*' scripts/gen-builtin-reference-history.sh)
-  if [ ! -x scripts/gen-builtin-reference-history.sh ] \
-    || git diff --quiet "$old" "$new" -- "${inputs[@]}"; then
+  if [ ! -x scripts/gen-builtin-reference-history.sh ]; then
+    return 0
+  fi
+  # Endpoint trees can match after an edit is reverted. The ledger still
+  # includes that revision. Walk every merged parent so TREESAME merge
+  # simplification cannot hide a side branch's intermediate builtin edits.
+  local changed
+  changed=$(git log --full-history -m -1 --format=%H "$old..$new" -- "${inputs[@]}")
+  if [ -z "$changed" ]; then
     return 0
   fi
   # The ledger hashes every committed version of each builtin file, so its own

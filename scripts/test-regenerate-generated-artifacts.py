@@ -107,6 +107,25 @@ class ReferenceHistoryMergeTests(unittest.TestCase):
         ledger = json.loads((self.repo / LEDGER).read_text())["files"]
         self.assertTrue({"skills/demo/references/first.md", "skills/demo/references/second.md"} <= set(ledger))
 
+    def test_merged_edit_then_revert_regenerates_once_and_ledger_equals_fresh_run(self):
+        before = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("checkout", "-q", "-b", "factory/reverted-builtin")
+        builtin = "cas-cli/src/builtins/skills/demo/SKILL.md"
+        original = (self.repo / builtin).read_text()
+        self.write(builtin, original + "An intermediate shipped revision.\n")
+        self.git("commit", "-q", "-am", "edit hashed builtin")
+        self.write(builtin, original)
+        self.git("commit", "-q", "-am", "revert hashed builtin")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "--no-ff", "-q", "factory/reverted-builtin", "-m", "merge edit and revert")
+        after = self.git("rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(self.git("diff", before, after, "--", builtin).stdout, "",
+                         "the endpoint trees conceal the intermediate revision")
+        self.generator_runs()
+        self.run_script("regenerate-generated-artifacts.sh", before, after)
+        self.assertEqual(self.generator_runs(), 1, "committed builtin history needs one regeneration")
+        self.assert_ledger_fresh()
+
     def test_a_failed_hub_web_build_still_regenerates_the_ledger_and_is_reported(self):
         self.write("hub-web/package.json", '{"scripts": {"build": "echo vite exploded >&2; exit 3"}}\n')
         (self.repo / "hub-web/node_modules").mkdir(parents=True)

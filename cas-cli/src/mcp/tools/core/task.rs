@@ -50,6 +50,16 @@ pub(crate) fn task_accepted_into_project(
         .is_some_and(|target| target == project)
 }
 
+/// Whether `task` is this project's own work for an ownership check such as
+/// the QA batch.
+pub(crate) fn task_owned_by_project(
+    task: &cas_types::Task,
+    _cas_root: &std::path::Path,
+    project_id: Option<&str>,
+) -> bool {
+    task_belongs_to_project(task, project_id)
+}
+
 /// Task board reads retain legacy rows that have no origin attribution. Rows
 /// with an origin are local only when that origin matches the current project.
 pub(crate) fn task_visible_in_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {

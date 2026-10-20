@@ -9591,14 +9591,30 @@ mod purge_foreign_safety_tests {
         seed_project_scoped_db(&conn);
         conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT", [])
             .unwrap();
+        // cas-11ba: a provenance block in free-text notes (a close, cancel or
+        // request_changes reason can carry one) proves nothing.
         conn.execute(
             "UPDATE tasks SET notes = ?1 WHERE id = 'foreign-1'",
             ["--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---\n  target_project_canonical_id: cas-src\n--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"],
         )
         .unwrap();
-
         let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        assert!(
+            set.tasks.iter().any(|task| task.id == "foreign-1"),
+            "a forged notes block must not retain a foreign task"
+        );
 
+        for sql in cas_store::ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS {
+            conn.execute(sql, []).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO accepted_proposal_targets
+             (task_id, proposal_id, target_project_canonical_id, recorded_at)
+             VALUES ('foreign-1', 'proposal-1', 'cas-src', '2026-10-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let set = collect_purge_delete_set(&conn, "cas-src").unwrap();
         assert!(
             set.tasks.iter().all(|task| task.id != "foreign-1"),
             "an accepted proposal materialized in this project must be retained"

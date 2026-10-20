@@ -115,7 +115,7 @@ pub(crate) fn validate_ledger(
         .get(&artifact.task_id)
         .map_err(|e| e.to_string())?;
     let project = crate::cloud::resolve_canonical_id(root);
-    if !crate::mcp::tools::core::task::task_belongs_to_project(&owner, project.as_deref()) {
+    if !crate::mcp::tools::core::task::task_owned_by_project(&owner, root, project.as_deref()) {
         return Err("ledger artifact owner belongs to another project".into());
     }
     let paths = crate::config::resolved_factory_artifact_paths(
@@ -168,7 +168,7 @@ pub(crate) fn prepare_receipt(
     let mut heads = BTreeMap::new();
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
-        if !crate::mcp::tools::core::task::task_belongs_to_project(&task, Some(&project)) {
+        if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
             return Err(format!(
                 "task {id} belongs to another project or has no project binding"
             ));
@@ -280,7 +280,7 @@ pub(crate) fn satisfying_receipt(
     head: &str,
 ) -> Result<Option<QaBatchReceipt>, String> {
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
-    if !crate::mcp::tools::core::task::task_belongs_to_project(task, Some(&project)) {
+    if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
         return Ok(None);
     }
     let Some(anchor) = task

@@ -8088,13 +8088,24 @@ impl CasCore {
                     // assignee the delivery branch is the recorded one. Without
                     // it the anchor from an earlier park stayed the head, and a
                     // waiver bound to the delivered tip never matched.
+                    // cas-4575: only a per-task branch holds nothing but this
+                    // task's commits. The later-task cut-off needs an assignee,
+                    // so a shared factory/<worker> branch keeps its anchor.
+                    let per_task_suffix = format!("-{}", task.id);
                     let live_tip = task
                         .assignee
                         .as_deref()
                         .map(|assignee| {
                             close_measured_factory_branch(&close_project_root, &task, assignee)
                         })
-                        .or_else(|| task_delivery_branch(&close_project_root, &task))
+                        .or_else(|| {
+                            task_delivery_branch(&close_project_root, &task).filter(|branch| {
+                                branch
+                                    .trim_start_matches("origin/")
+                                    .strip_prefix("factory/")
+                                    .is_some_and(|lane| lane.ends_with(&per_task_suffix))
+                            })
+                        })
                         .and_then(|branch| resolve_branch_sha(&close_project_root, &branch));
                     Some(
                         self.eligible_awaiting_merge_advance(

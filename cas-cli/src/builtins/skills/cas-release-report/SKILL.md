@@ -23,7 +23,10 @@ metadata:
    [references/exemplar.md](references/exemplar.md): page one leads with what
    shipped, one dot per CHANGELOG change grouped by product area, with plain
    titles. GitHub issues closed is a secondary figure counted by the generator;
-   do not hand-correct it. Every user and developer change stays Was → Now; keep
+   do not hand-correct it. Every user and developer change stays Was → Now. Where
+   the delivering task's artifacts hold a real before and after capture of the
+   same surface, add its `Before:`/`After:` pair (exemplar.md); never a lone
+   after shot or a general QA render. Keep
    the exact source URLs, retrieval times and full asset digests. Rerun step 2 to
    re-render; an existing Markdown source is kept unless you pass
    `--refresh-sources`.

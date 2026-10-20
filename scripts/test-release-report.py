@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Behavioral checks for the portable release renderer: python3 scripts/test-release-report.py."""
+import contextlib
 import importlib.util
+import io
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -91,6 +94,9 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertEqual(output.count('url("data:font/woff2;base64,'), 2)
         self.assertIn('<img class="mark" src="data:image/svg+xml;base64,', output)
         self.assertNotIn('--ink:var(--ink)', output)
+        # Print is the light set without the beforeprint hook: dark blocks are screen-only.
+        self.assertIn('@media screen and (prefers-color-scheme: dark)', output)
+        self.assertNotRegex(output, r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark')
 
     def test_publication_over_budget_row_survives_html_rendering(self):
         source = EXEMPLAR.replace("| Green to published |",
@@ -116,11 +122,16 @@ class ReleaseRendererTests(unittest.TestCase):
             self.assertNotIn('Cassy', output)
             self.assertIn('--verdict:#123456', output)
             self.assertIn('--bg:#F7F4EE', output)
-            # A DESIGN.md token source may not reach the network.
-            (root / 'tokens.css').write_text(':root{--paper:#fff;--art:url(https://example.org/a.png)}')
+            # A DESIGN.md source that would reach the network falls back, with a warning.
             (root / 'DESIGN.md').write_text('---\nsource: [tokens.css]\nmaps:\n  bg: "--paper"\n---\n')
-            with self.assertRaisesRegex(ValueError, 'only tokens and local font faces'):
-                renderer.render(EXEMPLAR, project_root=root)
+            for remote in ('--art:url(https://example.org/a.png)', '}@import "https://example.org/t.css";:root{'):
+                (root / 'tokens.css').write_text(':root{--paper:#fff;' + remote + '}')
+                warning = io.StringIO()
+                with self.subTest(remote=remote), contextlib.redirect_stderr(warning):
+                    output = renderer.render(EXEMPLAR, project_root=root)
+                    self.assertIn('--verdict:#123456', output)
+                    self.assertNotIn('example.org/a.png', output)
+                    self.assertIn('warning: DESIGN.md CSS sources may hold only tokens', warning.getvalue())
 
     def test_bad_totals_and_duplicate_issues_fail(self):
         for source in (EXEMPLAR.replace('| Total | 21 |', '| Total | 22 |'),
@@ -235,6 +246,35 @@ Source: release assets.
         self.assertNotIn('No GitHub issues were closed with this release.', output)
         self.assertIn('GitHub issues closed with this release · 0', output)
         self.assertIn('closed after the counting window.', output)
+
+    def test_eight_changes_draw_on_one_row(self):
+        titles = '; '.join(f'Change {n}' for n in range(1, 9))
+        source = BY_AREA.replace('| Sessions | 2 | Typing during cleanup; Peer ownership board |',
+                                 f'| Sessions | 8 | {titles} |').replace('| Total | 3 |', '| Total | 9 |')
+        output = renderer.render(source)
+        group = output[output.index('data-area="Sessions"'):output.index('data-area="Tasks and merges"')]
+        self.assertEqual(len(set(re.findall(r'<circle cx="\d+" cy="(\d+)"', group))), 1)
+
+    def test_change_with_before_and_after_captures_shows_the_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for side in ('before', 'after'):
+                (Path(tmp) / f'{side}.png').write_bytes(b'\x89PNG\r\n\x1a\n' + side.encode())
+            source = BY_AREA.replace('Now: it does not.\n', 'Now: it does not.\n\nBefore: before.png\n\nAfter: after.png\n')
+            output = renderer.render(source, project_root=Path(tmp))
+        card = output[output.index('<article class="change"><h4>Typing during cleanup'):]
+        card = card[:card.index('</article>')]
+        self.assertEqual(re.findall(r'<img src="data:image/png;base64,[^"]+" alt="(\w+): Typing during cleanup"', card), ['Before', 'After'])
+
+    def test_change_without_a_real_pair_shows_no_captures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'after.png').write_bytes(b'\x89PNG\r\n\x1a\nafter')
+            for lone in ('Now: it does not.\n', 'Now: it does not.\n\nAfter: after.png\n'):
+                warning = io.StringIO()
+                with self.subTest(lone=lone), contextlib.redirect_stderr(warning):
+                    output = renderer.render(BY_AREA.replace('Now: it does not.\n', lone), project_root=Path(tmp))
+                    self.assertNotIn('class="captures"', output)
+                    self.assertNotIn('<img src="data:image/png', output)
+                    self.assertEqual('After:' in lone, 'needs both Before: and After:' in warning.getvalue())
 
     def test_changes_by_area_rejects_zero_rows_miscounts_and_repeated_issues(self):
         row = '| Sessions | 2 | Typing during cleanup; Peer ownership board |'

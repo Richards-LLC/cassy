@@ -500,7 +500,8 @@ fn validate_create_response(
         return Err(TaskProposalError::Contract(format!(
             "Refusing untrusted cloud proposal response: proposal response project identity did not match the request. \
              Cloud persisted proposal {} (target task {}) for proposal_attempt_id {}, attesting origin {} and target {}; \
-             the request named origin {} and target {}. It is not confirmed here and no local blocker was recorded. \
+             the request named origin {} and target {}; expected target for identity comparison: {}. \
+             It is not confirmed here and no local blocker was recorded. \
              Do not create it again under a new attempt id: a retry with the same proposal_attempt_id returns this \
              receipt, and the target project's proposal_inbox lists the proposal.",
             response.proposal_id,
@@ -510,6 +511,7 @@ fn validate_create_response(
             server.target_project_canonical_id,
             request.origin_project_canonical_id,
             request.target_project_canonical_id,
+            expected_target,
         )));
     }
     Ok(())
@@ -930,7 +932,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "projects": [{ "canonical_id": "target-project", "aliases": ["target-alias"] }]
             })))
-            .expect(2)
             .mount(&server)
             .await;
 
@@ -940,9 +941,25 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(refusals[0], refusals[1], "the retry dedupes to the same receipt");
-        for receipt in ["did not match the request", "proposal-1", "cas-0123456789abcdef", "request-1", "target-alias", "target-project", "unexpected-origin", "expected target for identity comparison: target-project"] {
-            assert!(refusals[0].contains(receipt), "{receipt} missing: {}", refusals[0]);
+        assert_eq!(
+            refusals[0], refusals[1],
+            "the retry dedupes to the same receipt"
+        );
+        for receipt in [
+            "did not match the request",
+            "proposal-1",
+            "cas-0123456789abcdef",
+            "request-1",
+            "target-alias",
+            "target-project",
+            "unexpected-origin",
+            "expected target for identity comparison: target-project",
+        ] {
+            assert!(
+                refusals[0].contains(receipt),
+                "{receipt} missing: {}",
+                refusals[0]
+            );
         }
     }
 
@@ -977,6 +994,12 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(matches!(error, TaskProposalError::Contract(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("expected target for identity comparison: github.com/acme/unrelated"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

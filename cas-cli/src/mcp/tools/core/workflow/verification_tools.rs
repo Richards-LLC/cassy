@@ -1259,7 +1259,14 @@ mod lifecycle_friction_tests {
     use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, Task, TaskStatus, VerificationProofBoundary};
 
-    fn fixture(env: &mut TestEnvGuard) -> (tempfile::TempDir, CasCore, Task, cas_types::VerificationDispatch) {
+    fn fixture(
+        env: &mut TestEnvGuard,
+    ) -> (
+        tempfile::TempDir,
+        CasCore,
+        Task,
+        cas_types::VerificationDispatch,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         env.set("CAS_ROOT", &root);
@@ -1267,7 +1274,13 @@ mod lifecycle_friction_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         let core = CasCore::with_daemon(root.clone(), None, None);
         let agents = core.open_agent_store().unwrap();
-        agents.register(&Agent::new_with_role("review-supervisor".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "review-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
         core.set_agent_id_for_testing("review-supervisor".into());
         let mut task = Task::new("cas-5dc0-fixture".into(), "Review lifecycle fixture".into());
         task.status = TaskStatus::AwaitingMerge;
@@ -1275,7 +1288,16 @@ mod lifecycle_friction_tests {
         task.deliverables.factory_branch_anchor = Some("a".repeat(40));
         task.deliverables.parked_branch = Some("factory/implementer".into());
         core.open_task_store().unwrap().add(&task).unwrap();
-        let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "implementer", "review-supervisor", &VerificationProofBoundary::task(), chrono::Utc::now()+chrono::Duration::minutes(10), false).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root,
+            &task.id,
+            "implementer",
+            "review-supervisor",
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
         (dir, core, task, dispatch)
     }
 
@@ -1283,16 +1305,31 @@ mod lifecycle_friction_tests {
     async fn cas_5dc0_first_add_binds_the_unique_active_dispatch_without_retry() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);
-        let result = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-            "task_id":task.id,"status":"approved","summary":"Independent review completed"
-        })).unwrap())).await.expect("first add must bind the one active dispatch");
+        let result = core
+            .cas_verification_add(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id":task.id,"status":"approved","summary":"Independent review completed"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .expect("first add must bind the one active dispatch");
         assert_ne!(result.is_error, Some(true), "{result:?}");
-        let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).unwrap().unwrap();
-        assert_eq!(recorded.dispatch_id.as_deref(),Some(dispatch.id.as_str()));
+        let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
         // A terminal or missing dispatch is never silently inferred as new authority.
-        assert!(core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
-            "task_id":task.id,"status":"approved","summary":"Unbound duplicate"
-        })).unwrap())).await.is_err());
+        assert!(
+            core.cas_verification_add(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id":task.id,"status":"approved","summary":"Unbound duplicate"
+                }))
+                .unwrap()
+            ))
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1306,16 +1343,30 @@ mod lifecycle_friction_tests {
         let mut blocked = tasks.get(&task.id).unwrap();
         blocked.status = TaskStatus::Blocked;
         tasks.update(&blocked).unwrap();
-        let result = core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
-            id:task.id.clone(), reason:"Fix the rejected delivery while keeping its ownership".into()
-        })).await.expect("blocked parked deliveries need the same audited correction exit");
+        let result = core
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+                id: task.id.clone(),
+                reason: "Fix the rejected delivery while keeping its ownership".into(),
+            }))
+            .await
+            .expect("blocked parked deliveries need the same audited correction exit");
         assert_ne!(result.is_error, Some(true), "{result:?}");
         let reopened = tasks.get(&task.id).unwrap();
-        assert_eq!(reopened.status,TaskStatus::Open);
-        assert_eq!(reopened.assignee,task.assignee);
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee, task.assignee);
         assert!(reopened.deliverables.factory_branch_anchor.is_none());
-        assert!(reopened.deliverables.historical_factory_branch_anchors.contains(&"a".repeat(40)));
+        assert!(
+            reopened
+                .deliverables
+                .historical_factory_branch_anchors
+                .contains(&"a".repeat(40))
+        );
         assert!(!reopened.pending_verification);
-        assert_eq!(cas_store::get_verification_dispatch(&core.cas_root,&dispatch.id).unwrap().state,cas_types::VerificationDispatchState::Invalidated);
+        assert_eq!(
+            cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+                .unwrap()
+                .state,
+            cas_types::VerificationDispatchState::Invalidated
+        );
     }
 }

@@ -3554,6 +3554,24 @@ impl CasCore {
             });
         }
 
+        // A contained source is a no-op, not a new green merge that may
+        // close the task or dispatch verification. Validate the parked source
+        // above first so an old worker ref cannot hide a newer delivery.
+        // Transactional retries still reconcile their durable delivery state.
+        if transactional_delivery.is_none()
+            && let (Some(source_tip), Some(target_tip)) = (
+                manager.git().resolve_commit(&worktree.branch),
+                manager.git().resolve_commit(&worktree.parent_branch),
+            )
+            && manager.git().is_ancestor(&source_tip, &target_tip)
+        {
+            return Ok(Self::success(format!(
+                "Already contained: nothing new to merge; the parked tip is already in {}.\n\n\
+                 Source: {} @ {source_tip}\nTarget: {} @ {target_tip}",
+                worktree.parent_branch, worktree.branch, worktree.parent_branch,
+            )));
+        }
+
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
         // cas-0a21: held from before the target tip is first read until after

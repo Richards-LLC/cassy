@@ -13225,7 +13225,7 @@ mod tests {
             task_title: "red run".to_string(),
             worker: "kind-hound".to_string(),
         }]);
-        assert!(prompts.peek_all(10).unwrap().is_empty(), "a held worker is not woken");
+        assert_eq!(prompts.peek_all(10).unwrap().len(), 0);
 
         assert_eq!(reminders.resume_suspended_for_target("worker-id").unwrap(), 1);
         scan(Vec::new());
@@ -13233,7 +13233,8 @@ mod tests {
         assert_eq!(woken.len(), 1);
         assert_eq!(woken[0].target, "kind-hound");
         assert_eq!(cas_store::parse_reminder_delivery_id(&woken[0].prompt), Some(id));
-        assert!(woken[0].prompt.contains("(while you were held)"), "{}", woken[0].prompt);
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-927a");
     }
 
     /// GH #1015: a foreign factory must not consume a time reminder while

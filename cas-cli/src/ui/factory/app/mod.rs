@@ -2281,6 +2281,7 @@ impl FactoryApp {
         };
         let path = metadata_path(&session_name);
         let worker = worker_name.to_string();
+        let cas_dir = self.cas_dir().to_path_buf();
         let clear_hold = move || {
             if let Err(error) = persist_session_metadata_worker_hold_at(&path, &worker, false) {
                 tracing::warn!(
@@ -2290,6 +2291,7 @@ impl FactoryApp {
                     "failed to clear removed worker from durable hold set"
                 );
             }
+            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker));
         };
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
@@ -3449,6 +3451,36 @@ pub(crate) fn persist_session_metadata_delivery_mode_at(
     update_session_metadata_at(path, |metadata| {
         metadata.delivery_mode = delivery_mode;
     })
+}
+
+/// cas-c5ab: re-arm the suspended reminders of workers leaving a factory
+/// session (removed, or the session shutting down). Their hold ends with
+/// them, so nothing else would ever resume or cancel those reminders.
+pub(crate) fn resume_held_reminders(cas_dir: &std::path::Path, session_name: &str, workers: &[String]) {
+    let agents = crate::store::open_agent_store(cas_dir)
+        .map_err(|error| error.to_string())
+        .and_then(|store| store.list(None).map_err(|error| error.to_string()));
+    let agents = match agents {
+        Ok(agents) => agents,
+        Err(error) => {
+            tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders");
+            return;
+        }
+    };
+    let reminders = match crate::store::open_reminder_store(cas_dir) {
+        Ok(reminders) => reminders,
+        Err(error) => {
+            tracing::warn!(factory_session = %session_name, %error, "failed to open reminders to re-arm held reminders");
+            return;
+        }
+    };
+    for agent in agents.iter().filter(|agent| {
+        workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
+    }) {
+        if let Err(error) = reminders.resume_suspended_for_target(&agent.id) {
+            tracing::warn!(worker = %agent.name, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
+        }
+    }
 }
 
 /// Read the worker hold set for one factory session.
@@ -4876,8 +4908,19 @@ mod tests {
         );
         std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
         super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+        // cas-c5ab: the held worker's reminder is suspended; removal re-arms it.
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let mut agent = cas_types::Agent::new("worker-id".into(), worker.into());
+        agent.factory_session = Some(session.into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&agent).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        let time = cas_store::ReminderTriggerType::Time;
+        reminders.create("worker-id", None, "red run done", time, Some(after), None, None, 3600, Some(session)).unwrap();
+        assert_eq!(reminders.suspend_pending_for_target("worker-id").unwrap(), 1);
 
-        let mut app = super::FactoryApp::for_test();
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
         app.worker_names = vec![worker.to_string()];
         app.event_detector.add_worker(worker.to_string());
         app.set_factory_session(session.to_string());
@@ -4903,6 +4946,8 @@ mod tests {
             metadata.held_workers.is_empty(),
             "worker removal must clear durable state so a reused name cannot inherit it"
         );
+        assert_eq!(reminders.list_pending_for_target("worker-id").unwrap().len(), 1);
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
     }
 
     /// A hold update touches session metadata, not cas.db. The ordinary

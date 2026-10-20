@@ -356,6 +356,10 @@ pub trait ReminderStore: Send + Sync {
     /// [`Self::resume_suspended_for_target`].
     fn suspend_pending_for_target(&self, target_id: &str) -> Result<usize>;
 
+    /// Suspended reminders the agent owns or receives, or every suspended
+    /// reminder for `None`, so lists show a held worker's waits (cas-c5ab).
+    fn list_suspended(&self, agent_id: Option<&str>) -> Result<Vec<Reminder>>;
+
     /// Suspended event reminders for this event type, so a matching event
     /// during the hold can be recorded with [`Self::catch_suspended_event`].
     fn get_suspended_event_reminders(&self, event_type: &str) -> Result<Vec<Reminder>>;
@@ -873,6 +877,20 @@ impl ReminderStore for SqliteReminderStore {
             params![now, target_id],
         )?;
         Ok(rows)
+    }
+
+    fn list_suspended(&self, agent_id: Option<&str>) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!(
+            "SELECT {} FROM reminders WHERE status = 'suspended' \
+             AND (?1 IS NULL OR supervisor_id = ?1 OR target_id = ?1) ORDER BY created_at ASC",
+            Self::SELECT_COLUMNS
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let reminders = stmt
+            .query_map(params![agent_id], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(reminders)
     }
 
     fn get_suspended_event_reminders(&self, event_type: &str) -> Result<Vec<Reminder>> {

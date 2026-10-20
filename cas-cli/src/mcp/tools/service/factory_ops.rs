@@ -3810,24 +3810,15 @@ impl CasService {
         // cas-73b89: a hold suspends the worker's reminders and release
         // re-arms them. Cancelling them left a released worker with no wake:
         // kind-hound-79 sat idle for about an hour after a one-minute hold.
+        // cas-c5ab: the hold state is persisted first, so a failed write
+        // leaves the reminders untouched; a failed reminder update rolls the
+        // hold state back.
         let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to open reminder store: {error}"),
             )
         })?;
-        let reminder_count = if held {
-            reminders.suspend_pending_for_target(&worker.id)
-        } else {
-            reminders.resume_suspended_for_target(&worker.id)
-        }
-        .map_err(|error| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to update the worker's reminders: {error}"),
-            )
-        })?;
-
         let path = metadata_path(&factory_session);
         persist_session_metadata_worker_hold_at(&path, worker_name, held).map_err(|error| {
             Self::error(
@@ -3835,6 +3826,24 @@ impl CasService {
                 format!("Failed to update worker hold state: {error}"),
             )
         })?;
+        let updated = if held {
+            reminders.suspend_pending_for_target(&worker.id)
+        } else {
+            reminders.resume_suspended_for_target(&worker.id)
+        };
+        let reminder_count = match updated {
+            Ok(count) => count,
+            Err(error) => {
+                let rollback = persist_session_metadata_worker_hold_at(&path, worker_name, !held)
+                    .err()
+                    .map(|rollback| format!("; restoring the hold state also failed: {rollback}"))
+                    .unwrap_or_default();
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to update the worker's reminders: {error}{rollback}"),
+                ));
+            }
+        };
 
         let event_type = if held {
             "worker_hold_armed"

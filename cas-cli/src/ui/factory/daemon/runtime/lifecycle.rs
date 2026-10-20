@@ -4248,6 +4248,14 @@ impl FactoryDaemon {
             self.app.untrack_worker_process_group_if_gone(pgid).await;
         }
 
+        // cas-c5ab: a shutdown ends every hold, so re-arm held workers'
+        // reminders before their agents are unregistered.
+        crate::ui::factory::resume_held_reminders(
+            self.app.cas_dir(),
+            &self.session_name,
+            self.app.worker_names(),
+        );
+
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
             // Collect all agent names to unregister

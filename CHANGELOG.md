@@ -7,6 +7,82 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.66.0] - 2026-10-20
+
+### Added — safer setup and cleanup
+
+- **Neon workspace setup** — Was: initialization checked only root-level
+  packages and needed an interactive choice. → Now: it finds supported nested
+  workspace packages and accepts explicit organization and project IDs.
+- **Alternate Codex accounts** — Was: a home-relative account location could
+  reach setup literally and fail with an empty parse error. → Now: the home
+  shortcut expands before trust preparation, and missing hook setup is named.
+- **Codex model checks** — Was: a fresh list from an older Codex app could hide
+  models the current client supports. → Now: older or unversioned lists are
+  treated as unverified, so they cannot falsely mark a model unsupported.
+- **Safe retention preview** — Was: closed-task evidence and task-created iOS
+  simulators could accumulate indefinitely. → Now: pruning previews age, size,
+  keep reasons and owned simulators; applying requires confirmation and checks
+  project ownership.
+- **Team queue recovery** — Was: a team-linked project could hold a personal
+  backlog without exposing a safe recovery path. → Now: status and preflight
+  name the scope mismatch, and an explicit plan-first migration uses itemized
+  receipts before retiring personal copies.
+
+### Fixed — reliable recovery and idle signals
+
+- **Violet reconnects** — Was: a brief proxy reconnect could fail a claim while
+  repeated reads restarted the Cloud budget. → Now: the read retries through a
+  bounded reconnect window with one shared request budget and a covering lease.
+- **Rebased deliveries** — Was: an unchanged delivery rebased onto a new base
+  could leave its parked anchor stale. → Now: the anchor advances only after
+  proving the patch set is identical and the task still owns the continuation.
+- **Stalled project checks** — Was: one unavailable repository config could
+  hold up task close or merge while lifecycle code inspected unrelated roots.
+  → Now: probes are bounded, a stalled root shares one in-flight lookup, and
+  healthy project identities stay fresh.
+- **Project refreshes** — Was: one stalled known-root config could delay
+  refresh for every project. → Now: each observation is bounded independently
+  so healthy roots can still refresh.
+- **Idle-session wakeups** — Was: replayed Claude tool events could look like
+  unfinished work and suppress a completion or recovery wake. → Now: only
+  actual turn records hold the wake gate open.
+- **Repeated idle alerts** — Was: an alert could be marked before delivery,
+  and older expired-review relays could starve newer ones. → Now: an unanswered
+  idle page repeats until delivered, and the sweep skips relays already sent.
+- **Actionable next steps** — Was: blocked work could hide available work, and
+  a missing focus could hide ready work, while stale reminders could mask the
+  lack of a wake source. → Now: suggestions include eligible work even with no
+  focus and respect current peer ownership, while end-of-turn warnings identify
+  missing wake sources.
+- **Clearer provisioning errors** — Was: a failed worker launch could omit its
+  project and spawn context. → Now: failures identify the worker, project and
+  launch step.
+
+### Changed — reports, boundaries and checks
+
+- **Credential boundaries** — Was: the default policy omitted Neon tools, and
+  delegated commands could reach saved Neon or Vercel credentials. → Now:
+  Neon CLI and MCP access is denied by default, `NEON_API_KEY` stays out of
+  delegated environments, and credential-store reads are blocked across
+  command and script inputs.
+- **Bounded cleanup reports** — Was: a cleanup report could return hundreds
+  of thousands of characters. → Now: the default summarizes counts, sizes and
+  samples while preserving machine-readable status; bounded pages retain the
+  complete detail.
+- **Assembly proof selection** — Was: an unsupported row name could be ignored
+  while the command reported success. → Now: invalid names fail before proof
+  work begins and list the supported rows.
+- **Fixture isolation** — Was: a Codex trust test could dirty its checkout and
+  a provisioner dispatch test lacked its CLI companion. → Now: launch evidence
+  is isolated and dispatch is exercised through the real CLI fixture; strict
+  reminder assertions also hold under CPU load.
+- **Readable Violet posts** — Was: dense posts could cite unavailable items or
+  use unsupported time zones, and the CLI hid formatting violations. → Now:
+  shared rules require attached-only references and CT times; the hub
+  refuses unreadable posts with actionable violations, and `cas violet post`
+  surfaces the fixes.
+
 ## [3.65.0] - 2026-10-19
 
 ### Fixed — managed Slack replies

@@ -777,16 +777,52 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     clear_session_files(cas_root);
     let _ = std::fs::remove_file(cas_root.join(".verifier_unjail_marker"));
 
-    // Return codemap reminder as context if present, otherwise empty.
+    // Return reminders as context if present, otherwise empty.
     // Stop hooks don't support hookSpecificOutput.additionalContext in Claude
     // Code's schema — route via systemMessage instead.
-    if let Some(reminder) = codemap_reminder {
-        Ok(HookOutput::with_system_context(format!(
-            "<system-reminder>{reminder}</system-reminder>"
-        )))
-    } else {
+    let notices = [codemap_reminder, supervisor_turn_ends_without_wake_source(cas_root, input)]
+        .into_iter()
+        .flatten()
+        .map(|notice| format!("<system-reminder>{notice}</system-reminder>"))
+        .collect::<Vec<_>>();
+    if notices.is_empty() {
         Ok(HookOutput::empty())
+    } else {
+        Ok(HookOutput::with_system_context(notices.join("\n")))
     }
+}
+
+/// cas-7456 (GH #1302 F): a factory supervisor that ends its turn with no
+/// pending reminder has no wake source of its own; overnight that left two
+/// supervisors idle for 11–12 h. Warn (never block: a supervisor with nothing
+/// open may legitimately stop) so it sets one before going quiet.
+fn supervisor_turn_ends_without_wake_source(cas_root: &Path, input: &HookInput) -> Option<String> {
+    let is_supervisor = std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor");
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
+    if !is_supervisor || session.is_empty() {
+        return None;
+    }
+    let reminders = crate::store::open_reminder_store(cas_root).ok()?;
+    let id = current_agent_id(input);
+    let name = std::env::var("CAS_AGENT_NAME").unwrap_or_default();
+    // cas-b080: only this factory session's reminders can wake this turn's
+    // supervisor. A stale reminder left by an earlier session hid the warning.
+    let this_session = |pending: Vec<cas_store::Reminder>| {
+        pending
+            .iter()
+            .any(|reminder| reminder.session_id.as_deref() == Some(session.as_str()))
+    };
+    let has_wake_source = [id.as_str(), name.as_str()]
+        .into_iter()
+        .filter(|key| !key.is_empty())
+        .any(|key| {
+            reminders.list_pending(key).is_ok_and(this_session)
+                || reminders.list_pending_for_target(key).is_ok_and(this_session)
+        });
+    (!has_wake_source).then(|| {
+        "No wake source: this supervisor turn ended with no pending reminder, so only a relay Cassy delivers can start your next turn. If work is open (idle workers, parked deliveries, a running CI or merge queue), set one now with coordination action=remind (an event such as ci_completed or task_completed, or a time watchdog with cross_session=true)."
+            .to_string()
+    })
 }
 
 #[cfg(test)]

@@ -182,7 +182,12 @@ terminal result/notification, regardless of retries.
 
 A request has one total remote-wait budget of eight seconds, with each HTTP call
 bounded by the remaining budget (at most five seconds). This bounds waiting, not
-the lifetime of a server effect. Reconciliation runs in bounded background jobs
+the lifetime of a server effect. One exception is bounded and read-only: when a
+claim's Violet permalink read meets a dropped upstream that the proxy is
+reconnecting, the read is retried for at most fifteen seconds, and a read that
+then succeeds gives the Cloud calls a fresh eight-second budget. A claim
+therefore waits at most eight seconds normally and at most twenty-three seconds
+across a reconnect; a reconciliation lease covers that worst case. Reconciliation runs in bounded background jobs
 with persisted retry state, bounded batches and concurrency; it is not a poll
 loop inside a turn. Hooks and the factory control loop only enqueue local work
 and consume snapshots/results. No synchronous Cloud discovery at SessionStart,

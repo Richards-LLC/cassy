@@ -253,6 +253,35 @@ The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
 
+For a team-linked project with legacy personal transport, `cas cloud sync
+--json` reports `push.held_personal_pending`, `push.held_personal_failed`,
+`push.held_personal_rejected` and the team backlog in one final JSON document.
+Doctor and factory preflight explain that team-linked sync drains the team
+queue only. Retained conflict snapshots are history, not delivery failures.
+
+After the operator declares the project team-only, recover eligible legacy
+transport explicitly:
+
+```sh
+cas config set cloud.team_only true
+cas --json cloud queue migrate-to-team
+# Review every row and its decision before applying.
+cas --json cloud queue migrate-to-team --apply
+cas cloud sync
+```
+
+`migrate-to-team` defaults to a read-only preview, makes no HTTP calls and
+prints every queue identifier and decision. Apply requires `team_only=true`.
+It copies owned, project-scoped, shared upsert snapshots into the active team
+queue without replacing existing team intents. Deletes, private/global rows,
+foreign or unknown origins, foreign project routes and unsupported types stay
+untouched. Dependencies require both locally owned, shared endpoints and a
+current local edge. Canonical local routes are supported; receipts bind the personal route.
+Snapshot JSON is preserved so the existing exact itemized
+ACK can retire the personal copy after delivery; enqueue alone retires nothing.
+Missing/changed provenance or sharing policy fails closed. Reopen long-running
+writers after changing team_only so their cached policy uses the new setting.
+
 Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
 scope policy. A `team_owned_project` rejection establishes project policy, not
 remote entity presence or payload equivalence. Keep legacy or mixed rejection
@@ -655,16 +684,26 @@ Both lists default to empty and appear in `cas config list`. Server names are
 exact.
 
 Operator-authenticated CLIs and connector tools are refused to workers at the
-pre-tool hook (GH #1219). `factory.worker_denied_clis` (default `vercel`) names
+pre-tool hook (GH #1219). `factory.worker_denied_clis` (defaults `vercel`, `neonctl`) names
 executables a worker's shell may not run, matched on basename through wrappers
 (`env`, `sudo`, `timeout`, `sh -c`, `eval`, `npx`, `pnpm dlx`, paths).
-`factory.worker_denied_mcp_tools` (default `*vercel*`) holds case-insensitive
+`factory.worker_denied_mcp_tools` (defaults `*vercel*`, `*neon*`) holds case-insensitive
 tool-name patterns, also applied to each `server.tool` an `mcp_execute`
 dispatches. The refusal sends the worker to the supervisor with
 `blocker=true`; supervisors are unaffected. Both keys are operator-only, and
 an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
+
+The existing protected-operator-token policy removes inherited `NEON_API_KEY`
+and `VERCEL_TOKEN` from workers by default, even though `supervisor_only_env`
+is empty. Explicit project credential grants can authorize these names;
+`supervisor_only_env` still wins over grants. Changing a CLI/tool denial list
+does not grant a credential. Workers retain their own `.env.cas-db` and its
+`DATABASE_URL`; the supervisor provisions that disposable task branch with
+`factory action=db_branch_create`. Supervisors retain Neon CLI/MCP access and
+their credentials. An explicit CLI/tool list replaces its stock defaults,
+including an empty list to disable that check.
 
 Configured workers get a private, materialized MCP configuration under
 `<cas_root>/worker-mcp/<name>.json`. Tracked and existing worktree `.mcp.json`

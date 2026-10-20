@@ -256,6 +256,9 @@ fn preflight_codex_model_support(
 ) -> Result<(), String> {
     use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
     let mut seen = std::collections::BTreeSet::new();
+    // cas-49d3: the codex that will run the worker, probed once and only when
+    // a Codex spec names a model; the catalogue is judged against it.
+    let mut installed_codex: Option<Option<String>> = None;
     for spec in specs {
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
@@ -275,8 +278,9 @@ fn preflight_codex_model_support(
         let Some(home) = codex_home_path(account_dir.as_deref()) else {
             continue;
         };
+        let installed = installed_codex.get_or_insert_with(installed_codex_version).as_deref();
         if let CodexModelSupport::Unsupported { catalog, listed } =
-            codex_account_model_support(&home, model, now)
+            codex_account_model_support(&home, model, now, installed)
         {
             let account = account_dir
                 .as_deref()
@@ -292,6 +296,20 @@ fn preflight_codex_model_support(
         }
     }
     Ok(())
+}
+
+/// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
+/// bounded so a hung binary cannot stall a spawn; `None` when it cannot be read.
+fn installed_codex_version() -> Option<String> {
+    let budget = std::time::Duration::from_secs(3);
+    let output = crate::bounded_process::run_command(
+        std::process::Command::new("codex").arg("--version"),
+        crate::bounded_process::Deadline::after(budget),
+        budget,
+    )
+    .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !text.is_empty()).then_some(text)
 }
 
 /// The `CODEX_HOME` a Codex worker runs against: its account directory with
@@ -6441,6 +6459,13 @@ impl CasService {
         use cas_types::WorktreeStatus;
         use std::path::Path;
 
+        if req.limit == Some(0) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "gc_report limit must be positive",
+            ));
+        }
+
         let stale_after = req.older_than_secs.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -6608,6 +6633,19 @@ impl CasService {
             out.push_str(&format!("Active Cassy root placement: {message}\n"));
         }
 
+        // cas-75a8 (GH #1296): task-named simulators, read-only here.
+        if crate::task_simulators::supported() {
+            let tasks = crate::store::open_task_store(&self.inner.cas_root)
+                .and_then(|store| store.list(None).map_err(Into::into))
+                .unwrap_or_default();
+            out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
+                &crate::task_simulators::Simctl::default(),
+                &tasks,
+                &crate::task_ownership::KnownProjects::load(&self.inner.cas_root),
+                chrono::Utc::now(),
+            )));
+        }
+
         if !live_viktor_watches.is_empty() {
             out.push_str("\nLive Viktor watches:\n");
             for watch in &live_viktor_watches {
@@ -6748,7 +6786,9 @@ impl CasService {
         // cas-0033: disposable database branches past their task, worktree or TTL.
         out.push_str(&self.db_branch_gc_section());
 
-        Ok(Self::success(out))
+        Ok(Self::success(render_gc_report_response(
+            &out, req.limit, req.offset,
+        )))
     }
 
     /// cas-8f8f: read-only diagnostic that walks an epic's children
@@ -7302,7 +7342,7 @@ impl CasService {
                 .as_ref()
                 .map_err(|error| error.clone())
                 .and_then(|tasks| {
-                    eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now())
+                    crate::artifacts::retention::eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now(), crate::artifacts::retention::MIN_RETENTION_DAYS)
                 })
         } else {
             Ok(Default::default())
@@ -7336,6 +7376,28 @@ impl CasService {
             orphan_process_summary.skipped,
         );
         output.push_str(&artifact_cleanup.render());
+        // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
+        // opt-in; without it they are listed, never deleted.
+        if crate::task_simulators::supported() {
+            let simctl = crate::task_simulators::Simctl::default();
+            // Every task, not only closed ones, so an open task's device is
+            // named as kept rather than as unknown.
+            let simulators = crate::store::open_task_store(&self.inner.cas_root)
+                .map_err(anyhow::Error::from)
+                .and_then(|store| store.list(None).map_err(anyhow::Error::from))
+                .and_then(|tasks| {
+                    let others = crate::task_ownership::KnownProjects::load(&self.inner.cas_root);
+                    crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                });
+            output.push_str(&crate::task_simulators::render(&simulators));
+            if artifact_authorized && let Ok(simulators) = &simulators {
+                let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
+                output.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
+                for failure in failed {
+                    output.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+                }
+            }
+        }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
                 "\nJourney recordings: removed_files={files} reclaimed_bytes={bytes} (closed >=24h; force=true dry_run=false required)\n"
@@ -7473,6 +7535,381 @@ fn serve_memory_report(agents: &[cas_types::Agent]) -> String {
     )
 }
 
+const GC_REPORT_PAGE_SIZE: usize = 100;
+const GC_REPORT_PAGE_MAX: usize = 100;
+const GC_REPORT_PAGE_MAX_BYTES: usize = 32 * 1024;
+const GC_REPORT_SAMPLE_ITEMS: usize = 3;
+const GC_REPORT_SAMPLE_CHARS: usize = 180;
+const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 512;
+const GC_REPORT_MACHINE_STATUS_MAX_BYTES: usize = 8 * 1024;
+
+/// Keep the default tool result compact while preserving every original line
+/// behind explicit, zero-based `limit`/`offset` pages.
+fn render_gc_report_response(
+    full_report: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> String {
+    const HEADER: &str = "Factory GC Report\n=================\n";
+    let detail = full_report
+        .strip_prefix(HEADER)
+        .unwrap_or(full_report)
+        .trim_start_matches('\n');
+
+    if limit.is_some() || offset.is_some() {
+        let lines = detail.lines().collect::<Vec<_>>();
+        let requested_limit = limit.unwrap_or(GC_REPORT_PAGE_SIZE);
+        let page_size = requested_limit.min(GC_REPORT_PAGE_MAX);
+        let start = offset.unwrap_or(0).min(lines.len());
+        return render_gc_report_page(&lines, start, page_size, requested_limit);
+    }
+
+    summarize_gc_report(full_report, detail)
+}
+
+fn summarize_gc_report(full_report: &str, detail: &str) -> String {
+    let mut sections = detail
+        .split("\n\n")
+        .map(|section| section.trim_matches('\n'))
+        .filter(|section| !section.trim().is_empty());
+    let metrics = sections.next().unwrap_or_default();
+    let mut summary = format!(
+        "Factory GC Report\n=================\nFull report: {} bytes; detail pages contain at most {} zero-based lines and {} bytes. Use `factory action=gc_report limit={} offset=0` for full detail.\n\n",
+        full_report.len(),
+        GC_REPORT_PAGE_MAX,
+        GC_REPORT_PAGE_MAX_BYTES,
+        GC_REPORT_PAGE_SIZE,
+    );
+    let machine_status_lines = detail
+        .lines()
+        .filter(|line| gc_report_is_machine_status_line(line))
+        .collect::<Vec<_>>();
+    if !metrics.is_empty() {
+        for line in metrics.lines() {
+            if !gc_report_is_machine_status_line(line) {
+                summary.push_str(line);
+                summary.push('\n');
+            }
+        }
+        summary.push_str(
+            "\n\nInventory summary (category counts/bytes; first up to 3 items per category):\n",
+        );
+    }
+
+    for section in sections {
+        let lines = section.lines().collect::<Vec<_>>();
+        let Some(heading) = lines.first() else {
+            continue;
+        };
+        if gc_report_is_machine_status_line(heading) {
+            continue;
+        }
+        let label = gc_report_category_label(heading);
+        let detail_lines = lines
+            .iter()
+            .skip(1)
+            .copied()
+            .filter(|line| !line.is_empty() && !gc_report_is_machine_status_line(line))
+            .collect::<Vec<_>>();
+        let item_lines = detail_lines
+            .iter()
+            .copied()
+            .filter(|line| gc_report_is_inventory_item(line))
+            .collect::<Vec<_>>();
+        let item_count = item_lines.len();
+        let section_bytes = lines
+            .iter()
+            .filter(|line| !gc_report_is_machine_status_line(line))
+            .map(|line| line.len().saturating_add(1))
+            .sum::<usize>();
+        summary.push_str(&format!(
+            "- {label}: {item_count} items, {section_bytes} bytes\n"
+        ));
+
+        if let Some(context) = detail_lines
+            .iter()
+            .copied()
+            .find(|line| !gc_report_is_inventory_item(line))
+        {
+            summary.push_str(&format!(
+                "  Context: {}\n",
+                gc_report_short_line(context)
+            ));
+        }
+        for item in item_lines.iter().take(GC_REPORT_SAMPLE_ITEMS) {
+            summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
+        }
+    }
+    if !machine_status_lines.is_empty() {
+        summary.push_str("\nMachine-readable status:\n");
+        for line in machine_status_lines {
+            summary.push_str(&gc_report_bounded_machine_status_line(line));
+            summary.push('\n');
+        }
+    }
+    summary
+}
+
+fn render_gc_report_page(
+    lines: &[&str],
+    start: usize,
+    page_size: usize,
+    requested_limit: usize,
+) -> String {
+    let max_end = start.saturating_add(page_size).min(lines.len());
+    let mut end = start;
+    for candidate_end in start.saturating_add(1)..=max_end {
+        if gc_report_page_text(lines, start, candidate_end, requested_limit).len()
+            > GC_REPORT_PAGE_MAX_BYTES
+        {
+            break;
+        }
+        end = candidate_end;
+    }
+    if end == start && start < lines.len() {
+        // Keep a single unusually long row from exceeding the tool-result cap.
+        let mut page = gc_report_page_text(lines, start, start + 1, requested_limit);
+        let row_text = format!("{}\n", lines[start]);
+        if let Some(position) = page.rfind(&row_text) {
+            page.replace_range(
+                position..,
+                &format!(
+                    "[line {start} omitted: {} bytes exceeds the {} byte page cap]\n",
+                    lines[start].len(),
+                    GC_REPORT_PAGE_MAX_BYTES
+                ),
+            );
+        }
+        return page;
+    }
+    gc_report_page_text(lines, start, end, requested_limit)
+}
+
+fn gc_report_page_text(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    requested_limit: usize,
+) -> String {
+    let mut page = format!(
+        "Factory GC Report\n=================\nDetail page: zero-based lines {start}..{end} of {} (max {GC_REPORT_PAGE_MAX} lines, {GC_REPORT_PAGE_MAX_BYTES} bytes).\n",
+        lines.len()
+    );
+    if requested_limit > GC_REPORT_PAGE_MAX {
+        page.push_str(&format!(
+            "Requested limit {requested_limit} was capped at {GC_REPORT_PAGE_MAX}.\n"
+        ));
+    }
+    if end < lines.len() {
+        page.push_str(&format!("Next offset: {end}\n"));
+    }
+    page.push('\n');
+    for line in &lines[start..end] {
+        page.push_str(line);
+        page.push('\n');
+    }
+    page
+}
+
+fn gc_report_category_label(heading: &str) -> String {
+    let heading = heading.trim().trim_end_matches(':').trim();
+    let chars = heading.chars().collect::<Vec<_>>();
+    if chars.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
+        return heading.to_string();
+    }
+    let half = GC_REPORT_CATEGORY_HEADING_MAX_CHARS / 2;
+    let start = chars[..half].iter().collect::<String>();
+    let end = chars[chars.len() - half..].iter().collect::<String>();
+    format!("{start}…{end}")
+}
+
+fn gc_report_is_inventory_item(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("- ")
+        || line.starts_with("session=")
+        || line.starts_with("[")
+}
+
+fn gc_report_is_machine_status_line(line: &str) -> bool {
+    let Some((key, _)) = line.split_once("_STATUS_JSON=") else {
+        return false;
+    };
+    !key.is_empty()
+        && key.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn gc_report_short_line(line: &str) -> String {
+    let mut chars = line.chars();
+    let short = chars.by_ref().take(GC_REPORT_SAMPLE_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+fn gc_report_bounded_machine_status_line(line: &str) -> String {
+    if line.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
+        return line.to_string();
+    }
+
+    let Some((key, raw_json)) = line.split_once('=') else {
+        return line.chars().take(GC_REPORT_MACHINE_STATUS_MAX_BYTES).collect();
+    };
+    let original_bytes = line.len();
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw_json) else {
+        return format!(
+            "{key}={{\"summary_truncated\":true,\"summary_original_bytes\":{original_bytes}}}"
+        );
+    };
+    let original_counts = ["caches", "lane_previews"]
+        .into_iter()
+        .map(|field| {
+            (
+                field,
+                value
+                    .get(field)
+                    .and_then(serde_json::Value::as_array)
+                    .map_or(0, Vec::len),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (field, count) in &original_counts {
+        if let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut) {
+            items.truncate(GC_REPORT_SAMPLE_ITEMS);
+        }
+        let omitted = count.saturating_sub(GC_REPORT_SAMPLE_ITEMS);
+        if omitted > 0
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(format!("{field}_omitted"), serde_json::json!(omitted));
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("summary_truncated".into(), serde_json::Value::Bool(true));
+        object.insert(
+            "summary_original_bytes".into(),
+            serde_json::json!(original_bytes),
+        );
+    }
+
+    loop {
+        let encoded = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+        let candidate = format!("{key}={encoded}");
+        if candidate.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
+            return candidate;
+        }
+
+        let mut removed = false;
+        for field in ["caches", "lane_previews"] {
+            let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            if items.pop().is_none() {
+                continue;
+            }
+            let omitted_key = format!("{field}_omitted");
+            let omitted = value
+                .get(&omitted_key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(1);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(omitted_key, serde_json::json!(omitted));
+            }
+            removed = true;
+            break;
+        }
+        if !removed {
+            let count_for = |field: &str| {
+                original_counts
+                    .iter()
+                    .find(|(name, _)| *name == field)
+                    .map_or(0, |(_, count)| *count)
+            };
+            let compact = serde_json::json!({
+                "schema_version": value.get("schema_version"),
+                "filesystem": value.get("filesystem"),
+                "candidate_bytes": value.get("candidate_bytes"),
+                "selected_bytes": value.get("selected_bytes"),
+                "reclaimed_bytes": value.get("reclaimed_bytes"),
+                "dry_run": value.get("dry_run"),
+                "cache_count": count_for("caches"),
+                "lane_preview_count": count_for("lane_previews"),
+                "summary_truncated": true,
+                "summary_original_bytes": original_bytes,
+            });
+            return format!("{key}={compact}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod gc_report_render_tests {
+    use super::*;
+
+    #[test]
+    fn large_machine_status_is_bounded_and_records_omitted_cache_details() {
+        let caches = (0..1_000)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/tmp/factory/cache-{index}"),
+                    "bytes": index,
+                    "disposition": "selected",
+                    "reason": "stale regenerable cache; review before cleanup",
+                })
+            })
+            .collect::<Vec<_>>();
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "filesystem": {"total_bytes": 10_000, "available_bytes": 5_000},
+            "candidate_bytes": 499_500,
+            "selected_bytes": 499_500,
+            "reclaimed_bytes": 0,
+            "dry_run": true,
+            "remediation": "Review gc_report before cleanup.",
+            "caches": caches,
+            "lane_previews": [],
+        });
+        let report = format!(
+            "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
+        );
+
+        let summary = render_gc_report_response(&report, None, None);
+        let line = summary
+            .lines()
+            .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))
+            .expect("bounded machine-readable status line");
+        assert!(line.len() <= 8 * 1024, "{} bytes", line.len());
+        let value: serde_json::Value = serde_json::from_str(
+            line.strip_prefix("TARGET_CACHE_STATUS_JSON=").unwrap(),
+        )
+        .expect("status remains valid JSON");
+        assert_eq!(value["summary_truncated"], true);
+        assert_eq!(value["caches"].as_array().unwrap().len(), 3);
+        assert_eq!(value["caches_omitted"], 997);
+        let category = summary
+            .lines()
+            .find(|line| line.starts_with("- Cargo target cache pressure:"))
+            .unwrap();
+        assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
+        let category_bytes = category
+            .split(" items, ")
+            .nth(1)
+            .unwrap()
+            .split(" bytes")
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert!(category_bytes < 1_000, "{category}");
+        assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn serve_rss_bytes(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
@@ -7536,39 +7973,7 @@ struct FactoryArtifactInventory {
     error: Option<String>,
     removed: usize,
     dry_run: bool,
-    review_roots: Vec<(std::path::PathBuf, ArtifactRootUsage)>,
-}
-
-#[derive(Default)]
-struct ArtifactRootUsage {
-    bytes: u64,
-    regenerable: Vec<std::path::PathBuf>,
-    error: Option<String>,
-}
-
-fn artifact_root_usage(root: &std::path::Path) -> ArtifactRootUsage {
-    let mut usage = ArtifactRootUsage::default();
-    for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                usage.error = Some(error.to_string());
-                continue;
-            }
-        };
-        if entry.file_type().is_file() {
-            match entry.metadata() {
-                Ok(metadata) => usage.bytes = usage.bytes.saturating_add(metadata.len()),
-                Err(error) => usage.error = Some(error.to_string()),
-            }
-        } else if entry.file_type().is_dir()
-            && (entry.file_name() == "DerivedData" || entry.file_name() == "target")
-        {
-            usage.regenerable.push(entry.path().to_path_buf());
-        }
-    }
-    usage.regenerable.sort();
-    usage
+    review_roots: Vec<(std::path::PathBuf, crate::artifacts::retention::ArtifactRootUsage)>,
 }
 
 impl FactoryArtifactInventory {
@@ -7591,7 +7996,7 @@ impl FactoryArtifactInventory {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| {
                 let path = entry.path();
-                let usage = artifact_root_usage(&path);
+                let usage = crate::artifacts::retention::artifact_root_usage(&path);
                 (path, usage)
             })
             .collect();
@@ -7680,52 +8085,6 @@ fn factory_artifact_inventory(
     inventory.closed.sort();
     inventory.stray.sort();
     inventory
-}
-
-/// Keep at least seven days of evidence after close. Any nonterminal task,
-/// or task updated in that window (including appended notes), can keep older
-/// evidence alive by citing its task/path or a published artifact alias.
-fn eligible_artifact_tasks(
-    cas_root: &std::path::Path,
-    tasks: &[cas_types::Task],
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<std::collections::BTreeSet<String>, String> {
-    let cutoff = now - chrono::Duration::days(7);
-    let references = serde_json::to_string(
-        &tasks
-            .iter()
-            .filter(|task| !task.is_terminal() || task.updated_at >= cutoff)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| error.to_string())?;
-    let artifacts =
-        cas_store::SqliteArtifactStore::open(cas_root).map_err(|error| error.to_string())?;
-    let mut eligible = std::collections::BTreeSet::new();
-    for task in tasks.iter().filter(|task| {
-        task.status == cas_types::TaskStatus::Closed
-            && task.closed_at.is_some_and(|closed| closed <= cutoff)
-    }) {
-        if references.contains(&task.id) {
-            continue;
-        }
-        let published = artifacts
-            .list_for_task(&task.id)
-            .map_err(|error| error.to_string())?;
-        let referenced = published.iter().any(|artifact| {
-            std::iter::once(Some(artifact.id.as_str()))
-                .chain([
-                    artifact.cloud_artifact_id.as_deref(),
-                    artifact.cloud_url.as_deref(),
-                    artifact.slack_permalink.as_deref(),
-                ])
-                .flatten()
-                .any(|alias| !alias.is_empty() && references.contains(alias))
-        });
-        if !referenced {
-            eligible.insert(task.id.clone());
-        }
-    }
-    Ok(eligible)
 }
 
 /// Trace/video recordings are bulky scratch; receipts keep the separate
@@ -11739,6 +12098,7 @@ mod spawn_lifecycle_tests {
         std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
         std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
             "fetched_at": chrono::Utc::now(),
+            "client_version": "99.0.0",
             "models": [{"slug": "gpt-6-sol"}]
         }).to_string()).unwrap();
         let (specs, recipe, _) = build_lane_spawn_specs(

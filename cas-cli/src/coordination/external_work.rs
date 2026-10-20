@@ -17,6 +17,13 @@ use uuid::Uuid;
 pub const CONTRACT_SCHEMA: &str = "cassy.coordination/v1";
 pub const TOTAL_REMOTE_BUDGET: Duration = Duration::from_secs(8);
 pub const CALL_REMOTE_BUDGET: Duration = Duration::from_secs(5);
+/// cas-5fe0 (GH #1292): the observed proxy reconnect took 5–15 s.
+pub const VIOLET_RECONNECT_WINDOW: Duration = Duration::from_secs(15);
+/// cas-8ccd: the longest one reconciled operation can run (a reconnect wait,
+/// then a fresh Cloud budget), plus margin, so a reconcile lease outlives it.
+pub const RECONCILE_LEASE: Duration = Duration::from_secs(
+    VIOLET_RECONNECT_WINDOW.as_secs() + TOTAL_REMOTE_BUDGET.as_secs() + 5,
+);
 // A daemon reconciliation job has the shared eight-second budget. Reconcile
 // one operation per job so a multi-row batch cannot multiply that wait.
 pub const RECONCILE_BATCH_LIMIT: usize = 1;
@@ -390,6 +397,9 @@ fn digest(value: &str) -> String {
 pub struct RemoteError {
     pub message: String,
     pub timed_out: bool,
+    /// cas-5fe0 (GH #1292): the upstream connection dropped and the proxy is
+    /// reconnecting; a read-only call may be retried shortly.
+    pub reconnecting: bool,
 }
 
 impl RemoteError {
@@ -397,6 +407,7 @@ impl RemoteError {
         Self {
             message: message.into(),
             timed_out: false,
+            reconnecting: false,
         }
     }
 
@@ -404,6 +415,16 @@ impl RemoteError {
         Self {
             message: message.into(),
             timed_out: true,
+            reconnecting: false,
+        }
+    }
+
+    /// A dropped upstream that the proxy is reconnecting (cas-5fe0).
+    pub fn reconnecting(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            timed_out: false,
+            reconnecting: true,
         }
     }
 }
@@ -552,7 +573,7 @@ impl CloudCoordinationPort for HttpCloudCoordinationPort {
             Err(ureq::Error::Transport(error)) => {
                 let message = error.to_string();
                 let timed_out = message.to_ascii_lowercase().contains("timed out");
-                Err(RemoteError { message, timed_out })
+                Err(RemoteError { message, timed_out, reconnecting: false })
             }
         }
     }
@@ -582,7 +603,7 @@ impl CloudCoordinationPort for HttpCloudCoordinationPort {
             Err(ureq::Error::Transport(error)) => {
                 let message = error.to_string();
                 let timed_out = message.to_ascii_lowercase().contains("timed out");
-                Err(RemoteError { message, timed_out })
+                Err(RemoteError { message, timed_out, reconnecting: false })
             }
         }
     }
@@ -658,6 +679,9 @@ pub struct ExternalWorkService {
     pub violet: Arc<dyn VioletThreadResolver>,
     pub context: OperationContext,
     pub total_budget: Duration,
+    /// cas-5fe0 (GH #1292): how long the read-only Violet resolution keeps
+    /// retrying while the proxy reconnects a dropped upstream.
+    pub violet_reconnect_window: Duration,
     /// cas-f869: the invocation clock a reply-intent's claim expiry is judged
     /// against (tests pin it).
     pub now: fn() -> DateTime<Utc>,
@@ -676,6 +700,7 @@ impl ExternalWorkService {
             violet,
             context,
             total_budget: TOTAL_REMOTE_BUDGET,
+            violet_reconnect_window: VIOLET_RECONNECT_WINDOW,
             now: Utc::now,
         }
     }
@@ -695,6 +720,44 @@ impl ExternalWorkService {
             }
             other => self.mutate(other),
         }
+    }
+
+    /// Resolve a permalink through Violet. A dropped upstream that the proxy
+    /// is reconnecting is retried, read-only, until it answers or
+    /// [`Self::violet_reconnect_window`] passes; any other failure returns at
+    /// once. A persistent outage still fails, naming how long it was retried.
+    ///
+    /// cas-8ccd: the first read spends the request's one remote-wait budget
+    /// (`deadline`), exactly as the spec's eight seconds. Only when a read
+    /// meets a reconnecting upstream does the claim wait longer: retries are
+    /// bounded by the reconnect window (each call cut to what is left of it),
+    /// and a read that then succeeds hands the Cloud calls a fresh budget.
+    /// Returns the result and the deadline the Cloud calls must honour.
+    fn resolve_violet(&self, external_ref: &str, deadline: Instant) -> (Result<Value, RemoteError>, Instant) {
+        let started = Instant::now();
+        let first = deadline.saturating_duration_since(started).min(CALL_REMOTE_BUDGET);
+        let failure = match self.violet.resolve(external_ref, first) {
+            Err(failure) if failure.reconnecting => failure,
+            other => return (other, deadline),
+        };
+        let window_end = started + self.violet_reconnect_window;
+        let poll = (self.violet_reconnect_window / 6)
+            .clamp(Duration::from_millis(10), Duration::from_secs(2));
+        let mut failure = failure;
+        while Instant::now() + poll < window_end {
+            std::thread::sleep(poll);
+            let left = window_end.saturating_duration_since(Instant::now()).min(CALL_REMOTE_BUDGET);
+            match self.violet.resolve(external_ref, left) {
+                Err(next) if next.reconnecting => failure = next,
+                other => return (other, Instant::now() + self.total_budget),
+            }
+        }
+        failure.message = format!(
+            "{} (still unavailable after retrying for {}s)",
+            failure.message,
+            started.elapsed().as_secs()
+        );
+        (Err(failure), deadline)
     }
 
     fn mutate(&self, command: ExternalWorkCommand) -> Result<Value, ExternalWorkError> {
@@ -732,13 +795,14 @@ impl ExternalWorkService {
             }
         }
 
-        let deadline = Instant::now() + self.total_budget;
+        let mut deadline = Instant::now() + self.total_budget;
         if kind == "claim" && row.wire_json.is_none() {
             let external_ref = command
                 .claim_external_ref()
                 .ok_or_else(|| error("invalid_request", "claim requires external_ref"))?;
-            let timeout = call_timeout(deadline)?;
-            let resolved = match self.violet.resolve(external_ref, timeout) {
+            let (resolution, cloud_deadline) = self.resolve_violet(external_ref, deadline);
+            deadline = cloud_deadline;
+            let resolved = match resolution {
                 Ok(value) => value,
                 Err(error) => {
                     let result = failure_response(
@@ -919,11 +983,8 @@ impl ExternalWorkService {
                 .get("external_ref")
                 .and_then(Value::as_str)
                 .ok_or_else(|| error("journal_error", "claim permalink missing from journal"))?;
-            let deadline = Instant::now() + self.total_budget;
-            let resolved = self
-                .violet
-                .resolve(ref_link, call_timeout(deadline)?)
-                .map_err(|e| error("authority_unavailable", e.message))?;
+            let (resolved, deadline) = self.resolve_violet(ref_link, Instant::now() + self.total_budget);
+            let resolved = resolved.map_err(|e| error("authority_unavailable", e.message))?;
             if resolved.get("code").and_then(Value::as_str) != Some("completed") {
                 let mut response = resolved;
                 ensure_local_request_receipt(&mut response, &request_id);
@@ -1020,7 +1081,7 @@ impl ExternalWorkService {
     pub fn reconcile_due(&self, now_ms: i64) -> Result<Vec<Value>, ExternalWorkError> {
         let rows = self
             .journal
-            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, Duration::from_secs(15))
+            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, RECONCILE_LEASE)
             .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1527,6 +1588,8 @@ mod tests {
         post_result: Mutex<Result<Value, RemoteError>>,
         lookup_result: Mutex<Result<Value, RemoteError>>,
         posted: Mutex<Vec<(String, Value)>>,
+        /// cas-8ccd: the timeout each post was given.
+        post_timeouts: Mutex<Vec<Duration>>,
     }
 
     impl FakeCloud {
@@ -1538,6 +1601,7 @@ mod tests {
                 post_result: Mutex::new(Ok(acquired_response(REQUEST_ID))),
                 lookup_result: Mutex::new(Ok(acquired_response(REQUEST_ID))),
                 posted: Mutex::new(Vec::new()),
+                post_timeouts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1547,8 +1611,9 @@ mod tests {
             &self,
             path: &str,
             payload: &Value,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> Result<Value, RemoteError> {
+            self.post_timeouts.lock().unwrap().push(timeout);
             let id = payload
                 .get("request_id")
                 .and_then(Value::as_str)
@@ -1710,6 +1775,55 @@ mod tests {
         }
     }
 
+    /// Violet results returned in order, then the last one forever.
+    struct SequenceViolet {
+        calls: AtomicUsize,
+        results: Mutex<Vec<Result<Value, RemoteError>>>,
+        delay: Duration,
+    }
+
+    impl VioletThreadResolver for SequenceViolet {
+        fn resolve(&self, _external_ref: &str, _timeout: Duration) -> Result<Value, RemoteError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            let mut results = self.results.lock().unwrap();
+            if results.len() > 1 { results.remove(0) } else { results[0].clone() }
+        }
+    }
+
+    /// cas-5fe0 (GH #1292): a dropped Violet upstream that reconnects inside
+    /// the window lets the claim succeed with no manual retry; a persistent
+    /// drop fails clearly with nothing sent to Cloud; any other Violet
+    /// failure is not retried.
+    #[test]
+    fn claim_retries_violet_through_a_reconnect_and_fails_clearly_when_it_stays_down_cas_5fe0() {
+        let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        let identity = FakeViolet::ok().result.into_inner().unwrap();
+        let dropped = || Err(RemoteError::reconnecting("tool call 'violet_read' on 'violet' failed: Transport closed"));
+        for (results, expect_code, expect_calls, expect_posts) in [
+            (vec![dropped(), dropped(), identity.clone()], "acquired", 3, 1),
+            (vec![dropped()], "authority_unavailable", 0, 0),
+            (vec![Err(RemoteError::unavailable("no MCP proxy is configured"))], "authority_unavailable", 1, 0),
+        ] {
+            let journal = journal();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let violet = Arc::new(SequenceViolet { calls: AtomicUsize::new(0), results: Mutex::new(results), delay: Duration::ZERO });
+            let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
+            service.violet = violet.clone();
+            service.violet_reconnect_window = Duration::from_millis(120);
+            let result = service.execute(claim(REQUEST_ID, link)).unwrap();
+            assert_eq!(result["code"], expect_code, "{result}");
+            assert_eq!(cloud.posts.load(Ordering::SeqCst), expect_posts);
+            let calls = violet.calls.load(Ordering::SeqCst);
+            if expect_calls == 0 {
+                assert!(calls > 1, "a persistent drop is retried within the window");
+                assert!(result["guidance"].as_str().unwrap().contains("after retrying"), "{result}");
+            } else {
+                assert_eq!(calls, expect_calls);
+            }
+        }
+    }
+
     /// cas-b1d0 (GH #1266): Cloud's unverified-binding claim refusal reads as
     /// "unmanaged, reply through Violet v1" (claim and claim_status alike),
     /// with Cloud's own guidance kept; an unlinked project stays a bare refusal.
@@ -1739,6 +1853,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// cas-8ccd (1): a first-try Violet read spends the request's one remote
+    /// budget, so Cloud gets only what is left of it; only a read that waited
+    /// out a reconnect hands Cloud a fresh budget.
+    #[test]
+    fn claim_budget_is_shared_unless_a_reconnect_wait_happened_cas_8ccd() {
+        let link = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
+        let identity = FakeViolet::ok().result.into_inner().unwrap();
+        let dropped = || Err(RemoteError::reconnecting("Transport closed"));
+        let budget = Duration::from_millis(600);
+        let delay = Duration::from_millis(250);
+        for (results, fresh) in [(vec![identity.clone()], false), (vec![dropped(), identity.clone()], true)] {
+            let journal = journal();
+            let cloud = Arc::new(FakeCloud::new(journal.clone()));
+            let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal);
+            service.violet = Arc::new(SequenceViolet { calls: AtomicUsize::new(0), results: Mutex::new(results), delay });
+            service.total_budget = budget;
+            service.violet_reconnect_window = Duration::from_millis(400);
+            assert_eq!(service.execute(claim(REQUEST_ID, link)).unwrap()["code"], "acquired");
+            let given = cloud.post_timeouts.lock().unwrap()[0];
+            if fresh {
+                assert!(given > budget - Duration::from_millis(100), "after a reconnect wait Cloud gets a fresh budget: {given:?}");
+            } else {
+                assert!(given <= budget - delay, "a first-try read spends the shared budget: {given:?}");
+            }
+        }
+    }
+
+    /// cas-8ccd (2): the reconcile lease outlives the worst-case operation, so
+    /// a second pickup inside it finds nothing.
+    #[test]
+    fn reconcile_lease_covers_the_worst_case_run_cas_8ccd() {
+        assert!(RECONCILE_LEASE > VIOLET_RECONNECT_WINDOW + TOTAL_REMOTE_BUDGET);
+        let journal = journal();
+        journal.prepare(REQUEST_ID, "claim", &json!({"external_ref": "x"})).unwrap();
+        let now = 1_000_000;
+        assert_eq!(journal.lease_due(RECONCILE_BATCH_LIMIT, now, RECONCILE_LEASE).unwrap().len(), 1);
+        let worst = (VIOLET_RECONNECT_WINDOW + TOTAL_REMOTE_BUDGET).as_millis() as i64;
+        assert!(journal.lease_due(RECONCILE_BATCH_LIMIT, now + worst, RECONCILE_LEASE).unwrap().is_empty());
+        let expiry = now + RECONCILE_LEASE.as_millis() as i64;
+        assert_eq!(journal.lease_due(RECONCILE_BATCH_LIMIT, expiry, RECONCILE_LEASE).unwrap().len(), 1);
     }
 
     #[test]

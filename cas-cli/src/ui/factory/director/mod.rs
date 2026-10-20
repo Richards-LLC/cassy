@@ -34,6 +34,7 @@ pub(crate) use events::{
     FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS,
 };
 pub(crate) use events::MergedCloseBlockedTask;
+pub(crate) use events::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS;
 pub(crate) use events::{
     TranscriptFingerprint, WorkerHealthReport, WorkerHealthRequest, run_worker_health_probe,
     transcript_fingerprint,

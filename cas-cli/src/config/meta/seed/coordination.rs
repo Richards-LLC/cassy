@@ -126,8 +126,8 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     // cas-d757 (GH #1219): operator-authenticated CLIs and tools, denied to
     // factory workers by the pre-tool hook.
     for (key, name, default, description) in [
-        ("factory.worker_denied_clis", "Worker-denied CLIs", "vercel", "Operator-only. Executables a factory worker's shell may not run (matched on basename, through env/sudo/sh -c/npx-style wrappers), because without credentials they start a login that prompts the operator. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
-        ("factory.worker_denied_mcp_tools", "Worker-denied MCP Tools", "*vercel*", "Operator-only. MCP and connector tool-name patterns a factory worker may not call (case-insensitive; `*` matches any characters), including calls dispatched through mcp_execute. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+        ("factory.worker_denied_clis", "Worker-denied CLIs", "vercel,neonctl", "Operator-only. Executables a factory worker's shell may not run (matched on basename, through env/sudo/sh -c/npx-style wrappers), because without credentials they start a login that prompts the operator. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
+        ("factory.worker_denied_mcp_tools", "Worker-denied MCP Tools", "*vercel*,*neon*", "Operator-only. MCP and connector tool-name patterns a factory worker may not call (case-insensitive; `*` matches any characters), including calls dispatched through mcp_execute. The worker is told to ask the supervisor with a blocker. Supervisors are unaffected; empty disables the guard."),
     ] {
         registry.register(ConfigMeta {
             key, section: "factory", name, description,

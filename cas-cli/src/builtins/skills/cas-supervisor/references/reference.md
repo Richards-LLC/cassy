@@ -66,7 +66,7 @@ factory action=server_stop ...
 
 `shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
 
-**`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never sees a credential. Provision one:
+**`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never receives your `NEON_API_KEY`. Provision one:
 
 ```text
 factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
@@ -75,6 +75,17 @@ factory action=db_branch_delete task_id=<task> [id=<branch id>]
 ```
 
 Your `cas serve` creates `cas-<task-id>-<n>` with `neonctl`; use `neonctl` for ad-hoc Neon work too. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.
+
+Stock workers cannot run `neonctl` (including `env`, `npx` and `pnpm dlx`
+wrappers) or call tools matching `*neon*`, alongside the Vercel denials.
+Refusals route them to `coordination action=message target=supervisor blocker=true summary="need Neon" message="<operation and reason>"`.
+Inherited `NEON_API_KEY` and `VERCEL_TOKEN` are stripped by the existing
+protected-token policy; your credentials and `db_branch_create` stay available.
+The worker keeps its own `.env.cas-db` and `DATABASE_URL`. Operator-configured
+`factory.worker_denied_clis` / `factory.worker_denied_mcp_tools` replace the
+stock lists, and `[]` disables the corresponding check. Explicit project grants
+(such as `factory.worker_credential_env`) can authorize credentials;
+`factory.supervisor_only_env` denials still win.
 
 ### Worker controls
 

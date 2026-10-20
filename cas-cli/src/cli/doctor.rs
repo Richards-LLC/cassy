@@ -5833,6 +5833,18 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         }
     };
 
+    if let Ok(config) = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+        && config.active_team_id().is_some()
+        && let Ok(queue) = crate::cloud::SyncQueue::open_read_only(cas_root)
+        && let Ok(held) = queue.personal_row_count()
+        && held > 0
+    {
+        return Check {
+            name: "cloud sync queue".into(), status: CheckStatus::Warning,
+            message: format!("{held} personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}", if config.team_only {"on"} else {"off"}, crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)),
+        };
+    }
+
     let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
         Ok(pending) => pending,
         Err(error) => {
@@ -6275,6 +6287,23 @@ mod tests {
     /// cas-9b5d: prowl's petra-stella-cloud had no open session for 13 days,
     /// so nothing pulled. Doctor names the stale pull and its cause, and a
     /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).
+    #[test]
+    fn cas_db92_doctor_explains_held_personal_rows_without_retrying_the_wrong_endpoint() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut cloud = crate::cloud::CloudConfig::default();
+        cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap(); queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let check = cloud_queue_check(&root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("1 personal row(s) held"));
+        assert!(check.message.contains("cas config set cloud.team_only true"));
+        assert!(check.message.contains("cas cloud queue migrate-to-team"));
+        assert!(!check.message.contains("cas cloud queue --retry"));
+    }
+
     #[test]
     fn cas_9b5d_pull_freshness_flags_a_store_without_a_live_serve() {
         use crate::cloud::SyncQueue;

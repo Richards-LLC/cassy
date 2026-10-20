@@ -174,7 +174,7 @@ fn parked_deliveries(data: &DirectorData, epic_id: &str) -> Vec<ParkedDelivery> 
 #[derive(Debug, Clone)]
 pub(crate) struct StallEvidenceRequest {
     cas_dir: PathBuf,
-    epic_id: String,
+    epic_id: Option<String>,
     session: String,
     /// The parked deliveries in the loop's current snapshot, for a job that
     /// reads no new snapshot (the database is unchanged).
@@ -185,18 +185,21 @@ pub(crate) struct StallEvidenceRequest {
 impl StallEvidenceRequest {
     pub(crate) fn new(
         cas_dir: PathBuf,
-        epic_id: String,
+        epic_id: Option<String>,
         session: String,
         current: &DirectorData,
     ) -> Self {
-        let parked = parked_deliveries(current, &epic_id);
-        let assignment = AssignmentRequest::new(cas_dir.clone(), current, &epic_id);
+        let parked = epic_id
+            .as_deref()
+            .map(|epic_id| parked_deliveries(current, epic_id))
+            .unwrap_or_default();
+        let assignment = AssignmentRequest::new(cas_dir.clone(), current);
         Self { cas_dir, epic_id, session, parked, assignment }
     }
 
     pub(super) fn assignment_request(&self, fresh: Option<&DirectorData>) -> Option<AssignmentRequest> {
         match fresh {
-            Some(data) => AssignmentRequest::new(self.cas_dir.clone(), data, &self.epic_id),
+            Some(data) => AssignmentRequest::new(self.cas_dir.clone(), data),
             None => self.assignment.clone(),
         }
     }
@@ -210,7 +213,11 @@ impl StallEvidenceRequest {
         stores: Option<&DirectorStores>,
     ) -> ParkedFactsMap {
         let parked = match fresh {
-            Some(data) => parked_deliveries(data, &self.epic_id),
+            Some(data) => self
+                .epic_id
+                .as_deref()
+                .map(|epic_id| parked_deliveries(data, epic_id))
+                .unwrap_or_default(),
             None => self.parked.clone(),
         };
         if parked.is_empty() {
@@ -800,8 +807,12 @@ mod tests {
             }
             data.in_progress_tasks.push(task);
         }
-        let request =
-            StallEvidenceRequest::new(dir.path().into(), "cas-epic".into(), "here".into(), &data);
+        let request = StallEvidenceRequest::new(
+            dir.path().into(),
+            Some("cas-epic".into()),
+            "here".into(),
+            &data,
+        );
         let classify = |fresh| {
             let facts = request.facts(fresh, Some(&stores));
             let git = facts

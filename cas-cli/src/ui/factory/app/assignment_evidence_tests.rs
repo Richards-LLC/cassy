@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
     let server = MockServer::start().await;
     let now = Utc::now();
-    // Only this task has a live peer claim; local and expired claims are controls.
+    // Live, expired and local ownership claims exercise the real start policy.
     for (id, owner, expires) in [
         (
             "cas-claimed",
@@ -22,6 +22,11 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
             now - chrono::Duration::minutes(1),
         ),
         ("cas-own", "id-local", now + chrono::Duration::minutes(10)),
+        (
+            "cas-loose-claimed",
+            "peer-worker",
+            now + chrono::Duration::minutes(10),
+        ),
     ] {
         let key = crate::cloud::peer_claims::claim_key("github.com/acme/widgets", id);
         Mock::given(method("GET"))
@@ -64,13 +69,17 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         local.factory_session = Some("fixture".into());
         local.registered_at = now - chrono::Duration::hours(1);
         stores.agent_store.register(&local).unwrap();
-        for id in ["cas-epic", "cas-split", "cas-claimed", "cas-free", "cas-expired", "cas-own"] {
+        for id in ["cas-epic", "cas-split", "cas-claimed", "cas-free", "cas-expired", "cas-own", "cas-running"] {
             let mut task = Task::new(id.into(), id.into());
             if id == "cas-epic" { task.task_type = TaskType::Epic; task.status = TaskStatus::InProgress; }
+            if id == "cas-running" { task.status = TaskStatus::InProgress; task.assignee = Some("busy-worker".into()); }
             stores.task_store.add(&task).unwrap();
             if id != "cas-epic" {
                 stores.task_store.add_dependency(&Dependency::new(id.into(), "cas-epic".into(), DependencyType::ParentChild)).unwrap();
             }
+        }
+        for id in ["cas-loose-free", "cas-loose-claimed"] {
+            stores.task_store.add(&Task::new(id.into(), id.into())).unwrap();
         }
         cas_store::insert_epic_split(&cas, &cas_store::EpicSplit {
             id: "split-peer".into(), epic_id: "cas-epic".into(), local_agent_id: "supervisor".into(),
@@ -102,6 +111,7 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
             &Default::default(), &HashSet::new(), now).unwrap();
         let event = DirectorEvent::SupervisorStalled {
             next_step: detected, occurrence: now.to_rfc3339(), actionable_idle_secs: 600,
+            operator_page_episode: None,
         };
         let mut later = cas_store::open_epic_splits(&cas).unwrap().remove(0);
         later.id = "split-after-detection".into();
@@ -121,15 +131,19 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         // Accepted ownership survives proposal expiry, but cancellation releases it without task edits.
         cas_store::decide_epic_split(&cas, "split-peer", &[cas_store::SplitState::Accepted], cas_store::SplitState::Cancelled, None, now).unwrap();
         assert_eq!(classify(&mut app), expected(&["cas-expired", "cas-free", "cas-own", "cas-split"]));
-        // With only the peer's claimed task still open there is no assign
-        // nudge; it remains an active child, not an assemble-ready epic.
-        for id in ["cas-expired", "cas-free", "cas-own", "cas-split"] {
+        // Close every ready child but keep one in-progress child, so the
+        // focused epic has no ready work without becoming assemble-ready.
+        for id in ["cas-expired", "cas-free", "cas-own", "cas-split", "cas-claimed"] {
             let mut task = stores.task_store.get(id).unwrap();
             task.status = TaskStatus::Closed;
             stores.task_store.update(&task).unwrap();
         }
         app.unfiltered_director_data = DirectorData::load_fast(&cas).unwrap();
-        assert_eq!(classify(&mut app), None);
+        assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
+            "with no ready work in the focused epic, production evidence must cover fallback tasks and filter the live peer claim");
+        app.current_epic_id = None;
+        assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
+            "without focus, production evidence must still cover ready tasks and filter the live peer claim");
 
     }).await.unwrap();
 }

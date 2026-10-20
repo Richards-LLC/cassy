@@ -658,15 +658,17 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub count: Option<i32>,
 
-    /// Maximum rows to inspect/render for epic_status or server_list.
+    /// Maximum rows for epic_status/server_list or detail lines per gc_report page.
     #[schemars(
-        description = "epic_status: maximum child rows to inspect/render, with offset for paging. server_list: maximum server rows (default 20, capped at 50; must be positive)"
+        description = "gc_report: maximum full-detail lines per page (default 100 when paging, capped at 100; must be positive). epic_status: maximum child rows to inspect/render, with offset for paging. server_list: maximum server rows (default 20, capped at 50; must be positive)"
     )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
-    /// Number of child rows to skip before inspecting/rendering for epic_status.
-    #[schemars(description = "epic_status only: number of child rows to skip before the page")]
+    /// Number of rows/lines to skip before a page for gc_report or epic_status.
+    #[schemars(
+        description = "gc_report: zero-based number of full-report detail lines to skip; specifying limit or offset selects paged detail instead of the bounded summary. epic_status: number of child rows to skip before the page"
+    )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub offset: Option<usize>,
 

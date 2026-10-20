@@ -51,6 +51,143 @@ fn enqueue_worker_attention_relay(
     enqueue_worker_attention_relay_for_episode(cas_dir, event, Some(chrono::DateTime::UNIX_EPOCH))
 }
 
+/// cas-7456 (GH #1302 D): the supervisor has left its idle page unanswered
+/// past [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`] while work waits, so the
+/// operator hears it too. The tracker asks on every such wake; this records
+/// one durable operator turn per silence `episode` (the supervisor's last
+/// activity), so the stored row is the "already paged" mark (cas-b080).
+///
+/// [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`]: crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS
+fn page_operator_for_idle_supervisor(
+    cas_dir: &std::path::Path,
+    next_step: &crate::ui::factory::director::SupervisorActionableState,
+    episode: chrono::DateTime<chrono::Utc>,
+) {
+    let session = std::env::var("CAS_FACTORY_SESSION").unwrap_or_default();
+    let supervisor = crate::store::open_agent_store(cas_dir)
+        .map(|agents| {
+            crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_notice_recipient(
+                agents.as_ref(),
+                (!session.is_empty()).then_some(session.as_str()),
+            )
+            .name
+        })
+        .unwrap_or_else(|_| "the supervisor".to_string());
+    let hours = crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS / 3600;
+    let summary = format!("Supervisor {supervisor} idle {hours}h+ with work waiting");
+    let message = format!(
+        "Supervisor {supervisor} has taken no action for over {hours} hours and has not answered its idle pages, while work waits:\n{}\nType in its pane to wake it, or take the work over.",
+        next_step.next_step_text()
+    );
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        tracing::warn!("cas-7456: prompt queue unavailable; supervisor-idle operator page skipped");
+        return;
+    };
+    let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message,
+        summary: summary.clone(),
+        device_id: "*".to_string(),
+        operator_label: None,
+        kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        attachments: Vec::new(),
+        reply_to_session: None,
+    }) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(%error, "cas-7456: failed to encode the supervisor-idle operator page");
+            return;
+        }
+    };
+    if let Err(error) = queue.record_operator_turn(&cas_store::OperatorTurn {
+        source: "supervisor-idle-watchdog",
+        target: "operator",
+        prompt: &payload,
+        factory_session: (!session.is_empty()).then_some(session.as_str()),
+        metadata: cas_store::OperatorTurnMetadata {
+            summary: Some(summary.as_str()),
+            priority: Some(cas_store::NotificationPriority::High),
+            origin: Some(&cas_store::QueueOrigin::Daemon),
+            kind: Some("blocker"),
+            dedupe_key: Some(&format!("supervisor-idle-page:{session}:{}", episode.to_rfc3339())),
+            ..Default::default()
+        },
+    }) {
+        tracing::warn!(%error, "cas-7456: failed to record the supervisor-idle operator page");
+    }
+}
+
+/// How far back an expired verification dispatch is still escalated, so an
+/// upgrade does not page for old history.
+const EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS: i64 = 24;
+
+/// cas-7456 (GH #1302 B): a verification dispatch whose deadline passed with
+/// no verdict wakes the supervisor through a durable worker-attention relay,
+/// one per dispatch (the relay is keyed on the dispatch id, so each sweep's
+/// repeat is idempotent). Its lifecycle-wake source puts it under the GH #894
+/// watchdog, which tells the operator if the supervisor never receives it.
+///
+/// cas-b080: dispatches already woken (their relay's prompt is delivered) are
+/// skipped before the per-sweep cap, so a burst of expiries cannot keep the
+/// same oldest rows in front of newer ones. Returns how many expired
+/// dispatches have a persisted relay after this sweep.
+pub(super) fn escalate_expired_verification_dispatches(
+    cas_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    /// New relays written per sweep; the sweep runs every 60 s.
+    const RELAYS_PER_SWEEP: usize = 20;
+    const KIND: &str = "verification_dispatch_expired";
+    let since = now - chrono::Duration::hours(EXPIRED_DISPATCH_ESCALATION_WINDOW_HOURS);
+    let expired = match cas_store::expired_verification_dispatches(cas_dir, since, now, 1000) {
+        Ok(expired) => expired,
+        Err(error) => {
+            tracing::warn!(%error, "cas-7456: expired verification dispatches unavailable");
+            return 0;
+        }
+    };
+    let session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let supervisor_queue = crate::store::open_supervisor_queue_store(cas_dir).ok();
+    let woken = |dispatch: &&cas_types::VerificationDispatch| {
+        let key = worker_attention_relay_key(session.as_deref(), KIND, "supervisor", &dispatch.id);
+        supervisor_queue.as_ref().is_some_and(|queue| {
+            queue
+                .get_by_transition_key(&key)
+                .ok()
+                .flatten()
+                .is_some_and(|notification| notification.prompt_delivered_at.is_some())
+        })
+    };
+    let (already, pending): (Vec<_>, Vec<_>) = expired.iter().partition(woken);
+    already.len()
+        + pending
+        .into_iter()
+        .take(RELAYS_PER_SWEEP)
+        .filter(|dispatch| {
+            let detail = format!(
+                "Verification dispatch {} for {} passed its deadline {} with no verdict. Re-dispatch the verifier (or verify directly), then finish the close.",
+                dispatch.id,
+                dispatch.task_id,
+                dispatch.deadline_at.to_rfc3339()
+            );
+            let overdue = (now - dispatch.deadline_at).num_seconds().max(0) as u64;
+            matches!(
+                enqueue_worker_attention_relay_detail(
+                    cas_dir,
+                    KIND,
+                    "supervisor",
+                    Some(&dispatch.task_id),
+                    Some(overdue),
+                    &detail,
+                    &dispatch.id,
+                ),
+                WorkerAttentionRelayOutcome::Persisted { .. }
+            )
+        })
+        .count()
+}
+
 fn enqueue_worker_attention_relay_for_episode(
     cas_dir: &std::path::Path,
     event: &crate::ui::factory::director::DirectorEvent,
@@ -60,8 +197,12 @@ fn enqueue_worker_attention_relay_for_episode(
         next_step,
         occurrence,
         actionable_idle_secs,
+        operator_page_episode,
     } = event
     {
+        if let Some(episode) = operator_page_episode {
+            page_operator_for_idle_supervisor(cas_dir, next_step, *episode);
+        }
         if next_step.merged_close_blocked_relay_key().is_some() {
             // Each delivery owns one durable notice, even when the mixed queue
             // gains another task or the supervisor/daemon starts a new turn.
@@ -1112,6 +1253,21 @@ pub(super) struct FoldedRelayAttempt {
 /// (cas-26c8 L2). A recorded row the prompt never reached is re-driven by the
 /// death sweep (cas-ff42 L1).
 #[allow(clippy::too_many_arguments)]
+/// The durable dedupe key of one worker-attention episode (its
+/// `supervisor_queue.transition_key`), shared by the relay writer and the
+/// sweeps that ask whether an episode was already relayed (cas-b080).
+fn worker_attention_relay_key(
+    factory_session: Option<&str>,
+    kind: &str,
+    worker: &str,
+    occurrence: &str,
+) -> String {
+    format!(
+        "worker-attention:{}:{kind}:{worker}:{occurrence}",
+        factory_session.unwrap_or("")
+    )
+}
+
 fn enqueue_worker_attention_relay_inner(
     cas_dir: &std::path::Path,
     kind: &str,
@@ -1148,10 +1304,7 @@ fn enqueue_worker_attention_relay_inner(
             )
         })
         .unwrap_or_else(|| {
-            format!(
-                "worker-attention:{}:{kind}:{worker}:{occurrence}",
-                factory_session.as_deref().unwrap_or("")
-            )
+            worker_attention_relay_key(factory_session.as_deref(), kind, worker, occurrence)
         });
     let payload = serde_json::json!({
         "kind": kind,
@@ -1592,6 +1745,7 @@ mod worker_attention_tests {
                     },
                 occurrence: "episode-1".into(),
                 actionable_idle_secs: 600,
+                operator_page_episode: None,
             },
         );
         assert!(matches!(
@@ -1610,6 +1764,124 @@ mod worker_attention_tests {
             rows[0].prompt
         );
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+    }
+
+    /// cas-7456 (GH #1302 B): a verification dispatch expired overnight with
+    /// no escalation. The sweep wakes the supervisor once per expired
+    /// dispatch, and leaves due-later and day-old dispatches alone.
+    #[test]
+    fn an_expired_verification_dispatch_wakes_the_supervisor_once_gh1302() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "dispatch-expiry-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "dispatch-expiry-test");
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        for id in ["cas-b4d8", "cas-ancient", "cas-due-later"] {
+            tasks.add(&cas_types::Task::new(id.into(), id.into())).unwrap();
+        }
+        let now = chrono::Utc::now();
+        let dispatch = |task: &str, deadline| {
+            cas_store::create_verification_dispatch(&cas_dir, task, "worker-id", "supervisor-id", deadline)
+                .unwrap()
+        };
+        let expired = dispatch("cas-b4d8", now - chrono::Duration::minutes(5));
+        dispatch("cas-ancient", now - chrono::Duration::hours(30));
+        dispatch("cas-due-later", now + chrono::Duration::minutes(10));
+
+        assert_eq!(escalate_expired_verification_dispatches(&cas_dir, now), 1);
+        escalate_expired_verification_dispatches(&cas_dir, now);
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
+        assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
+        // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
+        assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
+    }
+
+    /// cas-b080: more expiries in the window than one sweep relays. The
+    /// sweep skips dispatches it already woke the supervisor for, so newer
+    /// ones are reached on the next sweep instead of starving behind the
+    /// oldest twenty forever.
+    #[test]
+    fn expired_dispatches_past_one_sweeps_cap_are_reached_on_the_next_sweep() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "dispatch-burst-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "dispatch-burst-test");
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        let dispatches = (0..25)
+            .map(|n| {
+                let id = format!("cas-burst{n:02}");
+                tasks.add(&cas_types::Task::new(id.clone(), id.clone())).unwrap();
+                cas_store::create_verification_dispatch(
+                    &cas_dir,
+                    &id,
+                    "worker-id",
+                    "supervisor-id",
+                    now - chrono::Duration::minutes(60 - n),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        escalate_expired_verification_dispatches(&cas_dir, now);
+        escalate_expired_verification_dispatches(&cas_dir, now);
+        let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+        let woken = dispatches
+            .iter()
+            .filter(|dispatch| {
+                let key = worker_attention_relay_key(
+                    Some("dispatch-burst-test"),
+                    "verification_dispatch_expired",
+                    "supervisor",
+                    &dispatch.id,
+                );
+                queue
+                    .get_by_transition_key(&key)
+                    .unwrap()
+                    .is_some_and(|relay| relay.prompt_delivered_at.is_some())
+            })
+            .count();
+        assert_eq!(woken, 25, "the newest five must not starve behind the oldest twenty");
+    }
+
+    /// cas-7456 (GH #1302 D): a supervisor-idle page flagged for the operator
+    /// becomes one durable operator turn naming the waiting work, alongside
+    /// the supervisor's own wake. cas-b080: the tracker asks on every wake of
+    /// the silence, so later pages of the same episode (new occurrences) must
+    /// not page the operator again.
+    #[test]
+    fn an_operator_flagged_idle_page_reaches_the_operator_once_per_episode_gh1302() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "idle-page-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "idle-page-test");
+        let episode = chrono::DateTime::parse_from_rfc3339("2026-10-20T01:05:00Z").unwrap().to_utc();
+        for occurrence in ["2026-10-20T03:05:00Z", "2026-10-20T03:15:00Z"] {
+            let event = crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step: crate::ui::factory::director::SupervisorActionableState::AssignReadyWork {
+                    task_ids: vec!["cas-ready".into()],
+                    idle_workers: vec!["calm-owl".into()],
+                },
+                occurrence: occurrence.into(),
+                actionable_idle_secs: 7200,
+                operator_page_episode: Some(episode),
+            };
+            enqueue_worker_attention_relay(&cas_dir, &event);
+        }
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+        let operator = rows.iter().filter(|row| row.target == "operator").collect::<Vec<_>>();
+        assert_eq!(operator.len(), 1, "{rows:?}");
+        assert!(operator[0].prompt.contains("cas-ready") && operator[0].prompt.contains("calm-owl"), "{}", operator[0].prompt);
+        assert!(rows.iter().any(|row| row.target != "operator"), "the supervisor is still woken: {rows:?}");
     }
 
     #[test]
@@ -2292,6 +2564,7 @@ mod worker_attention_tests {
                     },
                 occurrence: "episode-1".into(),
                 actionable_idle_secs: 600,
+                operator_page_episode: None,
             };
             if harness == "codex" {
                 // Replay a durable-only notification after the registered
@@ -2474,6 +2747,7 @@ mod worker_attention_tests {
                 next_step: next_step.clone(),
                 occurrence: "2026-09-11T02:40:00Z".to_string(),
                 actionable_idle_secs: 600,
+                operator_page_episode: None,
             },
         );
         let replay = enqueue_worker_attention_relay(
@@ -2482,6 +2756,7 @@ mod worker_attention_tests {
                 next_step,
                 occurrence: "2026-09-11T02:50:00Z".to_string(),
                 actionable_idle_secs: 1200,
+                operator_page_episode: None,
             },
         );
         assert!(matches!(
@@ -2523,6 +2798,7 @@ mod worker_attention_tests {
         };
         let event = |state, occurrence: &str| DirectorEvent::SupervisorStalled {
             next_step: state, occurrence: occurrence.into(), actionable_idle_secs: 600,
+            operator_page_episode: None,
         };
         assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event(
             SupervisorActionableState::MergeCloseBlocked { tasks: vec![delivery.clone()] }, "first")),

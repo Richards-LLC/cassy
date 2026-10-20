@@ -85,7 +85,12 @@ fn isolate_codex_env(env: &mut TestEnvGuard, tag: &str) -> (Scratch, Scratch, Pa
 /// (`CODEX_HOME`, `PATH`), which cannot be done safely from parallel threads.
 #[tokio::test]
 async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
+    let launch_cwd = Scratch::new("launch-cwd");
     let mut env = TestEnvGuard::temp_home();
+    let source_cwd = std::env::current_dir().unwrap();
+    // Launch-time version probes inherit the process cwd rather than a pane's
+    // workdir. Keep their mock receipts out of the source checkout too.
+    env.set_current_dir(launch_cwd.path());
     codex_worker_pane_pre_trusts_workdir_before_launch(&mut env).await;
     codex_supervisor_pane_pre_trusts_workdir_before_launch(&mut env).await;
     claude_worker_pane_does_not_touch_codex_config(&mut env).await;
@@ -93,6 +98,19 @@ async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
     codex_does_not_launch_when_trust_read_back_cannot_verify(&mut env).await;
     #[cfg(unix)]
     concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back(&mut env).await;
+
+    #[cfg(unix)]
+    {
+        let marker = ".mock-codex-launched-before-trust";
+        assert!(
+            !source_cwd.join(marker).exists(),
+            "mock Codex probes must not leave launch receipts in the source checkout"
+        );
+        assert!(
+            launch_cwd.join(marker).is_file(),
+            "mock Codex probe receipts must live in the test-owned temporary directory"
+        );
+    }
 }
 
 async fn codex_worker_pane_pre_trusts_workdir_before_launch(env: &mut TestEnvGuard) {

@@ -203,6 +203,7 @@ or its error receipt, as one document, preserving additive fields. Every
 | `violet_post_failed` | the hub refused without a code of its own |
 | `thread_files_unconfirmed` | the thread posted, but its receipt lists fewer attached files on a reply than were sent; read the thread, and rerun only with the same `--idempotency-key` |
 | `uploaded_not_attached` | the thread posted, but the hub uploaded a reply's files without attaching them (`state: uploaded`); read the thread before posting again |
+| `format_unreadable` | the draft names a file it does not attach, or shows a UTC time; refused before sending, in the hub's own `format_unreadable` shape (the hub's other readability rules arrive as the same code from the hub). Each violation prints its `rule`, `line`, `excerpt` and `fix`; apply the fixes ([slack-formatting](../../slack-formatting/SKILL.md)) and post again |
 
 An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet

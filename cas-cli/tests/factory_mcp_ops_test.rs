@@ -5870,6 +5870,109 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+#[tokio::test]
+async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
+    const AGENT_COUNT: usize = 240;
+    const NAME_PADDING: usize = 400;
+
+    let env = FactoryTestEnv::new();
+    let old_heartbeat = chrono::Utc::now() - chrono::Duration::hours(1);
+    for index in 0..AGENT_COUNT {
+        let last_heartbeat = old_heartbeat + chrono::Duration::seconds(index as i64);
+        let mut agent = Agent::new(
+            Agent::generate_fallback_id(),
+            format!("stale-report-{index:03}-{}", "x".repeat(NAME_PADDING)),
+        );
+        agent.role = AgentRole::Worker;
+        agent.last_heartbeat = last_heartbeat;
+        agent.registered_at = last_heartbeat;
+        env.agent_store()
+            .register(&agent)
+            .expect("register stale agent");
+    }
+
+    let default_req: FactoryRequest =
+        serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
+    let default_report = env
+        .service
+        .factory_request(Parameters(default_req))
+        .await
+        .expect("bounded gc report");
+    let summary = get_text(&default_report);
+
+    let mut offset = 0;
+    let mut found_agents = vec![false; AGENT_COUNT];
+    loop {
+        let page_req: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "gc_report",
+            "limit": 100,
+            "offset": offset,
+        }))
+        .unwrap();
+        let page = env
+            .service
+            .factory_request(Parameters(page_req))
+            .await
+            .expect("gc report detail page");
+        let page_text = get_text(&page);
+        assert!(
+            page_text.len() <= 32 * 1024,
+            "detail page must satisfy the byte cap, got {} bytes",
+            page_text.len()
+        );
+        assert!(
+            !page_text.contains(" omitted:"),
+            "a detail page must not replace inventory rows with an omission marker: {page_text}"
+        );
+        for (index, found) in found_agents.iter_mut().enumerate() {
+            *found |= page_text.contains(&format!("stale-report-{index:03}-"));
+        }
+        let Some(next_offset) = page_text.lines().find_map(|line| {
+            line.strip_prefix("Next offset: ")
+                .and_then(|value| value.parse::<usize>().ok())
+        }) else {
+            break;
+        };
+        assert!(
+            next_offset > offset,
+            "pagination did not advance: {page_text}"
+        );
+        offset = next_offset;
+    }
+    assert!(
+        found_agents.iter().all(|found| *found),
+        "every stale-agent item must be reachable through pages; found {}/{}",
+        found_agents.iter().filter(|found| **found).count(),
+        AGENT_COUNT
+    );
+    assert!(
+        summary.len() < 24_000,
+        "default gc_report should stay compact, got {} bytes",
+        summary.len()
+    );
+    assert!(summary.contains("Stale agents: 240"), "{summary}");
+    assert!(summary.contains("Stale agents: 240 items"), "{summary}");
+    let stale_category = summary
+        .lines()
+        .find(|line| line.starts_with("- Stale agents: 240 items, "))
+        .expect("stale-agent category count and byte summary");
+    let stale_bytes: usize = stale_category
+        .split(" items, ")
+        .nth(1)
+        .unwrap()
+        .split(" bytes")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(stale_bytes > 100_000, "{stale_category}");
+    assert!(summary.contains("first up to 3 items per category"), "{summary}");
+    assert!(
+        summary.contains("stale-report-000-"),
+        "top stale-agent sample missing: {summary}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_gc_report_names_dangling_primary_node_modules_link() {
@@ -5983,6 +6086,13 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         report_text.contains("closed-task candidates=1"),
         "{report_text}"
     );
+    let artifact_summary = report_text
+        .lines()
+        .find(|line| line.starts_with("- Durable task artifacts:"))
+        .expect("durable artifact heading and summary");
+    assert!(artifact_summary.contains(&format!("root={}", root.display())));
+    assert!(artifact_summary.contains("closed-task candidates=1"));
+    assert!(artifact_summary.contains("stray inventory=2 mode=review-only"));
     assert!(
         report_text.contains("review-only stray artifact"),
         "{report_text}"
@@ -6244,6 +6354,14 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     );
     assert_eq!(machine["caches"][0]["bytes"], 64);
     assert_eq!(machine["caches"][0]["disposition"], disposition);
+    let cache_category = report_text
+        .lines()
+        .find(|line| line.starts_with("- Cargo target cache pressure: "))
+        .expect("target-cache category summary");
+    assert!(
+        cache_category.starts_with("- Cargo target cache pressure: 1 items, "),
+        "machine JSON must not count as a cache inventory item: {cache_category}"
+    );
     assert!(
         report_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"

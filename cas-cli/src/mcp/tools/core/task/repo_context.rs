@@ -8,6 +8,8 @@ use cas_types::WorkTarget;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
+mod candidate_probe;
+
 /// Host-local repository evidence resolved fresh for one lifecycle mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoContext {
@@ -17,8 +19,8 @@ pub(crate) struct RepoContext {
     pub target_branch: String,
 }
 
-/// Preflight-only repository probe. Lifecycle mutations retain their existing
-/// resolver; preflight supplies one absolute deadline across every Git call.
+/// Repository Git probe sharing one absolute deadline across every command.
+/// Preflight and lifecycle candidate discovery supply their own budgets.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedRepoProbe {
     deadline: Deadline,
@@ -739,23 +741,27 @@ pub(crate) fn unanchored_task_start_warning(
     )
 }
 
-fn candidate_paths(cas_root: &Path) -> Vec<PathBuf> {
-    let mut raw = Vec::new();
+fn candidate_paths(cas_root: &Path) -> Result<Vec<candidate_probe::Candidate>, String> {
+    let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
+    let mut raw = vec![cas_root.to_path_buf()];
     if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
         && let Ok(known) = store.list()
     {
         raw.extend(known.into_iter().map(|repo| repo.path));
     }
-    raw.push(cas_root.to_path_buf());
     let mut seen = HashSet::new();
-    raw.into_iter()
-        // The host registry intentionally retains historical checkouts. Avoid
-        // one failed `git` process per deleted TempDir/stale path during
-        // bounded preflight and lifecycle resolution.
-        .filter(|path| path.exists())
-        .filter_map(|path| git_layout(&path).ok().map(|(root, _)| root))
-        .filter(|root| seen.insert(root.clone()))
-        .collect()
+    let mut candidates = Vec::new();
+    for path in raw {
+        if deadline.remaining().is_zero() {
+            return Err("WORK TARGET REPOSITORY UNAVAILABLE: known-root scan exceeded its 5s budget; retry after storage access recovers".to_string());
+        }
+        if let Some(candidate) = candidate_probe::probe(&path, deadline)?
+            && seen.insert(candidate.repo_root.clone())
+        {
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
 }
 
 fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
@@ -917,13 +923,12 @@ pub(crate) fn resolve_repo_context(
     }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    for candidate in candidate_paths(cas_root) {
-        let identities = repo_identities(&candidate);
+    for candidate in candidate_paths(cas_root)? {
+        let identities = candidate.identities;
         if identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
-        }) && let Ok((repo_root, git_common_dir)) = git_layout(&candidate)
-        {
-            matches.push((repo_root, git_common_dir));
+        }) {
+            matches.push((candidate.repo_root, candidate.git_common_dir));
         }
         // cas-1a1c: report each checkout's identities as one GROUP rather than
         // flattening them. When the mismatch is the pin-vs-remote shape, seeing
@@ -1363,6 +1368,124 @@ mod tests {
                 "the stale registry entry must remain nonexistent"
             );
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreachable_known_roots_are_bounded_and_negatively_cached() {
+        const CHILD_ROOT: &str = "CAS_REPO_CONTEXT_HANG_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let fixtures = PathBuf::from(root);
+            let healthy = fixtures.join("healthy");
+            let calls = fixtures.join("blocked-probes");
+            let target = WorkTarget {
+                repo_selector: "project:healthy".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let cas_root = healthy.join(".cas");
+            let first = std::thread::scope(|scope| {
+                let peer = scope.spawn(|| resolve_repo_context(&cas_root, &target));
+                let first = resolve_repo_context(&cas_root, &target)
+                    .expect("an unrelated blocked root must not prevent healthy resolution");
+                assert_eq!(peer.join().unwrap().unwrap(), first);
+                first
+            });
+            assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
+            let first_calls = std::fs::read_to_string(&calls).expect("blocked root was probed");
+            assert_eq!(first_calls.lines().count(), 1, "overlapping callers share one probe");
+            std::fs::write(
+                healthy.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"healthy-renamed\"\n",
+            )
+            .unwrap();
+            let renamed = WorkTarget {
+                repo_selector: "project:healthy-renamed".to_string(),
+                ..target
+            };
+            let second = resolve_repo_context(&cas_root, &renamed).unwrap();
+            assert_eq!(second.repo_root, first.repo_root);
+            assert_eq!(second.repo_selector, renamed.repo_selector);
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap(),
+                first_calls,
+                "a timed-out root must not start another probe while negatively cached"
+            );
+            return;
+        }
+
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        for mode in ["git", "config"] {
+            // The parent owns fixtures so even the red timeout cleans them up.
+            let fixtures =
+                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+            let healthy = fixtures.path().join("healthy");
+            let blocked = fixtures.path().join("blocked");
+            for repo in [&healthy, &blocked] {
+                std::fs::create_dir(repo).unwrap();
+                git(repo, &["init", "-q", "-b", "main"]);
+                std::fs::create_dir(repo.join(".cas")).unwrap();
+                crate::store::known_repos::register_repo_strict(repo).unwrap();
+            }
+            std::fs::write(
+                healthy.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"healthy\"\n",
+            )
+            .unwrap();
+            let fifo = if mode == "config" {
+                blocked.join(".cas/config.toml")
+            } else {
+                fixtures.path().join("blocked-git")
+            };
+            assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+            let actual_git = cmcp_core::resolve_stdio_executable("git").unwrap();
+            let bin = fixtures.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            crate::test_paths::warm_stub(
+                &bin.join("git"),
+                r#"#!/bin/sh
+if [ "$2" = "$CAS_TEST_BLOCKED_ROOT" ]; then
+    if [ "$4" = --show-toplevel ]; then
+        printf 'probe\n' >> "$CAS_TEST_BLOCKED_CALLS"
+    fi
+    if [ "$CAS_TEST_BLOCKED_MODE" = git ]; then
+        read -r blocked < "$CAS_TEST_BLOCKED_FIFO"
+        exit 1
+    fi
+fi
+exec "$CAS_TEST_REAL_GIT" "$@"
+"#,
+            );
+            let mut paths = vec![bin];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            // Re-exec isolates the blocked filesystem call and fixture PATH.
+            // The outer deadline also reaps the unfixed Git child.
+            let output = run_command(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "mcp::tools::core::task::repo_context::tests::unreachable_known_roots_are_bounded_and_negatively_cached",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_ROOT, fixtures.path())
+                    .env("PATH", std::env::join_paths(paths).unwrap())
+                    .env("CAS_TEST_REAL_GIT", actual_git)
+                    .env("CAS_TEST_BLOCKED_ROOT", &blocked)
+                    .env("CAS_TEST_BLOCKED_CALLS", fixtures.path().join("blocked-probes"))
+                    .env("CAS_TEST_BLOCKED_MODE", mode)
+                    .env("CAS_TEST_BLOCKED_FIFO", &fifo),
+                Deadline::after(Duration::from_secs(20)),
+                Duration::from_secs(20),
+            )
+            .unwrap_or_else(|error| panic!("{mode} known-root fixture did not return: {error:?}"));
+            assert!(
+                output.status.success(),
+                "{mode} fixture failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
     }
 
     #[test]

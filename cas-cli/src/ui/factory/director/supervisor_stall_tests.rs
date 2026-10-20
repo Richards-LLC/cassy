@@ -208,6 +208,99 @@ fn ready_work_and_idle_worker_become_actionable_only_after_threshold() {
     );
 }
 
+/// cas-7456 (GH #1302 C): a supervisor set tasks to Blocked (waiting on a
+/// human) and the workers holding them vanished from the idle list, so the
+/// ready-work page never fired while they idled for 10 h.
+#[test]
+fn a_blocked_task_does_not_hide_its_idle_worker_from_ready_work_gh1302() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 20, 11, 0, 0).unwrap();
+    let mut snapshot = data();
+    snapshot
+        .ready_tasks
+        .push(task("cas-waits-on-ben", TaskStatus::Blocked, Some("gold-fox"), Some("cas-epic")));
+    snapshot
+        .ready_tasks
+        .push(task("cas-ready", TaskStatus::Open, None, Some("cas-epic")));
+    snapshot.agents.push(worker("gold-fox", now - Duration::hours(10)));
+
+    assert_eq!(
+        supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None),
+        Some(SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-ready".into()],
+            idle_workers: vec!["gold-fox".into()],
+        })
+    );
+}
+
+/// cas-7456 (GH #1302 E): idle workers sat beside 134 ready tasks for 10 h.
+/// Ready work outside the focused epic, or with no epic focused, still pages.
+#[test]
+fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 20, 11, 0, 0).unwrap();
+    let mut snapshot = data();
+    // The focused epic still has work in flight, so it is not assembly time.
+    snapshot
+        .in_progress_tasks
+        .push(task("cas-running", TaskStatus::InProgress, Some("busy-owl"), Some("cas-epic")));
+    let backlog = (0..12).map(|n| format!("cas-r{n:02}")).collect::<Vec<_>>();
+    for id in &backlog {
+        snapshot.ready_tasks.push(task(id, TaskStatus::Open, None, None));
+    }
+    snapshot.agents.push(worker("gold-fox", now - Duration::hours(10)));
+    let expected = Some(SupervisorActionableState::AssignReadyWork {
+        task_ids: backlog.clone(),
+        idle_workers: vec!["gold-fox".into()],
+    });
+
+    for focus in [Some("cas-epic"), None] {
+        let state = supervisor_actionable_state(&snapshot, focus, "supervisor", &HashSet::new(), now, 600, |_| None);
+        assert_eq!(state, expected, "focus {focus:?}");
+    }
+    let text = expected.unwrap().next_step_text();
+    assert!(text.contains("cas-r09 and 2 more to idle worker(s) gold-fox"), "{text}");
+}
+
+/// cas-7456 (GH #1302 D): two supervisors left their idle page unanswered for
+/// 11–12 h overnight. From two hours of silence with work waiting, every
+/// wake asks to page the operator for that silence episode. cas-b080: the
+/// tracker keeps asking, so a page whose event was dropped before delivery
+/// is asked again on the next wake; the durable operator turn is deduped on
+/// the episode. Fresh supervisor activity names a new episode.
+#[test]
+fn an_unanswered_idle_page_keeps_asking_for_the_operator_until_delivered_gh1302() {
+    let start = Utc.with_ymd_and_hms(2026, 10, 20, 1, 5, 0).unwrap();
+    let actionable = Some(SupervisorActionableState::AssignReadyWork {
+        task_ids: vec!["cas-ready".into()],
+        idle_workers: vec!["gold-fox".into()],
+    });
+    let mut tracker = SupervisorStallTracker::default();
+    let pages = |tracker: &mut SupervisorStallTracker, last_call: i64, minutes: std::ops::RangeInclusive<i64>| {
+        minutes
+            .step_by(5)
+            .filter_map(|minute| {
+                tracker
+                    .observe(
+                        actionable.clone(),
+                        Some(start + Duration::minutes(last_call)),
+                        false,
+                        start + Duration::minutes(minute),
+                        600,
+                    )
+                    .operator_page_episode
+                    .map(|episode| (minute, episode))
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = pages(&mut tracker, 0, 10..=140);
+    assert_eq!(
+        first,
+        vec![(120, start), (130, start), (140, start)],
+        "every wake of the silence asks, so a dropped first page is asked again"
+    );
+    let second = pages(&mut tracker, 400, 410..=520);
+    assert_eq!(second, vec![(520, start + Duration::minutes(400))], "a new silence is a new episode");
+}
+
 #[test]
 fn all_terminal_children_choose_assembly_exit_step() {
     let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
@@ -552,10 +645,15 @@ fn stall_nudge_never_suggests_foreign_origin_tasks_cas_0c98() {
         }),
         "the stall nudge must name only this project's task"
     );
+    // A foreign epic is not in the session's snapshot, so its children are
+    // never suggested; the session's own ready work still is (GH #1302 E).
     assert_eq!(
         nudge(Some("pulse-card"), "cas-foreign-epic"),
-        None,
-        "a foreign epic is not in the session's snapshot, so its children are never suggested"
+        Some(SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-local-ready".into()],
+            idle_workers: vec!["gold-fox".into()],
+        }),
+        "a foreign epic's children are never suggested"
     );
     // Precondition: without a project scope the foreign rows reach the nudge,
     // which is the GH #995 symptom.

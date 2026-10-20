@@ -1052,11 +1052,11 @@ fn default_target_cache_retention_count() -> usize {
 }
 
 fn default_worker_denied_clis() -> Vec<String> {
-    vec!["vercel".to_string()]
+    vec!["vercel".to_string(), "neonctl".to_string()]
 }
 
 fn default_worker_denied_mcp_tools() -> Vec<String> {
-    vec!["*vercel*".to_string()]
+    vec!["*vercel*".to_string(), "*neon*".to_string()]
 }
 
 fn default_render_max_fps() -> u32 {

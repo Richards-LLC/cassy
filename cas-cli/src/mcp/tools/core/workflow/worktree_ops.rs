@@ -1465,6 +1465,46 @@ fn parked_merge_source(
     ))
 }
 
+impl CasCore {
+    fn parked_merge_source_for_task(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        repo: &Path,
+        source: &str,
+        parent_branch: &str,
+        task: &cas_types::Task,
+    ) -> Result<Option<String>, String> {
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+            return Ok(None);
+        };
+        let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let original = parked_merge_source(&git, source, &task.id, anchor);
+        if original.is_ok() || task.status != cas_types::TaskStatus::AwaitingMerge {
+            return original;
+        }
+        let Some(tip) = git.resolve_commit(source) else {
+            return original;
+        };
+        let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            parent_branch.to_string()
+        } else {
+            crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(repo, parent_branch)
+        };
+        if !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+            repo, anchor, &tip, &target, &task.id,
+        ) {
+            return original;
+        }
+        self.advance_awaiting_merge_anchor(task_store, task, repo, parent_branch, Some(&tip))
+            .map_err(|error| format!("Cannot rebind rebased delivery anchor: {error}"))?;
+        let rebound = task_store.get(&task.id).map_err(|error| format!("Cannot reload rebased delivery anchor: {error}"))?;
+        let Some(anchor) = rebound.deliverables.factory_branch_anchor.as_deref() else {
+            return original;
+        };
+        parked_merge_source(&git, source, &task.id, anchor)
+    }
+}
+
 /// A branch-only merge request can name its task through the canonical
 /// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
 fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
@@ -3158,7 +3198,7 @@ impl CasCore {
         let task_id = task_id.or(inferred_task_id.as_deref());
         // cas-bebc (GH #1023 finding 9): never integrate another live factory
         // session's worker branch or task from this session.
-        let scoped_task =
+        let mut scoped_task =
             task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
@@ -3465,13 +3505,12 @@ impl CasCore {
         // than merge another task's work under this task's name.
         if transactional_delivery.is_none()
             && let Some(task_id) = task_id
-            && let Some(anchor) = self
-                .open_task_store()
-                .ok()
-                .and_then(|store| store.get(task_id).ok())
-                .and_then(|task| task.deliverables.factory_branch_anchor)
+            && let Ok(store) = self.open_task_store()
+            && let Ok(task) = store.get(task_id)
         {
-            match parked_merge_source(manager.git(), &worktree.branch, task_id, &anchor) {
+            match self.parked_merge_source_for_task(
+                store.as_ref(), &cwd, &worktree.branch, &worktree.parent_branch, &task,
+            ) {
                 Ok(Some(delivery_branch)) => worktree.branch = delivery_branch,
                 Ok(None) => {}
                 Err(refusal) => {
@@ -3482,6 +3521,13 @@ impl CasCore {
                     });
                 }
             }
+            // Later dirty-checkout and merge-intent handling use the same
+            // durable anchor that the source guard just validated.
+            scoped_task = Some(store.get(task_id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Cannot reload parked delivery after source validation: {error}")),
+                data: None,
+            })?);
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -6117,6 +6163,114 @@ mod cas_7ce6_parked_merge_source_tests {
         git(path, &["checkout", "-qb", "factory/w"]);
         let anchor = commit(path, "parked");
         (repo, anchor)
+    }
+
+    fn rebased_lane() -> (tempfile::TempDir, cas_types::Task, String) {
+        let (repo, _) = stacked_lane();
+        let path = repo.path();
+        let anchor = commit(path, "parked-second");
+        git(path, &["checkout", "-q", "main"]);
+        commit(path, "target-update");
+        git(path, &["checkout", "-q", "factory/w"]);
+        git(path, &["rebase", "main"]);
+        let tip = git(path, &["rev-parse", "HEAD"]);
+        let mut task = cas_types::Task::new("cas-park".into(), "parked rebase".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("w".into());
+        task.deliverables.parked_branch = Some("factory/w".into());
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        (repo, task, tip)
+    }
+
+    #[test]
+    fn rebased_same_patch_delivery_rebinds_and_merges_without_reclose_cas_e833() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for worker_on_next_task in [false, true] {
+            let (repo, task, tip) = rebased_lane();
+            let target = git(repo.path(), &["rev-parse", "main"]);
+            let base = git(repo.path(), &["rev-parse", "main^"]);
+            // Both local-ahead and origin-ahead targets exclude imported work.
+            git(repo.path(), &[
+                "update-ref", "refs/remotes/origin/main",
+                if worker_on_next_task { &target } else { &base },
+            ]);
+            if worker_on_next_task {
+                git(repo.path(), &["update-ref", "refs/heads/main", &base]);
+            }
+            let mut tasks = vec![task.clone()];
+            if worker_on_next_task {
+                let mut next = cas_types::Task::new("cas-next".into(), "next task".into());
+                next.status = cas_types::TaskStatus::InProgress;
+                next.assignee = task.assignee.clone();
+                tasks.push(next);
+            }
+            let store = crate::store::mock::MockTaskStore::with_tasks(tasks);
+            let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+            assert_eq!(
+                core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task),
+                Ok(None),
+            );
+            let rebound = store.get(&task.id).unwrap();
+            assert_eq!(rebound.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+            assert_eq!(rebound.deliverables.parked_branch, task.deliverables.parked_branch);
+            assert!(rebound.notes.contains(task.deliverables.factory_branch_anchor.as_deref().unwrap()));
+            assert_eq!(
+                core.parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &rebound),
+                Ok(None),
+            );
+            assert_eq!(store.get(&task.id).unwrap().notes, rebound.notes, "retry is idempotent");
+            if worker_on_next_task {
+                assert_eq!(store.get("cas-next").unwrap().status, cas_types::TaskStatus::InProgress);
+            }
+            git(repo.path(), &["checkout", "-q", "main"]);
+            git(repo.path(), &["merge", "--no-ff", "-m", "integrate", "factory/w"]);
+            assert!(repo.path().join("parked").is_file());
+            assert!(repo.path().join("parked-second").is_file());
+            assert!(repo.path().join("target-update").is_file());
+        }
+    }
+
+    #[test]
+    fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for shape in ["earlier-changed", "extra", "dropped", "whitespace", "empty", "foreign-owner"] {
+            let (repo, task, tip) = rebased_lane();
+            match shape {
+                "earlier-changed" | "whitespace" => {
+                    git(repo.path(), &["reset", "--hard", &format!("{tip}~2")]);
+                    let content = if shape == "whitespace" { "parked \t" } else { "changed after review" };
+                    std::fs::write(repo.path().join("parked"), content).unwrap();
+                    git(repo.path(), &["add", "parked"]);
+                    git(repo.path(), &["commit", "-qm", "changed first patch"]);
+                    git(repo.path(), &["cherry-pick", &tip]); // Last patch still matches.
+                }
+                "extra" => { commit(repo.path(), "extra-work"); }
+                "dropped" => { git(repo.path(), &["reset", "--hard", "HEAD^"]); }
+                "empty" => {
+                    git(repo.path(), &["reset", "--hard", "main"]);
+                    git(repo.path(), &["commit", "--allow-empty", "-qm", "empty delivery"]);
+                }
+                "foreign-owner" => {
+                    git(repo.path(), &["commit", "--amend", "-qm", "fix(cas-b0b0): another task"]);
+                }
+                _ => unreachable!(),
+            }
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+            let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+            let before = git(repo.path(), &["rev-parse", "main"]);
+            let refusal = core
+                .parked_merge_source_for_task(&store, repo.path(), "factory/w", "main", &task)
+                .expect_err("changed content is not the parked delivery");
+            assert!(refusal.contains("PARKED DELIVERY NOT ON SOURCE"), "{shape}: {refusal}");
+            assert_eq!(
+                serde_json::to_value(store.get(&task.id).unwrap()).unwrap(),
+                serde_json::to_value(&task).unwrap(),
+                "{shape} must preserve the parked task",
+            );
+            assert_eq!(git(repo.path(), &["rev-parse", "main"]), before);
+        }
     }
 
     /// cas-7ce6 AC: after the worker moves its branch on to the next task, a

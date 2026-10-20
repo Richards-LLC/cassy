@@ -66,6 +66,8 @@ pub(crate) mod git_evidence;
 pub mod git_log;
 pub mod harness_policy;
 pub mod history;
+pub mod task_ownership;
+pub mod task_simulators;
 pub mod db_branch;
 pub mod hooks;
 pub mod issue_reconcile;

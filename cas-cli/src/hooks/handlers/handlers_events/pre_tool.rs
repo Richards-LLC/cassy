@@ -124,7 +124,13 @@ fn handle_pre_tool_use_inner(
         return Ok(HookOutput::with_pre_tool_permission("deny", reason));
     }
 
-    // cas-d757 (GH #1219): operator-authenticated CLIs (vercel) and their
+    if let Some(reason) =
+        super::worker_denied_tools::credential_store_access_denial(input, tool_name)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
+    // cas-d757 (GH #1219): operator-authenticated CLIs (vercel/neonctl) and their
     // MCP tools are the supervisor's. Workers only; before auto-approval and
     // the missing-root early return.
     if let Some(reason) = super::worker_denied_tools::denial(input, tool_name, cas_root) {
@@ -963,7 +969,6 @@ fn handle_pre_tool_use_inner(
 
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
-
     if protection.enabled {
         // Bash has no file_path. Reuse the structural destination recognizer
         // from workspace containment; credential reads and quoted command text
@@ -3298,7 +3303,7 @@ fn shell_command_without_heredoc_bodies(command: &str) -> String {
     shell_command
 }
 
-fn shell_heredoc_bodies(command: &str) -> Vec<String> {
+pub(super) fn shell_heredoc_bodies(command: &str) -> Vec<String> {
     let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
         std::collections::VecDeque::new();
     let mut bodies = Vec::new();
@@ -4744,7 +4749,7 @@ const COMMAND_WRAPPERS: &[&str] = &[
 
 /// The index of the command a wrapper chain runs, or `None` when the
 /// statement has no command word.
-fn unwrapped_command_index(words: &[String]) -> Option<usize> {
+pub(super) fn unwrapped_command_index(words: &[String]) -> Option<usize> {
     let mut index = executable_word_index(words)?;
     for _ in 0..16 {
         let name = shell_word_basename(&words[index]);

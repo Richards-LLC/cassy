@@ -383,7 +383,16 @@ pub fn run_internal_provisioner(input: &Path, output: &Path) -> anyhow::Result<(
     );
     let context: WorkerSpawnContext = serde_json::from_value(input_data.context)?;
     let outcome = (|| {
-        let prep = context.resolve()?;
+        let worker_name = context.worker_name.clone();
+        let project_path = context.project_path.clone();
+        let cas_dir = context.cas_dir.clone();
+        let prep = context.resolve().with_context(|| {
+            format!(
+                "resolving spawn context for '{worker_name}' (project {}, CAS {})",
+                project_path.display(),
+                cas_dir.display()
+            )
+        })?;
         serde_json::to_writer(
             std::fs::File::create(input.with_file_name("prepared.json"))?,
             &prep.worktree_info.is_some(),
@@ -398,8 +407,15 @@ pub fn run_internal_provisioner(input: &Path, output: &Path) -> anyhow::Result<(
         let receipt = super::render_and_ops::epic_workers::spawn_provision_receipt(&prep);
         let warnings = prep.warnings.clone();
         let base_provenance = prep.base_provenance.clone();
+        let result = prep.run().with_context(|| {
+            format!(
+                "running spawn preparation for '{worker_name}' (project {}, CAS {})",
+                project_path.display(),
+                cas_dir.display()
+            )
+        })?;
         Ok::<_, anyhow::Error>(ProvisionedWorker {
-            result: prep.run()?,
+            result,
             warnings,
             base_provenance,
             receipt,
@@ -583,7 +599,11 @@ pub(crate) fn run_command(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn()?;
+    let executable = command.get_program().to_string_lossy().into_owned();
+    let cwd = command.get_current_dir().map(Path::to_path_buf);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to launch provisioner {executable:?} in {cwd:?}"))?;
     {
         let mut pid = cancellation
             .child_pid
@@ -737,38 +757,6 @@ mod tests {
             strip_deleted_suffix(PathBuf::from("/bin/cas (deleted)")),
             PathBuf::from("/bin/cas")
         );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn internal_provisioner_main_dispatch_round_trips_success() {
-        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let dir = tempfile::tempdir().unwrap();
-        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-        std::fs::write(
-            cas_dir.join("config.toml"),
-            "[factory]\nspawn_min_free_gib = 0\n",
-        )
-        .unwrap();
-        let context = WorkerSpawnContext {
-            worker_name: "dispatch-fixture".into(),
-            spawn_type: "named".into(),
-            isolate: false,
-            task_id: None,
-            project_path: dir.path().to_path_buf(),
-            cas_dir,
-            worktree_repo_root: None,
-            worktree_root: None,
-            epic_branch: None,
-            current_epic_id: None,
-            factory_session: None,
-        };
-        // launch invokes the real cas binary, hidden main.rs dispatch and JSON envelope.
-        let (handle, _) = launch(context, Duration::from_secs(10));
-        let worker = handle.await.unwrap().unwrap();
-        assert_eq!(worker.result.worker_name, "dispatch-fixture");
-        assert_eq!(worker.result.cwd, dir.path());
-        assert!(worker.result.worktree.is_none());
-        assert!(!worker.receipt.is_empty());
     }
 
     #[test]

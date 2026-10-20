@@ -5,9 +5,9 @@
 //! With no CLI credentials it started a Vercel device login, which put an auth
 //! prompt on the operator's screen, every time. The operator does not grant
 //! it; the supervisor owns such access. This guard refuses a worker's shell
-//! command that runs a CLI on `factory.worker_denied_clis` (default `vercel`),
+//! command that runs a CLI on `factory.worker_denied_clis` (defaults `vercel`, `neonctl`),
 //! however wrapped, and an MCP or connector tool matching
-//! `factory.worker_denied_mcp_tools` (default `*vercel*`), including calls
+//! `factory.worker_denied_mcp_tools` (defaults `*vercel*`, `*neon*`), including calls
 //! dispatched through `mcp_execute`. The refusal sends the worker to the
 //! supervisor with a blocker. Supervisors are never refused.
 use std::path::Path;
@@ -80,6 +80,28 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
         return denied_cli(&policy, command).map(|cli| cli_refusal(&cli));
     }
     denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| tool_refusal(&name, &pattern))
+}
+
+/// Refuse paths into operator-authenticated stores before auto-approval. The
+/// path resolver is shared with every supported file and shell surface.
+pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> Option<String> {
+    if !super::operator_credentials::references_store(input, tool) {
+        return None;
+    }
+    if crate::harness_policy::is_factory_agent(input) && crate::harness_policy::is_worker(input) {
+        Some(operator_credential_refusal())
+    } else {
+        Some("🚫 PROTECTED OPERATOR CREDENTIALS: operator Neon and Vercel authentication stores are not readable from agent sessions.".to_string())
+    }
+}
+
+fn operator_credential_refusal() -> String {
+    let prefix = crate::harness_policy::own_tool_prefix();
+    format!(
+        "🚫 WORKER-DENIED OPERATOR CREDENTIALS (GH #1293): factory workers cannot read the operator's Neon or Vercel authentication stores. Ask the supervisor via blocker=true: \
+         `{prefix}coordination action=message target=supervisor blocker=true summary=\"need operator credential access\" \
+         message=\"<what you need and why>\"`, then wait."
+    )
 }
 
 /// The project's factory denials, else the global ones, else the defaults.

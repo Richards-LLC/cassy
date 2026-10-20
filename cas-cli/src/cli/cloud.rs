@@ -396,6 +396,8 @@ fn clear_foreign_identity_metadata(
 #[derive(Parser)]
 #[command(group(clap::ArgGroup::new("purge").args(["purge_team_owned", "purge_pull_echoes"])))]
 pub struct CloudQueueArgs {
+    #[command(subcommand)]
+    pub command: Option<CloudQueueCommand>,
     /// Remove selected rejected personal copies with proven team delivery.
     /// Ownership rejection alone is not proof; unproven transport is retained.
     #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
@@ -435,6 +437,17 @@ pub struct CloudQueueArgs {
     /// Clear all items from the queue
     #[arg(long)]
     pub clear: bool,
+}
+
+#[derive(Subcommand)]
+pub enum CloudQueueCommand {
+    /// Preview owned legacy personal rows eligible for team transport.
+    /// No HTTP calls. Personal copies stay until itemized team delivery is proven.
+    MigrateToTeam {
+        /// Enqueue the previewed snapshots; requires cloud.team_only=true.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -1626,7 +1639,7 @@ fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdopti
     match adoption {
         TeamScopeAdoption::Adopted(team) => {
             if cli.json {
-                println!(
+                eprintln!(
                     "{}",
                     serde_json::json!({
                         "team_scope_adoption": {
@@ -1651,7 +1664,7 @@ fn print_team_scope_adoption(cli: &Cli, adoption: &crate::cloud::TeamScopeAdopti
             // project belongs to, and silence here would reproduce exactly the
             // "why is nothing shared?" confusion this task exists to remove.
             if cli.json {
-                println!(
+                eprintln!(
                     "{}",
                     serde_json::json!({
                         "team_scope_adoption": {
@@ -2581,9 +2594,50 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
 // QUEUE - View and manage sync queue
 // ═══════════════════════════════════════════════════════════════════════════════
 
+fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: &mut dyn io::Write) -> anyhow::Result<()> {
+    // Deliberately avoid the inheriting loader: its credential cache writes.
+    let config = CloudConfig::load_from_cas_dir(cas_root)?;
+    let team = config.active_team_id().ok_or_else(|| anyhow::anyhow!("Link this project first with `cas cloud team set <team>`"))?;
+    let project = crate::cloud::resolve_canonical_id_for_sync(cas_root)?;
+    anyhow::ensure!(!apply || config.team_only,
+        "Apply requires an operator-declared team-only project: `cas config set cloud.team_only true`; preview with `cas cloud queue migrate-to-team`");
+    let queue = if apply { SyncQueue::open(cas_root)? } else { SyncQueue::open_read_only(cas_root)? };
+    let rows = queue.migrate_personal_to_team(&team, &project, apply)?;
+    let eligible = rows.iter().filter(|row| row.eligible).count();
+    if json {
+        serde_json::to_writer(&mut *out, &serde_json::json!({
+            "operation":"migrate_to_team", "dry_run":!apply, "team_id":team,
+            "project_id":project,"team_only":config.team_only,"eligible":eligible,
+            "enqueued":if apply {eligible} else {0}, "personal_retired":0,
+            "rows":rows, "next":SyncQueue::personal_backlog_remedy(config.team_only),
+        }))?;
+        writeln!(out)?;
+    } else {
+        writeln!(out, "{}: {eligible} eligible; {} retained", if apply {"Enqueued"} else {"Preview"}, rows.len()-eligible)?;
+        writeln!(out, "Personal copies remain until itemized team delivery is acknowledged.")?;
+        for row in &rows {
+            // Full identifiers are available in JSON; fixed vocabulary is ASCII.
+            let id: String = row.entity_id.chars().take(24).collect();
+            writeln!(out, "{} {} {}", row.id, row.entity_type, if row.eligible {"enqueue"} else {"retain"})?;
+            writeln!(out, "  {id}")?;
+            writeln!(out, "  {}", row.reason)?;
+        }
+        writeln!(out, "Full identifiers: cas --json cloud queue migrate-to-team")?;
+        if !config.team_only { writeln!(out, "Declare team-only: cas config set cloud.team_only true")?; }
+        writeln!(out, "Apply: cas cloud queue migrate-to-team --apply")?;
+        writeln!(out, "Then: cas cloud sync")?;
+    }
+    Ok(())
+}
+
 fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use crate::cloud::SyncQueue;
 
+    if let Some(CloudQueueCommand::MigrateToTeam { apply }) = args.command {
+        anyhow::ensure!(!args.purge_team_owned && !args.clear && !args.retry && args.prune.is_none(),
+            "migrate-to-team cannot be combined with queue maintenance flags");
+        return execute_queue_migrate_to_team(cas_root, cli.json, apply, &mut io::stdout());
+    }
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
 
@@ -2955,7 +3009,7 @@ impl SkippedTeamBacklog {
 /// Keeping the presentation data separate from [`crate::cloud::SyncResult`]
 /// lets command handlers preserve their JSON wire shape while `cas update`
 /// and the interactive cloud commands share one human renderer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SyncSummary {
     pub kind: SyncSummaryKind,
     pub counts: BTreeMap<String, usize>,
@@ -3014,7 +3068,8 @@ pub struct SyncSummary {
     pub team_only_mismatch: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyncSummaryKind {
     Push,
     Pull,
@@ -4280,11 +4335,11 @@ fn execute_sync_with_output(
             cas_root,
             cli,
             args.full,
-            emit_output,
+            emit_output && !cli.json,
         )?;
     }
 
-    let operation_output = emit_output && (cli.json || args.dry_run);
+    let operation_output = emit_output && args.dry_run;
     // cas-421e: decided after the team-scope adoption above, which can turn a
     // personal project into a team-linked one within this same sync.
     let team_linked = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
@@ -4316,7 +4371,7 @@ fn execute_sync_with_output(
         // already succeeded by now) and from the pull below (best-effort).
         let cloud_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
         if let Some(team_summary) =
-            execute_team_push_with_output(&cloud_config, cas_root, cli, emit_output && cli.json)?
+            execute_team_push_with_output(&cloud_config, cas_root, cli, false)?
         {
             if let Some(push_summary) = summaries.first_mut() {
                 push_summary.merge_team_summary(&team_summary);
@@ -4380,15 +4435,28 @@ fn execute_sync_with_output(
         summaries.push(pull_summary);
     }
 
-    if emit_output && !cli.json && !args.dry_run {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        for summary in &summaries {
-            render_sync_summary(&mut fmt, summary, cli.verbose)?;
-        }
+    if emit_output && !args.dry_run {
+        write_sync_summaries(&mut io::stdout(), &summaries, cli.json, cli.verbose)?;
     }
 
     Ok(summaries)
+}
+
+fn write_sync_summaries(out: &mut dyn io::Write, summaries: &[SyncSummary], json: bool, verbose: bool) -> anyhow::Result<()> {
+    if json {
+        serde_json::to_writer(&mut *out, &serde_json::json!({
+            "operation":"sync_summary",
+            "push":summaries.iter().find(|s|s.kind == SyncSummaryKind::Push),
+            "pull":summaries.iter().find(|s|s.kind == SyncSummaryKind::Pull),
+            "held_personal_reason":summaries.iter().any(|s|s.team_configured && s.held_personal_pending+s.held_personal_failed>0).then_some("team_linked_sync_drains_team_queue_only"),
+            "recovery_command":"cas cloud queue migrate-to-team",
+        }))?;
+        writeln!(out)?;
+    } else {
+        let mut fmt = Formatter::stdout(out, ActiveTheme::default());
+        for summary in summaries { render_sync_summary(&mut fmt, summary, verbose)?; }
+    }
+    Ok(())
 }
 
 /// The push receipt of a team-linked sync before the team drain is merged in
@@ -8113,6 +8181,61 @@ mod team_cmd_tests {
 
         assert!(tf.output().contains("1 conflict(s) resolved"));
         assert!(tf.output().contains("entry cas-conflict"));
+    }
+
+    #[test]
+    fn cas_db92_migration_cli_defaults_to_read_only_preview_and_requires_team_only_apply() {
+        let parsed = CloudQueueArgs::try_parse_from(["queue", "migrate-to-team"]).unwrap();
+        assert!(matches!(parsed.command, Some(CloudQueueCommand::MigrateToTeam { apply: false })));
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "migration-cli").unwrap();
+        let mut config = CloudConfig::default();
+        config.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
+        config.save_to_cas_dir(&root).unwrap();
+        let task_id = "cas-long-identifier-preserved-in-json";
+        let mut task = crate::types::Task::new(task_id.into(), "fixture".into());
+        task.origin_project = Some("migration-cli".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let queue = SyncQueue::open(&root).unwrap(); queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, task_id, crate::cloud::SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap())).unwrap();
+        let before_config = fs::read(root.join("cloud.json")).unwrap();
+        let before_queue = serde_json::to_value(queue.list_all(10).unwrap()).unwrap();
+        let mut output = Vec::new();
+        execute_queue_migrate_to_team(&root, true, false, &mut output).unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(preview["dry_run"], true); assert_eq!(preview["enqueued"], 0);
+        assert_eq!(preview["eligible"], 1); assert_eq!(preview["rows"][0]["entity_id"], task_id);
+        assert!(execute_queue_migrate_to_team(&root, true, true, &mut Vec::new()).unwrap_err().to_string().contains("cloud.team_only true"));
+        assert_eq!(fs::read(root.join("cloud.json")).unwrap(), before_config);
+        assert_eq!(serde_json::to_value(queue.list_all(10).unwrap()).unwrap(), before_queue);
+        let mut plain = Vec::new();
+        execute_queue_migrate_to_team(&root, false, false, &mut plain).unwrap();
+        assert!(plain.is_ascii());
+        assert!(String::from_utf8(plain).unwrap().lines().all(|l|l.len() <= 80));
+        let mut local = crate::config::Config::load(&root).unwrap();
+        local.set("cloud.team_only", "true").unwrap(); local.save(&root).unwrap();
+        let mut applied = Vec::new();
+        execute_queue_migrate_to_team(&root, true, true, &mut applied).unwrap();
+        let applied: serde_json::Value = serde_json::from_slice(&applied).unwrap();
+        assert_eq!(applied["enqueued"], 1); assert_eq!(applied["personal_retired"], 0);
+        assert_eq!(queue.personal_row_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn cas_db92_sync_json_reports_held_personal_queue_and_recovery_command() {
+        let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
+        let mut summary = team_only_push_summary();
+        refresh_team_linked_backlog(&mut summary, temp.path(), "team-1", false).unwrap();
+        let mut output = Vec::new();
+        write_sync_summaries(&mut output, &[summary], true, false).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["operation"], "sync_summary");
+        assert_eq!(value["push"]["held_personal_pending"], 1);
+        assert_eq!(value["push"]["held_personal_failed"], 3);
+        assert_eq!(value["push"]["held_personal_rejected"]["team_owned_project"], 2);
+        assert_eq!(value["push"]["team_backlog_pending"], 0);
+        assert_eq!(value["recovery_command"], "cas cloud queue migrate-to-team");
     }
 
     /// cas-25c1 fixture: a team-linked checkout whose personal queue holds

@@ -13099,6 +13099,9 @@ fn dropped_ledger_keys_regenerate(
     // An older generator ignores `--rev`/`--only` and would rewrite the
     // caller's checkout instead: run only one that declares `--only`.
     let generator = show(target, REFERENCE_HISTORY_GENERATOR)?;
+    if !String::from_utf8_lossy(&generator).contains("--only)") {
+        return None;
+    }
     let scratch = tempfile::tempdir().ok()?;
     let script = scratch.path().join("gen-builtin-reference-history.sh");
     let fresh = scratch.path().join("reference-history.json");

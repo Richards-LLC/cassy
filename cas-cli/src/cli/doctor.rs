@@ -4589,20 +4589,27 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
 
 fn cloud_team_only_check(cas_root: &Path) -> Check {
     match crate::cloud::CloudConfig::load_from_cas_dir(cas_root) {
-        Ok(config) if config.team_only => match config.validate_team_only() {
-            Ok(()) => {
-                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
-                Check::new(
+        Ok(config) if config.team_only => {
+            let (held, held_label) = team_only_doctor_held_rows(cas_root, &config);
+            match config.validate_team_only() {
+                Ok(()) => Check::new(
                     "cloud team-only",
-                    if held > 0 { CheckStatus::Warning } else { CheckStatus::Ok },
-                    format!("on; project rows sync only to the configured team; {held} personal rows held (team_only)"),
-                )
+                    if held > 0 {
+                        CheckStatus::Warning
+                    } else {
+                        CheckStatus::Ok
+                    },
+                    format!(
+                        "on; project rows sync only to the configured team; {held} {held_label} held (team_only)"
+                    ),
+                ),
+                Err(message) => Check::new(
+                    "cloud team-only",
+                    CheckStatus::Error,
+                    format!("{message}; {held} {held_label} held (team_only)"),
+                ),
             }
-            Err(message) => {
-                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
-                Check::new("cloud team-only", CheckStatus::Error, format!("{message}; {held} personal rows held (team_only)"))
-            }
-        },
+        }
         Ok(config) => {
             // cas-25c1: the cloud already said this project is team-owned.
             // A checkout that never got `cloud.team_only` keeps queueing
@@ -4626,6 +4633,23 @@ fn cloud_team_only_check(cas_root: &Path) -> Check {
             CheckStatus::Warning,
             format!("could not read cloud config: {error}"),
         ),
+    }
+}
+
+fn team_only_doctor_held_rows(
+    cas_root: &Path,
+    config: &crate::cloud::CloudConfig,
+) -> (usize, &'static str) {
+    if config.active_team_id().is_some() {
+        (
+            crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0),
+            "migratable personal row(s)",
+        )
+    } else {
+        let count = crate::cloud::SyncQueue::open_read_only(cas_root)
+            .and_then(|queue| queue.personal_row_count())
+            .unwrap_or(0);
+        (count, "personal row(s)")
     }
 }
 
@@ -5859,7 +5883,9 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
     let rejections = cloud_queue_rejections(&conn);
-    let remediation = if rejections.is_empty()
+    let remediation = if held_notice.is_some() && rejections.is_empty() {
+        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team`; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else if rejections.is_empty()
         || rejections
             .iter()
             .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
@@ -6291,7 +6317,35 @@ mod tests {
     /// so nothing pulled. Doctor names the stale pull and its cause, and a
     /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).
     #[test]
-    fn cas_db92_doctor_explains_held_personal_rows_without_retrying_the_wrong_endpoint() {
+    fn cas_db92_doctor_explains_single_held_personal_row_without_retry_advice() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let mut cloud = crate::cloud::CloudConfig::default();
+        cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = crate::types::Task::new("held".into(), "held".into());
+        task.origin_project = Some("p".into());
+        tasks.add(&task).unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap())).unwrap();
+
+        let check = cloud_queue_check(&root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("1 migratable personal row(s) held"));
+        assert!(check.message.contains("cas config set cloud.team_only true"));
+        assert!(check.message.contains("cas cloud queue migrate-to-team"));
+        assert!(!check.message.contains("cas cloud queue --retry"), "{}", check.message);
+
+        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
+        let after_migration = cloud_queue_check(&root);
+        assert!(!after_migration.message.contains("personal row(s) held"), "{}", after_migration.message);
+    }
+
+    #[test]
+    fn cas_db92_doctor_keeps_conflict_and_rejection_details_with_a_held_row() {
         let temp = TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
@@ -6308,12 +6362,7 @@ mod tests {
                 task.share = Some(crate::types::ShareScope::Private);
             }
             tasks.add(&task).unwrap();
-            queue.enqueue(
-                crate::cloud::EntityType::Task,
-                id,
-                crate::cloud::SyncOperation::Upsert,
-                Some(&serde_json::to_string(&task).unwrap()),
-            ).unwrap();
+            queue.enqueue(crate::cloud::EntityType::Task, id, crate::cloud::SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap())).unwrap();
         };
         enqueue_task("held", false);
         enqueue_task("registration-conflict", true);
@@ -6326,15 +6375,24 @@ mod tests {
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("1 migratable personal row(s) held"));
-        assert!(check.message.contains("cas config set cloud.team_only true"));
-        assert!(check.message.contains("cas cloud queue migrate-to-team"));
-        assert!(!check.message.contains("cas cloud queue --retry"));
         assert!(check.message.contains("project_registration_conflict"), "{}", check.message);
         assert!(check.message.contains("team_owned_project"), "{}", check.message);
+    }
 
-        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
-        let after_migration = cloud_queue_check(&root);
-        assert!(!after_migration.message.contains("personal row(s) held"), "{}", after_migration.message);
+    #[test]
+    fn cas_db92_team_only_check_counts_personal_rows_without_a_linked_team() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut config = crate::cloud::CloudConfig::default();
+        config.team_only = true;
+        config.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+
+        let check = cloud_team_only_check(&root);
+        assert!(matches!(check.status, CheckStatus::Error));
+        assert!(check.message.contains("1 personal row(s) held (team_only)"), "{}", check.message);
     }
 
     #[test]

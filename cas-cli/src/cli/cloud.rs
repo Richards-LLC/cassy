@@ -2347,7 +2347,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             fmt.write_raw("Not logged in to Cassy Cloud")?;
             fmt.newline()?;
             if let Some(count) = held {
-                fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
                 fmt.newline()?;
             }
             fmt.write_raw("  Run ")?;
@@ -2446,7 +2446,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     ))?;
                     fmt.newline()?;
                     if let Some(count) = held {
-                        fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                        fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
                         fmt.newline()?;
                     }
 

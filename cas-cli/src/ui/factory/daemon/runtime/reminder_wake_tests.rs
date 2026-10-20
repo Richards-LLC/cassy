@@ -77,7 +77,8 @@ async fn a_fired_reminder_wakes_an_idle_supervisor_pane_cas_835e() {
 }
 
 /// Only a daemon-stamped row that IS a reminder delivery has the class. The
-/// same words from any other sender, or quoted mid-text, never wake.
+/// same words from a worker can be a directed message, but never acquire the
+/// Reminder class; quoted daemon text is not a reminder delivery.
 #[test]
 fn reminder_wake_authority_cannot_be_borrowed_cas_835e() {
     let prompt = "Reminder #42: check CI 38834844173\nProvenance: issued 5 min ago under no task context.";
@@ -95,7 +96,11 @@ fn reminder_wake_authority_cannot_be_borrowed_cas_835e() {
         },
     ] {
         // pin: the reminder delivery text exactly as fire_reminder renders it.
-        assert_eq!(class(&sender, prompt), None, "{sender:?} must not wake with a reminder's words");
+        let expected = if matches!(sender, WakeSender::Registered { .. }) {
+            Some(SupervisorWakeClass::DirectedMessage)
+        } else { None };
+        assert_eq!(class(&sender, prompt), expected,
+            "{sender:?} must not acquire Reminder authority from the words alone");
     }
     assert_eq!(
         class(&WakeSender::Daemon, "FYI: Reminder #42: check CI"),

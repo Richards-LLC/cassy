@@ -575,7 +575,12 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert!(replies[0].prompt.ends_with("yes"));
     // pin: pm_1 is the fixture's Cloud parent id and must survive as reply correlation.
     assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
-    for (kind, blocker, wakes) in [(Some("blocker"), false, true), (None, true, true), (Some("status"), false, false)] {
+    // Ordinary/status mail wakes too. Only explicit receipt/quiet intent
+    // removes eligibility from an authenticated peer message.
+    for (kind, blocker, wakes) in [
+        (Some("blocker"), false, true), (None, true, true), (Some("status"), false, true),
+        (Some("receipt"), false, false), (Some("quiet"), false, false),
+    ] {
         let body = format!("peer intent {kind:?} blocker={blocker}");
         coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker})).await.unwrap();
         let bb = b.clone();

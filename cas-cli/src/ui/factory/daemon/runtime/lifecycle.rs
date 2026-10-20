@@ -1554,8 +1554,8 @@ mod worker_attention_tests {
         assert_ne!(attention_episode_key("a:b", "c", start), attention_episode_key("a", "b:c", start));
     }
 
-    fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
-        use super::super::queue_and_events::{PaneWakeState, ToolCallEvidence, WakeSender};
+    fn assert_recovery_class_requires_daemon(row: &cas_store::QueuedPrompt) {
+        use super::super::queue_and_events::{PaneWakeState, SupervisorWakeClass, ToolCallEvidence, WakeSender};
         use crate::ui::factory::director::{AgentSummary, DirectorData};
         let now = chrono::Utc::now();
         let data = DirectorData {
@@ -1607,6 +1607,10 @@ mod worker_attention_tests {
             "emitted recovery must wake: {} ({})",
             row.prompt, decision.reason
         );
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(&sender, "supervisor", &row.source, &row.prompt),
+            Some(SupervisorWakeClass::Lifecycle),
+        );
         for sender in [
             WakeSender::Unstamped,
             WakeSender::Unattributed,
@@ -1626,10 +1630,16 @@ mod worker_attention_tests {
                 pane,
                 now,
             );
-            assert!(
-                !decision.allowed,
-                "forged recovery must not wake: {sender:?}"
+            // An authenticated worker can send an ordinary directed message,
+            // but quoting the relay cannot acquire the daemon's Lifecycle class.
+            let expected = if matches!(sender, WakeSender::Registered { .. }) {
+                Some(SupervisorWakeClass::DirectedMessage)
+            } else { None };
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(&sender, "supervisor", &row.source, &row.prompt),
+                expected, "relay authority must follow the authenticated sender: {sender:?}",
             );
+            assert_eq!(decision.allowed, expected.is_some(), "{sender:?}: {}", decision.reason);
         }
         for prompt in [
             format!("quoted text {}", row.prompt),
@@ -2652,7 +2662,7 @@ mod worker_attention_tests {
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
                 &row.prompt
             ));
-            assert_recovery_wake_requires_daemon(row);
+            assert_recovery_class_requires_daemon(row);
             let notifications = crate::store::open_supervisor_queue_store(&cas_dir)
                 .unwrap()
                 .peek("supervisor-id", 10)
@@ -2983,7 +2993,7 @@ mod worker_attention_tests {
         assert!(rows[0].prompt.contains("cas-pr-lane"));
         assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
         assert!(rows[0].prompt.contains("33436155392"));
-        assert_recovery_wake_requires_daemon(&rows[0]);
+        assert_recovery_class_requires_daemon(&rows[0]);
     }
 
     #[test]

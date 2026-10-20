@@ -683,6 +683,14 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 
+    /// Seconds to collect directed supervisor messages into one submitted turn.
+    #[serde(default = "default_supervisor_message_debounce_secs")]
+    pub supervisor_message_debounce_secs: u64,
+
+    /// Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.
+    #[serde(default = "default_supervisor_message_wakes_per_hour")]
+    pub supervisor_message_wakes_per_hour: u64,
+
     /// Maximum number of characters accepted in an ordinary agent message.
     #[serde(default = "default_message_max_chars")]
     pub message_max_chars: usize,
@@ -1003,6 +1011,10 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
     14
 }
 
+fn default_supervisor_message_debounce_secs() -> u64 { 20 }
+
+fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -1080,6 +1092,8 @@ impl Default for FactoryConfig {
             scratch_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
+            supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
+            supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
             note_max_chars: default_note_max_chars(),

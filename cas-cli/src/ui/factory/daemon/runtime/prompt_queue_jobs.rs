@@ -69,6 +69,8 @@ pub(crate) enum QueueStamp {
         reason: cas_store::PendingReason,
         detail: Option<String>,
     },
+    /// One submitted supervisor turn, persisted off the control loop.
+    DirectedWake { cas_dir: PathBuf, recipient: String, senders: Vec<String>, created_at: chrono::DateTime<chrono::Utc>, injected_at: chrono::DateTime<chrono::Utc> },
     /// What the wake nudge did.
     WakeAttempt {
         attempt: cas_store::WakeAttempt,
@@ -147,6 +149,7 @@ impl QueueStamp {
             Self::TransportDelivered => "transport_delivered",
             Self::TransportReceipt => "transport_receipt",
             Self::PendingReason { .. } => "pending_reason",
+            Self::DirectedWake { .. } => "directed_wake",
             Self::WakeAttempt { .. } => "wake_attempt",
             Self::Retry { .. } => "retry",
             Self::Dropped { .. } => "dropped",
@@ -168,6 +171,9 @@ impl QueueStamp {
 
     pub(crate) fn apply(&self, queue: &dyn cas_store::PromptQueueStore, row: i64, recipient: &str) -> cas_store::Result<()> {
         match self {
+            Self::DirectedWake { cas_dir, recipient, senders, created_at, injected_at } =>
+                crate::supervisor_message_wakes::record(cas_dir,row,recipient,senders,*created_at,*injected_at)
+                    .map_err(|error| cas_store::StoreError::Other(error.to_string())),
             Self::ReleaseClaim { claim_token } => queue
                 .release_recipient_transport_claim(row, recipient, *claim_token)
                 .map(drop),

@@ -2091,10 +2091,12 @@ pub enum SupervisorWakeClass {
     Lifecycle,
     /// Another registered supervisor on this clone (cas-15f2).
     PeerSupervisor,
+    /// An authenticated ordinary directed message; debounce and cap run in QueueSelect.
+    DirectedMessage,
     /// A peer supervisor of this repo on another machine, relayed by the
     /// Cassy Cloud peer mailbox: a Daemon-stamped row whose first line is a
     /// CAS-written `<cas-peer-message …/>` envelope carrying a direct reply,
-    /// ask or blocker. Peer FYIs remain inbox-only (cas-1f25).
+    /// kind or reply metadata. A no-kind field report wakes too (cas-1e7e2).
     CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
@@ -2646,7 +2648,6 @@ pub(crate) struct StallNudgeRead {
 pub(crate) struct RowFacts {
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
-    pub(crate) wake_cap_notice: Option<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
     /// `None` when the read failed.
     pub(crate) wake_gate: Option<(u32, Option<chrono::DateTime<chrono::Utc>>)>,
@@ -6585,45 +6586,10 @@ impl FactoryDaemon {
         pane_target != supervisor_name && Self::worker_looks_idle(data, pane_target, now)
     }
 
-    /// cas-f02b (GH #101): may this queued row wake an IDLE supervisor pane?
-
-    ///
-    /// cas-dab2 excluded the supervisor from the idle nudge for good reason —
-    /// worker→supervisor chatter was being typed over the operator's
-    /// in-progress input and double-delivered with no attribution. That
-    /// exclusion stays for ordinary traffic. But it also silenced the one
-    /// class of message the factory cannot make progress without: a worker
-    /// parked in `awaiting_merge` (or close-rejected / blocked) is waiting on
-    /// the supervisor, and for a Claude supervisor in teams mode the signal is
-    /// an inbox FILE write that Claude Code reads only at a turn boundary. An
-    /// idle supervisor has no next boundary, so the fleet idles until
-    /// something external creates a turn — the reported behavior, where every
-    /// merge drain came from a scheduled sweep and never from the push the
-    /// factory prompt promises.
-    ///
-    /// Narrow by construction (cas-d9a8 re-keyed the first bullet: the marker
-    /// was a caller-settable string, so it stated intent and proved nothing):
-    /// - only rows CAS itself stamped as written by its own machinery, an
-    ///   authenticated peer supervisor, or a registered worker sending a
-    ///   CAS-framed merge request, typed status/ready action, blocker or
-    ///   verification-dispatch handoff (cas-8725) — never arbitrary messages;
-    /// - only when the pane's own signals are quiet right now — judged by
-    ///   heartbeat/activity freshness alone, since a supervisor owns its epic
-    ///   for the whole session and that ownership is not an in-flight turn;
-    /// - never while the operator has an unsubmitted draft (`composer_dirty`),
-    ///   so cas-dab2's stolen-typing symptom cannot recur through this path
-    ///   even after `Mux::inject`'s bounded defer window elapses;
-    /// - the payload is a self-identifying `<task-lifecycle …>` block, so it
-    ///   cannot be mistaken for operator input the way a bare relayed worker
-    ///   message could.
-    /// Whether this row is a supervisor wake signal at all — independent of
-    /// whether the pane can take it right now (cas-f02b). Used to decide that a
-    /// row must NOT be consumed until it has actually woken the pane.
-    ///
-    /// cas-d9a8: keyed on the server-stamped sender, exactly like
-    /// [`Self::supervisor_wake_decision`]. If these two disagreed, an eligible
-    /// row would either be consumed before it ever woke the pane (the original
-    /// silent stall) or held pending forever.
+    /// Only authenticated directed messages and CAS action envelopes can wake
+    /// a supervisor. Quiet acknowledgements/copies do not. QueueSelect debounces
+    /// and caps directed messages; the existing pane gate protects busy turns,
+    /// composers and drafts. A wake row remains pending until a handoff succeeds.
     fn row_is_supervisor_wake(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -6634,24 +6600,9 @@ impl FactoryDaemon {
             .is_some_and(SupervisorWakeClass::wakes_idle)
     }
 
-    /// The one place that answers "may THIS sender wake the supervisor with
-    /// THIS payload" (cas-d9a8). `None` means the row is not a wake signal.
-    ///
-    /// Two factors, both required, and neither derived from anything the
-    /// sender typed:
-    ///  - WHO: the server-stamped origin, resolved to a registry role.
-    ///  - WHAT: an envelope CAS itself emits, not free text.
-    ///
-    /// `source` is no longer AUTHORITY, only intent. It used to be half the
-    /// authority here — `is_lifecycle_wake_source(source)` is
-    /// `source.starts_with("lifecycle-wake:")` — which meant the property CAS
-    /// actually enforced was "the caller knows a prefix and a tag grammar",
-    /// not "the caller is who it claims to be". It is still READ, but only on
-    /// a row CAS itself stamped, where CAS also wrote the source: the marker
-    /// is how the lifecycle emitter separates a transition that parks a lane
-    /// (`awaiting_merge`) from a progress FYI (`closed`), and dropping it
-    /// would start waking supervisors for exactly the noise cas-dab2 stopped.
-    /// On any other sender the string is not consulted.
+    /// Classification is based on the immutable authenticated origin, never
+    /// a caller's source label. Sender-selected quiet metadata can only remove
+    /// wake eligibility; it cannot create authority or a typed action class.
     pub(crate) fn supervisor_wake_class(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -6659,6 +6610,7 @@ impl FactoryDaemon {
         prompt: &str,
     ) -> Option<SupervisorWakeClass> {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        if crate::supervisor_message_wakes::quiet(prompt) || crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(prompt).is_some() { return None; }
         match sender {
             // cas-f02b / cas-3dcb: a lifecycle transition, worker death, spawn
             // failure, CI red or worker-attention relay parks a lane behind
@@ -6784,9 +6736,9 @@ impl FactoryDaemon {
                         // close path; accepted from the registered origin on
                         // the same terms as the verification handoff.
                         Some(SupervisorWakeClass::QaDispatch)
-                    } else {
-                        None
-                    }
+                    } else if matches!(role, cas_types::AgentRole::Worker | cas_types::AgentRole::Director) {
+                        Some(SupervisorWakeClass::DirectedMessage)
+                    } else { None }
                 }
             },
             // An unstamped, explicitly-unattributed or no-longer-resolvable
@@ -6945,6 +6897,7 @@ impl FactoryDaemon {
             SupervisorWakeClass::Lifecycle => {
                 "supervisor pane is quiet and the row is a lifecycle wake from CAS"
             }
+            SupervisorWakeClass::DirectedMessage => "supervisor pane is quiet and the row is an authenticated directed message",
             SupervisorWakeClass::PeerSupervisor => {
                 "supervisor pane is quiet and the row is from an authenticated peer supervisor"
             }
@@ -7629,6 +7582,7 @@ impl FactoryDaemon {
         inject_result: anyhow::Result<super::delivery::NudgeReport>,
     ) {
         let super::inject_commands::DirectDelivery {
+            message_batch, message_senders,
             queued,
             pane_target,
             generation: inject_generation,
@@ -7638,6 +7592,26 @@ impl FactoryDaemon {
             urgent_wake_probe_opened,
             delivery_started_at_utc,
         } = delivery;
+        if inject_result.as_ref().is_ok_and(|report| report.outcome == cas_mux::InjectOutcome::Delivered)
+            && !wake_deferred && !message_senders.is_empty() {
+            self.queue_jobs.stamp(self.app.cas_dir(),queued.id,&queued.target,
+                super::prompt_queue_jobs::QueueStamp::DirectedWake { cas_dir: self.app.cas_dir().to_path_buf(),
+                    recipient: pane_target.clone(), senders: message_senders, created_at: queued.created_at,
+                    injected_at: chrono::Utc::now() });
+        }
+        for (member, generation) in message_batch {
+            let report = inject_result.as_ref().map(|report| {
+                let mut report=report.clone();
+                report.wake=cas_store::WakeAttempt::NotAttempted;
+                report.wake_detail=Some(format!("coalesced into supervisor wake #{}",queued.id));
+                report
+            }).map_err(|error| anyhow::anyhow!("{error}"));
+            self.finish_direct_delivery(super::inject_commands::DirectDelivery {
+                queued: member, pane_target: pane_target.clone(), generation,
+                message_batch: Vec::new(), message_senders: Vec::new(), wake_deferred,
+                prior_copy_unread, nudge_only, urgent_wake_probe_opened: false, delivery_started_at_utc,
+            },report);
+        }
         let target = &queued.target;
         let mut success = false;
         // cas-7a01 (GH #155): persist what the wake nudge actually did
@@ -9146,7 +9120,7 @@ impl FactoryDaemon {
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
             // GH #1231: bounded supervisor events have one delivery path.
             // Preserve already-held legacy copies until their recovery settles.
-            let inline_supervisor_body = claude_inbox_target
+            let inline_supervisor_body = !facts.message_senders.is_empty() || claude_inbox_target
                 && (target == "supervisor" || target == self.app.supervisor_name())
                 && cas_store::fits_hook_surface(&prompt_with_instructions)
                 && facts.deferred_inbox.is_none()
@@ -9930,8 +9904,31 @@ impl FactoryDaemon {
                         continue;
                     }
                     super::prompt_queue_jobs::ClaimStep::HandedOff
-                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
+                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => {
+                        for member in &facts.message_batch {
+                            self.queue_jobs.release_inject_claim(self.app.cas_dir(),member.id,&member.target);
+                        }
+                        continue;
+                    },
                 };
+                let mut batch_claims = Vec::new();
+                let mut waiting_for_batch = false;
+                for member in &facts.message_batch {
+                    match self.queue_jobs.claim_for_inject(self.app.cas_dir(), &self.session_name,
+                        member.id, &member.target, &member.target) {
+                        super::prompt_queue_jobs::ClaimStep::Claimed(token) => batch_claims.push((member.clone(),token)),
+                        super::prompt_queue_jobs::ClaimStep::Waiting => waiting_for_batch = true,
+                        super::prompt_queue_jobs::ClaimStep::HandedOff | super::prompt_queue_jobs::ClaimStep::NotClaimed => {},
+                    }
+                }
+                if waiting_for_batch {
+                    self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
+                    continue;
+                }
+                for (member, _) in &batch_claims {
+                    prompt_with_instructions.push_str(&format!("\n\n{}\n{}",
+                        crate::mcp::tools::service::agent_search_system::message::first_message_provenance(member), member.prompt));
+                }
                 let normal_wake = if !queued.urgent {
                     let is_supervisor_target = pane_target == self.app.supervisor_name();
                     // cas-45c4: every recipient's pane is sampled now — the
@@ -10003,6 +10000,14 @@ impl FactoryDaemon {
                     Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
                 } else { None };
                 if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
+                    for (member, token) in &batch_claims {
+                        self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
+                        self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: wake_decision.status_detail(),
+                                recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
+                        self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
+                    }
                     // No transport admission, cadence spend or attempt: keep the
                     // body surfaceable by the next hook and stop 100ms selection.
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
@@ -10031,6 +10036,13 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
+                let mut message_batch = Vec::new();
+                for (member, token) in batch_claims {
+                    match self.queue_jobs.admit_claimed(self.app.cas_dir(),member.id,&member.target,token,Instant::now()) {
+                        super::prompt_queue_jobs::Admission::Inject { generation } => message_batch.push((member,generation)),
+                        super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},
+                    }
+                }
                 if renudge_granted {
                     self.reserve_renudge_attempt(queued.id);
                 }
@@ -10086,6 +10098,7 @@ impl FactoryDaemon {
                                 ticket,
                                 super::inject_commands::UrgentInject::Row {
                                     delivery: Box::new(super::inject_commands::DirectDelivery {
+                                        message_batch: Vec::new(), message_senders: Vec::new(),
                                         queued: queued.clone(),
                                         pane_target: pane_target.clone(),
                                         generation: inject_generation,
@@ -10255,6 +10268,7 @@ impl FactoryDaemon {
                                     super::inject_commands::UrgentInject::NormalRow {
                                         inline_supervisor: inline_supervisor_body,
                                         delivery: Box::new(super::inject_commands::DirectDelivery {
+                                            message_batch, message_senders: facts.message_senders.clone(),
                                             queued: queued.clone(), pane_target: pane_target.clone(),
                                             generation: inject_generation, wake_deferred: false,
                                             prior_copy_unread, nudge_only, urgent_wake_probe_opened: false,
@@ -10304,6 +10318,7 @@ impl FactoryDaemon {
                 };
                 self.finish_direct_delivery(
                     super::inject_commands::DirectDelivery {
+                        message_batch, message_senders: facts.message_senders.clone(),
                         queued: queued.clone(),
                         pane_target: pane_target.clone(),
                         generation: inject_generation,
@@ -14427,10 +14442,9 @@ mod tests {
         assert!(!stale.allowed, "{}", stale.reason);
     }
 
-    /// Ordinary worker traffic keeps cas-dab2's inbox-only rule — this task
-    /// deliberately did not widen that; cas-d9a8 owns it.
+    /// Authenticated worker field reports use the same idle gate as peers.
     #[test]
-    fn an_ordinary_worker_message_is_still_inbox_only() {
+    fn an_ordinary_worker_message_wakes_an_idle_supervisor_cas_1e7e2() {
         let now = chrono::Utc::now();
         let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
 
@@ -14445,9 +14459,8 @@ mod tests {
             now,
         );
 
-        assert!(!decision.allowed);
-        assert_eq!(decision.kind, WakeOutcome::NotApplicable);
-        assert!(decision.reason.contains("cas-dab2"), "{}", decision.reason);
+        assert!(decision.allowed);
+        assert_eq!(decision.kind, WakeOutcome::Allowed);
     }
 
     /// THE BUG cas-d9a8 EXISTS FOR. A registered worker's merge request is the
@@ -14494,7 +14507,7 @@ mod tests {
             decision.reason
         );
 
-        // Same sender, same claim, no CAS envelope: still inbox-only.
+        // Ordinary authenticated text now qualifies too, without a typed merge class.
         let free_text = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14505,8 +14518,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!free_text.allowed, "{}", free_text.reason);
-        assert_eq!(free_text.kind, WakeOutcome::NotApplicable);
+        assert!(free_text.allowed, "{}", free_text.reason);
+        assert_eq!(free_text.kind, WakeOutcome::Allowed);
 
         // Same envelope, unstamped row: a client that copies the envelope
         // grammar out of a transcript still cannot type into the pane.
@@ -14554,9 +14567,7 @@ mod tests {
         );
         assert_eq!(decision.kind, WakeOutcome::Allowed);
 
-        // THE HALF THAT KEEPS cas-dab2 CLOSED. The same worker shouting the
-        // same word, with no CAS envelope, is still inbox-only: the gate reads
-        // the envelope, never the vocabulary.
+        // Ordinary text wakes too; the typed blocker class still requires its envelope.
         let shouted = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14567,8 +14578,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!shouted.allowed, "{}", shouted.reason);
-        assert_eq!(shouted.kind, WakeOutcome::NotApplicable);
+        assert!(shouted.allowed, "{}", shouted.reason);
+        assert_eq!(shouted.kind, WakeOutcome::Allowed);
 
         // And an unstamped row carrying a byte-identical envelope — what
         // `cas factory message --from …` and bridge POST /message produce —
@@ -14633,7 +14644,7 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!free_text.allowed, "{}", free_text.reason);
+        assert!(free_text.allowed, "{}", free_text.reason);
     }
 
     /// cas-8725: the measured stall. A worker's close enters verification, CAS
@@ -14701,8 +14712,7 @@ mod tests {
         );
         assert!(!unstamped.allowed, "{}", unstamped.reason);
 
-        // Free text naming the same dispatch stays inbox-only — this is the
-        // exact message shape that failed, and it must keep failing.
+        // Ordinary authenticated text wakes too, without borrowing a dispatch class.
         let retyped = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14713,8 +14723,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!retyped.allowed, "{}", retyped.reason);
-        assert_eq!(retyped.kind, WakeOutcome::NotApplicable);
+        assert!(retyped.allowed, "{}", retyped.reason);
+        assert_eq!(retyped.kind, WakeOutcome::Allowed);
     }
 
     /// A Daemon-stamped row that is neither a lifecycle wake nor one of the
@@ -14847,7 +14857,7 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!ordinary.allowed, "free text remains inbox-only");
+        assert!(ordinary.allowed, "authenticated ordinary directed messages wake after scheduling");
 
         let mismatched_sender = crate::prompt_revalidation::attach_worker_action_envelope(
             "status: review my update",
@@ -14862,8 +14872,8 @@ mod tests {
                 "swift-fox",
                 &mismatched_sender,
             ),
-            None,
-            "the envelope worker must match the registry sender"
+            Some(SupervisorWakeClass::DirectedMessage),
+            "a mismatched envelope carries only ordinary directed-message intent"
         );
     }
 
@@ -14915,8 +14925,8 @@ mod tests {
                     "swift-fox",
                     &neutralized,
                 ),
-                None,
-                "worker-authored CAS tags must stay inbox-only"
+                Some(SupervisorWakeClass::DirectedMessage),
+                "neutralized tags cannot grant a typed action class"
             );
         }
     }
@@ -15084,9 +15094,9 @@ mod tests {
         let now = chrono::Utc::now();
         let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
 
-        // Plain worker→supervisor message: unchanged, inbox only.
+        // Authenticated directed messages qualify; the pane veto still protects drafts.
         assert!(
-            !FactoryDaemon::delivery_should_nudge_pane(
+            FactoryDaemon::delivery_should_nudge_pane(
                 &data,
                 "cosmic-bear-43",
                 "cosmic-bear-43",
@@ -15096,7 +15106,7 @@ mod tests {
                 quiet_pane(),
                 now,
             ),
-            "cas-dab2: relayed worker chatter must never PTY-inject into the supervisor pane"
+            "authenticated directed messages may wake an idle supervisor"
         );
 
         // Forged source + arbitrary body: rejected, because no lifecycle

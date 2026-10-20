@@ -128,6 +128,12 @@ fn peer_message(id: &str, reply: bool) -> ClaimedPeerMessage {
     }
 }
 
+fn age_imported(daemon: &FactoryDaemon) {
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+        [(Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()]).unwrap();
+}
+
 fn import(
     daemon: &FactoryDaemon,
     messages: Vec<ClaimedPeerMessage>,
@@ -157,6 +163,7 @@ async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
         ],
     );
     assert_eq!(imported.delivered, 2, "{imported:?}");
+    age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();
     super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
@@ -179,18 +186,20 @@ async fn peer_reply_real_queue_wakes_idle_supervisor_once_per_pass_cas_1f25() {
             .unwrap()
             .unwrap()
             .processed_at
-            .is_none(),
-        "second reply waits for a later pass"
+            .is_some(),
+        "both replies are carried by the same turn"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn peer_fyi_real_queue_stays_inbox_only_cas_1f25() {
+async fn peer_fyi_real_queue_wakes_without_a_kind_cas_1e7e2() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (_root, mut daemon) = peer_fixture().await;
     let imported = import(&daemon, vec![peer_message("pm-fyi", false)]);
     assert_eq!(imported.delivered, 1);
+    age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();
+    super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
     let report = queue
         .message_delivery_report(imported.admitted[0])
@@ -198,8 +207,8 @@ async fn peer_fyi_real_queue_stays_inbox_only_cas_1f25() {
         .unwrap();
     assert_eq!(
         report.wake_attempt,
-        cas_store::WakeAttempt::NotAttempted,
-        "FYI must stay quiet: {report:?}"
+        cas_store::WakeAttempt::Fired,
+        "no-kind field report wakes an idle supervisor: {report:?}"
     );
 }
 
@@ -209,6 +218,7 @@ async fn action_wakes(kind: &str) {
     let mut message = peer_message("pm-action", false);
     message.body = format!("<cas-peer-intent kind=\"{kind}\"/>\nPlease coordinate.");
     let report = import(&daemon, vec![message]);
+    age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();
     super::supervisor_single_turn_tests::settle_injected_writes(&mut daemon).await;
     let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
@@ -262,6 +272,7 @@ async fn peer_outside_project_or_session_cannot_reach_wake_path_cas_1f25() {
     worker.recipient_agent_id = "local-worker".into();
     let report = import(&daemon, vec![foreign, other_session, worker]);
     assert_eq!((report.delivered, report.rejected), (0, 3), "{report:?}");
+    age_imported(&daemon);
     daemon.process_prompt_queue().await.unwrap();
     assert!(
         crate::store::open_prompt_queue_store(daemon.app.cas_dir())
@@ -351,19 +362,17 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
             name: "gold-fox".into(),
         },
     ] {
-        assert!(
-            !decide(&sender, &prompt).allowed,
-            "{sender:?} must not raise a cloud peer wake"
-        );
+        assert_ne!(FactoryDaemon::supervisor_wake_class(&sender,"supervisor","peer:far-heron-3@box-b",&prompt),
+            Some(super::queue_and_events::SupervisorWakeClass::CloudPeerSupervisor),
+            "{sender:?} must not raise a cloud peer wake");
     }
     assert!(!decide(&WakeSender::Daemon, &format!("relayed: {prompt}")).allowed);
     let fyi = render_prompt(&peer_message("pm-fyi", false));
-    assert!(!decide(&WakeSender::Daemon, &fyi).allowed);
+    assert!(decide(&WakeSender::Daemon, &fyi).allowed);
     let quoted = crate::prompt_revalidation::attach_blocker_envelope(&fyi, "quoted-worker", None);
-    assert!(
-        !decide(&WakeSender::Daemon, &quoted).allowed,
-        "a peer FYI cannot borrow daemon blocker authority"
-    );
+    assert_eq!(FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon,"supervisor","peer:far-heron-3@box-b",&quoted),
+        Some(super::queue_and_events::SupervisorWakeClass::CloudPeerSupervisor),
+        "a peer FYI cannot borrow daemon blocker authority");
     for veto in [
         PaneWakeState {
             composer_dirty: true,

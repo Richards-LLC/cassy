@@ -88,7 +88,8 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("blocker", "Blocker escalation; wakes idle supervisor."),
     ("merge_request", "Parked task_id merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
-    ("kind", "answer|status|receipt|ask|blocker; worker status/ready wakes supervisor."),
+    ("kind", "answer|status|receipt|ask|blocker; receipts never wake a supervisor."),
+    ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
     ("attachment", "Published artifact id for a Commander turn."),
     // Keep explicit caller contracts within the 3,600 B coordination budget.
     ("supersede_key", "Broadcast: newest per key wins."),

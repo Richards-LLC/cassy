@@ -23,6 +23,8 @@ use crate::ui::factory::daemon::FactoryDaemon;
 /// what happened (the same state `deliver_queue_selection` held inline).
 #[derive(Debug, Clone)]
 pub(crate) struct DirectDelivery {
+    pub(crate) message_batch: Vec<(cas_store::QueuedPrompt,u64)>,
+    pub(crate) message_senders: Vec<String>,
     pub(crate) queued: cas_store::QueuedPrompt,
     /// The pane the row was delivered to (`supervisor` is name-normalised).
     pub(crate) pane_target: String,
@@ -104,7 +106,7 @@ impl UrgentInjects {
         self.broadcasts.contains_key(&row)
             || self.owners.values().any(|owner| match owner {
                 UrgentInject::Row { delivery, .. } | UrgentInject::NormalRow { delivery, .. } => {
-                    delivery.queued.id == row
+                    delivery.queued.id == row || delivery.message_batch.iter().any(|(member,_)|member.id==row)
                 }
                 UrgentInject::ContextReset { row: id, .. } => *id == row,
                 UrgentInject::BroadcastMember { row: id, .. } => *id == row,

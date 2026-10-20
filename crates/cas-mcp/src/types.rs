@@ -1033,6 +1033,11 @@ pub struct AgentRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub blocker: Option<bool>,
 
+    /// Suppress an idle supervisor wake while retaining ordinary inbox delivery.
+    #[schemars(description = "message: false keeps this directed message inbox-only; acknowledgements and broadcasts never wake")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub wake: Option<bool>,
+
     /// Explicit notification this message acknowledges or answers.
     ///
     /// The recipient can use this durable queue ID to distinguish a real reply

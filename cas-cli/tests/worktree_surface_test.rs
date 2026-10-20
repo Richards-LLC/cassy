@@ -239,6 +239,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         delivery_mode: None,
         merge_request: None,
         blocker: None,
+        wake: None,
         in_reply_to: None,
         kind: None,
         attachment: None,

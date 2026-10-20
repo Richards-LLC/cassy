@@ -186,6 +186,14 @@ impl Config {
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
+                "factory.supervisor_message_debounce_secs".to_string(),
+                factory.supervisor_message_debounce_secs.to_string(),
+            ),
+            (
+                "factory.supervisor_message_wakes_per_hour".to_string(),
+                factory.supervisor_message_wakes_per_hour.to_string(),
+            ),
+            (
                 "factory.message_max_chars".to_string(),
                 factory.message_max_chars.to_string(),
             ),

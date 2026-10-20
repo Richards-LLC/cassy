@@ -424,3 +424,101 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
 }
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
+    if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // Both harnesses use the same body, claim and completion path.
+    for cli in [
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Codex,
+    ] {
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let peer = cas_types::Agent::new_with_role(
+            "burst-peer".into(),
+            "peer".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&peer)
+            .unwrap();
+        let bodies = [
+            "First field report",
+            "Second field report",
+            "Third field report",
+        ];
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| {
+                enqueue(
+                    &daemon,
+                    "peer",
+                    body,
+                    cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: peer.id.clone(),
+                    },
+                )
+            })
+            .collect();
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        // Advance the durable queue clock, without sleeping for the debounce.
+        rusqlite::Connection::open(cas.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+                [(chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
+            )
+            .unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        let typed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let text = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if text.ends_with('\r') {
+                    break text;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one submitted burst body");
+        assert_eq!(typed.matches('\r').count(), 1, "one turn: {typed:?}");
+        for body in bodies {
+            assert_eq!(typed.matches(body).count(), 1, "{typed:?}");
+        }
+        assert!(
+            teams_messages(&daemon).is_empty(),
+            "no duplicate Teams copy"
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        for id in &ids {
+            assert!(
+                typed.contains(&format!("[cas #{id} ")),
+                "each row retains its identity"
+            );
+            assert_eq!(
+                queue.message_delivery_report(*id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Delivered
+            );
+        }
+        assert!(
+            crate::supervisor_message_wakes::report(&cas, daemon.app.supervisor_name())
+                .unwrap()
+                .contains("directed_message_wakes_last_hour: 1")
+        );
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("input")).unwrap(),
+            typed,
+            "no second turn for batch passengers"
+        );
+    }
+}

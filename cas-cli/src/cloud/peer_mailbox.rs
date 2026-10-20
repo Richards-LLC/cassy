@@ -223,12 +223,16 @@ pub struct PeerEnvelope {
 pub enum PeerMessageKind {
     Ask,
     Blocker,
+    Receipt,
+    Quiet,
 }
 
 impl PeerMessageKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
+            Self::Receipt => "receipt",
+            Self::Quiet => "quiet",
             Self::Blocker => "blocker",
         }
     }
@@ -236,6 +240,8 @@ impl PeerMessageKind {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "ask" => Some(Self::Ask),
+            "receipt" => Some(Self::Receipt),
+            "quiet" => Some(Self::Quiet),
             "blocker" => Some(Self::Blocker),
             _ => None,
         }
@@ -244,10 +250,7 @@ impl PeerMessageKind {
 
 impl PeerEnvelope {
     pub fn wakes_idle(&self) -> bool {
-        self.in_reply_to
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-            || self.kind.is_some()
+        !matches!(self.kind, Some(PeerMessageKind::Receipt | PeerMessageKind::Quiet))
     }
 }
 
@@ -374,6 +377,9 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let machine = machine_of(message);
     let (kind, body) = split_message_intent(&message.body);
     let (attachments, body) = split_attachments(body);
+    let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
+        Some(PeerMessageKind::Quiet)
+    } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
     // Existing first-line split proposals are typed asks too. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {

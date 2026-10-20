@@ -188,6 +188,22 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.supervisor_message_debounce_secs", section: "factory", name: "Supervisor Message Debounce",
+        description: "Seconds to collect directed supervisor messages into one submitted turn.", value_type: ConfigType::Int, default: "20",
+        constraint: Constraint::Range(0, 300), advanced: false, requires_feature: None,
+        keywords: &["factory", "message", "wake", "cost"],
+        use_cases: &["Bound directed-message wake latency and token cost"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.supervisor_message_wakes_per_hour", section: "factory", name: "Supervisor Message Wake Cap",
+        description: "Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.", value_type: ConfigType::Int, default: "6",
+        constraint: Constraint::Range(1, 1000), advanced: false, requires_feature: None,
+        keywords: &["factory", "message", "wake", "cost"],
+        use_cases: &["Bound directed-message wake latency and token cost"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.message_max_chars",
         section: "factory",
         name: "Agent Message Character Cap",

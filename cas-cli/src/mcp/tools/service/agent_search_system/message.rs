@@ -1013,6 +1013,9 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        if req.wake == Some(false) || req.kind.as_deref() == Some("receipt") {
+            message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+        }
         // Resolve cross-machine peers before applying the local inbox cap.
         // Their Cloud body must be readable on the receiving machine: spilling
         // first sent a path on the sender's disk instead of the full text
@@ -1933,6 +1936,7 @@ impl CasService {
                         crate::prompt_revalidation::WorkerActionKind::Ready
                     })
                 }
+                Some("receipt" | "answer" | "ask") => None,
                 Some(other) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
@@ -3830,9 +3834,19 @@ impl CasService {
                     factory.delivery_stalled_normal_secs
                 };
                 let verdict_line = recipient_verdict(&r, now, escalate_after_secs);
+                let wake_target = if r.target == "supervisor" {
+                    crate::store::open_agent_store(&self.inner.cas_root).ok()
+                        .and_then(|store| store.list(None).ok())
+                        .and_then(|agents| agents.into_iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor
+                            && agent.factory_session == r.factory_session).max_by_key(|agent| agent.registered_at))
+                        .map(|agent| agent.name).unwrap_or_else(|| r.target.clone())
+                } else { r.target.clone() };
+                let wake_cost_line = crate::supervisor_message_wakes::report(&self.inner.cas_root, &wake_target)
+                    .unwrap_or_else(|error| format!("directed_message_wake_cost: unavailable ({error})\n"));
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      {verdict_line}\
+                     {wake_cost_line}\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\

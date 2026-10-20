@@ -29,10 +29,11 @@ from pathlib import Path
 
 STATUSES = ("Met (live)", "Met (measured)", "Partial", "Gap", "Gap → PM")
 # Common client identifiers are not tracker keys. Exempt only these named
-# standard/model families and four-digit fiscal periods, not every prefix.
+# standard/model families and two-/four-digit fiscal years, not every prefix.
 CLIENT_IDENTIFIERS = re.compile(
     r"\b(?:COVID-19|SHA-(?:1|224|256|384|512)|UTF-(?:8|16|32)|"
-    r"ISO-[0-9]+|GPT-[0-9]+(?:\.[0-9]+)?|(?:Q[1-4]|H[12]|FY)-[0-9]{4})\b", re.I)
+    r"SOC-2|ASC-606|ISO-[0-9]{4,5}|GPT-[0-9]+(?:\.[0-9]+)?|"
+    r"(?:Q[1-4]|H[12])-[0-9]{4}|FY-(?:[0-9]{2}|[0-9]{4}))\b", re.I)
 HYGIENE = [
     # CAS ids include all-digit and longer collision suffixes. Known PROJ/ENG
     # keys also ignore case; other numeric trackers use uppercase prefixes.

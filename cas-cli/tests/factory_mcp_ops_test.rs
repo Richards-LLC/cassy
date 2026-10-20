@@ -10193,6 +10193,15 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     );
     agents.update(&agent).unwrap();
 
+    // cas-21db: assignment and start straddle another worker's merge. Keep
+    // the local epic ref stale, as it is in an idle worker's private clone.
+    let project = env.cas_root.parent().unwrap();
+    let remote = home.path().join("origin.git");
+    git_stdout(project, &["init", "--bare", remote.to_str().unwrap()]);
+    git_stdout(project, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git_stdout(project, &["push", "origin", "epic/foreign"]);
+    let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
+
     let assigned = assign(&env, &task_b, worker)
         .await
         .expect("a clean idle worker may accept work behind its target");
@@ -10200,6 +10209,15 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         assigned.contains("assignee") && assigned.contains("epic/foreign"),
         "{assigned}"
     );
+    git_stdout(project, &["checkout", "epic/foreign"]);
+    std::fs::write(project.join("merged.txt"), "another worker landed\n").unwrap();
+    git_stdout(project, &["add", "merged.txt"]);
+    git_stdout(project, &["commit", "-m", "merge between assignment and start"]);
+    let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
+    git_stdout(project, &["push", "origin", "epic/foreign"]);
+    git_stdout(project, &["reset", "--hard", &assigned_target]);
+    git_stdout(project, &["update-ref", "refs/remotes/origin/epic/foreign", &assigned_target]);
+
     let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "start", "id": task_b
     }))
@@ -10208,7 +10226,8 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
     assert_eq!(
         git_stdout(&worker_path, &["rev-parse", "HEAD"]),
-        git_stdout(&worker_path, &["rev-parse", "epic/foreign"])
+        merged_target,
+        "start must fetch the epic that moved after assignment"
     );
 }
 

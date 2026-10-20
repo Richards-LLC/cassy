@@ -467,10 +467,12 @@ mod tests {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let this = tempfile::tempdir().unwrap();
         let global = crate::store::known_repos::host_cas_dir();
-        std::fs::create_dir_all(&global).unwrap();
-        rusqlite::Connection::open(global.join("cas.db"))
+        let home = global.parent().unwrap();
+        assert_eq!(crate::store::init_cas_dir(home).unwrap(), global);
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        crate::store::open_task_store(&global)
             .unwrap()
-            .execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY); INSERT INTO tasks VALUES ('cas-abcd');")
+            .add(&cas_types::Task::new("cas-abcd".into(), "a global-scope task".into()))
             .unwrap();
         let projects = KnownProjects::load(&this.path().join(".cas"));
         assert_eq!(projects.holders("cas-abcd").unwrap(), vec!["global store".to_string()]);

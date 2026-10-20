@@ -608,6 +608,63 @@ fn supervisor_hook_registration_rebinds_orphaned_dispatches_cas_9060() {
     }
 }
 
+fn assert_foreign_dispatch_not_adopted_cas_9060(foreign_machine: bool, foreign_session: bool, deleted: bool) {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_FACTORY_SESSION", "adoption-session");
+    let temp = TempDir::new().unwrap();
+    let root = init_cas_dir(temp.path()).unwrap();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let (supervisor, _) = register_session_start_agent(
+        &root, agents.as_ref(), "local-supervisor", Some("local-supervisor"),
+        Some("supervisor"), std::process::id(), None,
+    ).unwrap();
+    let mut peer = Agent::new("peer-supervisor".into(), "peer-supervisor".into());
+    peer.role = AgentRole::Supervisor;
+    peer.factory_session = Some(if foreign_session { "peer-session" } else { "adoption-session" }.into());
+    peer.machine_id = if foreign_machine { Some("peer-machine".into()) } else { supervisor.machine_id.clone() };
+    // The peer's live process has a different fingerprint on its own host.
+    // Looking up this PID locally must never decide that peer's liveness.
+    peer.pid = Some(std::process::id());
+    peer.pid_starttime = Some(0);
+    agents.register(&peer).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = Task::new("cas-9060-peer-review".into(), "peer-owned parked review".into());
+    task.status = cas_types::TaskStatus::AwaitingMerge;
+    tasks.add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch(
+        &root, &task.id, "worker", &peer.id,
+        chrono::Utc::now() - chrono::Duration::minutes(1),
+    ).unwrap();
+    if deleted { agents.unregister(&peer.id).unwrap(); }
+    register_session_start_agent(
+        &root, agents.as_ref(), &supervisor.id, Some(&supervisor.name),
+        Some("supervisor"), std::process::id(), None,
+    ).unwrap();
+    let after = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+    assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&dispatch).unwrap());
+    // Even a stale caller snapshot cannot cross the transaction's own scope
+    // check. This is independent of the startup prefilter above.
+    assert_eq!(cas_store::adopt_orphaned_verification_dispatches(
+        &root, &supervisor.id, &[peer], chrono::Utc::now() + chrono::Duration::minutes(10),
+    ).unwrap(), 0);
+}
+
+#[test]
+fn live_same_session_peer_on_another_machine_is_not_adopted_cas_9060() {
+    assert_foreign_dispatch_not_adopted_cas_9060(true, false, false);
+}
+
+#[test]
+fn deleted_owner_from_another_session_is_not_adopted_cas_9060() {
+    assert_foreign_dispatch_not_adopted_cas_9060(false, true, true);
+}
+
+#[test]
+fn deleted_owner_from_another_machine_is_not_adopted_cas_9060() {
+    assert_foreign_dispatch_not_adopted_cas_9060(true, false, true);
+}
+
 /// cas-921f (P1 fix-round): the real env→register→resolve chain for a
 /// worker's harness, end to end — from a REAL `CAS_FACTORY_WORKER_CLI` env
 /// var (not injected `Agent.metadata` directly, which is what the earlier

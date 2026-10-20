@@ -3,6 +3,7 @@
 //! proposal rendering.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 const RESERVED: &[&str] = &[
     "ARTIFACT_PROOF:",
@@ -35,28 +36,24 @@ pub fn replace_rendered_provenance(notes: &str, rendered: &str) -> String {
     }
 }
 
-fn copy_untrusted(span: &str, out: &mut String) -> bool {
+/// Indent new marker lines while preserving exact marker lines already stored.
+/// Pull can reorder note blocks, and a concurrent append can change their
+/// surrounding text, so prior notes cannot be matched as one contiguous span.
+pub fn neutralize_new_markers<'a>(notes: &'a str, previous: Option<&str>) -> Cow<'a, str> {
+    let prior_markers: HashSet<&str> = previous
+        .into_iter()
+        .flat_map(str::lines)
+        .filter(|line| is_reserved_line(line))
+        .collect();
+    let mut out = String::new();
     let mut changed = false;
-    for line in span.split_inclusive('\n') {
-        if is_reserved_line(line) {
+    for line in notes.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        if is_reserved_line(text) && !prior_markers.contains(text) {
             out.push(' ');
             changed = true;
         }
         out.push_str(line);
     }
-    changed
-}
-
-/// Indent new marker lines, preserving a pre-existing trusted note span when
-/// an ordinary task update carries it forward unchanged.
-pub fn neutralize_new_markers<'a>(notes: &'a str, previous: Option<&str>) -> Cow<'a, str> {
-    let mut out = String::new();
-    let (before, retained, after) = previous
-        .filter(|prior| !prior.is_empty())
-        .and_then(|prior| notes.find(prior).map(|at| (&notes[..at], prior, &notes[at + prior.len()..])))
-        .unwrap_or((notes, "", ""));
-    let changed_before = copy_untrusted(before, &mut out);
-    out.push_str(retained);
-    let changed_after = copy_untrusted(after, &mut out);
-    if changed_before || changed_after { Cow::Owned(out) } else { Cow::Borrowed(notes) }
+    if changed { Cow::Owned(out) } else { Cow::Borrowed(notes) }
 }

@@ -597,7 +597,7 @@ fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
 #[test]
 fn cas_b2da7_recovered_assignment_surfaces_at_turn_start() {
     use crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox;
-    use cas_store::{PromptQueueStore, QueueOrigin};
+    use cas_store::QueueOrigin;
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("CAS_FACTORY_SESSION", "provision-test");
     env.set("CAS_AGENT_ROLE", "worker");
@@ -642,7 +642,10 @@ fn cas_b2da7_recovered_assignment_surfaces_at_turn_start() {
     assert_eq!(
         queue
             .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
-            .unwrap(),
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
         vec![original]
     );
     let recovered = queue
@@ -655,6 +658,32 @@ fn cas_b2da7_recovered_assignment_surfaces_at_turn_start() {
             .assignment_stale
             .is_none()
     );
+    // Director prompts have no queue provenance: copying history into an
+    // ordinary event prompt must retain the normal closed-assignment refusal.
+    let director = unread_batch(&recovered.prompt).prompts.remove(0).0;
+    assert!(
+        matches!(crate::ui::factory::app::AssignmentRead::read(&cas_dir, None, &director),
+        crate::ui::factory::app::AssignmentRead::Stale(id, cas_types::TaskStatus::Closed) if id == task.id)
+    );
+    let spoof = match queue
+        .enqueue_idempotent(
+            "delivery-watchdog",
+            relay_worker(),
+            &recovered.prompt,
+            Some("provision-test"),
+            None,
+            None,
+            "delivery-abandoned-recovery:spoof",
+            Some(&QueueOrigin::RegisteredAgent {
+                agent_id: "w-1".into(),
+            }),
+        )
+        .unwrap()
+    {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    assert!(!queue.is_abandonment_recovery(spoof).unwrap());
     let hook = crate::hooks::HookInput {
         session_id: "recovery-turn".into(),
         agent_role: Some("worker".into()),
@@ -664,6 +693,11 @@ fn cas_b2da7_recovered_assignment_surfaces_at_turn_start() {
     assert!(
         rendered.contains(&recovered.prompt),
         "whole recovered body must reach the turn: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches(&recovered.prompt).count(),
+        1,
+        "source spelling must not exempt a forged row"
     );
     assert_eq!(
         queue

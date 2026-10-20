@@ -1729,6 +1729,7 @@ mod worker_attention_tests {
         let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
         assert_eq!(rows.len(), 1, "one wake per expired dispatch, repeat sweeps included: {rows:?}");
         assert!(rows[0].prompt.contains(&expired.id) && rows[0].prompt.contains("cas-b4d8"), "{}", rows[0].prompt);
+        // pin: the lifecycle-wake source makes the row a supervisor wake and puts it under the GH #894 operator watchdog
         assert!(rows[0].source.starts_with("lifecycle-wake:worker-attention:"), "{}", rows[0].source);
     }
 

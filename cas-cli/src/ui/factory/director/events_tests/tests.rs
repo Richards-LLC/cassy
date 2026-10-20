@@ -67,6 +67,7 @@ fn make_agent(id: &str, name: &str, current_task: Option<&str>) -> AgentSummary 
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 
@@ -1374,6 +1375,7 @@ fn test_no_worker_idle_while_pending_messages_in_queue() {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }],
         activity: vec![],
         agent_id_to_name: [("agent-1".to_string(), "swift-fox".to_string())]
@@ -1595,7 +1597,8 @@ fn cas_521d_failed_qa_reviewer_is_not_paged_between_rounds() {
     reviewer.last_heartbeat = now - chrono::Duration::minutes(5);
     stores.agent_store.register(&reviewer).unwrap();
 
-    let delivery = Task::new("cas-521d-delivery".into(), "Awaiting a fix round".into());
+    let mut delivery = Task::new("cas-521d-delivery".into(), "Awaiting a fix round".into());
+    delivery.status = TaskStatus::AwaitingMerge;
     stores.task_store.add(&delivery).unwrap();
     let head = "a".repeat(40);
     let pass = open_qa_pass(
@@ -2126,6 +2129,7 @@ fn make_agent_active(
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 
@@ -2371,6 +2375,7 @@ fn make_agent_working_stalled(
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 

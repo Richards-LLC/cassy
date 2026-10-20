@@ -994,6 +994,7 @@ fn test_agent_summary_fields() {
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     };
 
     assert_eq!(summary.id, "agent-123");

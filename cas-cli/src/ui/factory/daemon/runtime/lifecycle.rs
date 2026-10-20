@@ -1426,6 +1426,7 @@ mod worker_attention_tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("worker-id".into(), "gold-fox".into())]
@@ -1542,6 +1543,7 @@ mod worker_attention_tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: HashMap::new(),

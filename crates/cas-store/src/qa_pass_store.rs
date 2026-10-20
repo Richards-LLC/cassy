@@ -695,6 +695,44 @@ pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Resu
     latest_with_conn(&conn, task_id)
 }
 
+/// Reviewer IDs for tasks whose latest QA round failed. Callers should pass
+/// only tasks still in the state that awaits another review round.
+pub fn latest_failed_qa_reviewers(
+    cas_dir: &Path,
+    task_ids: &[String],
+) -> Result<std::collections::HashMap<String, String>> {
+    if task_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let placeholders = (1..=task_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.task_id, current.reviewer_agent_id
+         FROM qa_passes current
+         WHERE current.task_id IN ({placeholders})
+           AND current.state = 'failed'
+           AND current.reviewer_agent_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM qa_passes newer
+             WHERE newer.task_id = current.task_id
+               AND (newer.requested_at > current.requested_at
+                 OR (newer.requested_at = current.requested_at AND newer.round > current.round)
+                 OR (newer.requested_at = current.requested_at AND newer.round = current.round
+                     AND newer.id > current.id))
+           )"
+    ))?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(task_ids.iter()),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+        .map_err(StoreError::Database)
+}
+
 /// Passed or waived round for exactly `head`, if any.
 pub fn satisfying_qa_pass_for_head(
     cas_dir: &Path,

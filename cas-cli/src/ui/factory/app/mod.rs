@@ -5202,6 +5202,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }];
         source
             .agent_id_to_name

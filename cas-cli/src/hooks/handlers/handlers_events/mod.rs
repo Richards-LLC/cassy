@@ -4,6 +4,7 @@ pub(crate) mod codemap;
 pub(crate) mod message_display;
 mod neon_sql_guard;
 mod notifications;
+pub(super) mod operator_credentials;
 mod pre_tool;
 mod slack_transport;
 mod worker_denied_tools;

@@ -13223,10 +13223,9 @@ fn dropped_line_samples(
         let target_text = git(&["show", &format!("{target}:{path}")]).unwrap_or_default();
         let target_lines: std::collections::HashSet<&str> =
             target_text.lines().map(str::trim).collect();
-        let missing: Vec<String> = patch
-            .lines()
-            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
-            .map(|line| line[1..].trim())
+        let missing: Vec<String> = task_attribution::hunk_lines(&patch)
+            .filter_map(|(_, line)| line.strip_prefix('+'))
+            .map(str::trim)
             .filter(|line| !line.is_empty() && !target_lines.contains(line))
             .take(PER_PATH)
             .map(|line| {
@@ -23396,8 +23395,21 @@ fn run_lightweight_structural_lint_at_tip(
         let mut current_path = String::new();
         let mut current_is_rust = false;
         let mut current_file_line = 0usize;
-        for line in diff_text.lines() {
-            if line.starts_with("+++ ") {
+        let mut hunk_lines = task_attribution::hunk_lines(&diff_text).peekable();
+        for (line_index, line) in diff_text.lines().enumerate() {
+            // Consume actual hunk content before interpreting file metadata:
+            // `+++ b/example.rs` can itself be an added content line.
+            if let Some((_, content)) = hunk_lines.next_if(|(index, _)| *index == line_index) {
+                if let Some(content) = content.strip_prefix('+') {
+                    current_file_line += 1;
+                    result.push(DiffEntry::Added(AddedLine {
+                        content,
+                        path: current_path.clone(),
+                        file_line: current_file_line,
+                        is_rust_file: current_is_rust,
+                    }));
+                }
+            } else if line.starts_with("+++ ") {
                 // "+++ b/path/to/file.ext" in a unified git diff.
                 // Strip the diff prefix ("b/") to obtain the bare path.
                 let path = line[4..].trim_start_matches("b/");
@@ -23423,14 +23435,6 @@ fn run_lightweight_structural_lint_at_tip(
                     current_file_line = new_start.saturating_sub(1);
                 }
                 result.push(DiffEntry::HunkBoundary);
-            } else if line.starts_with('+') && !line.starts_with("+++") {
-                current_file_line += 1;
-                result.push(DiffEntry::Added(AddedLine {
-                    content: &line[1..],
-                    path: current_path.clone(),
-                    file_line: current_file_line,
-                    is_rust_file: current_is_rust,
-                }));
             }
         }
         result

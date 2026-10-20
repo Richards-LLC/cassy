@@ -111,16 +111,14 @@ pub(super) fn rejection(
                 ));
             }
         };
-        let lines: Vec<_> = diff
-            .lines()
-            .filter(|line| {
-                (line.starts_with('+') || line.starts_with('-'))
-                    && !line.starts_with("+++")
-                    && !line.starts_with("---")
-                    || line.starts_with("Binary files ")
+        let lines: Vec<_> = super::task_attribution::hunk_lines(&diff)
+            .map(|(_, line)| line)
+            .filter(|line| line.starts_with('+') || line.starts_with('-'))
+            .chain(diff.lines().filter(|line| {
+                line.starts_with("Binary files ")
                     || line.starts_with("old mode ")
                     || line.starts_with("new mode ")
-            })
+            }))
             .collect();
         // Paths reported by attribution can include an unchanged snapshot from
         // an earlier commit in the receipt window. Only a real diff needs approval.

@@ -39,7 +39,7 @@ pub enum ConfigCommands {
     /// Show differences from default configuration
     Diff(ConfigDiffArgs),
 
-    /// Reset config option(s) to default
+    /// Remove a config override to restore its default (or reset all options)
     Reset(ConfigResetArgs),
 
     /// Export configuration to file

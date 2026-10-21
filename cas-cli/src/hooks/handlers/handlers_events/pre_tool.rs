@@ -8965,6 +8965,57 @@ mod workspace_contract_tests {
     }
 
     #[test]
+    fn codex_exec_redirection_admission_uses_workdir_or_names_its_omission_cas_0224() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let worktree = cas_root.join("worktrees/worker-0224");
+        let child = worktree.join("hub-web");
+        let outside = cas_root.join("worktrees/outside.log");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(worktree.join("target")).unwrap();
+        env.set("CAS_HOOK_HARNESS", "codex");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_CLONE_PATH", &worktree);
+
+        let mut mismatches = Vec::new();
+        for (command, workdir, expected, missing_workdir) in [
+            ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false),
+            ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false),
+            ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true),
+            ("printf x > ../../outside.log".to_string(), Some(child), "deny", false),
+            (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false),
+            (format!("printf x > '{}'", outside.display()), None, "deny", false),
+        ] {
+            // Codex 0.163 projects exec_command as Bash/command with turn cwd.
+            // The optional workdir models the upstream projection once fixed.
+            let mut input = bash_input(&command, &worktree);
+            if let Some(workdir) = workdir {
+                input.tool_input.as_mut().unwrap()["workdir"] = serde_json::json!(workdir);
+            }
+            let value = serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap();
+            let specific = &value["hookSpecificOutput"];
+            let reason = specific["permissionDecisionReason"].as_str().unwrap_or("");
+            if specific["permissionDecision"] != expected {
+                mismatches.push(format!("{command}, {:?}: expected {expected}, got {value}", input.tool_input));
+            }
+            if missing_workdir {
+                if !["../target/check.log", "hook input omits workdir", "absolute in-worktree path"]
+                    .iter().all(|part| reason.contains(part))
+                    || reason.contains(&cas_root.join("worktrees/target/check.log").display().to_string())
+                    || reason.contains("outside")
+                {
+                    mismatches.push(format!("missing-workdir refusal must explain uncertainty without a guessed escape: {value}"));
+                }
+            } else if expected == "deny" && !reason.contains(&outside.display().to_string()) {
+                mismatches.push(format!("real escape must name its destination: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
     fn pre_tool_uses_registered_worktree_for_nested_cwd() {
         let cas_root = tempfile::tempdir().expect("cas root");
         let worktree = tempfile::tempdir().expect("worktree");

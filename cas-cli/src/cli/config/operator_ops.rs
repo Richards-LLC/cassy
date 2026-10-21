@@ -463,6 +463,16 @@ mod tests {
         std::fs::create_dir_all(&models).unwrap();
         std::os::unix::fs::symlink(&models, home.join("models-link")).unwrap();
 
+        let config_path = cas_root.join("config.toml");
+        let original = "# operator-maintained config\n\
+[sync]\n\
+min_helpful = 3 # preserve sync value\n\
+\n\
+[factory]\n\
+# compatibility spelling stays in place\n\
+worker_build_jobs = \"4\"\n";
+        std::fs::write(&config_path, original).unwrap();
+
         let change = set_project_write_roots(
             &format!("~/Downloads, {}", home.join("models-link").display()),
             &cas_root,
@@ -473,7 +483,15 @@ mod tests {
         assert_eq!(change.stored, expected, "`~` expands and symlinks resolve");
         assert!(change.previous.is_empty());
 
-        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let expected_toml = original.replace(
+            "worker_build_jobs = \"4\"\n",
+            &format!(
+                "worker_build_jobs = \"4\"\nwrite_roots = [\"{}\"]\n",
+                expected.join("\",\"")
+            ),
+        );
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(text, expected_toml);
         assert!(text.contains("write_roots"), "{text}");
         let config = crate::config::Config::load(&cas_root).unwrap();
         assert_eq!(config.factory().write_roots, expected);
@@ -487,8 +505,65 @@ mod tests {
         assert_eq!(change.previous, expected);
         assert!(change.stored.is_empty());
         assert!(crate::config::Config::load(&cas_root).unwrap().factory().write_roots.is_empty());
-        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(text, original);
         assert!(!text.contains("write_roots"), "{text}");
+    }
+
+    #[test]
+    fn config_registry_keys_round_trip_through_set_and_get() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/roundtrip");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+
+        let original = format!(
+            "# existing aliases\n\
+[factory]\n\
+worker_build_jobs = \"4\"\n\
+write_roots = [\"{}\"]\n\
+\n\
+[staging]\n\
+large_artifact_dir = \"before\"\n",
+            downloads.display()
+        );
+        std::fs::write(cas_root.join("config.toml"), original).unwrap();
+
+        let registry = crate::config::registry();
+        let mut keys = registry.all_keys();
+        keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
+        keys.sort_unstable();
+        keys.dedup();
+
+        for key in keys {
+            let value = match key {
+                "factory.worker_build_jobs" => "8",
+                "factory.cargo_build_jobs" => "9",
+                "staging.staging_dir" => "roundtrip-staging-dir",
+                "staging.large_artifact_dir" => "roundtrip-large-artifact-dir",
+                "factory.write_roots" => "~/Downloads",
+                _ => registry.get(key).expect("registered key metadata").default,
+            };
+
+            if key == "factory.write_roots" {
+                let before = Config::load(&cas_root).unwrap();
+                let change = set_project_write_roots(value, &cas_root, PANE_CGROUP).unwrap();
+                let mut expected = before;
+                expected.set_factory_write_roots(change.stored.clone());
+                let actual = Config::load(&cas_root).unwrap();
+                assert_eq!(actual.get(key), expected.get(key), "{key}");
+                continue;
+            }
+
+            let mut config = Config::load(&cas_root).unwrap();
+            let mut expected = config.clone();
+            expected.set(key, value).unwrap();
+            set_config_value(&mut config, key, value, &cas_root, operator).unwrap();
+            let actual = Config::load(&cas_root).unwrap();
+            assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");
+        }
     }
 
     /// GH #1182: setting roots refuses inside a factory worker (or server)

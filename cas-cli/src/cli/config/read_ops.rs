@@ -321,11 +321,31 @@ fn execute_set_internal(
         let theme = ActiveTheme::default();
         let mut out = std::io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
-        fmt.success(&format!("Set {key} = {value}"))?;
-        if !old_value.is_empty() && old_value != value {
-            fmt.write_raw("  ")?;
-            fmt.write_muted(&format!("was: {old_value}"))?;
+        let shadowed_mode = (key == "hub.tailscale_serve")
+            .then(|| config.hub.as_ref().and_then(|hub| hub.transport_mode))
+            .flatten();
+        if let Some(mode) = shadowed_mode {
+            let effective_value = config.get(key).unwrap_or_else(|| value.to_owned());
+            let requested_mode = if value == "true" { "auto" } else { "loopback" };
+            fmt.warning(&format!(
+                "Legacy {key} = {value} saved; ignored by hub.transport_mode."
+            ))?;
+            fmt.write_raw(&format!(
+                "  Effective value: {key} = {effective_value} (transport_mode = {}).",
+                mode.as_str()
+            ))?;
             fmt.newline()?;
+            fmt.write_raw(&format!(
+                "  Use: cas config set hub.transport_mode {requested_mode}"
+            ))?;
+            fmt.newline()?;
+        } else {
+            fmt.success(&format!("Set {key} = {value}"))?;
+            if !old_value.is_empty() && old_value != value {
+                fmt.write_raw("  ")?;
+                fmt.write_muted(&format!("was: {old_value}"))?;
+                fmt.newline()?;
+            }
         }
     }
     Ok(())

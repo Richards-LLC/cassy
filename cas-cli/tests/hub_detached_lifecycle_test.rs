@@ -286,6 +286,11 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         .expect("restart help");
     assert!(help.status.success());
     let help_text = String::from_utf8_lossy(&help.stdout);
+    let normalized_help = help_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized_help.contains("Keep this launch loopback-only (overrides hub.transport_mode for this launch)"),
+        "loopback flag help should describe its transport policy override: {help_text}"
+    );
     assert!(
         help_text.to_ascii_lowercase().contains("detached restart"),
         "restart JSON help must scope its response shape to detached hubs: {help_text}"

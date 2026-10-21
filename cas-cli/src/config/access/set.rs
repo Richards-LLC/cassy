@@ -695,6 +695,15 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "qa.registry.path" => {
+                let path = std::path::Path::new(value.trim());
+                if path.as_os_str().is_empty() || path.is_absolute()
+                    || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err(MemError::Parse("qa.registry.path must be a non-empty project-relative path without ..".into()));
+                }
+                self.qa.get_or_insert_with(QaConfig::default).registry.path = value.trim().to_owned();
+            }
             "qa.mode" => {
                 let mode = match value.trim() {
                     "per_task" => QaMode::PerTask,

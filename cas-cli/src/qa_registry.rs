@@ -24,6 +24,8 @@ pub struct Registry {
     pub fixtures: Option<BTreeMap<String, Fixture>>,
     pub bug_families: BTreeMap<String, BugFamily>,
     pub journeys: Vec<Journey>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +41,8 @@ pub struct Invariant {
     pub statement: String,
     pub check: String,
     pub bug: Option<Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,6 +107,8 @@ pub struct Journey {
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
     pub seeded: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,11 +126,19 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Traffic {
+    #[serde(deserialize_with = "nullable_share")]
     pub share_pct: Option<f64>,
+    #[serde(default)]
     pub basis: String,
+    #[serde(default)]
     pub source: Option<String>,
+}
+
+fn nullable_share<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error> {
+    Option::<f64>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -172,15 +186,376 @@ pub fn check(project_root: &Path, registry_path: &Path) -> Result<ValidationRepo
     ))
 }
 
+/// Compile GitHub-style path filters while treating route brackets literally.
+fn pattern(raw: &str) -> Result<glob::Pattern, String> {
+    let raw = raw.strip_prefix('!').unwrap_or(raw);
+    if raw.is_empty() {
+        return Err("empty path filter".to_owned());
+    }
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '[' => escaped.push_str("[[]"),
+            ']' => escaped.push_str("[]]"),
+            _ => escaped.push(ch),
+        }
+    }
+    glob::Pattern::new(&escaped).map_err(|error| error.to_string())
+}
+
+fn pattern_matches(pattern: &glob::Pattern, path: &str) -> bool {
+    pattern.matches_with(
+        path,
+        glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        },
+    )
+}
+
 /// Ordered path filters: the last matching positive/negative entry wins.
+/// Invalid filters never match; `validate` reports their errors separately.
 pub fn matches_path<'a>(globs: impl IntoIterator<Item = &'a str>, path: &str) -> bool {
-    let _ = (globs, path);
-    false
+    let mut matched = false;
+    for raw in globs {
+        if pattern(raw).is_ok_and(|p| pattern_matches(&p, path)) {
+            matched = !raw.starts_with('!');
+        }
+    }
+    matched
+}
+
+impl ValidationReport {
+    fn problem(&mut self, code: &str, subject: &str, message: impl Into<String>) {
+        self.problems.push(Problem {
+            code: code.into(),
+            subject: subject.into(),
+            message: message.into(),
+        });
+    }
+
+    fn debt(&mut self, code: &str, subject: &str, message: &str) {
+        self.debt.push(Problem {
+            code: code.into(),
+            subject: subject.into(),
+            message: message.into(),
+        });
+    }
+
+    fn globs<'a>(
+        &mut self,
+        subject: &str,
+        globs: impl IntoIterator<Item = &'a str>,
+        tracked: &[String],
+        check_orphans: bool,
+    ) {
+        for raw in globs {
+            match pattern(raw) {
+                Err(error) => self.problem("invalid_glob", subject, format!("{raw:?}: {error}")),
+                Ok(p) if check_orphans && !tracked.iter().any(|path| pattern_matches(&p, path)) => {
+                    self.problem(
+                        "orphan_glob",
+                        subject,
+                        format!("glob {raw:?} matches no tracked file"),
+                    );
+                }
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
+fn valid_status(status: &str) -> bool {
+    matches!(status, "live" | "dark" | "dead")
+}
+
+fn present(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.trim().is_empty())
 }
 
 impl Registry {
-    pub fn validate(&self, _tracked: &[String]) -> ValidationReport {
-        ValidationReport::default()
+    /// Resolve shared groups after the journey's direct owners in declared group order.
+    pub fn owner_globs<'a>(&'a self, journey: &'a Journey) -> Vec<&'a str> {
+        let mut globs = journey.owners.globs();
+        for name in &journey.owner_groups {
+            if let Some(group) = self.owner_groups.get(name) {
+                globs.extend(group.globs.iter().map(String::as_str));
+            }
+        }
+        globs
+    }
+
+    pub fn effective_surfaces<'a>(&'a self, qa: &'a crate::config::QaConfig) -> Vec<&'a str> {
+        match &self.surfaces {
+            Some(globs) => globs.iter().map(String::as_str).collect(),
+            None => qa
+                .user_facing_paths
+                .iter()
+                .chain(&qa.api_paths)
+                .map(String::as_str)
+                .collect(),
+        }
+    }
+
+    /// Validate in memory against the caller's tracked-file snapshot (no subprocess).
+    pub fn validate(&self, tracked: &[String]) -> ValidationReport {
+        use std::collections::BTreeSet;
+        let mut report = ValidationReport::default();
+        if self.version != Some(1) {
+            report.problem("version", "registry", "version must be 1");
+        }
+        let date_valid = self.updated.as_deref().is_some_and(|date| {
+            date.len() == 10
+                && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == date)
+        });
+        if !date_valid {
+            report.problem(
+                "updated",
+                "registry",
+                "updated must be an ISO date (YYYY-MM-DD)",
+            );
+        }
+        if self.journeys.is_empty() {
+            report.problem("journeys", "registry", "journeys must be a non-empty list");
+        }
+        let ids: BTreeSet<_> = self.journeys.iter().map(|j| j.id.as_str()).collect();
+        let mut seen = BTreeSet::new();
+        for (name, group) in &self.owner_groups {
+            let subject = format!("owner_groups.{name}");
+            if group.description.trim().is_empty() || group.globs.is_empty() {
+                report.problem(
+                    "owner_group",
+                    &subject,
+                    "description and non-empty globs are required",
+                );
+            }
+            report.globs(
+                &subject,
+                group.globs.iter().map(String::as_str),
+                tracked,
+                true,
+            );
+        }
+        for (name, invariant) in &self.invariants {
+            if invariant.statement.trim().is_empty() || invariant.check.trim().is_empty() {
+                report.problem(
+                    "invariant",
+                    &format!("invariants.{name}"),
+                    "statement and check are required",
+                );
+            }
+        }
+        if let Some(fixtures) = &self.fixtures {
+            for (name, fixture) in fixtures {
+                if fixture.description.trim().is_empty() || fixture.provider.trim().is_empty() {
+                    report.problem(
+                        "fixture",
+                        &format!("fixtures.{name}"),
+                        "description and provider are required",
+                    );
+                }
+            }
+        }
+        report.globs(
+            "ignore",
+            self.ignore.iter().map(String::as_str),
+            tracked,
+            false,
+        );
+        if let Some(surfaces) = &self.surfaces {
+            report.globs(
+                "surfaces",
+                surfaces.iter().map(String::as_str),
+                tracked,
+                true,
+            );
+        }
+        for journey in &self.journeys {
+            let id = journey.id.as_str();
+            if id.is_empty()
+                || !id.as_bytes()[0].is_ascii_alphanumeric()
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            {
+                report.problem("id", id, "id must match ^[A-Za-z0-9][A-Za-z0-9._-]*$");
+            }
+            if !seen.insert(id) {
+                report.problem("duplicate_id", id, "duplicate journey id");
+            }
+            if !valid_status(&journey.status) {
+                report.problem("status", id, "status must be live, dark or dead");
+            } else if journey.status != "live" && !present(journey.status_reason.as_deref()) {
+                report.problem(
+                    "status_reason",
+                    id,
+                    "dark/dead journeys need a status_reason",
+                );
+            }
+            for (env, status) in &journey.env_status {
+                if !matches!(env.as_str(), "staging" | "prod") {
+                    report.problem(
+                        "env_status",
+                        id,
+                        format!("unknown env_status key {env:?}; use staging or prod"),
+                    );
+                }
+                if !valid_status(&status.status) {
+                    report.problem(
+                        "env_status",
+                        id,
+                        format!("env_status.{env}.status must be live, dark or dead"),
+                    );
+                }
+            }
+            if let (Some(kind), Some(kinds)) = (&journey.kind, &self.kinds) {
+                if !kinds.contains(kind) {
+                    report.problem("kind", id, format!("kind {kind:?} is not in kinds"));
+                }
+            }
+            for group in &journey.owner_groups {
+                if !self.owner_groups.contains_key(group) {
+                    report.problem(
+                        "unknown_owner_group",
+                        id,
+                        format!("unknown owner group {group:?}"),
+                    );
+                }
+            }
+            for invariant in &journey.invariants {
+                if !self.invariants.contains_key(invariant) {
+                    report.problem(
+                        "unknown_invariant",
+                        id,
+                        format!("unknown invariant {invariant:?}"),
+                    );
+                }
+            }
+            if let Some(fixtures) = &self.fixtures {
+                for fixture in &journey.fixtures {
+                    if !fixtures.contains_key(fixture) {
+                        report.problem(
+                            "unknown_fixture",
+                            id,
+                            format!("unknown fixture {fixture:?}"),
+                        );
+                    }
+                }
+            }
+            if let Some(finisher) = &journey.finisher {
+                if !ids.contains(finisher.as_str()) {
+                    report.problem(
+                        "unknown_finisher",
+                        id,
+                        format!("unknown finisher {finisher:?}"),
+                    );
+                }
+            }
+            report.globs(
+                id,
+                journey.owners.globs(),
+                tracked,
+                journey.status != "dead",
+            );
+            if let Some(spec) = &journey.spec {
+                if !tracked.contains(spec) {
+                    report.problem(
+                        "untracked_spec",
+                        id,
+                        format!("spec {spec:?} is not tracked"),
+                    );
+                }
+            }
+            if journey.seeded {
+                report.debt("seeded", id, "seeded journey needs curation");
+            }
+            if journey.status == "live" {
+                if !journey.entry.as_ref().is_some_and(|entry| {
+                    !entry.url.trim().is_empty() && !entry.trigger.trim().is_empty()
+                }) {
+                    report.problem(
+                        "missing_entry",
+                        id,
+                        "live journeys need entry.url and entry.trigger",
+                    );
+                }
+                if !self
+                    .owner_globs(journey)
+                    .iter()
+                    .any(|glob| !glob.starts_with('!') && !glob.is_empty())
+                {
+                    report.problem(
+                        "missing_owners",
+                        id,
+                        "live journeys need owners or an owner group with globs",
+                    );
+                }
+                if !journey.seeded {
+                    if journey.steps.is_empty()
+                        || journey.steps.iter().any(|step| step.trim().is_empty())
+                    {
+                        report.problem("missing_steps", id, "live journeys need non-empty steps");
+                    }
+                    if journey.invariants.is_empty() {
+                        report.problem("missing_invariants", id, "live journeys need invariants");
+                    }
+                    if journey.traffic.is_none() {
+                        report.problem(
+                            "missing_traffic",
+                            id,
+                            "live journeys need traffic.share_pct and traffic.basis",
+                        );
+                    }
+                }
+                if journey
+                    .traffic
+                    .as_ref()
+                    .is_some_and(|traffic| traffic.share_pct.is_none())
+                {
+                    report.debt(
+                        "unmeasured_traffic",
+                        id,
+                        "live journey traffic share_pct is null",
+                    );
+                }
+            }
+            if let Some(traffic) = &journey.traffic {
+                if traffic.basis.trim().is_empty() {
+                    report.problem(
+                        "traffic_basis",
+                        id,
+                        "traffic.basis must say what the share counts",
+                    );
+                }
+            }
+        }
+        for (name, family) in &self.bug_families {
+            let subject = format!("bug_families.{name}");
+            if family.title.trim().is_empty() {
+                report.problem("bug_family", &subject, "title is required");
+            }
+            for invariant in &family.invariants {
+                if !self.invariants.contains_key(invariant) {
+                    report.problem(
+                        "unknown_invariant",
+                        &subject,
+                        format!("unknown invariant {invariant:?}"),
+                    );
+                }
+            }
+            for journey in &family.journeys {
+                if !ids.contains(journey.as_str()) {
+                    report.problem(
+                        "unknown_journey",
+                        &subject,
+                        format!("unknown journey {journey:?}"),
+                    );
+                }
+            }
+        }
+        report
     }
 }
 
@@ -212,7 +587,7 @@ bug_families:
   claim:
     title: Workspace was unclaimed
     found: "2026-10-20"
-    fixed_by: [abc123]
+    fixed_by: [3573, abc123]
     tasks: [cas-1234]
     invariants: [INV-CLAIM]
     journeys: [B2-home]

@@ -3,6 +3,20 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     registry.register(ConfigMeta {
+        key: "qa.registry.path",
+        section: "qa",
+        name: "Journey Registry Path",
+        description: "Project-relative YAML journey registry validated by cas qa journeys --check.",
+        value_type: ConfigType::String,
+        default: "docs/qa/journeys.yaml",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["qa", "journey", "registry", "yaml"],
+        use_cases: &["Choose a project-specific journey registry location"],
+    });
+
+    registry.register(ConfigMeta {
         key: "qa.mode", section: "qa", name: "QA Mode",
         description: "per_task keeps per-delivery evidence and independent QA. batch defers evidence at park and accepts one published staging ledger for its listed delivery anchors after integration; no automatic per-task QA is dispatched. Explicit QA requests remain available.",
         value_type: ConfigType::String, default: "per_task",

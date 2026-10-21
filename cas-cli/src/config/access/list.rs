@@ -338,6 +338,7 @@ impl Config {
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),
+            ("qa.registry.path".to_string(), qa.registry.path.clone()),
             ("qa.mode".to_string(), qa.mode.to_string()),
             ("qa.evidence_gate".to_string(), qa.evidence_gate.to_string()),
             ("qa.api_paths".to_string(), qa.api_paths.join(",")),

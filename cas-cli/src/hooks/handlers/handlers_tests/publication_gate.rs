@@ -213,3 +213,16 @@ fn publication_gate_post_release_pending_and_override() {
     }
     assert!(store.get("cas-pub-epic").unwrap().notes.contains("post-release gate overridden"));
 }
+
+#[test]
+fn publication_gate_non_release_post_to_rubric_channel_passes() {
+    let _env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let _store = epic_store(dir.path());
+    let cas = dir.path().join(".cas");
+    std::fs::write(cas.join("config.toml"),"[qa.post_release]\ncommand = './check'\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("docs/release-notes")).unwrap();
+    std::fs::write(dir.path().join("docs/release-notes/RUBRIC.md"),"- **Channel:** `#cas-internal` (`C12345678`)\n").unwrap();
+    let post = json!({"channel":"cas-internal","kind":"message","epic_id":"cas-pub-epic","text":"Staging database maintenance completed; backups are healthy."});
+    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",post,dir.path()),Some(&cas)).unwrap()).is_none(),"ordinary channel status must pass while the release check is pending");
+}

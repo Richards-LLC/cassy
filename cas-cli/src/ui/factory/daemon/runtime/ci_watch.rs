@@ -2031,6 +2031,51 @@ mod tests {
     }
 
     #[test]
+    fn deploy_configuration_errors_preserve_ordinary_ci_alerts() {
+        let mut errors = Vec::new();
+        for (file, damaged) in [
+            ("config.toml", "[qa.release]\nintegration_branch = ["),
+            ("ci-deploy-watch.json", "not JSON"),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            deploy_config(temp.path());
+            let damaged_path = temp.path().join(file);
+            std::fs::write(&damaged_path, damaged).unwrap();
+            let mut deploy = run_with("staging", "current", 100, Some("failure"));
+            deploy.name = "Deploy Backend".into();
+            let transport = TipTransport {
+                runs: vec![run_with("main", "current", 101, Some("failure")), deploy],
+                tip: Some("current"),
+                failed_job: Some("Test service"),
+                job_lookups: Cell::new(0),
+            };
+            let watched = BTreeSet::from(["main".into()]);
+            let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            queue.init().unwrap();
+            // A second poll must still produce ordinary CI, without treating
+            // lost deploy state as a fresh healthy watermark or overwriting it.
+            for _ in 0..2 {
+                match collect_failures(&transport, &watched, Some(temp.path())) {
+                    Ok(failures) => {
+                        assert_eq!(failures.len(), 1);
+                        assert_eq!(failures[0].branch, "main");
+                        assert!(failures[0].merged_into.is_none());
+                        emit_failure(&queue, "factory-session", &failures[0]).unwrap();
+                    }
+                    Err(error) => errors.push(format!("{file}: {error}")),
+                }
+            }
+            assert_eq!(std::fs::read_to_string(damaged_path).unwrap(), damaged);
+            if errors.is_empty() {
+                let rows = queue.peek_all(10).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].priority, NotificationPriority::High);
+            }
+        }
+        assert!(errors.is_empty(), "deploy setup silenced ordinary CI: {errors:?}");
+    }
+
+    #[test]
     fn path_filtered_deploy_red_survives_moved_tip() {
         let temp = tempfile::TempDir::new().unwrap();
         deploy_config(temp.path());

@@ -582,7 +582,13 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     initialize_telemetry();
 
-    let cas_root: Option<PathBuf> = find_cas_root().ok();
+    // Machine-scoped config follows HOME and does not require an initialized
+    // project. Project telemetry/tracing retain their own discovery paths.
+    let cas_root: Option<PathBuf> = match &cli.command {
+        Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
+            .or_else(|| find_cas_root().ok()),
+        _ => find_cas_root().ok(),
+    };
 
     // cas-e1c7: a command that would rewrite another store's identity or
     // config is refused before anything else runs (sign-in included).
@@ -741,6 +747,10 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
 type StoreGuard = Option<(&'static str, Option<store_choice::StoreChoice>)>;
 
 fn config_store_guard(cmd: &config::ConfigCommands) -> StoreGuard {
+    // Host policy ignores project-store selectors, just as the hub daemon does.
+    if config::host_root_for_command(cmd).is_some() {
+        return None;
+    }
     match cmd {
         config::ConfigCommands::Set(args) => Some(("cas config set", args.store.store)),
         config::ConfigCommands::Reset(args) => Some(("cas config reset", args.store.store)),

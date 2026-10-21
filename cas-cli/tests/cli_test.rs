@@ -724,6 +724,128 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout(predicate::str::contains("false"));
+
+    // Hub policy is consumed by the host daemon, even from an initialized
+    // project with a conflicting value (cas-e3ed).
+    let host = temp.path().join(".test-home/.cas");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::write(
+        host.join("config.toml"),
+        "[hub]\ntransport_mode = \"required\"\ntailscale_serve = false\n",
+    )
+    .unwrap();
+    let root = temp.path().join(".cas");
+    let mut project = cas::config::Config::load(&root).unwrap();
+    project.set("hub.transport_mode", "loopback").unwrap();
+    project.save(&root).unwrap();
+    let project_before = std::fs::read(root.join("config.toml")).unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "get", "hub.transport_mode"])
+        .assert()
+        .success()
+        .stdout("required\n");
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "get", "hub.tailscale_serve"])
+        .assert()
+        .success()
+        .stdout("true\n");
+    let list = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "config", "list", "--section", "hub"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["hub"]["hub.transport_mode"]["value"], "required");
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "hub.transport_mode", "loopback"])
+        .assert()
+        .success();
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .get("hub.transport_mode")
+            .as_deref(),
+        Some("loopback")
+    );
+    assert_eq!(
+        std::fs::read(root.join("config.toml")).unwrap(),
+        project_before,
+        "host policy must not rewrite project config"
+    );
+    let outside = TempDir::new().unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(outside.path())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "get", "hub.transport_mode"])
+        .assert()
+        .success()
+        .stdout("loopback\n");
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "set", "hub.tailscale_serve", "true"])
+        .assert()
+        .success();
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .hub
+            .unwrap()
+            .tailscale_serve,
+        Some(true)
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "list", "--section", "hub", "--json"])
+        .assert()
+        .success();
+    let other = temp.path().join("other/.cas");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("config.toml"), "").unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env("CAS_ROOT", &other)
+        .args(["config", "set", "hub.transport_mode", "required"])
+        .assert()
+        .success();
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .get("hub.transport_mode")
+            .as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        std::fs::read(root.join("config.toml")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("config.toml")).unwrap(),
+        ""
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "get", "sync.enabled"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Cassy store here"));
 }
 
 #[test]

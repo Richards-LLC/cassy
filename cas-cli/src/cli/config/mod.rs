@@ -218,6 +218,19 @@ pub struct ConfigEditArgs {
     pub all: bool,
 }
 
+/// Key-specific host commands do not depend on project discovery or CAS_ROOT.
+pub(super) fn host_root_for_command(cmd: &ConfigCommands) -> Option<std::path::PathBuf> {
+    let key = match cmd {
+        ConfigCommands::Get(args) => args.key.as_str(),
+        ConfigCommands::Set(args) => args.key.as_str(),
+        ConfigCommands::Reset(args) => args.key.as_str(),
+        ConfigCommands::Describe(args) => args.key.as_str(),
+        ConfigCommands::List(args) if args.section.as_deref() == Some("hub") => "hub.",
+        _ => return None,
+    };
+    read_ops::host_scoped_key(key).then(crate::config::host_config_dir)
+}
+
 /// Execute a config command
 ///
 /// cas_root is resolved once at CLI entry point and passed here.

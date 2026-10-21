@@ -1467,7 +1467,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
     let args = &effective_args;
 
-    let preflight = preflight_factory_launch(args, &project_root, resolved_cas_root.as_deref())?;
+    let (session_name, preflight) =
+        preflight_factory_launch(args, &project_root, resolved_cas_root.as_deref())?;
     if !preflight.notices.is_empty() {
         let theme = crate::ui::theme::ActiveTheme::default();
         let mut stdout = std::io::stdout();
@@ -1575,11 +1576,6 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         let workers: Vec<String> = all_names[1..].to_vec();
         (sup, workers)
     };
-
-    let session_name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| generate_session_name(Some(&project_root.to_string_lossy())));
 
     let orphans_killed = lifecycle::cleanup_orphaned_daemons();
     if orphans_killed > 0 {
@@ -2044,6 +2040,87 @@ fn preflight_factory_launch(
     args: &FactoryArgs,
     cwd: &std::path::Path,
     cas_root: Option<&std::path::Path>,
+) -> Result<(String, FactoryPreflight)> {
+    // Resolve the session before preflight can refuse: no daemon exists yet
+    // to retain its error, and successful launches need the runtime-log pointer too.
+    let session_name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| generate_session_name(Some(&cwd.to_string_lossy())));
+    let result = check_factory_launch(args, cwd, cas_root);
+    let default_root = cwd.join(".cas");
+    let log_root = result
+        .as_ref()
+        .map(|preflight| preflight.cas_root.as_path())
+        .unwrap_or_else(|_| cas_root.unwrap_or(&default_root));
+    let diagnostics =
+        record_factory_launch_diagnostics(&session_name, log_root, result.as_ref().err());
+    match result {
+        Ok(preflight) => {
+            if let Err(error) = diagnostics {
+                eprintln!("Warning: could not write factory launch diagnostics: {error}");
+            }
+            Ok((session_name, preflight))
+        }
+        Err(error) => match diagnostics {
+            Ok(path) => Err(anyhow::anyhow!(
+                "{error:#}\n\nLaunch diagnostics: {}",
+                path.display()
+            )),
+            Err(log_error) => Err(anyhow::anyhow!(
+                "{error:#}\n\nCould not write factory launch diagnostics: {log_error}"
+            )),
+        },
+    }
+}
+
+fn record_factory_launch_diagnostics(
+    session_name: &str,
+    cas_root: &std::path::Path,
+    refusal: Option<&anyhow::Error>,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    // daemon.log must remain stderr-only: boot recovery treats nonempty stderr
+    // as a daemon failure. Keep launch diagnostics independently discoverable.
+    let path = crate::ui::factory::session_log_dir(session_name).join("launch.log");
+    std::fs::create_dir_all(path.parent().expect("session log directory"))?;
+    let logging = Config::load(cas_root)
+        .ok()
+        .and_then(|config| config.logging)
+        .unwrap_or_default();
+    let now = chrono::Local::now();
+    let runtime_log =
+        crate::logging::log_path_for_date(&cas_root.join(&logging.log_dir), now.date_naive());
+    let mut record = format!(
+        "\n[{}] Factory launch preflight\n\
+         daemon.log records daemon stderr and can be empty.\n\
+         Project runtime tracing: {}\n\
+         Runtime logs rotate daily using the local date (cas-YYYY-MM-DD.log).\n",
+        now.to_rfc3339(),
+        runtime_log.display(),
+    );
+    if !logging.enabled {
+        record.push_str("Project runtime file logging is disabled (logging.enabled=false).\n");
+    }
+    if let Some(error) = refusal {
+        record.push_str(&format!("Refused before daemon startup:\n{error:#}\n"));
+    } else {
+        record.push_str("Preflight passed; daemon startup has not run yet.\n");
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    file.write_all(record.as_bytes())?;
+    file.sync_data()?;
+    Ok(path)
+}
+
+fn check_factory_launch(
+    args: &FactoryArgs,
+    cwd: &std::path::Path,
+    cas_root: Option<&std::path::Path>,
 ) -> Result<FactoryPreflight> {
     let mut failures: Vec<String> = Vec::new();
     let mut notices: Vec<String> = Vec::new();
@@ -2316,6 +2393,65 @@ fn preflight_factory_launch(
 mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
+
+    #[test]
+    fn preflight_session_diagnostics_retain_refusal_and_runtime_log_cas_c1881() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = project.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[logging]\nlog_dir = 'runtime-traces'\n",
+        )
+        .unwrap();
+        let args = FactoryArgs {
+            name: Some("preflight-diagnostics".into()),
+            supervisor_cli: "invalid-harness".into(),
+            no_worktrees: true,
+            ..Default::default()
+        };
+        let session = args.name.as_deref().unwrap();
+        let path = crate::ui::factory::session_log_dir(session).join("launch.log");
+        let stderr = crate::ui::factory::daemon_log_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for previous in ["", "previous daemon stderr\n"] {
+            std::fs::write(&stderr, previous).unwrap();
+            let previous_diagnostics = std::fs::read_to_string(&path).unwrap_or_default();
+            let error = preflight_factory_launch(&args, &project, Some(&root))
+                .err()
+                .expect("invalid harness must refuse launch");
+            let error = format!("{error:#}");
+            assert!(error.contains("invalid-harness"), "{error}");
+            let diagnostics = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                diagnostics.starts_with(&previous_diagnostics),
+                "{diagnostics}"
+            );
+            assert!(
+                diagnostics.len() > previous_diagnostics.len(),
+                "{diagnostics}"
+            );
+            assert!(diagnostics.contains("invalid-harness"), "{diagnostics}");
+            assert!(
+                diagnostics.contains("before daemon startup"),
+                "{diagnostics}"
+            );
+            assert!(
+                diagnostics.contains(&root.join("runtime-traces").display().to_string()),
+                "{diagnostics}"
+            );
+            assert!(
+                regex::Regex::new(r"runtime-traces[/\\]cas-\d{4}-\d{2}-\d{2}\.log")
+                    .unwrap()
+                    .is_match(&diagnostics),
+                "{diagnostics}"
+            );
+            assert!(diagnostics.contains("daemon stderr"), "{diagnostics}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert_eq!(std::fs::read_to_string(&stderr).unwrap(), previous);
+        }
+    }
 
     /// cas-31ec: `cas` exports its build knobs before the factory launch
     /// check runs. With `nice_cargo` and a pinned job count, an operator

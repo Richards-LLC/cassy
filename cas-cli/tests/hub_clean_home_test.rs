@@ -2485,7 +2485,7 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let child = command.spawn().expect("spawn concurrent restart");
         (child, stdout_path, stderr_path)
     };
-    let (first, first_stdout, first_stderr) = spawn_restart("restart-a");
+    let (mut first, first_stdout, first_stderr) = spawn_restart("restart-a");
     let old_hub_waiting = barrier.join("record-removed-lock-held");
     let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while !old_hub_waiting.exists() && Instant::now() < deadline {
@@ -2496,7 +2496,7 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let _ = first.wait_with_output();
         panic!("old hub did not reach the deterministic lock-release barrier");
     }
-    let (second, second_stdout, second_stderr) = spawn_restart("restart-b");
+    let (mut second, second_stdout, second_stderr) = spawn_restart("restart-b");
     let waiter_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     loop {
         let waiters = fs::read_dir(&barrier)

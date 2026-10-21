@@ -174,6 +174,66 @@ fn hub_record_proves_its_own_session_and_cli_launcher() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
+    let home = private_home();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let initial = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "--no-tailscale-serve",
+            "hub",
+            "start",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("start hub before restart");
+    assert!(
+        initial.status.success(),
+        "hub start failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).expect("initial hub JSON");
+
+    let restart = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "--no-tailscale-serve",
+            "hub",
+            "restart",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("restart detached hub");
+    assert!(
+        restart.status.success(),
+        "hub restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+
+    // serde_json::from_slice rejects trailing JSON, so this also proves that
+    // restart writes exactly one document to stdout.
+    let receipt: Value =
+        serde_json::from_slice(&restart.stdout).expect("one hub restart JSON value");
+    assert_eq!(receipt["stop"]["stopped"], true, "{receipt}");
+    assert_eq!(receipt["stop"]["pid"], initial["pid"], "{receipt}");
+    assert_eq!(receipt["start"]["version"], initial["version"], "{receipt}");
+    assert_ne!(receipt["start"]["pid"], initial["pid"], "{receipt}");
+
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop restarted hub");
+    assert!(
+        stop.status.success(),
+        "hub stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn factory_worker_hub_record_uses_its_joined_server_scope() {

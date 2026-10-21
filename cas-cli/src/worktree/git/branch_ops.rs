@@ -905,6 +905,13 @@ impl GitOperations {
         }
     }
 
+    /// Read origin authority without advancing the local integration branch.
+    /// CI refusal must still leave that branch untouched.
+    pub(crate) fn fetch_merge_target(&self, target: &str) -> Result<Option<String>> {
+        if !self.has_origin_remote() { return Ok(None); }
+        self.fetch_merge_target_bounded(target, FETCH_TIMEOUT).map(Some)
+    }
+
     /// A target refresh must update its exact origin ref even when the
     /// repository's configured fetch refspec only tracks another branch.
     fn fetch_merge_target_bounded(&self, target: &str, timeout: Duration) -> Result<String> {

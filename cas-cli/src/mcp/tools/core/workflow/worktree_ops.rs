@@ -1469,19 +1469,14 @@ fn contained_merge_receipt(
     git: &crate::worktree::GitOperations,
     source: &str,
     target: &str,
-    refreshed: &crate::worktree::git::TargetReconcile,
 ) -> Option<String> {
-    use crate::worktree::git::TargetReconcile;
     let source_tip = git.resolve_commit(source)?;
-    // These SHAs come from the just-completed explicit-destination fetch.
     // A failed refresh never lets stale local history claim publication.
-    let (target_tip, authority) = match refreshed {
-        TargetReconcile::NoRemote => (git.resolve_commit(target)?, target.to_string()),
-        TargetReconcile::FetchFailed { .. } => return None,
-        TargetReconcile::AlreadyCurrent { sha } => (sha.clone(), format!("origin/{target}")),
-        TargetReconcile::FastForwarded { to, .. } => (to.clone(), format!("origin/{target}")),
-        TargetReconcile::AheadOfRemote { remote, .. } | TargetReconcile::Diverged { remote, .. } =>
-            (remote.clone(), format!("origin/{target}")),
+    // Tracking refs refresh here; local target advancement remains behind CI,
+    // unless this source is already integrated and no merge is needed.
+    let (target_tip, authority) = match git.fetch_merge_target(target).ok()? {
+        Some(sha) => (sha, format!("origin/{target}")),
+        None => (git.resolve_commit(target)?, target.to_string()),
     };
     git.is_ancestor(&source_tip, &target_tip).then(|| format!(
         "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
@@ -3610,14 +3605,15 @@ impl CasCore {
 
         // An unpublished local merge is not a no-op. Only a fresh origin
         // snapshot (or a repository with no origin) can prove containment.
-        // Reconciliation also keeps the existing behind-local checkout fix.
-        if transactional_delivery.is_none() {
+        if transactional_delivery.is_none()
+            && let Some(receipt) = contained_merge_receipt(
+                manager.git(), &worktree.branch, &worktree.parent_branch,
+            )
+        {
+            // Preserve the existing behind-local checkout repair, but only
+            // after origin has proved that this source needs no CI/merge.
             let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
-            if let Some(receipt) = contained_merge_receipt(
-                manager.git(), &worktree.branch, &worktree.parent_branch, &refreshed,
-            ) {
-                return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
-            }
+            return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
         }
 
         let mut reconciled_delivery = false;
@@ -3978,7 +3974,7 @@ impl CasCore {
             // was behind. Re-check the reconciled ref before merge side effects.
             if transactional_delivery.is_none()
                 && let Some(receipt) = contained_merge_receipt(
-                    manager.git(), &worktree.branch, &worktree.parent_branch, &reconcile,
+                    manager.git(), &worktree.branch, &worktree.parent_branch,
                 )
             {
                 return Ok(Self::success(format!("{receipt}{reconcile_note}")));

@@ -228,6 +228,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     assert_eq!(receipt["stop"]["stopped"], true, "{receipt}");
     assert_eq!(receipt["stop"]["pid"], initial["pid"], "{receipt}");
     assert_eq!(receipt["start"]["version"], initial["version"], "{receipt}");
+    assert_eq!(receipt["start"]["already_satisfied"], false, "{receipt}");
     assert_ne!(receipt["start"]["pid"], initial["pid"], "{receipt}");
 
     let failed_restart = cas_command(home.path(), &path)
@@ -402,6 +403,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 .expect("wait for second restart racer"),
         ];
         let mut observed = false;
+        let mut launched_starts = 0;
         for output in &outputs {
             let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
                 panic!(
@@ -421,12 +423,21 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                     value["start"].is_object(),
                     "race attempt {attempt}: {value}"
                 );
+                match value["start"]["already_satisfied"].as_bool() {
+                    Some(false) => launched_starts += 1,
+                    Some(true) => {}
+                    None => panic!("race attempt {attempt} has no start disposition: {value}"),
+                }
             } else {
                 assert_eq!(value["status"], "error", "race attempt {attempt}: {value}");
             }
             if stop["already_satisfied"] == true {
                 assert_eq!(stop["stopped"], false, "race attempt {attempt}: {value}");
                 assert!(stop["pid"].is_null(), "race attempt {attempt}: {value}");
+                assert_eq!(
+                    value["start"]["already_satisfied"], true,
+                    "race attempt {attempt} peer-satisfied restart must identify the winner: {value}"
+                );
                 assert!(
                     stop["tailscale_serve_removed"].is_null(),
                     "race attempt {attempt}: {value}"
@@ -437,6 +448,12 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 );
                 observed = true;
             }
+        }
+        if observed {
+            assert_eq!(
+                launched_starts, 1,
+                "race attempt {attempt} must identify exactly one restart as the launcher"
+            );
         }
         let cleanup = cas_command(race_home.path(), &path)
             .args(["--json", "hub", "stop"])

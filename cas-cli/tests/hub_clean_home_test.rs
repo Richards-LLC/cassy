@@ -2577,7 +2577,8 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         String::from_utf8_lossy(&cleanup.stderr)
     );
 
-    let mut successful_pids = Vec::new();
+    let mut launched_pids = Vec::new();
+    let mut satisfied_pids = Vec::new();
     for (name, output) in labelled {
         let value: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{name} did not emit one JSON value ({error}): {detail}"));
@@ -2585,13 +2586,20 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             let pid = value["start"]["pid"]
                 .as_u64()
                 .unwrap_or_else(|| panic!("{name} success has no hub PID: {value}"));
-            if value["stop"]["already_satisfied"] == true {
+            match value["start"]["already_satisfied"].as_bool() {
+                Some(false) => launched_pids.push(pid),
+                Some(true) => satisfied_pids.push(pid),
+                None => panic!("{name} success has no start disposition: {value}; {detail}"),
+            }
+            if value["start"]["already_satisfied"] == true
+                || value["stop"]["already_satisfied"] == true
+            {
                 assert_eq!(
                     pid, running_pid,
                     "{name} already-satisfied stop must return the running hub: {value}; {detail}"
                 );
             }
-            successful_pids.push(pid);
+            assert_eq!(pid, running_pid, "{name} must report the running hub: {value}; {detail}");
         } else {
             let message = value["message"].as_str().unwrap_or_default();
             assert!(
@@ -2601,12 +2609,14 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             );
         }
     }
-    successful_pids.sort_unstable();
-    successful_pids.dedup();
     assert_eq!(
-        successful_pids,
+        launched_pids,
         vec![running_pid],
-        "only the running winner may be reported as a successful hub: {detail}"
+        "exactly one restart may report that it launched the running hub: {detail}"
+    );
+    assert!(
+        satisfied_pids.iter().all(|pid| *pid == running_pid),
+        "a peer-satisfied restart must identify the running hub: {detail}"
     );
     if let Some(old_cgroup) = initial["cgroup"].as_str() {
         assert_ne!(

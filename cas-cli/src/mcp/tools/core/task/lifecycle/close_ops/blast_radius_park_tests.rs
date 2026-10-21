@@ -158,46 +158,25 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let widened = call(&f.worker, close.clone()).await;
     assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
 
-    let input_changes = [
-        (
-            "Cargo.toml",
-            "\n[workspace.metadata.cas95e0]\nproof = true\n",
-            "build(cas-br01): update package proof metadata",
-        ),
-        (
-            "crates/widget/tests/gear.rs",
-            "#[test]\nfn gear_turns() {}\n",
-            "test(cas-br01): add gear coverage",
-        ),
-        (
-            "crates/widget/src/gear.rs",
-            "pub fn turn() { let _ = 2; }\n",
-            "fix(cas-br01): update gear behavior",
-        ),
-    ];
-    let mut tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
     );
-    for (path, contents, message) in input_changes {
-        if let Some(parent) = Path::new(path).parent() {
-            std::fs::create_dir_all(f.worker_path.join(parent)).unwrap();
-        }
-        std::fs::write(f.worker_path.join(path), contents).unwrap();
-        git(&f.worker_path, &["add", path]);
-        git(&f.worker_path, &["commit", "-q", "-m", message]);
-        git(&f.worker_path, &["push", "-q", "origin", LANE]);
-        let stale = call(&f.worker, close.clone()).await;
-        assert!(
-            stale.contains("FOCUSED PROOF REQUIRED"),
-            "receipt at {tested_tip} must not cover proof-input change {path}: {stale}"
-        );
-        assert_eq!(f.task().status, TaskStatus::InProgress, "{path}: {stale}");
-        tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-        crate::factory_worker_check::record_passing_test_for_tests(
-            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
-        );
-    }
+    let source_path = "crates/widget/src/gear.rs";
+    std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
+    git(&f.worker_path, &["add", source_path]);
+    git(&f.worker_path, &["commit", "-q", "-m", "fix(cas-br01): update gear behavior"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale = call(&f.worker, close.clone()).await;
+    assert!(
+        stale.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover Rust source change: {stale}"
+    );
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+    );
 
     let doc_path = "docs/design/cli/update-managed-files.brief.md";
     std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();

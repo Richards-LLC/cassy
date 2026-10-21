@@ -161,6 +161,15 @@ pub(crate) fn refresh_upkeep(
         }
     }
     let output = document.to_string();
+    // Like config retirement, never replace a config the operator made
+    // read-only (an atomic rename would bypass it). The next update after
+    // write permission is restored adopts the window.
+    if output != raw && std::fs::metadata(&path).is_ok_and(|m| m.permissions().readonly()) {
+        return Ok(vec![
+            "config is read-only; upkeep stages unchanged until write permission is restored"
+                .into(),
+        ]);
+    }
     if !dry_run && output != raw {
         atomic_replace_project_config(&path, &output)?;
     }

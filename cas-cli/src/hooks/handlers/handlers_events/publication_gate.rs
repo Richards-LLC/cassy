@@ -19,6 +19,12 @@ const OVERRIDE_WINDOW_HOURS: i64 = 6;
 pub(super) const OVERRIDE_MARKER: &str = "PUBLICATION OVERRIDE:";
 
 pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
+    let posts = violet_posts(tool, input);
+    if let Some(root) = cas_root
+        && let Some(reason) = post_release_denial(&posts, root)
+    {
+        return Some(reason);
+    }
     let gated: Vec<Value> = violet_posts(tool, input)
         .into_iter()
         .filter(is_deliverable_post)
@@ -44,7 +50,10 @@ pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
         .map(|task| format!("{} ({}): {}", task.id, task.status, task.title))
         .collect();
     if epic.pending_verification {
-        open.push(format!("{}: the epic's own verification is pending", epic.id));
+        open.push(format!(
+            "{}: the epic's own verification is pending",
+            epic.id
+        ));
     }
     if open.is_empty() {
         return None;
@@ -118,7 +127,10 @@ fn collect_dispatch(code: &Value, posts: &mut Vec<Value>) {
     match code {
         Value::Array(calls) => calls.iter().for_each(|call| collect_dispatch(call, posts)),
         Value::Object(call) => {
-            let server = call.get("server").and_then(Value::as_str).unwrap_or_default();
+            let server = call
+                .get("server")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let tool = call.get("tool").and_then(Value::as_str).unwrap_or_default();
             if server.eq_ignore_ascii_case("violet") && tool.eq_ignore_ascii_case("violet_post") {
                 let args = ["arguments", "args", "input", "params"]
@@ -204,7 +216,11 @@ fn explicit_epic(post: &Value, store: &dyn cas_store::TaskStore) -> Option<Strin
     if task.task_type == TaskType::Epic {
         return Some(task.id);
     }
-    store.get_parent_epic(task_id).ok().flatten().map(|epic| epic.id)
+    store
+        .get_parent_epic(task_id)
+        .ok()
+        .flatten()
+        .map(|epic| epic.id)
 }
 
 /// A verification-type task: a gate, or a task whose labels or title say it
@@ -236,4 +252,45 @@ fn recent_override(notes: &str, now: chrono::DateTime<chrono::Utc>) -> Option<St
             && age <= chrono::Duration::hours(OVERRIDE_WINDOW_HOURS))
         .then(|| line[at..].trim().chars().take(200).collect())
     })
+}
+
+/// Release-note announcements have a separate gate from deliverable verification.
+fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
+    crate::qa_post_release::configured(root)?;
+    let rubric = std::fs::read_to_string(root.parent()?.join("docs/release-notes/RUBRIC.md"))
+        .unwrap_or_default();
+    let channel_pattern = regex::Regex::new(r"#[A-Za-z0-9_-]+|\bC[A-Z0-9]{6,}\b").ok()?;
+    let channels: Vec<String> = rubric
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("channel"))
+        .flat_map(|line| {
+            channel_pattern
+                .find_iter(line)
+                .map(|m| m.as_str().trim_start_matches('#').to_string())
+        })
+        .collect();
+    let store = crate::store::open_task_store(root).ok()?;
+    for post in posts {
+        let marked = post.get("release_notes").and_then(Value::as_bool) == Some(true);
+        let rubric_channel = post
+            .get("channel")
+            .and_then(Value::as_str)
+            .is_some_and(|c| {
+                channels
+                    .iter()
+                    .any(|known| known == c.trim_start_matches('#'))
+            });
+        if !marked && !rubric_channel {
+            continue;
+        }
+        let epic = explicit_epic(post, store.as_ref())
+            .or_else(crate::ui::factory::preferred_epic_id_from_session_metadata);
+        let Some(epic) = epic.and_then(|id| store.get(&id).ok()) else {
+            return Some("RELEASE NOTES BLOCKED (post_release_pending): name epic_id (or task_id) so Cassy can check its post-release receipt.".into());
+        };
+        if let Some(reason) = crate::qa_post_release::gate(root, &epic, true) {
+            return Some(reason);
+        }
+    }
+    None
 }

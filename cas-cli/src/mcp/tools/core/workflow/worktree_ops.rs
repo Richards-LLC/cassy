@@ -3227,6 +3227,10 @@ impl CasCore {
                 data: None,
             });
         }
+        if let Some(epic) = scoped_task.as_ref().filter(|t|t.task_type == cas_types::TaskType::Epic)
+            && let Ok(actor) = self.get_agent_id()
+            && let Err(error) = crate::qa_post_release::arm_on_merge(&cas_root,epic,&actor)
+        { tracing::warn!(%error,epic=%epic.id,"could not arm post-release fallback at merge request"); }
         // cas-9c34: the supervisor is acting on this task's merge request,
         // whatever this attempt's outcome; it is read.
         if let Some(task_id) = task_id

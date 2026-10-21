@@ -7093,6 +7093,19 @@ impl CasCore {
             data: None,
         })?;
 
+        if task.task_type == TaskType::Epic && !task.is_terminal() {
+            if let Ok(actor) = self.get_agent_id() {
+                if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {
+                    tracing::warn!(%error,epic=%task.id,"could not arm post-release fallback");
+                }
+            }
+            if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
+                return Ok(Self::tool_error(reason));
+            }
+            // An override use appends an audit note; do not overwrite it later.
+            task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
+        }
+
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
         // verification dispatch, or completion-receipt projection so every

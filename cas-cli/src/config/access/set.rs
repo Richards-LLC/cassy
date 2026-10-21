@@ -667,6 +667,30 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.post_release.command" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.command = value.trim().to_string();
+            }
+            "qa.post_release.window_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.window_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.interval_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.interval_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.timeout_secs" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.timeout_secs = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.release_branches" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.release_branches = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.post_release.env" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.env = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "qa.preflight_hook" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_hook = if value.trim().is_empty() {

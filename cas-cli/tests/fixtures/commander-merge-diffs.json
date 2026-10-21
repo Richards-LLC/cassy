@@ -1,0 +1,99 @@
+{
+  "description": "Ten latest first-parent main merges captured for cas-1a420. Retain changed hub-web/catalog paths and one unrelated path when none exist; all omitted paths lie outside the legacy hub-web catalog surface. Full git diff path lists are in the task parity-baseline artifact. Expected IDs were captured from the committed legacy selector. CSS/import hunks have a separate focused fixture.",
+  "diffs": [
+    {
+      "base": "5f868a44a18d50c126be75adee380593465fa5a3",
+      "head": "0e9f5b4e3413b8c53e24019b6de58a772817f87d",
+      "changed_file_count": 99,
+      "files": [
+        ".claude/CODEMAP.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "eb3e9a6ae3cab1fbe487ecfa2a657eb247710a66",
+      "head": "5f868a44a18d50c126be75adee380593465fa5a3",
+      "changed_file_count": 44,
+      "files": [
+        ".claude/CODEMAP.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "acfb0b0185e00f049426509d339217b954d1d610",
+      "head": "eb3e9a6ae3cab1fbe487ecfa2a657eb247710a66",
+      "changed_file_count": 106,
+      "files": [
+        ".claude/CODEMAP.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "d18e8aadc9b44ef90cb73a0c4591b6a423c58338",
+      "head": "acfb0b0185e00f049426509d339217b954d1d610",
+      "changed_file_count": 276,
+      "files": [
+        "hub-web/DESIGN.md",
+        "hub-web/e2e/journeys/find-conversation.journey.ts",
+        "hub-web/src/tokens.test.ts"
+      ],
+      "journeys": [
+        "HUB-J3"
+      ]
+    },
+    {
+      "base": "d6014e1d80415984a5114598610fb144e9be38ee",
+      "head": "d18e8aadc9b44ef90cb73a0c4591b6a423c58338",
+      "changed_file_count": 7,
+      "files": [
+        "docs/release-notes/2026-10-20-v3.66.0-report-attachments.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "067cfdb938401696ce0539b83288c1c36d6f8fae",
+      "head": "d6014e1d80415984a5114598610fb144e9be38ee",
+      "changed_file_count": 90,
+      "files": [
+        "CHANGELOG.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "72ed24a5464f8cba0a939b778df80c3102fe9dea",
+      "head": "067cfdb938401696ce0539b83288c1c36d6f8fae",
+      "changed_file_count": 1,
+      "files": [
+        "cas-cli/src/coordination/binding_repair/tests.rs"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "a8ae7c2234ec9ee404ad4bb66d56f02c0c26aad9",
+      "head": "72ed24a5464f8cba0a939b778df80c3102fe9dea",
+      "changed_file_count": 6,
+      "files": [
+        "docs/release-notes/2026-10-19-v3.65.0-slack.md"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "9813ef848d20386d4b9b268dcf28b4fa8ced97f3",
+      "head": "a8ae7c2234ec9ee404ad4bb66d56f02c0c26aad9",
+      "changed_file_count": 4,
+      "files": [
+        "crates/cas-mux/src/backend/codex.rs"
+      ],
+      "journeys": []
+    },
+    {
+      "base": "432a5ecc045196c8e2475079e67e7c02dfe79665",
+      "head": "9813ef848d20386d4b9b268dcf28b4fa8ced97f3",
+      "changed_file_count": 7,
+      "files": [
+        "docs/release-notes/2026-10-19-v3.65.0-slack.md"
+      ],
+      "journeys": []
+    }
+  ]
+}

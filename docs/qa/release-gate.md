@@ -119,6 +119,10 @@ the job and failed step when GitHub reports one. The relay key includes the
 branch, workflow and SHA, so repeated polls send one blocker for that failure.
 This watcher works even when no release adapter is configured.
 
+Ordinary CI runs ending in `failure` or `timed_out` count as red when GitHub
+reports a failed or timed-out job. They raise the usual high-priority CI alert
+at the branch tip; a run with only cancelled jobs stays silent.
+
 Path-filtered deploys may not rerun after the branch moves. An observed red deploy
 therefore stays red until a newer successful run of the same workflow on the
 integration branch. Cancelled, skipped and neutral runs do not clear it. Latest
@@ -132,12 +136,13 @@ adds no GitHub calls; it cannot discover a deploy already outside the first
 current. The release gate's served-component check still detects stale deploys
 when a gate is attempted.
 
-
 If the project config cannot be loaded or saved deploy observations cannot be
 read, deploy monitoring pauses and the existing ordinary CI branch watches stay
-active. The watcher preserves corrupt state for repair and warns once per
-affected path per daemon process. A state-write failure also warns once, while
-current alerts continue to be relayed.
+active. The watcher preserves corrupt state for repair and warns once per path
+and error class (`read`, `parse`, `write`) until that operation recovers. A
+healthy read rearms read/parse warnings; a matching persisted observation or a
+successful write rearms write warnings. State-write failures keep current alerts
+available, and unchanged observations do not rewrite the state file.
 
 ## Fixtures and personas
 

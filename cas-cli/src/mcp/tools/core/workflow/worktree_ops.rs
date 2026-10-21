@@ -6403,7 +6403,18 @@ mod cas_7ce6_parked_merge_source_tests {
                 .unwrap().expect("an exact delivery branch remains usable");
             assert_eq!(git(path, &["rev-parse", &source]), anchor);
             git(path, &["checkout", "-q", "main"]);
-            git(path, &["merge", "--no-ff", "-m", "integrate parked source", &source]);
+            let manager = crate::worktree::WorktreeManager::new(path, crate::worktree::WorktreeConfig {
+                auto_merge: true,
+                ..Default::default()
+            }).unwrap();
+            // Simulate movement after preflight: branch still names B, but
+            // Git must consume the reviewed SHA, without changing branch identity.
+            let mut worktree = crate::types::Worktree::new(
+                "w".into(), "factory/w".into(), "main".into(), path.to_path_buf(),
+            );
+            let branch = worktree.branch.clone();
+            manager.merge_preserving_worktree_at(&mut worktree, false, false, &anchor).unwrap();
+            assert_eq!(worktree.branch, branch);
             assert!(path.join("parked").is_file());
             assert_eq!(git(path, &["rev-parse", "main^2"]), anchor);
             assert!(!ops.is_ancestor(&tip, "main"), "unreviewed B must not be integrated");

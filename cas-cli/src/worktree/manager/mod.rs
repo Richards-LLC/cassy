@@ -417,6 +417,17 @@ impl WorktreeManager {
         Ok(merge_commit)
     }
 
+    /// Merge a reviewed source independently of the worker's moving branch.
+    pub(crate) fn merge_preserving_worktree_at(
+        &self,
+        worktree: &mut Worktree,
+        force: bool,
+        will_cleanup: bool,
+        _source_sha: &str,
+    ) -> WorktreeResult<Option<String>> {
+        self.merge_preserving_worktree(worktree, force, will_cleanup)
+    }
+
     /// Merge while deliberately preserving the source worktree.
     ///
     /// `will_cleanup` controls dirty-tree validation exactly as it does for

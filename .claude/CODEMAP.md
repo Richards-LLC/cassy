@@ -97,6 +97,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/mcp/server/` - runtime, prompts, resources, watchdog, and allocator controls.
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifact, search, rule, and workflow handlers.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - task start/close, evidence validation, epic lanes, and merged-delivery closure.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/docs_upkeep.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` - pre-park G1–G6 upkeep checks, snapshot attribution, escapes, and observe accounting.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - task-owned diff attribution and shared hunk parsing.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merged_verification.rs` - verification dispatch for merged deliveries another close gate refuses.
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded candidate-repository discovery for task lifecycle calls.

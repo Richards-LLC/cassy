@@ -93,7 +93,10 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
     write(f.repo.path(), "src/account/extra.ts", "existing directory");
     let head = commit(f.repo.path());
     assert!(
-        f.run(&head).is_ok(),
+        f.run(&head)
+            .unwrap()
+            .iter()
+            .any(|n| n.contains("UPKEEP ADVISORY G5") && n.contains("src/account/extra.ts")),
         "a new file in an existing directory is advisory"
     );
     write(f.repo.path(), "src/payments/start.ts", "new directory");
@@ -174,20 +177,22 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
 
 #[test]
 fn docs_upkeep_removed_named_path_requires_map_edit() {
-    for rename in [false, true] {
+    for (old, new, rename) in [
+        ("schema/model.sql", "schema/entity.sql", false),
+        ("schema/model.sql", "schema/entity.sql", true),
+        ("src/account", "src/profile", false),
+        ("src/account", "src/profile", true),
+    ] {
         let mut f = Fixture::new();
         if rename {
-            git(
-                f.repo.path(),
-                &["mv", "schema/model.sql", "schema/entity.sql"],
-            );
+            git(f.repo.path(), &["mv", old, new]);
         } else {
-            git(f.repo.path(), &["rm", "schema/model.sql"]);
+            git(f.repo.path(), &["rm", "-r", old]);
         }
         let head = commit(f.repo.path());
         let error = f.run(&head).unwrap_err();
         assert!(
-            error.contains("CODEMAP DRIFT") && error.contains("schema/model.sql"),
+            error.contains("CODEMAP DRIFT") && error.contains(old),
             "{error}"
         );
         write(
@@ -236,11 +241,7 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
                 crate::qa_registry::DEFAULT_PATH,
                 &format!(
                     "version: 1\njourneys:\n  - {{id: signup, status: {}}}\n",
-                    if change == "dead" || change == "revived" {
-                        "dead"
-                    } else {
-                        "live"
-                    }
+                    if change == "dead" { "dead" } else { "live" }
                 ),
             ),
         }
@@ -262,4 +263,13 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
         assert!(f.run(&head).is_ok());
         assert!(f.task.notes.contains("UPKEEP ESCAPE G6"));
     }
+    let mut f = Fixture::new();
+    write(f.repo.path(), "schema/model.sql", "changed model");
+    write(
+        f.repo.path(),
+        "docs/PRODUCT_OVERVIEW.md",
+        "# Updated domain model\n",
+    );
+    let head = commit(f.repo.path());
+    assert!(f.run(&head).is_ok());
 }

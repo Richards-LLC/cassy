@@ -169,3 +169,7 @@ Accounting is durable and deduplicated across retries: notes start with
 summaries can count these rows without executing a check again. Epic close appends
 `Upkeep escapes in this epic: <n> (<task: gate/token/reason>…)` across its descendants.
 Current warnings and observe summaries also appear in park and close receipts.
+
+Documentation upkeep gates G5/G6 run alongside these gates, including when no
+registry exists. See [documentation upkeep](docs-upkeep.md) for CODEMAP and
+PRODUCT_OVERVIEW conditions, stages, adoption and decision escapes.

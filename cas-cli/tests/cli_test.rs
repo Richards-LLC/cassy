@@ -45,6 +45,52 @@ fn test_version() {
 }
 
 #[test]
+fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(root.join("README.md"), "candidate fixture\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    cas_cmd(root).current_dir(root).args(["init", "--yes"]).assert().success();
+    let artifact_base = root.join("task-artifacts");
+    std::fs::write(
+        root.join(".cas/config.toml"),
+        format!("[factory]\nartifacts_root = {:?}\n", artifact_base.display().to_string()),
+    ).unwrap();
+    let output = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "candidate", "build", "--task", "cas-0227", "--plan", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidate = std::path::PathBuf::from(plan["candidate_dir"].as_str().unwrap());
+    assert!(candidate.starts_with(&artifact_base), "{plan}");
+    assert!(candidate.ends_with("cas-0227/candidate"), "{plan}");
+    assert_eq!(plan["binary"], candidate.join("cas").display().to_string());
+    assert_eq!(plan["version_file"], candidate.join("VERSION.txt").display().to_string());
+    assert_eq!(plan["checksums_file"], candidate.join("SHA256SUMS").display().to_string());
+    assert_eq!(plan["revision"].as_str().unwrap().len(), 40);
+    assert!(!candidate.exists(), "planning must not build or create evidence");
+}
+
+#[test]
 fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

@@ -592,6 +592,16 @@ Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
 omitted, but not both. The proposer claims only `mine`; acceptance claims only
 the recipient's share. Existing expiry, cancel and start guards apply.
 
+Assignments and starts of a peer's split children name the peer and split and
+refuse the change, including `force=true`. To take over one child, a live
+registered supervisor uses `task action=update id=<child> assignee=<worker>
+supervisor_override=true reason="<agreed takeover reason>"`. This persists a
+decision bound to that worker's registration; only its successful start consumes
+the decision. A different worker, a claim, transfer or pre-assigned spawn cannot
+use it. Cancel or redirect the split to change the ownership agreement instead.
+Accepted splits remain binding until cancelled; their expiry limits acceptance
+of unanswered proposals.
+
 Accept, reject, cancel and expiry carry typed `epic_split_decided` peer intent,
 eligible to wake through the existing mailbox and pane gates. Read
 `factory action=epic_split id=<split> decision=status` (or just `id=<split>`) for

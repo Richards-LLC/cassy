@@ -1976,15 +1976,7 @@ fn prepare_factory_session(
     project_root: &std::path::Path,
     cas_root: Option<&std::path::Path>,
 ) -> Result<FactorySessionAction> {
-    let (session_name, preflight) = preflight_factory_launch(args, project_root, cas_root)?;
-    if !preflight.notices.is_empty() {
-        let theme = crate::ui::theme::ActiveTheme::default();
-        let mut stdout = std::io::stdout();
-        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-        for note in &preflight.notices {
-            fmt.info(note)?;
-        }
-    }
+    let mut replacement = None;
     let codex_home = codex_account_home_suffix(&args.supervisor_cli);
     if !codex_home.is_empty() {
         let theme = crate::ui::theme::ActiveTheme::default();
@@ -1993,7 +1985,8 @@ fn prepare_factory_session(
         fmt.info(&format!("Resolving factory session{codex_home}"))?;
     }
 
-    // Auto-attach to existing session, or kill it if --new
+    // Choose attach before launch-only checks or diagnostics. Defer an accepted
+    // --new replacement until preflight succeeds so a refusal keeps the daemon.
     if !args.legacy && args.name.is_none() {
         let project_dir = project_root.to_string_lossy();
         if let Ok(Some(session)) = find_session_for_project(&project_dir, None) {
@@ -2013,9 +2006,7 @@ fn prepare_factory_session(
                         "Kill existing session and start fresh?",
                         true,
                     )? {
-                        lifecycle::kill_session_if_running(&session.name)?;
-                        fmt.info(&format!("Killed. Starting new session...{codex_home}"))?;
-                        fmt.newline()?;
+                        replacement = Some(session.name);
                     } else {
                         fmt.info("Attaching to existing session instead.")?;
                         fmt.newline()?;
@@ -2057,6 +2048,27 @@ fn prepare_factory_session(
         }
     }
 
+    let preflight = preflight_factory_launch(args, project_root, cas_root)?;
+    let theme = crate::ui::theme::ActiveTheme::default();
+    let mut stdout = std::io::stdout();
+    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+    for note in &preflight.notices {
+        fmt.info(note)?;
+    }
+    if let Some(name) = replacement {
+        lifecycle::kill_session_if_running(&name)?;
+        fmt.info(&format!("Killed. Starting new session...{codex_home}"))?;
+        fmt.newline()?;
+    }
+    let session_name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| generate_session_name(Some(&project_root.to_string_lossy())));
+    if let Err(error) =
+        record_factory_launch_diagnostics(Some(&session_name), &preflight.cas_root, None)
+    {
+        eprintln!("Warning: could not write factory launch diagnostics: {error}");
+    }
     Ok(FactorySessionAction::Launch {
         session_name,
         preflight,
@@ -2067,42 +2079,24 @@ fn preflight_factory_launch(
     args: &FactoryArgs,
     cwd: &std::path::Path,
     cas_root: Option<&std::path::Path>,
-) -> Result<(String, FactoryPreflight)> {
-    // Resolve the session before preflight can refuse: no daemon exists yet
-    // to retain its error, and successful launches need the runtime-log pointer too.
-    let session_name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| generate_session_name(Some(&cwd.to_string_lossy())));
-    let result = check_factory_launch(args, cwd, cas_root);
-    let default_root = cwd.join(".cas");
-    let log_root = result
-        .as_ref()
-        .map(|preflight| preflight.cas_root.as_path())
-        .unwrap_or_else(|_| cas_root.unwrap_or(&default_root));
-    let diagnostics =
-        record_factory_launch_diagnostics(&session_name, log_root, result.as_ref().err());
-    match result {
-        Ok(preflight) => {
-            if let Err(error) = diagnostics {
-                eprintln!("Warning: could not write factory launch diagnostics: {error}");
-            }
-            Ok((session_name, preflight))
-        }
-        Err(error) => match diagnostics {
-            Ok(path) => Err(anyhow::anyhow!(
-                "{error:#}\n\nLaunch diagnostics: {}",
-                path.display()
-            )),
-            Err(log_error) => Err(anyhow::anyhow!(
+) -> Result<FactoryPreflight> {
+    check_factory_launch(args, cwd, cas_root).map_err(|error| {
+        let default_root = cwd.join(".cas");
+        match record_factory_launch_diagnostics(
+            args.name.as_deref(),
+            cas_root.unwrap_or(&default_root),
+            Some(&error),
+        ) {
+            Ok(path) => anyhow::anyhow!("{error:#}\n\nLaunch diagnostics: {}", path.display()),
+            Err(log_error) => anyhow::anyhow!(
                 "{error:#}\n\nCould not write factory launch diagnostics: {log_error}"
-            )),
-        },
-    }
+            ),
+        }
+    })
 }
 
 fn record_factory_launch_diagnostics(
-    session_name: &str,
+    session_name: Option<&str>,
     cas_root: &std::path::Path,
     refusal: Option<&anyhow::Error>,
 ) -> std::io::Result<std::path::PathBuf> {
@@ -2110,15 +2104,18 @@ fn record_factory_launch_diagnostics(
 
     // daemon.log must remain stderr-only: boot recovery treats nonempty stderr
     // as a daemon failure. Keep launch diagnostics independently discoverable.
-    let path = crate::ui::factory::session_log_dir(session_name).join("launch.log");
-    std::fs::create_dir_all(path.parent().expect("session log directory"))?;
     let logging = Config::load(cas_root)
         .ok()
         .and_then(|config| config.logging)
         .unwrap_or_default();
+    let log_dir = cas_root.join(&logging.log_dir);
+    let path = match session_name {
+        Some(name) => crate::ui::factory::session_log_dir(name).join("launch.log"),
+        None => log_dir.join("factory-launch.log"),
+    };
+    std::fs::create_dir_all(path.parent().expect("launch log directory"))?;
     let now = chrono::Local::now();
-    let runtime_log =
-        crate::logging::log_path_for_date(&cas_root.join(&logging.log_dir), now.date_naive());
+    let runtime_log = crate::logging::log_path_for_date(&log_dir, now.date_naive());
     let mut record = format!(
         "\n[{}] Factory launch preflight\n\
          daemon.log records daemon stderr and can be empty.\n\

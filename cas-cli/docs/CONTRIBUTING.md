@@ -277,9 +277,15 @@ token or cost improvement.
 
 ## Factory launch diagnostics
 
-Factory launch preflight writes `~/.cas/logs/factory/<session>/launch.log`,
-including refusals that happen before the daemon starts. A refused launch prints
-this path alongside its original reason. Repeated attempts append dated records.
+Starting a new factory writes `~/.cas/logs/factory/<session>/launch.log` after
+the attach decision and launch preflight. Attaching to a running factory reuses
+that session without creating a new log directory or running launch-only checks.
+
+Refused launches with `--name` append to that session's `launch.log`. Unnamed
+refusals append to one stable project file, `<CAS_ROOT>/<logging.log_dir>/factory-launch.log`
+(by default `.cas/logs/factory-launch.log`), without reserving a session name.
+A refused launch prints its log path alongside its original reason. Repeated
+refusals append dated records at the same path.
 
 `launch.log` also identifies the project's runtime tracing file, using the
 resolved CAS root and `logging.log_dir` from its configuration. These files use

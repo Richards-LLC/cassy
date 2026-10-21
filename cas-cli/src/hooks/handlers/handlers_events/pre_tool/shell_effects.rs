@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ShellEffects {
+    pub relative_redirection: Option<String>,
     pub writes: Vec<String>,
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
@@ -260,6 +261,15 @@ fn collect_script(
         factory_shell_tokens_with_literals(&shell_command_without_heredoc_bodies(script));
     let mut values = inherited.clone();
     values.extend(factory_shell_variable_values(&tokens));
+    for pair in tokens.windows(2) {
+        if let [ShellToken::Operator('>'), ShellToken::Word(target)] = pair {
+            for path in expand_factory_shell_word(target, &values) {
+                if !Path::new(&path).is_absolute() && !path.starts_with('~') {
+                    effects.relative_redirection.get_or_insert(path);
+                }
+            }
+        }
+    }
     // Directory operands use only bindings visible before that cd. The
     // legacy file-target expander above also collects finite loop values.
     let mut directory_values = inherited.clone();

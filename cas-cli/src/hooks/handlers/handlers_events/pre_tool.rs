@@ -17,6 +17,31 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
+    // Codex 0.163 reports the turn cwd and drops exec_command's workdir.
+    // Honor the execution directory when a newer projection supplies it;
+    // otherwise a relative redirection cannot be attributed to any root.
+    let mut execution_input = None;
+    if input.tool_name.as_deref() == Some("Bash")
+        && cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .is_ok_and(|harness| harness.eq_ignore_ascii_case("codex"))
+        && let Some(tool_input) = input.tool_input.as_ref()
+    {
+        if let Some(workdir) = tool_input.get("workdir").and_then(|value| value.as_str()).filter(|path| !path.is_empty()) {
+            let mut resolved = input.clone();
+            resolved.cwd = Path::new(&input.cwd).join(workdir).display().to_string();
+            execution_input = Some(resolved);
+        } else if crate::harness_policy::is_factory_agent(input)
+            && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
+            && let Ok(effects) = shell_effects::collect(command, Path::new(&input.cwd))
+            && let Some(path) = effects.relative_redirection
+        {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &format!(
+                "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve relative redirection `{path}` because the Codex hook input omits workdir. Use an absolute in-worktree path."
+            )));
+        }
+    }
+    let input = execution_input.as_ref().unwrap_or(input);
+
     // Select the literal capped Cargo route before policy stores or provider
     // lookups. Every protection still evaluates the rewritten command below.
     if worker_cargo_request(input) {

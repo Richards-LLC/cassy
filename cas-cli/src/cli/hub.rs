@@ -1162,7 +1162,7 @@ fn required_transport_refusal(
             "cas hub start",
         ),
     };
-    let mut message = format!("Hub transport required: Tailscale Serve is unavailable.\n{operation}");
+    let mut message = format!("Hub transport required: Tailscale is unavailable.\n{operation}");
     if let Some(issue) = issue {
         message.push('\n');
         message.push_str(issue);

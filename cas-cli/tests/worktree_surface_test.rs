@@ -2219,6 +2219,103 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     run_git(&["merge-base", "--is-ancestor", &anchor, "origin/epic/parked"], &repo.root);
 }
 
+/// Race two real handler calls and a separate peer clone against one origin.
+#[cfg(unix)]
+#[test]
+fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&root);
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["branch", "epic/race"], &repo.root);
+    run_git(&["push", "origin", "epic/race"], &repo.root);
+    let (epic, _) = create_epic_and_worker_task(&root, "epic/race", Some("alice"));
+    let tasks = open_task_store(&root).unwrap();
+    let mut tips = Vec::new();
+    for name in ["alice", "bob", "charlie"] {
+        if name != "alice" {
+            let mut task = Task::new(format!("task-{name}"), "Race delivery".into());
+            task.assignee = Some(name.into());
+            tasks.create_atomic(&task, &[], Some(&epic), None).unwrap();
+        }
+        let worker = root.join("worktrees").join(name);
+        repo.add_worktree(&worker, &format!("factory/{name}"));
+        std::fs::write(worker.join(format!("{name}.txt")), name).unwrap();
+        run_git(&["add", "."], &worker);
+        run_git(&["commit", "-m", name], &worker);
+        tips.push(git_stdout(&worker, &["rev-parse", "HEAD"]));
+    }
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+    env.set_current_dir(&repo.root);
+    // The peer's commit lands after the handler fetched and before its push.
+    // A real pre-push hook provides ordering without sleeps or a Git mock.
+    let peer = remote.path().join("peer");
+    run_git(&["clone", "-b", "epic/race", remote.path().to_str().unwrap(), peer.to_str().unwrap()], &repo.root);
+    run_git(&["config", "user.name", "Peer"], &peer);
+    run_git(&["config", "user.email", "peer@example.test"], &peer);
+    std::fs::write(peer.join("peer.txt"), "peer delivery").unwrap();
+    run_git(&["add", "."], &peer);
+    run_git(&["commit", "-m", "peer delivery"], &peer);
+    let peer_tip = git_stdout(&peer, &["rev-parse", "HEAD"]);
+    let hooks = repo.root.join(".git/hooks");
+    let hook = hooks.join("pre-push");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+    std::fs::write(&hook, format!(
+        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n git -C {} push origin refs/heads/epic/race:refs/heads/epic/race || exit 1\nfi\n",
+        quote(&hooks.join("peer-pushed")), quote(&peer)
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = |name: &str| {
+        let mut request = coord_req("worktree_merge");
+        request.id = Some(format!("factory/{name}"));
+        request.cleanup = Some(false);
+        request
+    };
+    let start = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["alice", "bob"].into_iter().map(|name| {
+            let root = &root;
+            let start = &start;
+            let req = request(name);
+            scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let service = make_service(root.clone());
+                start.wait();
+                runtime.block_on(service.coordination(Parameters(req)))
+                    .map(|result| get_text(&result)).map_err(|error| error.to_string())
+            })
+        }).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+    });
+    let origin_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
+    for tip in [&tips[0], &tips[1], &peer_tip] {
+        let contained = Command::new("git").args(["merge-base", "--is-ancestor", tip, &origin_tip])
+            .current_dir(&repo.root).status().unwrap().success();
+        assert!(contained, "both local merges and peer must land on origin; missing {tip}; receipts={results:#?}");
+    }
+    assert!(results.iter().all(|result| result.as_ref().is_ok_and(|text| !text.contains("NOT PUSHED"))), "{results:#?}");
+
+    // A different push failure leaves a local-only merge. Retrying must not
+    // claim containment from that local ref while origin lacks the source.
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let service = make_service(root.clone());
+    let req = request("charlie");
+    let rejected = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
+    let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
+    std::fs::remove_file(&hook).unwrap();
+    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
+    assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
+    let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
+    run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
+}
+
 #[tokio::test]
 async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved() {
     let mut env = test_env();

@@ -916,58 +916,101 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
 
 #[tokio::test]
 async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
-    let cas_dir = f.dir.path().join(".cas");
-    let task_dir = fresh_ledger(&f);
-    std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
-    std::fs::write(
-        task_dir.join("pairs.json"),
-        serde_json::json!({
-            "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
-            "pairs": [], "unpaired": [{"id": "G3", "before": {"png": "before.png"}}],
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let manifest = task_dir.join("bundle.json");
-    std::fs::write(
-        &manifest,
-        serde_json::json!({
-            "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let tasks = open_task_store(&cas_dir).unwrap();
-    let mut task = tasks.get(TASK).unwrap();
-    task.notes
-        .push_str(&format!("\nqa-bundle: {}", manifest.display()));
-    tasks.update(&task).unwrap();
-    let refusal = close_output(&f).await;
-    assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
-    cas_store::waive_qa_pass(
-        &cas_dir,
-        TASK,
-        "supervisor-session",
-        WORKER,
-        BRANCH,
-        &f.final_tip,
-        "fixture exact-head terminal evidence waiver",
-        chrono::Utc::now(),
-    )
-    .unwrap();
-    let parked = close(&f).await;
-    assert_eq!(
-        parked.deliverables.factory_branch_anchor.as_deref(),
-        Some(f.final_tip.as_str())
-    );
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert!(parked.notes.contains("QA evidence ledger waived"));
-    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
-    assert_eq!(passes.len(), 1);
-    assert_eq!(passes[0].bound_head, f.final_tip);
-    assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    for (surface, has_demo) in [("src/cli/status.rs", true), ("note.txt", false)] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture_with_surface(&mut env, surface, true);
+        let cas_dir = f.dir.path().join(".cas");
+        let task_dir = fresh_ledger(&f);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        if !has_demo {
+            task.demo_statement.clear();
+            tasks.update(&task).unwrap();
+        }
+        let original_notes = task.notes.clone();
+        let terminal = task_dir.join("terminal-qa/report.md");
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(&terminal, "terminal-qa: PASS fixture\n").unwrap();
+        let unrelated = task_dir.join("unrelated.json");
+        std::fs::write(&unrelated, r#"{"files":{"cells":["M01.png"]}}"#).unwrap();
+        let prose = task_dir.join("prose.txt");
+        std::fs::write(&prose, "old bundle instructions, not a manifest").unwrap();
+        for cited in [
+            "not-a-path".to_string(),
+            task_dir.join("missing.json").display().to_string(),
+            unrelated.display().to_string(),
+            prose.display().to_string(),
+        ] {
+            task.notes = format!("qa-bundle: {cited}");
+            let result = super::super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+                &cas_dir,
+                &task,
+                f.dir.path(),
+                "main",
+                Some(&f.final_tip),
+                Some(&[surface.into()]),
+            );
+            assert!(
+                result.is_ok(),
+                "{surface} without declared pairs must ignore {cited}: {result:?}"
+            );
+        }
+        task.notes = original_notes;
+        tasks.update(&task).unwrap();
+        std::fs::remove_file(terminal).unwrap();
+        std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
+        std::fs::write(
+            task_dir.join("pairs.json"),
+            serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
+                "pairs": [], "unpaired": [{"id": "G3", "before": {"png": "before.png"}}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manifest = task_dir.join("bundle.json");
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.notes
+            .push_str(&format!("\nqa-bundle: {}", manifest.display()));
+        tasks.update(&task).unwrap();
+        let refusal = close_output(&f).await;
+        assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
+        cas_store::waive_qa_pass(
+            &cas_dir,
+            TASK,
+            "supervisor-session",
+            WORKER,
+            BRANCH,
+            &f.final_tip,
+            "fixture exact-head terminal evidence waiver",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let parked = close(&f).await;
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.final_tip.as_str())
+        );
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        let waiver_label = if has_demo { "ledger" } else { "pair coverage" };
+        assert!(
+            parked
+                .notes
+                .contains(&format!("QA evidence {waiver_label} waived"))
+        );
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].bound_head, f.final_tip);
+        assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    }
 }
 
 #[tokio::test]

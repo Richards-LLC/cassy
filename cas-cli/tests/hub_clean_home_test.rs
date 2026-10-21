@@ -2524,7 +2524,10 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
     assert!(human.contains("Fix: cas claude login main"), "{human}");
     assert!(human.contains("path: ~/.codex"), "{human}");
     assert!(human.contains("Fix: cas codex login main"), "{human}");
-    assert!(human.contains("Fix: install grok CLI"), "{human}");
+    assert!(
+        human.contains("Fix: npm install -g @xai-official/grok"),
+        "{human}"
+    );
 
     let json = cas_command(home.path(), path)
         .env("CAS_HUB_SYSTEMCTL", &systemctl)

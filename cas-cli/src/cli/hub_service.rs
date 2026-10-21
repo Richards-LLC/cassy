@@ -109,6 +109,12 @@ struct LaunchReadiness {
     profile: String,
     ready: bool,
     detail: String,
+    #[serde(skip)]
+    summary: String,
+    #[serde(skip)]
+    profile_path: Option<PathBuf>,
+    #[serde(skip)]
+    repair: Option<String>,
 }
 
 impl ServiceReport {
@@ -138,16 +144,99 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
                     profile,
                     ready: true,
                     detail: path.display().to_string(),
+                    summary: String::new(),
+                    profile_path: None,
+                    repair: None,
                 },
-                Err(error) => LaunchReadiness {
-                    cli,
-                    profile,
-                    ready: false,
-                    detail: error.to_string(),
-                },
+                Err(error) => {
+                    use crate::hub::launch_env::LaunchError;
+                    let detail = error.to_string();
+                    let (summary, profile_path, repair) = match error {
+                        LaunchError::MissingBinary { cli } => (
+                            "CLI missing".to_owned(),
+                            None,
+                            Some(install_cli_command(cli).to_owned()),
+                        ),
+                        LaunchError::ProfileMissing { cli, path } => (
+                            format!("profile {profile} missing"),
+                            Some(path),
+                            Some(format!("cas {cli} login {profile}")),
+                        ),
+                        LaunchError::NotLoggedIn { cli, profile } => (
+                            format!("profile {profile} not logged in"),
+                            None,
+                            Some(format!("cas {cli} login {profile}")),
+                        ),
+                        LaunchError::ProbeFailed { .. } => {
+                            ("launch check failed".to_owned(), None, None)
+                        }
+                    };
+                    LaunchReadiness {
+                        cli,
+                        profile,
+                        ready: false,
+                        detail,
+                        summary,
+                        profile_path,
+                        repair,
+                    }
+                }
             }
         })
         .collect()
+}
+
+fn install_cli_command(cli: &str) -> &'static str {
+    match cli {
+        "claude" => "npm install -g @anthropic-ai/claude-code",
+        "codex" => "npm install -g @openai/codex",
+        "grok" => "npm install -g @xai-official/grok",
+        _ => "Install the CLI and add it to PATH",
+    }
+}
+
+fn readiness_path(path: &Path, home: &Path, full: bool, width: usize) -> (String, bool) {
+    let display = if full {
+        path.display().to_string()
+    } else if let Ok(relative) = path.strip_prefix(home) {
+        PathBuf::from("~").join(relative).display().to_string()
+    } else {
+        path.display().to_string()
+    };
+    let available = width.saturating_sub("    path: ".len()).max(1);
+    if full || display_cells(&display) <= available {
+        return (display, false);
+    }
+
+    let ellipsis = if crate::ui::components::formatter::locale_is_utf8() {
+        "…"
+    } else {
+        "..."
+    };
+    let suffix = trailing_path_cells(&display, available.saturating_sub(display_cells(ellipsis) + 1));
+    (format!("{ellipsis}/{suffix}"), true)
+}
+
+fn display_cells(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| if character.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+fn trailing_path_cells(value: &str, limit: usize) -> String {
+    let mut suffix = Vec::new();
+    let mut cells = 0;
+    for character in value.chars().rev() {
+        let width = if character.is_ascii() { 1 } else { 2 };
+        if cells + width > limit {
+            break;
+        }
+        cells += width;
+        suffix.push(character);
+    }
+    suffix.reverse();
+    suffix.into_iter().collect::<String>().trim_start_matches('/').to_owned()
 }
 
 fn capture_launch_profiles(cli: &Cli) -> Result<()> {
@@ -1305,34 +1394,48 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
     if cli.json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
+        let home = home_dir()?;
+        let terminal_width = usize::from(crate::ui::components::formatter::terminal_width());
+        let terminal_width = if terminal_width < 40 {
+            80
+        } else {
+            terminal_width
+        };
+        let mut paths_shortened = false;
         match report.supervision {
             "manual" => {
-                println!(
-                    "Cassy hub supervision is manual: {}",
-                    report.instructions.unwrap_or_default()
-                );
+                println!("Hub service: manual supervision on this host");
+                println!("  Fix: install systemd --user for automatic startup.");
+                println!("  Start at login with: cas hub start --tailscale-serve");
             }
             manager => {
                 println!(
-                    "Cassy hub service ({manager}) is {}{}{}; hub is {}",
+                    "Hub service ({manager}): {}; {}; {}; hub {}",
                     if report.installed {
                         "installed"
                     } else {
                         "not installed"
                     },
                     match report.enabled {
-                        Some(true) => ", enabled",
-                        Some(false) => ", disabled",
-                        None => "",
+                        Some(true) => "enabled",
+                        Some(false) => "disabled",
+                        None => "enablement unknown",
                     },
                     match report.active {
-                        Some(true) => " and active",
-                        Some(false) => " and inactive",
-                        None => "",
+                        Some(true) => "active",
+                        Some(false) => "inactive",
+                        None => "activity unknown",
                     },
                     report.hub_state.replace('_', " "),
                 );
                 if let Some(log_path) = report.log_path {
+                    let (log_path, shortened) = readiness_path(
+                        Path::new(&log_path),
+                        &home,
+                        cli.full,
+                        terminal_width,
+                    );
+                    paths_shortened |= shortened;
                     println!("  Logs: {log_path}");
                 }
             }
@@ -1341,17 +1444,28 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
             println!("  Warning: {warning}");
         }
         for readiness in &report.launch_readiness {
+            if readiness.ready {
+                println!(
+                    "  {} launch: ready (profile {})",
+                    readiness.cli, readiness.profile
+                );
+                continue;
+            }
             println!(
-                "  {} launch: {} (profile {}, {})",
-                readiness.cli,
-                if readiness.ready {
-                    "ready"
-                } else {
-                    "unavailable"
-                },
-                readiness.profile,
-                readiness.detail
+                "  {} launch: unavailable ({})",
+                readiness.cli, readiness.summary
             );
+            if let Some(path) = &readiness.profile_path {
+                let (path, shortened) = readiness_path(path, &home, cli.full, terminal_width);
+                paths_shortened |= shortened;
+                println!("    path: {path}");
+            }
+            if let Some(repair) = &readiness.repair {
+                println!("    Fix: {repair}");
+            }
+        }
+        if paths_shortened {
+            println!("  Full paths: cas hub service status --full or --json");
         }
     }
     Ok(())

@@ -14395,6 +14395,7 @@ pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &s
 /// cas-255b: an undeclared helper can have no delivery at all. Never infer
 /// that from a missing branch alone: require both the ownership checks on
 /// every known lane and a readable, empty task range in the closing checkout.
+/// A resolvable lane with any unmerged work still needs explicit delivery proof.
 /// Existing methodologies and all recorded delivery evidence keep their gates.
 fn task_has_no_delivery(
     repo: &std::path::Path,
@@ -14407,6 +14408,13 @@ fn task_has_no_delivery(
         && task.branch.is_none()
         && handoff_prior_holders(&task.notes).is_empty()
         && !has_recorded_code_delivery(task)
+        && task_delivery_branch(repo, task).is_none_or(|lane| {
+            matches!(
+                known_unmerged_factory_commits(repo, &lane,
+                    &preferred_diff_target_ref_for_delivery(repo, target, task.delivery_mode)),
+                KnownUnmergedCount::KnownZero,
+            )
+        })
         && window.is_some_and(|window| {
             window.identity.known_commits.is_empty()
                 && task_without_own_commits_judged(repo, task, target, receipt, false)

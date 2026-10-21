@@ -1,0 +1,252 @@
+use super::*;
+use std::process::Command;
+
+fn git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "impact fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+        .env("GIT_COMMITTER_NAME", "impact fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn write(repo: &Path, path: &str, body: &str) {
+    let path = repo.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+fn repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    repo
+}
+
+fn commit(repo: &Path) -> String {
+    git(repo, &["add", "."]);
+    git(
+        repo,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+    );
+    git(repo, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn qa_impact_orders_status_share_id_and_ignores_paths() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/flow.ts", "flow");
+    write(repo, "src/flow.test.ts", "test");
+    let mut yaml = String::from(
+        "version: 1\nupdated: '2026-10-21'\nignore: ['**/*.test.ts']\nowner_groups:\n  core: {description: Core, globs: ['src/**']}\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n",
+    );
+    for (id, status, share, owner) in [
+        ("L-z", "live", "null", "owners: ['src/flow.ts']"),
+        ("X-dead", "dead", "100", "owners: ['src/flow.ts']"),
+        ("L-cold", "live", "10", "owners: ['src/flow.ts']"),
+        ("L-hot", "live", "90", "owner_groups: [core]"),
+        ("D-dark", "dark", "99", "owners: ['src/flow.ts']"),
+        ("L-a", "live", "null", "owners: ['src/flow.ts']"),
+        (
+            "Only-ignored",
+            "live",
+            "100",
+            "owners: ['src/flow.test.ts']",
+        ),
+    ] {
+        yaml.push_str(&format!("  - id: {id}\n    status: {status}\n    status_reason: Flagged or historical\n    entry: {{url: /flow, trigger: Open}}\n    steps: [Arrive]\n    {owner}\n    invariants: [INV]\n    traffic: {{share_pct: {share}, basis: New accounts}}\n"));
+    }
+    write(repo, crate::qa_registry::DEFAULT_PATH, &yaml);
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[
+            Change::modified("src/flow.ts"),
+            Change::modified("src/flow.test.ts"),
+        ],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert_eq!(report.source, "registry");
+    assert!(report.registry.valid);
+    assert_eq!(
+        report
+            .journeys
+            .iter()
+            .map(|j| j.id.as_str())
+            .collect::<Vec<_>>(),
+        ["L-hot", "L-cold", "L-a", "L-z", "D-dark", "X-dead"]
+    );
+    assert_eq!(report.ignored, ["src/flow.test.ts"]);
+    let first = &report.journeys[0];
+    assert_eq!(
+        (
+            &*first.matches[0].file,
+            &*first.matches[0].glob,
+            &*first.matches[0].via
+        ),
+        ("src/flow.ts", "src/**", "owner_groups.core")
+    );
+    assert!(first.evidence_required.contains("INV"));
+    assert_eq!(
+        report.journeys[4].evidence_required,
+        "prove it stays unreachable"
+    );
+    assert_eq!(report.journeys[5].evidence_required, "none (NOT A ROUTE)");
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["journeys"][0]["invariants"][0]["check"], "Read state");
+}
+
+#[test]
+fn qa_impact_labels_unowned_with_longest_codemap_and_falls_back() {
+    let temp = repo();
+    let repo = temp.path();
+    write(
+        repo,
+        ".claude/CODEMAP.md",
+        "- `src/` - Broad area\n- `src/deep/` — Specific area\n",
+    );
+    commit(repo);
+    for path in [
+        "src/deep/page.vue",
+        "src/deep/other.ts",
+        "outside.txt",
+        "src/owned.ts",
+    ] {
+        write(repo, path, "file");
+    }
+    commit(repo);
+    let changes = [
+        Change::modified("src/deep/page.vue"),
+        Change::modified("src/deep/other.ts"),
+        Change::modified("outside.txt"),
+    ];
+    let report = analyze(repo, &QaConfig::default(), &changes, None, None).unwrap();
+    assert_eq!(report.source, "codemap_fallback");
+    assert!(report.journeys.is_empty());
+    assert_eq!(report.areas[0].prefix, "src/deep");
+    assert_eq!(report.areas[0].files.len(), 2);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("No journey registry:"))
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("PRODUCT_OVERVIEW.md is missing:"))
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("CODEMAP is stale ("))
+    );
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-21'\njourneys:\n  - id: owned\n    status: live\n    seeded: true\n    entry: {url: /, trigger: Open}\n    owners: ['src/owned.ts']\n",
+    );
+    let report = analyze(repo, &QaConfig::default(), &changes, None, None).unwrap();
+    assert_eq!(report.source, "registry");
+    assert!(report.areas.is_empty());
+    let page = report
+        .unowned
+        .iter()
+        .find(|p| p.file == "src/deep/page.vue")
+        .unwrap();
+    assert!(page.surface);
+    assert_eq!(
+        page.codemap.as_ref().unwrap(),
+        &CodemapLabel {
+            prefix: "src/deep".into(),
+            summary: "Specific area".into()
+        }
+    );
+    assert!(
+        report
+            .unowned
+            .iter()
+            .find(|p| p.file == "outside.txt")
+            .unwrap()
+            .codemap
+            .is_none()
+    );
+}
+
+#[test]
+fn qa_impact_legacy_catalog_preserves_qa_pass_selection_at_head() {
+    let temp = repo();
+    let repo = temp.path();
+    write(
+        repo,
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/journeys-for-diff.py"
+        )),
+    );
+    write(
+        repo,
+        "docs/qa/journeys.md",
+        "## hub-web\n\n- **Surface-wide:** `hub-web/src/*`\n\n### HUB-J1 · Reply\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/reply.ts`\n- **Suite:** `hub-web/e2e/reply.journey.ts`\n\n### HUB-J2 · Theme\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/theme.ts`\n- **Suite:** `hub-web/e2e/theme.journey.ts`\n",
+    );
+    for name in ["reply", "theme"] {
+        write(
+            repo,
+            &format!("hub-web/src/{name}.ts"),
+            "export const value = 'ok';",
+        );
+        write(
+            repo,
+            &format!("hub-web/e2e/{name}.journey.ts"),
+            &format!(
+                "test('HUB-J{} {name}', () => {{}});",
+                if name == "reply" { 1 } else { 2 }
+            ),
+        );
+    }
+    let head = commit(repo);
+    let paths = vec!["hub-web/src/reply.ts".to_owned()];
+    let expected = crate::qa_pass::catalog_journeys_for(repo, Some(&head), &paths);
+    assert_eq!(expected, ["HUB-J1"]);
+    // The physical checkout's files must not override a delivered revision.
+    write(repo, crate::qa_registry::DEFAULT_PATH, "invalid: [");
+    write(repo, "docs/qa/journeys.md", "old checkout");
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified(&paths[0])],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert_eq!(report.source, "legacy_catalog");
+    assert_eq!(
+        report
+            .journeys
+            .iter()
+            .map(|j| j.id.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(report.journeys[0].name, "Reply");
+    assert_eq!(
+        report.journeys[0].spec.as_deref(),
+        Some("hub-web/e2e/reply.journey.ts")
+    );
+}

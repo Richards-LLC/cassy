@@ -28,11 +28,28 @@ impl CasCore {
         // Preserve active/terminal authority, including explicit supervisor-only
         // timeout recovery. Only a missing or invalidated delivery cycle needs
         // preparation here; ordinary close still revalidates its exact proof.
-        if cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-            .is_some_and(|dispatch| {
-                dispatch.state != cas_types::VerificationDispatchState::Invalidated
-            })
+        let latest_dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        if latest_dispatch.as_ref().is_some_and(|dispatch| {
+            dispatch.state != cas_types::VerificationDispatchState::Invalidated
+        }) {
+            return Ok(());
+        }
+        // A task with no typed dispatch keeps the close gate's legacy
+        // authority: an undispatched approval still authorizes close, so a
+        // fresh dispatch here would only void it.
+        if latest_dispatch.is_none()
+            && self
+                .open_verification_store()
+                .ok()
+                .and_then(|store| store.get_latest_for_task(&task.id).ok().flatten())
+                .is_some_and(|row| {
+                    row.dispatch_id.is_none()
+                        && matches!(
+                            row.status,
+                            VerificationStatus::Approved | VerificationStatus::Skipped
+                        )
+                })
         {
             return Ok(());
         }

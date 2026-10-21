@@ -338,6 +338,9 @@ fn signed_out_hub_start_requires_explicit_loopback() {
 #[test]
 fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     let home = private_home();
+    // Restart refuses a stopped daemon only under the required policy (cas-3f03e).
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");

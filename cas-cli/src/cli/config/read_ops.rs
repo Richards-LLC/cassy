@@ -158,6 +158,41 @@ pub(crate) fn set_config_value(
     Ok(old_value)
 }
 
+/// Remove the stored override without serializing defaults back into the file.
+/// Keep the same operator guard and atomic writer as other config mutations.
+fn reset_config_value(
+    key: &str,
+    cas_root: &Path,
+) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(key != "factory.write_roots",
+        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it");
+    let _lock = crate::config::lock_project_config(cas_root)?;
+    let path = cas_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = toml::from_str(&raw)?;
+    let mut document = toml_edit::Document::parse(&raw)?.into_mut();
+    let mut parts: Vec<_> = key.split('.').collect();
+    let leaf = parts.pop().expect("a config key has at least one part");
+    let parent = parts.into_iter().try_fold(document.as_item_mut(), |item, part| {
+        item.as_table_like_mut()?.get_mut(part)
+    });
+    let removed = parent.and_then(|item| item.as_table_like_mut()?.remove(leaf)).is_some();
+    let contents = document.to_string();
+    let after: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &after, InvocationContext::from_process)?;
+    if removed {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    if key == "viktor.enabled" {
+        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
+    }
+    Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
+}
+
 fn execute_set_internal(
     config: &mut Config,
     key: &str,
@@ -575,25 +610,19 @@ pub(crate) fn execute_reset(
         } else {
             println!("Reset all {} options to defaults", reg.count());
         }
-    } else if let Some(meta) = reg.get(&args.key) {
-        let old_value = set_config_value(
-            &mut config,
-            &args.key,
-            meta.default,
-            &config_root,
-            InvocationContext::from_process,
-        )?;
+    } else if reg.get(&args.key).is_some() {
+        let (old_value, new_value) = reset_config_value(&args.key, &config_root)?;
 
         if cli.json {
             let json = serde_json::json!({
                 "key": args.key,
                 "old_value": old_value,
-                "new_value": meta.default
+                "new_value": new_value
             });
             println!("{}", serde_json::to_string(&json)?);
         } else {
-            println!("Reset {} to default: {}", args.key, meta.default);
-            if old_value != meta.default {
+            println!("Reset {} to default: {}", args.key, new_value);
+            if old_value != new_value {
                 println!("  (was: {old_value})");
             }
         }

@@ -14,8 +14,8 @@ impl Config {
         // not a single literal value (llm.harness/model/reasoning_effort —
         // see cas-05e3/cas-fbac): resolution depends on role, so there's no
         // one concrete string to show as `default:` in the registry.
-        // `cas config reset <key>` / the TUI 'd' key / the interactive
-        // editor all call `set(key, meta.default)`, which for these fields
+        // The TUI 'd' key and the interactive editor call
+        // `set(key, meta.default)`, which for these fields
         // means `set(key, "(default)")` — meaning "clear the field back to
         // unset", NOT "set it to the literal value `(default)`". The
         // documented way to clear one of these fields directly

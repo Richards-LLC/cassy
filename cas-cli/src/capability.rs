@@ -465,6 +465,77 @@ mod tests {
     use super::*;
     use cas_factory::CAPABILITY_UNKNOWN_TTL_MS;
 
+    #[cfg(unix)]
+    fn claude_probe_fixture() -> crate::test_support::TestEnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (name, body) in [
+            ("claude", "printf 'probe\\n' >> \"$HOME/claude-calls\"; printf '%s' \"$CLAUDE_TEST_STATUS\"; exit \"$CLAUDE_TEST_EXIT\""),
+            ("security", "printf '    \"/Library/Keychains/System.keychain\"\\n'"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("PATH", bin);
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
+        env.set("CLAUDE_TEST_EXIT", "0");
+        for name in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            env.remove(name);
+        }
+        env
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn claude_ssh_locked_keychain_is_not_a_logout_cas_43b3() {
+        let mut env = claude_probe_fixture();
+        env.set("SSH_CONNECTION", "fixture");
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
+        env.set("CLAUDE_TEST_EXIT", "1");
+        let (_, evidence) = probe_harness(
+            Harness::ClaudeCode,
+            "fixture",
+            None,
+            &BinaryObservation::Observed("fixture".into()),
+            None,
+            10,
+            Deadline::after(Duration::from_secs(30)),
+        );
+        assert_eq!(evidence.availability, CapabilityAvailability::Unknown);
+        // pin: incident #1294 requires this diagnostic instead of login advice.
+        assert_eq!(evidence.reason.as_deref(), Some("macOS login keychain locked in ssh session"));
+        assert!(!evidence.remediation.unwrap_or_default().contains("claude login"));
+        assert!(!env.home().join("claude-calls").exists(), "inaccessible keychain must not trigger a Claude auth probe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_auth_probes_are_bounded_per_profile_cas_43b3() {
+        let mut env = claude_probe_fixture();
+        let calls = env.home().join("claude-calls");
+        let first = probe_claude_auth(None, 10, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(first.availability, CapabilityAvailability::Available);
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
+        let cached = probe_claude_auth(None, 1_010, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(cached, first, "a repeated check must reuse the observation, including its timestamp");
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+        let other = probe_claude_auth(Some("other-profile"), 1_010, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(other.availability, CapabilityAvailability::Unavailable);
+        let refreshed = probe_claude_auth(None, 300_010, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(refreshed.availability, CapabilityAvailability::Unavailable);
+        assert_eq!(refreshed.observed_at_ms, 300_010);
+        env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
+        env.set("CLAUDE_TEST_EXIT", "1");
+        let failed = probe_claude_auth(None, 360_010, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(failed.availability, CapabilityAvailability::Unknown);
+        let repeated = probe_claude_auth(None, 370_010, Deadline::after(Duration::from_secs(30)));
+        assert_eq!(repeated, failed, "transient failures must also throttle probes without refreshing evidence");
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 4);
+    }
+
     #[test]
     fn route_identity_keeps_endpoint_and_account_separate() {
         let first = route_identity(

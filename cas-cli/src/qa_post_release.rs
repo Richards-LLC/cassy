@@ -213,6 +213,12 @@ mod tests {
             project_runner_lease(&cas).unwrap().is_some(),
             "an exited owner releases the lease"
         );
+        let observation_lock = lock(&cas, &epic.id).unwrap();
+        assert!(
+            lock_contention(&lock(&cas, &epic.id).unwrap_err()),
+            "wrapped observation contention is a silent retry"
+        );
+        drop(observation_lock);
         let probe = dir.path().join("check");
         fs::write(&probe,format!("#!/bin/sh\n[ -z \"$POST_RELEASE_PRIVATE\" ] && [ \"$QA_READ_TOKEN\" = read-only-test-token ] || exit 1\nprintf '%s' '{}'\n",serde_json::json!({"ok":true,"alarms":[],"checked_at":start,"readback":{"journey":"signup","subject":"opaque-1","invariants":["workspace"],"ok":true}}))).unwrap();
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
@@ -640,7 +646,7 @@ fn project_runner_lease(cas_root: &Path) -> Result<Option<File>> {
     }
 }
 
-fn lock_contention(error: &anyhow::Error) -> bool {
+pub(crate) fn lock_contention(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()

@@ -35,8 +35,7 @@ fn execute_status(measurement: &Measurement) -> anyhow::Result<()> {
     let pending_path = project_root.join(".cas").join(CODEMAP_PENDING_FILE);
     println!("CODEMAP.md: {}", codemap_path.display());
     println!("  Evaluated ref: {}", measurement.reference);
-    let last_updated = measurement.last_commit(".claude/CODEMAP.md")
-        .map(|commit| format!("commit {commit}"))
+    let last_updated = measurement.last_updated(".claude/CODEMAP.md")
         .unwrap_or_else(|| get_codemap_last_updated(&codemap_path));
     println!("  Last updated: {last_updated}");
     if let Some(evaluation) = evaluate_codemap_at(measurement) {

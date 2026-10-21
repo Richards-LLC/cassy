@@ -25,10 +25,10 @@ fn same_repo(a: &Path, b: &Path) -> bool {
             root,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )
-            .map(|text| {
-                let path = PathBuf::from(text.trim());
-                path.canonicalize().unwrap_or(path)
-            })
+        .map(|text| {
+            let path = PathBuf::from(text.trim());
+            path.canonicalize().unwrap_or(path)
+        })
     };
     common(a).zip(common(b)).is_some_and(|(a, b)| a == b)
 }
@@ -36,8 +36,13 @@ fn same_repo(a: &Path, b: &Path) -> bool {
 impl Measurement {
     /// Hooks supply the harness cwd; CLI status supplies the process cwd.
     pub fn at(cwd: &Path, cas_root: &Path) -> Self {
-        let root = crate::store::detect::find_git_toplevel(cwd)
-            .unwrap_or_else(|_| cas_root.parent().unwrap_or(cwd).to_path_buf());
+        let root = crate::store::detect::find_git_toplevel(cwd).unwrap_or_else(|_| {
+            if cwd.is_dir() {
+                cwd.to_path_buf()
+            } else {
+                cas_root.parent().unwrap_or(cwd).to_path_buf()
+            }
+        });
         let store = if cas_root.parent().is_some_and(|hint| same_repo(&root, hint)) {
             cas_root.to_path_buf()
         } else {
@@ -98,9 +103,17 @@ impl Measurement {
     }
 
     pub fn last_commit(&self, path: &str) -> Option<String> {
+        self.log_value(path, "--format=%H")
+    }
+
+    pub fn last_updated(&self, path: &str) -> Option<String> {
+        self.log_value(path, "--format=%ci")
+    }
+
+    fn log_value(&self, path: &str, format: &str) -> Option<String> {
         git(
             &self.root,
-            &["log", "-1", "--format=%H", &self.reference, "--", path],
+            &["log", "-1", format, &self.reference, "--", path],
         )
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())

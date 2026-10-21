@@ -44,8 +44,7 @@ fn execute_status(measurement: &Measurement) -> anyhow::Result<()> {
     let doc_path = project_root.join(DOC_PATH);
     println!("PRODUCT_OVERVIEW.md: {}", doc_path.display());
     println!("  Evaluated ref: {}", measurement.reference);
-    let last_updated = measurement.last_commit(DOC_PATH)
-        .map(|commit| format!("commit {commit}"))
+    let last_updated = measurement.last_updated(DOC_PATH)
         .unwrap_or_else(|| get_doc_last_updated(project_root, &doc_path));
     println!("  Last updated: {last_updated}");
     match check_freshness_at(measurement)? {

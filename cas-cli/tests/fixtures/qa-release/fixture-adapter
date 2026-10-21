@@ -1,0 +1,24 @@
+#!/bin/sh
+# Real sandbox fixture: audit every invocation, with explicit failure switches.
+set -eu
+request=$(cat)
+printf '%s\n' "$request" >> "$FAKE_FIXTURE_LOG"
+case "$request" in *'"env":"staging"'*) ;; *) exit 1 ;; esac
+case "$1" in
+  fixture-setup)
+    if [ "${FAKE_SETUP_FAIL:-}" = 1 ]; then
+      printf '{"v":1,"ok":false,"error":{"kind":"external","message":"setup unavailable"}}\n'
+    else
+      printf '{"v":1,"ok":true,"data":{"handle":"fake-persona","outputs":{"account_id":"account-123"}}}\n'
+    fi
+    ;;
+  fixture-teardown)
+    case "$request" in *'"handle":"fake-persona"'*) ;; *) exit 1 ;; esac
+    if [ "${FAKE_TEARDOWN_FAIL:-}" = 1 ]; then
+      printf '{"v":1,"ok":false,"error":{"kind":"external","message":"cleanup unavailable"}}\n'
+    else
+      printf '{"v":1,"ok":true,"data":{"ok":true}}\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac

@@ -79,6 +79,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/qa_impact_io.rs` - read-only Git snapshots, diff paths, and legacy selector boundary for impact analysis.
 - `cas-cli/src/qa_post_release.rs` - persisted read-only release observations and scheduling/verdict state.
 - `cas-cli/src/qa_command.rs` - shared sandbox for project QA executables: no shell, env allow-list, timeout, 1 MiB stdout.
+- `cas-cli/src/qa_readback.rs` - shared read-back result, journey `readback` declaration, subject/invariant allow-list and outcome classification.
 - `cas-cli/src/qa_release.rs` - release gate seam: `[qa.release]` config, adapter protocol v1 and served-component equivalence preflight (fake adapter in `cas-cli/tests/fixtures/qa-release/`).
 - `cas-cli/src/cli/qa.rs` - `cas qa journeys --seed|--check|--status` and QA subcommand dispatch.
 - `cas-cli/src/cli/qa_impact.rs` - `cas qa impact` adapters for diff, files, stdin, and task-owned changes.

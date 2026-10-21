@@ -5504,7 +5504,7 @@ mod tests {
     /// migration is refused before Git runs; other targets skip the check.
     #[test]
     fn pending_migration_refuses_integration_merge() {
-        use crate::qa_release::fixture::{Project, release_config};
+        use crate::qa_release::test_project::{Project, release_config};
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = Project::new();
         let release = release_config(&[

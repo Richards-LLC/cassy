@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod fixtures;
+
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -377,6 +379,38 @@ pub fn preflight_served(
     }
 }
 
+/// Reads back `journey`'s declared invariants for the given subject ids
+/// through the adapter. Undeclared subjects, non-opaque ids and malformed
+/// invariant IDs are refused before any call.
+pub fn readback(
+    project_root: &Path,
+    config: &ReleaseConfig,
+    env: &str,
+    sha: &str,
+    journey: &crate::qa_registry::Journey,
+    subjects: &BTreeMap<String, String>,
+) -> Result<crate::qa_readback::Outcome, String> {
+    let declaration = journey.readback.as_ref();
+    let args = crate::qa_readback::request_args(&journey.id, declaration, subjects)?;
+    let answer = call(
+        project_root,
+        config,
+        Verb::Readback,
+        Request {
+            env,
+            sha,
+            journey: Some(&journey.id),
+            args,
+        },
+    );
+    Ok(crate::qa_readback::classify(
+        &journey.id,
+        declaration.expect("request_args refuses a missing declaration"),
+        subjects,
+        answer,
+    ))
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
@@ -587,9 +621,9 @@ pub fn check_migrations(
     }
 }
 
-/// A git project with the tracked fake adapter at `./scripts/qa/fake-adapter`.
+/// Test projects with the tracked fake adapter at `./scripts/qa/fake-adapter`.
 #[cfg(test)]
-pub(crate) mod fixture {
+pub(crate) mod test_project {
     use super::ReleaseConfig;
     use std::path::Path;
     use std::process::Command;
@@ -597,18 +631,11 @@ pub(crate) mod fixture {
     pub(crate) struct Project(tempfile::TempDir);
 
     impl Project {
+        /// A git repository on `main` with the fake adapter installed, uncommitted.
         pub(crate) fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt;
             let project = Self(tempfile::tempdir().unwrap());
             project.git(&["init", "-q", "-b", "main"]);
-            let adapter = project.root().join("scripts/qa/fake-adapter");
-            std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
-            std::fs::write(
-                &adapter,
-                include_str!("../tests/fixtures/qa-release/fake-adapter"),
-            )
-            .unwrap();
-            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+            fake_adapter(project.root(), "");
             project
         }
 
@@ -638,6 +665,25 @@ pub(crate) mod fixture {
         }
     }
 
+    /// Copies the tracked fake adapter into `root` and configures it.
+    pub(crate) fn fake_adapter(root: &Path, env: &str) -> ReleaseConfig {
+        use std::os::unix::fs::PermissionsExt;
+        let adapter = root.join("scripts/qa/fake-adapter");
+        std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        std::fs::write(
+            &adapter,
+            include_str!("../tests/fixtures/qa-release/fake-adapter"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ReleaseConfig {
+            adapter: "./scripts/qa/fake-adapter".into(),
+            env: env.split(',').filter(|name| !name.is_empty()).map(str::to_owned).collect(),
+            timeout_secs: 5,
+            ..ReleaseConfig::default()
+        }
+    }
+
     /// Builds `[qa.release]` through `cas config set`, checking each key lists back.
     pub(crate) fn release_config(settings: &[(&str, &str)]) -> ReleaseConfig {
         let mut config = crate::config::Config::default();
@@ -652,8 +698,11 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::{Project, release_config};
+    use super::test_project::{Project, fake_adapter, release_config};
     use super::*;
+    use std::process::Command;
+
+    include!("qa_release/fixture_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes
     /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a
@@ -697,6 +746,74 @@ mod tests {
             }
             other => panic!("expected a classified adapter error, got {other:?}"),
         }
+    }
+
+    /// Only declared subject kinds with opaque ids and declared invariant IDs
+    /// reach the adapter; its answer maps to pass, fail, blocked or missing.
+    #[test]
+    fn readback_allowlist() {
+        use crate::qa_readback::{Declaration, Outcome};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = fake_adapter(project.path(), "FAKE_READBACK_DATA,FAKE_ERROR_KIND");
+        let mut journey = crate::qa_registry::Journey {
+            id: "signup".into(),
+            readback: Some(Declaration {
+                subjects: vec!["account_uid".into(), "workspace_id".into()],
+                invariants: vec!["INV-ACCOUNT".into(), "INV-WORKSPACE".into()],
+            }),
+            ..Default::default()
+        };
+        let ids = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let subjects = ids(&[("account_uid", "uid-7f3a"), ("workspace_id", "ws_42")]);
+        let run = |journey: &crate::qa_registry::Journey, subjects: &BTreeMap<String, String>| {
+            readback(project.path(), &config, "staging", &"a".repeat(40), journey, subjects)
+        };
+
+        // Refused before any adapter call (FAKE_READBACK_DATA is still unset).
+        for refused in [
+            ids(&[("email", "a@b.c")]),
+            ids(&[("account_uid", "1; DROP TABLE users")]),
+        ] {
+            assert!(run(&journey, &refused).is_err(), "{refused:?}");
+        }
+        let declared = journey.readback.clone();
+        journey.readback.as_mut().unwrap().invariants =
+            vec!["SELECT * FROM accounts".into()];
+        assert!(run(&journey, &subjects).is_err(), "a query is not an invariant ID");
+        journey.readback = declared;
+
+        env.set(
+            "FAKE_READBACK_DATA",
+            r#"{"INV-ACCOUNT":{"ok":true,"observed":1},"INV-WORKSPACE":{"ok":true,"observed":"secret"}}"#,
+        );
+        match run(&journey, &subjects).unwrap() {
+            Outcome::Pass(readback) => {
+                assert!(readback.proves());
+                assert_eq!(readback.subject, "account_uid=uid-7f3a workspace_id=ws_42");
+            }
+            other => panic!("expected PASS, got {other:?}"),
+        }
+        env.set(
+            "FAKE_READBACK_DATA",
+            r#"{"INV-ACCOUNT":{"ok":true},"INV-WORKSPACE":{"ok":false}}"#,
+        );
+        assert!(matches!(
+            run(&journey, &subjects).unwrap(),
+            Outcome::Fail { failed, .. } if failed == ["INV-WORKSPACE"]
+        ));
+        env.set("FAKE_READBACK_DATA", r#"{"INV-ACCOUNT":{"ok":true}}"#);
+        assert!(matches!(run(&journey, &subjects).unwrap(), Outcome::Missing(_)));
+        env.set("FAKE_ERROR_KIND", "external");
+        assert!(matches!(
+            run(&journey, &subjects).unwrap(),
+            Outcome::BlockedExternal { provider: Some(p), .. } if p == "fake-health"
+        ));
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

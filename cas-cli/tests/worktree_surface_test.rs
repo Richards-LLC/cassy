@@ -6029,10 +6029,9 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     // Git transport is local; the declared cross-repo selector stays stable.
     std::fs::write(cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n")
+        "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n[worktrees]\nenabled = false\n")
         .unwrap();
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
-    disable_system_a(&cas_root);
     run_git(&["branch", "epic/c85e"], &repo.root);
     run_git(&["push", "origin", "main", "epic/c85e"], &repo.root);
 

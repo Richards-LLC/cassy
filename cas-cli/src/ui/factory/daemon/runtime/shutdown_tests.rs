@@ -925,3 +925,58 @@ async fn long_transcript_recycle(register_replacement: bool) {
         "unrelated live output"
     );
 }
+
+
+/// The same stop operation backs shutdown and same-name replacement. Both must
+/// drop regenerable scratch output while preserving the checkout and its proof.
+#[tokio::test]
+async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
+    let env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for replacement in [false, true] {
+        let repo = env.home().join(if replacement { "replace" } else { "shutdown" });
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("source"), "keep source").unwrap();
+        git(&["add", "source"]);
+        git(&["commit", "-qm", "fixture"]);
+        let cas = crate::store::init_cas_dir(&repo).unwrap();
+        let scratch = env.home().join("scratch");
+        std::fs::write(cas.join("config.toml"), format!(
+            "[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n",
+            scratch.display().to_string(), env.home().join("artifacts").display().to_string()
+        )).unwrap();
+        let name = "retiring-worker";
+        let worker = cas.join("worktrees").join(name);
+        std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        git(&["worktree", "add", "-qb", "factory/retiring-worker", worker.to_str().unwrap()]);
+        drop(crate::factory_target_cache::owner::acquire(&cas, &worker).unwrap().unwrap());
+        let target = crate::factory_scratch::worker_target_dir(&worker);
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        std::fs::write(target.join("debug/output"), "regenerable").unwrap();
+        std::fs::write(target.join("worker-check.log"), "proof survives").unwrap();
+        register_idle_worker(&cas, name);
+        let agents = open_agent_store(&cas).unwrap();
+        let mut agent = agents.get(&format!("agent-{name}")).unwrap();
+        agent.metadata.insert("clone_path".into(), worker.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut runtime = daemon(&cas);
+        runtime.app.adopt_worker_pane_for_test(idle_worker_pane(name, cas_mux::SupervisorCli::Codex));
+        if replacement {
+            runtime.app.shutdown_worker_for_recycle(name).await.unwrap();
+        } else {
+            runtime.app.shutdown_worker(name, false).await.unwrap();
+        }
+        assert!(!target.exists(), "scratch target survived replacement={replacement}: {}", target.display());
+        assert_eq!(std::fs::read_to_string(worker.join("source")).unwrap(), "keep source");
+        assert!(walkdir::WalkDir::new(env.home().join("artifacts")).into_iter().flatten().any(|entry| {
+            entry.file_name() == "worker-check.log"
+                && std::fs::read_to_string(entry.path()).unwrap() == "proof survives"
+        }), "proof must be durable before scratch is removed");
+    }
+}

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.70.0] - 2026-10-21
+
 ### Added — adaptive QA picks the journeys a change touches
 
 - **Journey registry** — Was: a project's user journeys lived only in prose QA docs, with nothing to check them against the code. → Now: `docs/qa/journeys.yaml` lists each journey's owners, specs and surfaces; `cas qa journeys --check` reports broken references, untracked specs and curation debt (such as a journey whose traffic share is not yet measured), `cas qa journeys --seed` drafts a registry from the project and keeps curated entries on re-seed, and `cas doctor` shows the registry's counts.

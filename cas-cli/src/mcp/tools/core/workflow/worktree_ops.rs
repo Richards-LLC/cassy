@@ -1469,12 +1469,23 @@ fn contained_merge_receipt(
     git: &crate::worktree::GitOperations,
     source: &str,
     target: &str,
+    refreshed: &crate::worktree::git::TargetReconcile,
 ) -> Option<String> {
+    use crate::worktree::git::TargetReconcile;
     let source_tip = git.resolve_commit(source)?;
-    let target_tip = git.resolve_commit(target)?;
+    // These SHAs come from the just-completed explicit-destination fetch.
+    // A failed refresh never lets stale local history claim publication.
+    let (target_tip, authority) = match refreshed {
+        TargetReconcile::NoRemote => (git.resolve_commit(target)?, target.to_string()),
+        TargetReconcile::FetchFailed { .. } => return None,
+        TargetReconcile::AlreadyCurrent { sha } => (sha.clone(), format!("origin/{target}")),
+        TargetReconcile::FastForwarded { to, .. } => (to.clone(), format!("origin/{target}")),
+        TargetReconcile::AheadOfRemote { remote, .. } | TargetReconcile::Diverged { remote, .. } =>
+            (remote.clone(), format!("origin/{target}")),
+    };
     git.is_ancestor(&source_tip, &target_tip).then(|| format!(
         "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
-         Source: {source} @ {source_tip}\nTarget: {target} @ {target_tip}"
+         Source: {source} @ {source_tip}\nTarget: {authority} @ {target_tip}"
     ))
 }
 
@@ -3577,52 +3588,43 @@ impl CasCore {
             });
         }
 
-        // A contained source is a no-op, not a new green merge that may
-        // close the task or dispatch verification. Validate the parked source
-        // above first so an old worker ref cannot hide a newer delivery.
-        // Transactional retries still reconcile their durable delivery state.
-        if transactional_delivery.is_none()
-            && let Some(receipt) = contained_merge_receipt(
-                manager.git(), &worktree.branch, &worktree.parent_branch,
-            )
-        {
-            return Ok(Self::success(receipt));
+        // All Cassy merges of this target serialize from the first origin
+        // refresh through publication and durable delivery state. Waiting for
+        // another merge must not block the async executor's worker thread.
+        let canonical_repo = manager.git().canonical_repo_key().map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Cannot resolve merge target repository identity: {error}")),
+            data: None,
+        })?;
+        let lock_root = cas_root.clone();
+        let lock_target = worktree.parent_branch.clone();
+        let _delivery_target_lock = tokio::task::spawn_blocking(move || {
+            crate::worktree::target_lock::lock_delivery_target(&lock_root, &canonical_repo, &lock_target)
+        }).await.map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Merge target lock job failed: {error}")), data: None,
+        })?.map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
+        })?;
+
+        // An unpublished local merge is not a no-op. Only a fresh origin
+        // snapshot (or a repository with no origin) can prove containment.
+        // Reconciliation also keeps the existing behind-local checkout fix.
+        if transactional_delivery.is_none() {
+            let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
+            if let Some(receipt) = contained_merge_receipt(
+                manager.git(), &worktree.branch, &worktree.parent_branch, &refreshed,
+            ) {
+                return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
+            }
         }
 
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
-        // cas-0a21: held from before the target tip is first read until after
-        // the post-merge delivery state is durable, so no other Cassy-mediated
-        // merge can move this repository's target ref inside the window.
-        // Bound to the function scope so it releases on every exit path.
-        let _delivery_target_lock;
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
-            let canonical_repo = manager
-                .git()
-                .canonical_repo_key()
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Transactional delivery cannot resolve canonical repository \
-                             identity for the merge target: {error}"
-                    )),
-                    data: None,
-                })?;
-            _delivery_target_lock = crate::worktree::target_lock::lock_delivery_target(
-                &cas_root,
-                &canonical_repo,
-                &receipt.target_branch,
-            )
-            .map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Transactional delivery could not acquire the target-ref lock: {error}"
-                )),
-                data: None,
-            })?;
-
             let fail = |state: cas_types::WorkerDeliveryState,
                         code: &'static str,
                         detail: String|
@@ -3898,7 +3900,7 @@ impl CasCore {
         // receipt; empty when nothing needed reconciling.
         let mut reconcile_note = String::new();
         let mut pushed_source_note = String::new();
-        let merge_commit = if reconciled_delivery {
+        let mut merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
                 &worktree.parent_branch,
@@ -3976,7 +3978,7 @@ impl CasCore {
             // was behind. Re-check the reconciled ref before merge side effects.
             if transactional_delivery.is_none()
                 && let Some(receipt) = contained_merge_receipt(
-                    manager.git(), &worktree.branch, &worktree.parent_branch,
+                    manager.git(), &worktree.branch, &worktree.parent_branch, &reconcile,
                 )
             {
                 return Ok(Self::success(format!("{receipt}{reconcile_note}")));
@@ -4419,9 +4421,18 @@ impl CasCore {
         // not a truthful receipt when origin never saw the merge.
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
             let branch = worktree.parent_branch.clone();
-            let outcome = manager.git().publish_branch_to_origin(&branch);
+            let outcome = manager.git().publish_merge_target_with_retry(&branch);
             (branch, outcome)
         });
+        if transactional_delivery.is_none() {
+            if let crate::worktree::git::TargetPushOutcome::Pushed { sha }
+                | crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha } = &push_outcome {
+                // A publication retry may have added a peer reconciliation
+                // merge. Every subsequent receipt must name the landed tip.
+                merge_commit = Some(sha.clone());
+            }
+            append_stale_checkout_notes(&mut reconcile_note, &manager);
+        }
         if let Some(error) = protected_default_branch_pr_error(
             &worktree.branch,
             &push_branch,

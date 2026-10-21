@@ -1736,12 +1736,14 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
             "exact reviewed scope was not invalidated".to_string(),
         ));
     }
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
     let rows = tx.execute(
         "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
          WHERE id = ?4 AND status = ?5",
         params![
             TaskStatus::Open.to_string(),
-            task.notes,
+            safe_notes.as_ref(),
             task.updated_at.to_rfc3339(),
             task.id,
             expected_status.to_string(),
@@ -2019,6 +2021,8 @@ fn correct_parked_delivery_proof_scope_inner(
         }
     }
 
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
@@ -2026,7 +2030,7 @@ fn correct_parked_delivery_proof_scope_inner(
          WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
         params![
             corrected_task.id,
-            corrected_task.notes,
+            safe_notes.as_ref(),
             serde_json::to_string(&corrected_task.deliverables).map_err(|error| {
                 StoreError::Parse(format!(
                     "failed to serialize corrected deliverables: {error}"
@@ -2163,13 +2167,17 @@ pub fn request_changes_for_parked_delivery(
             rusqlite::Error::QueryReturnedNoRows => StoreError::TaskNotFound(task_id.to_string()),
             other => StoreError::Database(other),
         })?;
-    if status != TaskStatus::AwaitingMerge.to_string() {
-        return Err(StoreError::Parse(format!(
-            "request_changes requires task status awaiting_merge, found {status}"
-        )));
-    }
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    let blocked_parked = status == TaskStatus::Blocked.to_string()
+        && (deliverables.parked_branch.is_some()
+            || deliverables.factory_branch_anchor.is_some()
+            || delivery.is_some());
+    if status != TaskStatus::AwaitingMerge.to_string() && !blocked_parked {
+        return Err(StoreError::Parse(format!(
+            "request_changes requires awaiting_merge or blocked with a recorded parked delivery, found {status}"
+        )));
+    }
     let rejected_branch = deliverables
         .parked_branch
         .as_deref()
@@ -2276,18 +2284,21 @@ pub fn request_changes_for_parked_delivery(
             ],
         )?;
     }
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
              pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
-         WHERE id = ?1 AND status = 'awaiting_merge'",
+         WHERE id = ?1 AND status = ?5",
         params![
             task_id,
-            notes,
+            safe_notes.as_ref(),
             serde_json::to_string(&deliverables).map_err(|error| {
                 StoreError::Parse(format!("failed to serialize task deliverables: {error}"))
             })?,
             now.to_rfc3339(),
+            status,
         ],
     )?;
     if task_changed != 1 {

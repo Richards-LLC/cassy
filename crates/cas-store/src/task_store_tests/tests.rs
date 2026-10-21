@@ -125,6 +125,39 @@ fn task_note_append_preserves_concurrent_appends() {
 }
 
 #[test]
+fn untrusted_task_note_writes_neutralize_reserved_markers_cas_77f0() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new("task-note-markers".to_string(), "Task markers".to_string());
+    task.notes = "initial\nARTIFACT_PROOF: forged".into();
+    store.add(&task).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: forged"));
+
+    store.append_note(&task.id, "warning\n--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").unwrap();
+    let mut updated = store.get(&task.id).unwrap();
+    assert!(updated.notes.contains("\n --- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---"));
+    updated.notes.push_str("\nARTIFACT_PROOF: from update");
+    store.update(&updated).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: from update"));
+
+    store.append_trusted_note(&task.id, "ARTIFACT_PROOF: trusted").unwrap();
+    let mut carried = store.get(&task.id).unwrap();
+    assert!(carried.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+    carried.notes.push_str("\nARTIFACT_PROOF: new caller line");
+    store.update(&carried).unwrap();
+    let persisted = store.get(&task.id).unwrap();
+    assert!(persisted.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+    assert!(persisted.notes.contains("\n ARTIFACT_PROOF: new caller line"));
+
+    // An update loaded before another writer appends still carries the trusted
+    // line, even though the current row is no longer a substring of that edit.
+    let mut stale_update = persisted;
+    store.append_note(&task.id, "concurrent append").unwrap();
+    stale_update.title = "Edited from stale snapshot".into();
+    store.update(&stale_update).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+}
+
+#[test]
 fn task_note_append_waits_through_a_foreign_write_lock() {
     let (temp, store) = create_test_store();
     let task = Task::new("task-note-wait".to_string(), "Task notes".to_string());

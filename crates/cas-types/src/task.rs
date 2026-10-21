@@ -515,9 +515,22 @@ pub struct IntegrationBatchEvidence {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// One supervisor decision authorizing one registered worker to start a peer's child.
+/// Removed by the successful start, or invalidated by a new assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitTakeoverAuthorization {
+    pub split_id: String,
+    pub worker_id: String,
+    pub supervisor_id: String,
+    pub reason: String,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_takeover: Option<SplitTakeoverAuthorization>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_batch: Option<IntegrationBatchEvidence>,
 
@@ -663,6 +676,8 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    split_takeover: Option<SplitTakeoverAuthorization>,
+    #[serde(default)]
     integration_batch: Option<IntegrationBatchEvidence>,
     #[serde(default)]
     work_target: Option<WorkTarget>,
@@ -709,6 +724,7 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            split_takeover: value.split_takeover,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
             work_target_cleared: value.work_target_cleared,
@@ -1041,7 +1057,8 @@ impl TaskDeliverables {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.work_target.is_none()
+        self.split_takeover.is_none()
+            && self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
             && self.evidence_only.is_none()
@@ -1518,6 +1535,15 @@ mod tests {
             Some("deadbeef")
         );
         assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
+
+        // A takeover may be the only deliverable. It must survive the same
+        // persistence boundary without relying on human task notes for authority.
+        let authorization = serde_json::json!({"split_id": "split-test", "worker_id": "worker-1",
+            "supervisor_id": "supervisor-1", "reason": "peer handed back the child"});
+        let mut encoded = serde_json::to_value(Task::new("cas-takeover".into(), "takeover".into())).unwrap();
+        encoded["deliverables"] = serde_json::json!({"split_takeover": authorization});
+        let task: Task = serde_json::from_value(encoded).unwrap();
+        assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["split_takeover"], authorization);
     }
 
     #[test]

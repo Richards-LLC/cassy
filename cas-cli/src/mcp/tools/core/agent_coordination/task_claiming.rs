@@ -17,6 +17,15 @@ impl CasCore {
             data: None,
         })?;
 
+        // Only start consumes a worker-bound takeover. Refuse before claim's
+        // auto-assignment/adoption paths can mutate a peer's task.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                hold.refusal(&req.task_id, &crate::mcp::tools::core::guidance::caller_prefix()),
+            ));
+        }
+
         // cas-a0d2: adopt an unattributed row into this project. Unlike
         // `start`, claim has no later write of its own, so persist the
         // adoption here or the next ownership check would ask again.
@@ -197,17 +206,6 @@ impl CasCore {
         // cas-5f28: mirror the claim into Cassy Cloud first; a peer on another
         // machine that holds this task refuses the claim before anything here
         // changes. Epics are shared: their overlap is only reported.
-        // cas-4736: a child the peer took under a binding epic split.
-        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(hold.refusal(
-                    &req.task_id,
-                    &crate::mcp::tools::core::guidance::caller_prefix(),
-                )),
-                data: None,
-            });
-        }
         // cas-0078: a claim another agent of this database holds is left with
         // it until the local lease below decides, and every round trip runs
         // off the async runtime within one budget.
@@ -662,7 +660,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-
         if task.is_terminal() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -956,6 +953,15 @@ impl CasCore {
             data: None,
         })?;
 
+        // A transfer must not silently move a split child or its takeover
+        // grant. Redirect the split, or mint a new reasoned assignment.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                hold.refusal(&req.task_id, &crate::mcp::tools::core::guidance::caller_prefix()),
+            ));
+        }
+
         // Set when the task had no active lease at all (e.g. a Blocked task
         // whose lease lapsed). The assignee, or a supervisor with
         // supervisor_override, may still hand it on (cas-6cfe7, GH #987).
@@ -1151,6 +1157,7 @@ impl CasCore {
         }
         // Update assignee to the target agent
         task.assignee = Some(target_name);
+        task.deliverables.split_takeover = None;
         task.updated_at = chrono::Utc::now();
 
         task_store.update(&task).map_err(|e| McpError {

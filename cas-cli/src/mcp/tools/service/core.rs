@@ -445,6 +445,7 @@ impl CasService {
                 state_patch,
                 req.delivery_mode.as_deref(),
                 req.merged_into.as_deref(),
+                req.supervisor_override.unwrap_or(false),
             )
             .await
     }

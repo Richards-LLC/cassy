@@ -44,6 +44,59 @@ fn test_version() {
         .stdout(predicate::str::contains("cas"));
 }
 
+/// The lib-test probe child does not exercise main.rs's early executable route.
+/// Both real-binary phases must preserve locks owned by this parent process.
+#[cfg(unix)]
+#[test]
+fn ownership_probe_binary_route_preserves_parent_locks_cas_b7f9() {
+    let temp = TempDir::new().unwrap();
+    let db = temp.path().join("cas.db");
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT);
+         INSERT INTO tasks VALUES ('cas-aaaa', 'checkpointed');
+         PRAGMA wal_checkpoint(TRUNCATE);
+         INSERT INTO tasks VALUES ('cas-bbbb', 'wal');
+         BEGIN IMMEDIATE; UPDATE tasks SET title='pending';",
+    ).unwrap();
+    let held_locks = || {
+        let output = std::process::Command::new("python3").args(["-I", "-S", "-c", r#"
+import fcntl, json, sys
+held = []
+for path, offset in [(sys.argv[1], 1073741826), (sys.argv[1] + '-shm', 120)]:
+    with open(path, 'r+b') as file:
+        try:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, offset)
+        except BlockingIOError:
+            held.append(True)
+        else:
+            held.append(False)
+print(json.dumps(held))
+"#]).arg(&db).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap()
+    };
+    let lengths = || (std::fs::metadata(&db).unwrap().len(),
+        std::fs::metadata(temp.path().join("cas.db-wal")).unwrap().len());
+    let before = lengths();
+    assert_eq!(held_locks(), vec![true, true], "real SQLite shared and WAL writer locks");
+    for (phase, variant, id) in [("before", "Before", "cas-bbbb"), ("after", "After", "cas-aaaa")] {
+        let response = temp.path().join(format!("{phase}.json"));
+        // pin: this internal flag is the executable protocol used by isolated_probe.
+        cas_cmd(temp.path()).current_dir(temp.path())
+            .arg("--internal-task-ownership-probe").arg(phase).arg(&db).arg(&response)
+            .timeout(std::time::Duration::from_secs(10))
+            .assert().success().stdout("").stderr("");
+        let result: serde_json::Value = serde_json::from_slice(&std::fs::read(response).unwrap()).unwrap();
+        assert!(result["Ok"][variant]["ids"].as_array().unwrap().iter().any(|value| value == id),
+            "{phase} must execute its snapshot phase: {result}");
+        assert_eq!(held_locks(), vec![true, true], "{phase} must not release parent locks");
+        assert_eq!(lengths(), before, "the inspected database and WAL must not grow");
+    }
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
 #[test]
 fn test_init_yes_flag() {
     let temp = TempDir::new().unwrap();

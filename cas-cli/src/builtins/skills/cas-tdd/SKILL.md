@@ -17,6 +17,8 @@ Elegant tests, not copious: a test exists to catch a real regression, and each e
 - Extend an existing test or table before adding a file; delete tests the change makes redundant or that cover dead code.
 - Assert observable behaviour. A test restating the implementation (mirroring its branches or constants) is bloat; mark a durable exact-text contract `// pin: <reason>`.
 - No exhaustive matrices, near-duplicates, copied fixtures, sleeps, timing assumptions or host state.
+- Claim, identity and state-machine changes are the exception: cover the combination table, every identity kind × every entry kind, as rows of one table-driven test. One happy-path fixture hides the pairs that break.
+- Every bug fix adds a regression case that runs red before the fix, so the suite keeps the bug out; where the project keeps a user-flow case catalog, add the case there too.
 - Stress loops and live probes are proof artifacts for the task note, not suite members.
 - A flaky test is a bug in the test: fix or delete it, never retry-wrap it.
 - Each test has one command and lane, selected from the dependency graph, and a failure that names whose fault it is.

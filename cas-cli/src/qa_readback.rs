@@ -34,6 +34,30 @@ pub struct Declaration {
     pub subjects: Vec<String>,
     /// Invariant IDs, for example `INV-WORKSPACE`.
     pub invariants: Vec<String>,
+    /// Unknown keys, kept so registry validation can name a typo.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Declaration {
+    /// Registry validation: typos and malformed lists fail at `--check`
+    /// instead of at gate time.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems: Vec<String> = self
+            .extra
+            .keys()
+            .map(|key| format!("readback has unknown field {key:?}; use subjects and invariants"))
+            .collect();
+        for (field, values) in [("subjects", &self.subjects), ("invariants", &self.invariants)] {
+            if values.is_empty() {
+                problems.push(format!("readback.{field} must not be empty"));
+            }
+            for value in values.iter().filter(|value| !name(value)) {
+                problems.push(format!("readback.{field} entry {value:?} is not an identifier"));
+            }
+        }
+        problems
+    }
 }
 
 /// What the gate does with one read-back.
@@ -72,11 +96,11 @@ fn name(value: &str) -> bool {
 
 /// The allow-listed `readback` verb arguments, or why the request is refused
 /// before any adapter call.
-pub fn request_args(
+pub fn request_args<'a>(
     journey: &str,
-    declaration: Option<&Declaration>,
+    declaration: Option<&'a Declaration>,
     subjects: &BTreeMap<String, String>,
-) -> Result<Value, String> {
+) -> Result<(&'a Declaration, Value), String> {
     let declaration = declaration
         .filter(|d| !d.subjects.is_empty() && !d.invariants.is_empty())
         .ok_or_else(|| format!("journey {journey} declares no readback"))?;
@@ -100,10 +124,11 @@ pub fn request_args(
             return Err(format!("subject {kind} is not an opaque id"));
         }
     }
-    Ok(serde_json::json!({
+    let args = serde_json::json!({
         "subjects": subjects,
         "invariants": declaration.invariants,
-    }))
+    });
+    Ok((declaration, args))
 }
 
 /// Maps the adapter's `{invariant_id: {ok, observed}}` answer, or its error,
@@ -115,6 +140,9 @@ pub fn classify(
     answer: Result<Value, crate::qa_release::CallError>,
 ) -> Outcome {
     use crate::qa_release::{CallError, ErrorKind};
+    if declaration.invariants.is_empty() {
+        return Outcome::Missing(format!("journey {journey} declares no readback invariants"));
+    }
     let data = match answer {
         Ok(data) => data,
         Err(CallError::Adapter(_, error))
@@ -163,5 +191,46 @@ pub fn classify(
         Outcome::Pass(readback(true))
     } else {
         Outcome::Missing(format!("not read back: {}", missing.join(", ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Malformed inputs fail where they are written: component paths at config
+    /// parse, `readback:` blocks at registry check, and an empty declaration
+    /// never classifies as PASS.
+    #[test]
+    fn readback_declarations_and_components_fail_early() {
+        use crate::qa_release::ReleaseConfig;
+        for path in ["../shared", "apps/../../etc", ":(glob)apps/**", ":!apps/web"] {
+            let error =
+                ReleaseConfig::parse_components(&format!(r#"{{"backend":["{path}"]}}"#))
+                    .unwrap_err();
+            assert!(error.contains("qa.release.components.backend path"), "{error}");
+        }
+        assert!(ReleaseConfig::parse_components(r#"{"backend":["apps/backend"]}"#).is_ok());
+
+        let registry = crate::qa_registry::parse(
+            "journeys:\n  - id: signup\n    status: dark\n    status_reason: later\n    readback: {subject: [account_uid], invariants: [\"SELECT 1\"]}\n",
+        )
+        .unwrap();
+        let problems: Vec<String> = registry
+            .validate(&[])
+            .problems
+            .into_iter()
+            .filter(|p| p.code == "readback")
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("unknown field \"subject\""), "{problems:?}");
+
+        let empty = Declaration::default();
+        let answer = Ok(serde_json::json!({}));
+        assert!(matches!(
+            classify("signup", &empty, &BTreeMap::new(), answer),
+            Outcome::Missing(_)
+        ));
     }
 }

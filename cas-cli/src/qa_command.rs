@@ -72,7 +72,7 @@ pub fn run(
     }
     if output.stdout.len() > MAX_STDOUT {
         return Err(CommandError::Failed(anyhow::anyhow!(
-            "Check output exceeds 1 MiB"
+            "Output exceeds 1 MiB"
         )));
     }
     Ok(output.stdout)
@@ -84,19 +84,19 @@ fn prepare(
     extra_args: &[&str],
 ) -> Result<std::process::Command> {
     let mut words = command.split_whitespace();
-    let program = words.next().context("Empty check command")?;
+    let program = words.next().context("Empty command")?;
     ensure!(
         !Path::new(program).is_absolute(),
-        "Check executable must be project-relative"
+        "Executable must be project-relative"
     );
     let path = sandbox
         .root
         .join(program)
         .canonicalize()
-        .context("Check executable missing")?;
+        .context("Executable missing")?;
     ensure!(
         path.starts_with(sandbox.root.canonicalize()?),
-        "Check executable must remain inside the project"
+        "Executable must remain inside the project"
     );
     let mut process = std::process::Command::new(path);
     process

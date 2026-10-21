@@ -9143,40 +9143,60 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_reachability_check_reports_real_missing_credential_detail() {
-        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
-            let temp = TempDir::new().unwrap();
-            let cas_root = temp.path().join(".cas");
-            fs::create_dir_all(&cas_root).unwrap();
-            let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
-            let mut config = cmcp_core::config::Config::default();
-            config.add_server(
-                "neon".to_string(),
-                cmcp_core::config::ServerConfig::Http {
-                    url: "https://neon.example.invalid/mcp".to_string(),
-                    auth: Some(format!("${{{missing}}}")),
-                    headers: std::collections::HashMap::new(),
-                    oauth: false,
-                },
-            );
-            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = TempDir::new().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        fs::write(
+            &user_proxy,
+            "[servers.viktor]\ntransport = 'http'\n\
+             url = 'https://viktor.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
+        ).unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // HOME alone does not redirect the loader's higher-priority XDG scope.
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        for key in ["VIKTOR_API_KEY", "NEON_API_KEY", "VERCEL_TOKEN"] {
+            env.remove(key);
+        }
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
+        let mut config = cmcp_core::config::Config::default();
+        config.add_server(
+            "neon".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://neon.example.invalid/mcp".to_string(),
+                auth: Some(format!("${{{missing}}}")),
+                headers: std::collections::HashMap::new(),
+                oauth: false,
+            },
+        );
+        config.save_to(&cas_root.join("proxy.toml")).unwrap();
 
-            let check = proxy_upstream_reachability_check(&cas_root);
-            assert!(matches!(check.status, CheckStatus::Warning));
-            assert!(
-                check
-                    .message
-                    .contains("checked 1 configured upstream(s) once")
-            );
-            assert!(
-                check.message.contains(&format!(
-                    "neon (missing required environment variable {missing}, named by `auth` in \
-                     the [servers.neon] block of {}",
-                    cas_root.join("proxy.toml").display()
-                )),
-                "cas-7a98: a project-supplied credential names its file: {}",
-                check.message
-            );
-        });
+        let check = proxy_upstream_reachability_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("checked 1 configured upstream(s) once"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains(&format!(
+                "neon (missing required environment variable {missing}, named by `auth` in \
+                 the [servers.neon] block of {}",
+                cas_root.join("proxy.toml").display()
+            )),
+            "cas-7a98: a project-supplied credential names its file: {}",
+            check.message
+        );
     }
 
     #[test]

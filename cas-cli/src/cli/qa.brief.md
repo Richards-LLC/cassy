@@ -21,7 +21,9 @@ No database is created by checking. Unavailable history is explicit and never me
 | Readable | Config saves warn only when a gate changes into enforce with positive measured drift; they name the artifact, count and status command. |
 | Machine output | --status preserves coverage fields and adds upkeep; config set preserves key/old_value/new_value and adds warnings in the same JSON document. Unknown drift is null, never zero. |
 | Omitted | No new qa status command, remote fetch, or persistent drift counter; individual freshness commands remain available. |
-Malformed YAML, missing registry and Git errors fail with the underlying cause.
+
+Journey checks fail on malformed YAML, missing registries and Git errors,
+naming the underlying cause.
 
 ## Critique
 

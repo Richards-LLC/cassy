@@ -1141,7 +1141,7 @@ fn required_transport_refusal(
     paths: &HubRuntimePaths,
     issue: Option<&str>,
 ) -> String {
-    let (operation, retry) = match &args.command {
+    let (operation, loopback, retry) = match &args.command {
         Some(HubCommands::Restart(_)) => {
             let state = paths
                 .read_process_record()
@@ -1154,17 +1154,22 @@ fn required_transport_refusal(
                     )
                 })
                 .unwrap_or_else(|| "Restart refused before stopping any hub.".to_owned());
-            (state, "cas hub restart")
+            (state, "cas hub restart --loopback", "cas hub restart")
         }
-        _ => ("Start refused; no hub was started.".to_owned(), "cas hub start"),
+        _ => (
+            "Start refused; no hub was started.".to_owned(),
+            "cas hub start --loopback",
+            "cas hub start",
+        ),
     };
-    let mut message = format!(
-        "Hub transport required: Tailscale is unavailable.\n{operation}"
-    );
+    let mut message = format!("Hub transport required: Tailscale is unavailable.\n{operation}");
     if let Some(issue) = issue {
         message.push('\n');
         message.push_str(issue);
     }
+    message.push_str(&format!(
+        "\nSelect a daemon with TAILSCALE_SOCKET or run `{loopback}`."
+    ));
     message.push_str(&format!(
         "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}."
     ));
@@ -1193,11 +1198,7 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
         if !manager.cli_available() {
-            anyhow::bail!(required_transport_refusal(
-                args,
-                &paths,
-                Some("Tailscale Serve is unavailable."),
-            ));
+            anyhow::bail!(required_transport_refusal(args, &paths, None));
         }
         let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
         if let Some(issue) = issue {

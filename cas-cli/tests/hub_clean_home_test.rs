@@ -2489,6 +2489,69 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     assert!(!home.path().join(".cas/hub").exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn hub_service_status_readiness_fits_80_columns_cas_0252() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for cli in ["claude", "codex"] {
+        cas::test_paths::warm_stub(&bin.join(cli), "#!/bin/sh\nexit 0\n");
+    }
+    let systemctl = bin.join("systemctl");
+    cas::test_paths::warm_stub(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = \"--version\" ] && exit 0\nexit 1\n",
+    );
+
+    let path = bin.as_os_str();
+    let output = cas_command(home.path(), path)
+        .env("CAS_HUB_SYSTEMCTL", &systemctl)
+        .args(["hub", "service", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        human.lines().all(|line| line.chars().count() <= 80),
+        "service status exceeded 80 columns:\n{human}"
+    );
+    assert!(human.contains("path: ~/.claude"), "{human}");
+    assert!(human.contains("Fix: cas claude login main"), "{human}");
+    assert!(human.contains("path: ~/.codex"), "{human}");
+    assert!(human.contains("Fix: cas codex login main"), "{human}");
+    assert!(human.contains("Fix: install grok CLI"), "{human}");
+
+    let json = cas_command(home.path(), path)
+        .env("CAS_HUB_SYSTEMCTL", &systemctl)
+        .args(["hub", "service", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let readiness = report["launch_readiness"].as_array().unwrap();
+    for (cli, profile) in [("claude", ".claude"), ("codex", ".codex")] {
+        let detail = readiness
+            .iter()
+            .find(|row| row["cli"] == cli)
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap();
+        assert!(detail.contains(&home.path().join(profile).display().to_string()));
+    }
+    assert_eq!(
+        readiness
+            .iter()
+            .find(|row| row["cli"] == "grok")
+            .unwrap()["detail"],
+        "grok CLI is not installed or executable"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn hub_status_prefers_live_lock_holder_over_dead_record_cas_ebbb() {

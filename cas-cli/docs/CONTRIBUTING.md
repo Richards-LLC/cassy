@@ -976,6 +976,34 @@ denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
 
+### Operator credential stores are masked from workers
+
+Workers share the operator's uid and `$HOME`, so removing environment tokens
+does not hide credential *files*. On Linux, when a non-empty Neon or Vercel
+store exists (`neonctl` and `com.vercel.cli` under `$HOME/.config`,
+`$HOME/.local/share`, the XDG roots or `VERCEL_CONFIG_DIR`), `Pty::spawn`
+starts the worker under bubblewrap (`crates/cas-pty/src/store_isolation.rs`):
+a user and mount namespace that shows the host filesystem, PIDs, environment
+and working directory unchanged, but covers each store with an empty
+read-only tmpfs. No reader inside the worker can see a store: interpreter
+one-liners, piped shells, variable indirection, archives, or
+`/proc/<host pid>/root`. A user-owned copy of `/etc/ssh/ssh_config.d` is
+bound in so that ssh and `git push` still accept their config. Root-owned
+files appear owned by `nobody` inside the namespace, and `sudo` is
+unavailable.
+
+- No store to hide: the launch is unchanged.
+- A store exists but `bwrap` or unprivileged user namespaces are unavailable:
+  the spawn fails with a remedy. Install bubblewrap, or set
+  `CAS_WORKER_STORE_ISOLATION=off` in the factory daemon's environment to
+  accept the exposure.
+- macOS has no backend yet. The worker starts with a warning, and the
+  PreToolUse credential-path guard is the only control there. This is a
+  known gap.
+
+Supervisors and plain sessions are not wrapped. The PreToolUse guard still
+runs for every worker as defense in depth.
+
 ### Tool-cache paths in Codex children
 
 Cassy forwards these four tool-owned variables through Codex's restricted

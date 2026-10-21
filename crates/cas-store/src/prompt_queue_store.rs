@@ -4194,11 +4194,9 @@ impl SqlitePromptQueueStore {
             let mut references = Vec::new();
             for (index, notice) in notices.iter().enumerate() {
                 if index < 3 {
-                    Self::insert_abandonment_recovery_in_tx(
-                        tx,
-                        notice,
-                        notice.recovery_content.as_deref().unwrap(),
-                    )?;
+                    if let Some(content) = notice.recovery_content.as_deref() {
+                        Self::insert_abandonment_recovery_in_tx(tx, notice, content)?;
+                    }
                 } else {
                     let reference_id = Self::insert_recovery_reference_in_tx(tx, notice)?;
                     references.push(format!(

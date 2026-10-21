@@ -149,6 +149,14 @@ fn main() -> ExitCode {
     let args = redact_viktor_key_args(std::env::args().skip(1).collect());
     sentry::add_command_breadcrumb(&args.join(" "));
 
+    // Config and hub refusals are returned through the shared error path. Keep
+    // those failures machine-readable on stdout when their caller requested
+    // JSON; stderr keeps the human diagnostic either way.
+    let json_refusal = cli.json
+        && matches!(
+            cli.command.as_ref(),
+            Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+        );
     let outcome = cli::run(cli);
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
@@ -158,24 +166,43 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            use cas::ui::components::Formatter;
-            use cas::ui::theme::ActiveTheme;
+            // A command that already printed its JSON report keeps stdout to
+            // that one document; its failure still reaches stderr below.
+            let (e, already_reported) = match e.downcast::<cli::JsonReportedFailure>() {
+                Ok(reported) => (reported.0, true),
+                Err(e) => (e, false),
+            };
+            if json_refusal && !already_reported {
+                let message = e
+                    .downcast_ref::<error::CasError>()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("{e:#}"));
+                println!("{}", serde_json::json!({"status": "error", "message": message}));
+            }
+            {
+                use cas::ui::components::Formatter;
+                use cas::ui::theme::ActiveTheme;
 
-            let mut err_out = std::io::stderr();
-            let theme = ActiveTheme::default();
-            let mut fmt = Formatter::stdout(&mut err_out, theme);
+                let mut err_out = std::io::stderr();
+                let theme = ActiveTheme::default();
+                let mut fmt = Formatter::stdout(&mut err_out, theme);
 
-            if let Some(err) = e.downcast_ref::<error::CasError>() {
-                let _ = fmt.error(&err.to_string());
+                if let Some(err) = e.downcast_ref::<error::CasError>() {
+                    let _ = fmt.error(&err.to_string());
 
-                // Show suggestion if available
-                if let Some(suggestion) = err.suggestion() {
-                    let _ = fmt.newline();
-                    let _ = fmt.warning("Suggestion:");
-                    let _ = fmt.indent_block(suggestion);
+                    // Show suggestion if available
+                    if let Some(suggestion) = err.suggestion() {
+                        let _ = fmt.newline();
+                        let _ = fmt.warning("Suggestion:");
+                        let _ = fmt.indent_block(suggestion);
+                    }
+                } else {
+                    let _ = fmt.error(&format!("{e:#}"));
                 }
+            }
 
-                // Return specific exit codes for different error types
+            // Preserve specific exit codes for different error types.
+            if let Some(err) = e.downcast_ref::<error::CasError>() {
                 match err {
                     error::CasError::NotFound(_)
                     | error::CasError::EntryNotFound(_)
@@ -190,7 +217,6 @@ fn main() -> ExitCode {
                     _ => ExitCode::FAILURE,
                 }
             } else {
-                let _ = fmt.error(&format!("{e:#}"));
                 ExitCode::FAILURE
             }
         }

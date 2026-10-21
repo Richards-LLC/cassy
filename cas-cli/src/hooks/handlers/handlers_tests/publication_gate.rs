@@ -197,8 +197,9 @@ fn publication_gate_post_release_pending_and_override() {
     std::fs::write(dir.path().join("docs/release-notes/RUBRIC.md"),"- **Channel:** `#release-channel` (`C12345678`)\n").unwrap();
     let mut unmarked = post.clone();
     unmarked.as_object_mut().unwrap().remove("release_notes");
+    unmarked["text"] = json!("*Live on production · User* — New capability is available.");
     assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked.clone(),dir.path()),Some(&cas)).unwrap()).unwrap().contains("post_release_pending"));
-    unmarked["channel"] = json!("ordinary-status");
+    unmarked["text"] = json!("Staging database maintenance completed.");
     assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked,dir.path()),Some(&cas)).unwrap()).is_none());
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     for (note, allowed) in [

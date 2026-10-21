@@ -179,6 +179,9 @@ mod tests {
         let mut epic = Task::new("cas-probe".into(), "Observe release".into());
         epic.task_type = TaskType::Epic;
         tasks.add(&epic).unwrap();
+        // An unconfigured server must not spawn a task (no Tokio runtime here).
+        spawn_runner(cas.clone());
+        assert!(!cas.join("post-release").exists());
         let mut config = Config::default();
         for (key, value) in [
             ("command", "./check"),
@@ -200,6 +203,16 @@ mod tests {
             )
             .unwrap();
         config.save(&cas).unwrap();
+        let lease = project_runner_lease(&cas).unwrap().unwrap();
+        assert!(
+            project_runner_lease(&cas).unwrap().is_none(),
+            "only one project runner may own the lease"
+        );
+        drop(lease);
+        assert!(
+            project_runner_lease(&cas).unwrap().is_some(),
+            "an exited owner releases the lease"
+        );
         let probe = dir.path().join("check");
         fs::write(&probe,format!("#!/bin/sh\n[ -z \"$POST_RELEASE_PRIVATE\" ] && [ \"$QA_READ_TOKEN\" = read-only-test-token ] || exit 1\nprintf '%s' '{}'\n",serde_json::json!({"ok":true,"alarms":[],"checked_at":start,"readback":{"journey":"signup","subject":"opaque-1","invariants":["workspace"],"ok":true}}))).unwrap();
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
@@ -606,17 +619,64 @@ pub(crate) fn tick(cas_root: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// One OS lease owns the configured project's runner across all serve processes.
+/// Unconfigured projects and contenders spawn no task and produce no warning.
+fn project_runner_lease(cas_root: &Path) -> Result<Option<File>> {
+    if configured(cas_root).is_none() {
+        return Ok(None);
+    }
+    let directory = cas_root.join("post-release");
+    fs::create_dir_all(&directory)?;
+    let lease = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("runner.lock"))?;
+    match fs2::FileExt::try_lock_exclusive(&lease) {
+        Ok(()) => Ok(Some(lease)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn lock_contention(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    })
+}
+
 pub(crate) fn spawn_runner(cas_root: PathBuf) {
+    let lease = match project_runner_lease(&cas_root) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error,"could not acquire post-release project runner lease");
+            return;
+        }
+    };
     tokio::spawn(async move {
+        let _lease = lease;
         loop {
             let root = cas_root.clone();
-            if let Err(error) = tokio::task::spawn_blocking(move || tick(&root))
-                .await
-                .unwrap_or_else(|e| Err(e.into()))
-            {
-                tracing::warn!(%error,"post-release background tick failed");
+            let result = tokio::task::spawn_blocking(move || {
+                if configured(&root).is_none() {
+                    return Ok(false);
+                }
+                tick(&root).map(|()| true)
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.into()));
+            match result {
+                Ok(false) => return,
+                Err(error) if !lock_contention(&error) => {
+                    tracing::warn!(%error,"post-release background tick failed")
+                }
+                _ => {}
             }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
 }

@@ -25,7 +25,10 @@ cas qa post-release start --epic cas-1234 --sha <full-release-sha>
 cas qa post-release status --epic cas-1234 --json
 ```
 
-Keep `cas serve` running. It owns the background job; the CLI returns immediately.
+Start `cas serve` after configuring the check and keep it running. One server
+owns a project-wide OS lease and the background job; other servers silently skip
+it. Unconfigured projects spawn no runner. The owner polls once per minute; the
+CLI returns immediately. A new server can acquire the lease after its owner exits.
 The default schedule observes at approximately +0, +15 and +30 minutes, with a
 120-second timeout per observation. Concurrent serve processes share a per-epic
 file lock. Receipts survive restarts; a missed observation interval fails the
@@ -56,8 +59,10 @@ origin contains its tip on a configured release branch, the check starts even
 if the release skill omitted start. Empty `release_branches` uses the default branch.
 
 Pending and failed checks refuse release-note posts and epic close. Violet
-posts marked `release_notes: true` or addressed to the Channel in
-`docs/release-notes/RUBRIC.md` use this gate, including `cas violet post`.
+posts marked `release_notes: true`, or whose first nonempty line has a rubric
+release heading (`Live on production` / `Staging`, followed by `User` / `Dev`),
+use this gate, including `cas violet post`. Ordinary messages in the same
+channel remain exempt.
 Specify `epic_id` or `task_id`, or use the session's focused epic.
 The CLI accepts `cas violet post --release-notes --epic <id> …` (and the
 same flags on `cas violet thread`). Merge, deploy,

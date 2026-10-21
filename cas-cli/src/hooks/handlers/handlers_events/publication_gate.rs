@@ -105,7 +105,13 @@ fn violet_posts(tool: &str, input: Option<&Value>) -> Vec<Value> {
             .filter(|input| input.get("action").and_then(Value::as_str) == Some("post"))
             .map(|input| {
                 let mut post = serde_json::json!({ "kind": "file" });
-                for key in ["channel", "epic_id", "task_id", "release_notes"] {
+                for key in [
+                    "channel",
+                    "epic_id",
+                    "task_id",
+                    "release_notes",
+                    "initial_comment",
+                ] {
                     if let Some(value) = input.get(key) {
                         post[key] = value.clone();
                     }
@@ -261,31 +267,13 @@ fn recent_override(notes: &str, now: chrono::DateTime<chrono::Utc>) -> Option<St
 
 /// Release-note announcements have a separate gate from deliverable verification.
 fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
+    if !posts.iter().any(release_notes_post) {
+        return None;
+    }
     crate::qa_post_release::configured(root)?;
-    let rubric = std::fs::read_to_string(root.parent()?.join("docs/release-notes/RUBRIC.md"))
-        .unwrap_or_default();
-    let channel_pattern = regex::Regex::new(r"#[A-Za-z0-9_-]+|\bC[A-Z0-9]{6,}\b").ok()?;
-    let channels: Vec<String> = rubric
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("channel"))
-        .flat_map(|line| {
-            channel_pattern
-                .find_iter(line)
-                .map(|m| m.as_str().trim_start_matches('#').to_string())
-        })
-        .collect();
     let store = crate::store::open_task_store(root).ok()?;
     for post in with_artifact_tasks(posts.to_vec(), root) {
-        let marked = post.get("release_notes").and_then(Value::as_bool) == Some(true);
-        let rubric_channel = post
-            .get("channel")
-            .and_then(Value::as_str)
-            .is_some_and(|c| {
-                channels
-                    .iter()
-                    .any(|known| known == c.trim_start_matches('#'))
-            });
-        if !marked && !rubric_channel {
+        if !release_notes_post(&post) {
             continue;
         }
         let epic = explicit_epic(&post, store.as_ref())
@@ -298,4 +286,46 @@ fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Rubric headings identify announcements; a shared channel alone never does.
+pub(crate) fn release_notes_post(post: &Value) -> bool {
+    if post.get("release_notes").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    let text = post
+        .get("text")
+        .or_else(|| post.get("initial_comment"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let heading = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .replace(['*', '_', '`', '[', ']', '#'], "")
+        .to_ascii_lowercase();
+    let heading = heading.trim();
+    let Some(rest) = heading
+        .strip_prefix("live on production")
+        .or_else(|| heading.strip_prefix("staging"))
+    else {
+        return false;
+    };
+    if rest.chars().next().is_none_or(|c| c.is_alphanumeric()) {
+        return false;
+    }
+    let label = rest
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | '|' | '·' | '—' | '–' | '-')
+        })
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_alphanumeric());
+    matches!(label, "user" | "dev")
+}
+
+/// CLI text announcements run only this family; deliverable checks stay exempt.
+pub(crate) fn post_release_post_denial(post: &Value, root: Option<&Path>) -> Option<String> {
+    post_release_denial(std::slice::from_ref(post), root?)
 }

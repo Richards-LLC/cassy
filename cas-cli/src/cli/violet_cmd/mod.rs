@@ -144,6 +144,9 @@ pub fn execute(
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let gate = |post: &Value| {
+        if post.get("kind").and_then(Value::as_str) == Some("message") {
+            return crate::hooks::handlers::handlers_events::violet_post_release_denial(post,cas_root);
+        }
         crate::hooks::handlers::handlers_events::violet_publication_denial(
             "violet_post",
             Some(post),
@@ -278,10 +281,10 @@ fn run_post(
         }])?;
     }
     let route = choose_route(&files);
-    gate_check(
-        context,
-        &json!({"channel":channel,"kind":route_kind(route),"release_notes":args.release_notes,"epic_id":args.epic}),
-    )?;
+    let post = json!({"channel":channel,"kind":route_kind(route),"text":text,"release_notes":args.release_notes,"epic_id":args.epic});
+    if route != Route::Message || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post) {
+        gate_check(context,&post)?;
+    }
     let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     // cas-8239 (GH #1300): a reply into a thread this session claimed and
     // registered a reply intent for carries that intent, so the hub posts it
@@ -623,11 +626,13 @@ fn run_thread(
     }
     draft_check::check(&drafts)?;
     let shares_files = replies.iter().any(|reply| !reply.files.is_empty());
-    let mut post = json!({"channel":channel,"kind":"thread","release_notes":args.release_notes,"epic_id":args.epic});
+    let mut post = json!({"channel":channel,"kind":"thread","text":text,"release_notes":args.release_notes,"epic_id":args.epic});
     if shares_files {
         post["replies"] = json!([{"files":[]}]);
     }
-    gate_check(context, &post)?;
+    if shares_files || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post) {
+        gate_check(context, &post)?;
+    }
     let mut hub = (context.connect)()?;
     let receipt = post_thread(hub.as_mut(), &channel, &text, &key, &replies)?;
     if context.json {

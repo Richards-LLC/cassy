@@ -1032,11 +1032,12 @@ mod tests {
 
         for width in [80, 120] {
             let mut command = Cli::command();
-            let report = command
+            let mut report = command
                 .find_subcommand_mut("release")
                 .expect("release subcommand")
                 .find_subcommand_mut("report")
                 .expect("report subcommand")
+                .clone()
                 .term_width(width);
             let mut help = Vec::new();
             report.write_long_help(&mut help).expect("render report help");

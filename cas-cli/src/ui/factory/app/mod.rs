@@ -1743,6 +1743,7 @@ impl FactoryApp {
                     }
                 }
                 if let Some(ready) = ready {
+                    prompt.merge_alert = Some(ready.evidence.clone());
                     if !self.event_detector.merge_alert_should_emit(
                         &ready.evidence.task_id, &ready.tip, ready.ci,
                     ) { continue; }

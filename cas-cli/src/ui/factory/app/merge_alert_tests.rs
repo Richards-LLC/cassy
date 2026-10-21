@@ -360,6 +360,45 @@ fn cas_9efb_live_target_suppresses_relay_with_origin_prefixed_target() {
 /// the worker tip remains unchanged. Exercise the real delivery-read path;
 /// only the GitHub response is replaced, using a real bare Git remote.
 #[test]
+fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
+    for outcome in ["pending", "merged", "superseded"] {
+        let mut f = Fixture::new();
+        let mut prompt = f.relay().pop().expect("settled CI builds a merge signal");
+        let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
+        if outcome == "merged" {
+            f.advance_target(true);
+            // The shared worker lane can advance while the old CI signal waits.
+            std::fs::write(f.repo.path().join("next-task.rs"), "// next delivery\n").unwrap();
+            git(f.repo.path(), &["add", "next-task.rs"]);
+            git(f.repo.path(), &["commit", "-qm", "another task"]);
+        } else if outcome == "superseded" {
+            let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+            let mut task = store.get("cas-9efb-test").unwrap();
+            task.deliverables.factory_branch_anchor = Some(tip.clone());
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = TaskStatus::Open;
+            store.update(&task).unwrap();
+        }
+        let deliver = f.app.deliverability_request().refresh_merge_prompt(&mut prompt);
+        match outcome {
+            // pin: the released signal's text is included when an integrated tip is wrongly actionable.
+            "merged" => assert!(!deliver, "already-integrated tip must not borrow the next lane tip: {}", prompt.text),
+            "superseded" => {
+                // pin: released director signals must name a declined tip as superseded.
+                assert!(prompt.text.to_lowercase().contains("superseded"), "{}", prompt.text);
+                // pin: this heading asks the supervisor to merge and must disappear on supersession.
+                assert!(!prompt.text.contains("MERGE REQUIRED"), "{}", prompt.text);
+            }
+            _ => {
+                assert!(deliver, "a genuinely outstanding merge still releases");
+                // pin: a live CI-completed signal retains its actionable merge heading.
+                assert!(prompt.text.contains("MERGE REQUIRED"));
+            }
+        }
+    }
+}
+
+#[test]
 fn cas_e48d_target_merged_during_ci_probe_suppresses_relay() {
     let mut f = Fixture::new();
     let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);

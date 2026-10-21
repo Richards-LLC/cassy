@@ -31,6 +31,7 @@ pub use knowledge_cmd::{
 mod known_repos;
 mod peers;
 mod project_overview_cmd;
+mod qa;
 mod provider_default;
 mod release_report;
 mod sweep;
@@ -373,6 +374,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Project QA registry and checks
+    #[command(subcommand)]
+    Qa(qa::QaCommand),
+
     /// Structural git-history index (backfill/status)
     #[command(subcommand)]
     History(history_cmd::HistoryCommands),
@@ -485,6 +490,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Mcp(_)
         | Commands::Queue(_)
         | Commands::ClaudeMd(_)
+        | Commands::Qa(_)
         | Commands::Codemap(_)
         | Commands::History(_)
         | Commands::Index(_)
@@ -718,6 +724,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Device(_) => "device".to_string(),
         Commands::Sync(_) => "sync".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
+        Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
@@ -863,6 +870,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Device(cmd) => device::execute(cmd, cli),
         Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
+        Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

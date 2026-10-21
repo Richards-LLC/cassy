@@ -411,9 +411,29 @@ impl std::fmt::Display for QaMode {
     }
 }
 
+/// Journey registry settings at `[qa.registry]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaRegistryConfig {
+    #[serde(default = "default_registry_path")]
+    pub path: String,
+}
+
+fn default_registry_path() -> String {
+    crate::qa_registry::DEFAULT_PATH.to_owned()
+}
+
+impl Default for QaRegistryConfig {
+    fn default() -> Self {
+        Self { path: default_registry_path() }
+    }
+}
+
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
+    /// Journey registry location; enforcement stages are added by the upkeep gates.
+    #[serde(default)]
+    pub registry: QaRegistryConfig,
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
     #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
     pub mode: QaMode,
@@ -579,6 +599,7 @@ impl Default for QaConfig {
     fn default() -> Self {
         Self {
             mode: QaMode::PerTask,
+            registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
             independent_pass: default_independent_pass(),

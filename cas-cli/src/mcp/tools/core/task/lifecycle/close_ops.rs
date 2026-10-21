@@ -2649,6 +2649,55 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     Ok(())
 }
 
+/// cas-c202: persist one close-transition flag change (pending verification,
+/// pending worktree merge, assignee) without rewriting the rest of the row.
+fn persist_close_flags(
+    task_store: &dyn cas_store::TaskStore,
+    snapshot: &Task,
+    edit: impl Fn(&mut Task),
+) -> cas_store::Result<()> {
+    let mut next = snapshot.clone();
+    edit(&mut next);
+    next.updated_at = chrono::Utc::now();
+    task_store.update(&next).map(|_| ())
+}
+
+#[cfg(test)]
+mod close_flag_race_tests {
+    use super::*;
+    use cas_store::TaskStore;
+
+    /// cas-c202 (cas-0224, 2026-10-21 14:18-14:19 UTC): a supervisor
+    /// proof_scope_fix committed while a worker's close was between its task
+    /// snapshot and the pending_verification write; the close wrote its stale
+    /// snapshot back and silently undid the correction.
+    #[test]
+    fn close_flag_write_keeps_a_concurrent_proof_scope_fix_cas_c202() {
+        let root = tempfile::tempdir().unwrap();
+        let store = cas_store::SqliteTaskStore::open(root.path()).unwrap();
+        store.init().unwrap();
+        let mut parked = Task::new("cas-race".into(), "proof scope race".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.proof_targets = vec!["old admission".into()];
+        store.add(&parked).unwrap();
+        let close_snapshot = store.get("cas-race").unwrap();
+
+        let mut corrected = close_snapshot.clone();
+        corrected.status = TaskStatus::Open;
+        corrected.proof_targets = vec!["pre_tool".into(), "pre_tool::shell_effects".into()];
+        corrected.notes = "[2026-10-21 14:18] PROOF-SCOPE FIX widened".into();
+        store.update_if_current(&corrected, &close_snapshot).unwrap();
+
+        persist_close_flags(&store, &close_snapshot, |task| task.pending_verification = true)
+            .unwrap();
+        let shown = store.get("cas-race").unwrap();
+        assert!(shown.pending_verification, "the close's own flag is recorded");
+        assert_eq!(shown.status, TaskStatus::Open, "the correction's status survives");
+        assert_eq!(shown.proof_targets, corrected.proof_targets, "widened proof targets survive");
+        assert!(shown.notes.contains("PROOF-SCOPE FIX"), "the correction's audit note survives");
+    }
+}
+
 #[cfg(test)]
 mod risk_proof_tests {
     use super::*;
@@ -8644,11 +8693,9 @@ impl CasCore {
                         ),
                         data: None,
                     })?;
-                    let mut task_to_update = task.clone();
-                    task_to_update.pending_verification = false;
-                    task_to_update.updated_at = now;
-                    task_store
-                        .update(&task_to_update)
+                    persist_close_flags(task_store.as_ref(), &task, |task| {
+                        task.pending_verification = false;
+                    })
                         .map_err(|error| McpError {
                             code: ErrorCode::INTERNAL_ERROR,
                             message: Cow::from(format!(
@@ -8783,10 +8830,9 @@ impl CasCore {
                         let elapsed_mins = (chrono::Utc::now() - v.created_at).num_seconds() / 60;
 
                         // Clear pending_verification so the jail releases.
-                        let mut task_to_update = task.clone();
-                        task_to_update.pending_verification = false;
-                        task_to_update.updated_at = chrono::Utc::now();
-                        if let Err(e) = task_store.update(&task_to_update) {
+                        if let Err(e) = persist_close_flags(task_store.as_ref(), &task, |task| {
+                            task.pending_verification = false;
+                        }) {
                             tracing::warn!(task_id = %req.id, error = %e, "failed to clear pending_verification on task");
                         }
 
@@ -9008,15 +9054,14 @@ impl CasCore {
                         }
 
                         // Mark only this task's close transition pending.
-                        let mut task_to_update = task.clone();
-                        task_to_update.pending_verification = true;
-                        if task_to_update.assignee.is_none() {
-                            if let Ok(agent_id) = self.get_agent_id() {
-                                task_to_update.assignee = Some(agent_id);
+                        let agent_id = self.get_agent_id().ok();
+                        let close_assignee = task.assignee.clone().or_else(|| agent_id.clone());
+                        if let Err(e) = persist_close_flags(task_store.as_ref(), &task, |task| {
+                            task.pending_verification = true;
+                            if task.assignee.is_none() {
+                                task.assignee = agent_id.clone();
                             }
-                        }
-                        task_to_update.updated_at = chrono::Utc::now();
-                        if let Err(e) = task_store.update(&task_to_update) {
+                        }) {
                             tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_verification on task");
                         }
 
@@ -9105,7 +9150,7 @@ impl CasCore {
                                         // and a handoff that says "worker"
                                         // when CAS knows the name is a worse
                                         // row than one that names it.
-                                        task_to_update.assignee.as_deref().unwrap_or("worker"),
+                                        close_assignee.as_deref().unwrap_or("worker"),
                                         req.reason.as_deref(),
                                         dispatch
                                             .repository
@@ -9351,15 +9396,13 @@ impl CasCore {
 
                         if needs_merge {
                             // Set pending_worktree_merge flag to enable worktree jail
-                            let mut task_to_update = task.clone();
-                            task_to_update.pending_worktree_merge = true;
-                            if task_to_update.assignee.is_none() {
-                                if let Ok(agent_id) = self.get_agent_id() {
-                                    task_to_update.assignee = Some(agent_id);
+                            let agent_id = self.get_agent_id().ok();
+                            if let Err(e) = persist_close_flags(task_store.as_ref(), &task, |task| {
+                                task.pending_worktree_merge = true;
+                                if task.assignee.is_none() {
+                                    task.assignee = agent_id.clone();
                                 }
-                            }
-                            task_to_update.updated_at = chrono::Utc::now();
-                            if let Err(e) = task_store.update(&task_to_update) {
+                            }) {
                                 tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_worktree_merge on task");
                             }
 

@@ -165,9 +165,10 @@ fn publish_parked_delivery_branch(
     )
 }
 
-/// The declared target eligible for a first-start branch reset. Assignment
-/// passes its proposed final status; start passes the persisted status, so a
-/// batched ownership/status update cannot promise a reset that start will skip.
+/// The declared target eligible for a first-start branch reset at assignment.
+/// Assignment passes its proposed final status, so a batched ownership/status
+/// update cannot promise a reset that start will skip. Resumes with anchors
+/// instead require task attribution in the start-time reconciliation.
 pub(crate) fn initial_factory_branch_reset_target(
     task: &Task,
     status: TaskStatus,
@@ -183,11 +184,13 @@ pub(crate) fn initial_factory_branch_reset_target(
 
 /// Keep a reused worker branch from silently carrying a prior task into a new
 /// target. A branch whose old tip is already reachable from the target is safe
-/// to reset; an unrelated tip is refused with the exact repair command.
+/// to reset; this task's own unmerged work is retained on resume. An unrelated
+/// tip is refused with the exact repair command.
 fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
     expected_branch: &str,
     target_branch: &str,
+    task_identity: Option<&close_ops::TaskCommitIdentity>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
@@ -246,6 +249,54 @@ fn reconcile_reused_factory_branch(
                 )
             })?;
         return Ok(ReusedFactoryBranchStart::Reset);
+    }
+
+    // cas-5eb1a: blocked -> open -> start is a resume, even before park
+    // recorded an anchor. Require attribution for EVERY off-target commit:
+    // an own tip/anchor must not hide another task lower in the branch.
+    // Bound the scan and fail closed on unreadable or excessive history.
+    let carries_only_task_commits = task_identity
+        .and_then(|identity| {
+            let history = crate::git_evidence::git_text(
+                worktree_path,
+                &[
+                    "log",
+                    "--max-count=201",
+                    "--format=%H%x1f%B%x1e",
+                    &factory_tip,
+                    &format!("^{target_tip}"),
+                    "--",
+                ],
+            )?;
+            let records: Vec<_> = history
+                .split('\u{1e}')
+                .map(str::trim)
+                .filter(|record| !record.is_empty())
+                .collect();
+            Some(
+                !records.is_empty()
+                    && records.len() <= 200
+                    && records.iter().all(|record| {
+                        let Some((sha, message)) = record.split_once('\u{1f}') else {
+                            return false;
+                        };
+                        let subject = message.trim().lines().next().unwrap_or("");
+                        !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                            && (identity
+                                .task_id
+                                .as_deref()
+                                .is_some_and(|id| close_ops::message_references_task(message, id))
+                                || close_ops::commit_is_task_attributable(
+                                    worktree_path,
+                                    sha,
+                                    identity,
+                                ))
+                    }),
+            )
+        })
+        .unwrap_or(false);
+    if carries_only_task_commits {
+        return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
     // A tip parked for merge is someone else's review, not stray work: keep
@@ -326,7 +377,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -350,7 +401,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
         assert!(error.contains("git rebase main"), "{error}");
@@ -363,7 +414,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -382,7 +433,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
@@ -404,7 +455,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -441,7 +492,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -1948,8 +1999,11 @@ impl CasCore {
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
 
+        // Anchors identify prior work; they must not bypass the foreign-commit
+        // check when an Open task resumes after review.
         let reused_factory_branch_reset = if is_worker
-            && initial_factory_branch_reset_target(&task, task.status).is_some()
+            && task.status == TaskStatus::Open
+            && task.deliverables.work_target.is_some()
         {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
@@ -1986,6 +2040,7 @@ impl CasCore {
                         worker_checkout,
                         &worker_branch,
                         &target_branch,
+                        Some(&close_ops::task_commit_identity(&task, None)),
                         |tip| {
                             crate::mcp::tools::parked_delivery_at_tip(
                                 task_store.as_ref(),

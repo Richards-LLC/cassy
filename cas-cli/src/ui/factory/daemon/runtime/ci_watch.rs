@@ -130,6 +130,14 @@ pub(crate) trait CiTransport {
     fn runs_for_sha(&self, _sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
         Ok(Vec::new())
     }
+    /// cas-e845: the commit's check-runs (`check_runs` objects), or `None`
+    /// when this transport cannot read them.
+    fn check_runs_for_sha(
+        &self,
+        _sha: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
+        Ok(None)
+    }
     /// cas-e369: the run's first failed job and, when known, its failed step.
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
         Ok(self.failing_job(run_id)?.map(|name| FailedJob { name, step: None }))
@@ -179,7 +187,29 @@ pub(crate) fn ci_completed_runs(
         })
         .collect();
     let done = !runs.is_empty() && runs.iter().all(|run| run.status == "completed");
-    Ok(done.then_some(runs))
+    if !done {
+        return Ok(None);
+    }
+    // cas-e845: a run reports completed/success while one of its jobs is still
+    // in_progress. Gate on the same check-run predicate worktree_merge admits
+    // on, limited to these runs' check suites so scheduled or unrelated
+    // workflows never hold the wake. Runs without a suite id keep run status.
+    let suites: Option<Vec<u64>> = runs.iter().map(|run| run.check_suite_id).collect();
+    if let (Some(suites), Some(checks)) = (suites, transport.check_runs_for_sha(&condition.sha)?) {
+        let ours: Vec<serde_json::Value> = checks
+            .into_iter()
+            .filter(|check| {
+                check
+                    .pointer("/check_suite/id")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|suite| suites.contains(&suite))
+            })
+            .collect();
+        if crate::mcp::tools::core::workflow::check_runs_unfinished(&ours) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(runs))
 }
 
 /// Probe each pending `ci_completed` reminder once; a failed read leaves
@@ -249,6 +279,9 @@ pub(crate) struct CiRun {
     pub conclusion: Option<String>,
     #[serde(default)]
     pub event: String,
+    /// The run's check suite; its jobs are the check-runs that carry this id.
+    #[serde(default)]
+    pub check_suite_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -962,6 +995,28 @@ impl CiTransport for GhCiTransport {
         Ok(response.workflow_runs)
     }
 
+    fn check_runs_for_sha(
+        &self,
+        sha: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
+        let response: serde_json::Value = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/commits/{sha}/check-runs", self.repo),
+            "-f".to_string(),
+            "per_page=100".to_string(),
+        ])?;
+        response
+            .get("check_runs")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                CiWatchError::Malformed("check-runs response omitted check_runs".to_string())
+            })
+    }
+
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
         let response: JobsResponse = self.gh_json(&[
             "api".to_string(),
@@ -1565,6 +1620,69 @@ mod tests {
         assert!(runs.iter().any(|run| run.event == "merge_group"));
     }
 
+    /// cas-e845: run 39612776866 reported completed/success while its
+    /// "Scoped Validation (fast)" check-run was still in_progress.
+    #[test]
+    fn ci_completed_waits_for_check_runs_of_a_completed_run_cas_e845() {
+        struct Checks(FakeTransport, Vec<serde_json::Value>);
+        impl CiTransport for Checks {
+            fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+                self.0.completed_runs()
+            }
+            fn failing_job(&self, id: u64) -> Result<Option<String>, CiWatchError> {
+                self.0.failing_job(id)
+            }
+            fn failed_log(&self, id: u64) -> Result<Option<String>, CiWatchError> {
+                self.0.failed_log(id)
+            }
+            fn merge_queue_pull_requests(
+                &self,
+            ) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+                self.0.merge_queue_pull_requests()
+            }
+            fn delivery_pull_requests(
+                &self,
+                branch: &str,
+            ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
+                self.0.delivery_pull_requests(branch)
+            }
+            fn runs_for_sha(&self, sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
+                self.0.runs_for_sha(sha)
+            }
+            fn check_runs_for_sha(
+                &self,
+                _: &str,
+            ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
+                Ok(Some(self.1.clone()))
+            }
+        }
+        let transport = |status: &str, conclusion: Option<&str>| {
+            let mut fake = recorded_runs("completed", Some("success"));
+            for (index, run) in fake.runs.iter_mut().enumerate() {
+                run.check_suite_id = Some(100 + index as u64);
+            }
+            let ci = fake.runs.iter().find(|run| run.name == "CI" && run.event == "push");
+            let suite = ci.unwrap().check_suite_id.unwrap();
+            let checks = vec![
+                serde_json::json!({"id": 1, "name": "Classify CI diff", "status": "completed",
+                    "conclusion": "success", "check_suite": {"id": suite}}),
+                serde_json::json!({"id": 2, "name": "Scoped Validation (fast)", "status": status,
+                    "conclusion": conclusion, "check_suite": {"id": suite}}),
+                // A queued job of an unselected suite must not hold the wake.
+                serde_json::json!({"id": 3, "name": "watchdog", "status": "queued",
+                    "conclusion": null, "check_suite": {"id": 999}}),
+            ];
+            Checks(fake, checks)
+        };
+        let running = transport("in_progress", None);
+        assert!(
+            ci_completed_runs(&running, &ci_completed(Some("CI"))).unwrap().is_none(),
+            "a completed run with an in_progress job is not CI completed"
+        );
+        let finished = transport("completed", Some("success"));
+        assert!(ci_completed_runs(&finished, &ci_completed(Some("CI"))).unwrap().is_some());
+    }
+
     #[test]
     fn ci_completed_carries_a_failure_conclusion() {
         let failed = recorded_runs("completed", Some("failure"));
@@ -1579,11 +1697,12 @@ mod tests {
     }
 
     /// One watcher interval plus one daemon refresh tick plus the bounded
-    /// origin and run-list `gh` calls stay inside the 60 s contract.
+    /// origin, run-list and (cas-e845) check-runs `gh` calls stay inside the
+    /// 60 s contract.
     #[test]
     fn ci_completed_wakes_within_a_minute() {
         let tick = super::super::lifecycle::DAEMON_REFRESH_INTERVAL;
-        let worst = CI_WAKE_INTERVAL + tick + 2 * GH_CALL_TIMEOUT;
+        let worst = CI_WAKE_INTERVAL + tick + 3 * GH_CALL_TIMEOUT;
         assert!(worst <= Duration::from_secs(60), "{worst:?}");
     }
 
@@ -1601,6 +1720,7 @@ mod tests {
             status: "completed".to_string(),
             conclusion: conclusion.map(str::to_string),
             event: "push".to_string(),
+            check_suite_id: None,
         }
     }
 

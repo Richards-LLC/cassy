@@ -461,30 +461,16 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
             "refs_converged" | "refs_diverged" => {
                 assert!(deliver, "a pending merge or push still releases");
                 let push_required = outcome == "refs_diverged";
-                // pin: live evidence must add/remove ref-disagreement and push-only instructions together.
+                // pin: ref-disagreement must reflect the same live evidence as the action.
+                let disagreement = prompt.text.contains("Git ref disagreement detected:");
+                // pin: this action applies only while the local merge needs a push.
+                let push_action = prompt.text.contains("2. Push required:");
+                // pin: the alternative action must ask for the still-outstanding merge.
+                let merge_action = prompt.text.contains("2. Merge factory/merge-w into epic/test");
                 assert_eq!(
-                    prompt.text.contains("Git ref disagreement detected:"),
-                    push_required,
-                    // pin: include the released body in an evidence/action mismatch diagnostic.
-                    "{}",
-                    prompt.text
-                );
-                // pin: Push required means the local merge exists; that instruction must disappear after reset.
-                assert_eq!(
-                    prompt.text.contains("2. Push required:"),
-                    push_required,
-                    // pin: include the released body in an evidence/action mismatch diagnostic.
-                    "{}",
-                    prompt.text
-                );
-                // pin: the alternative action is an actual merge, not another push-only instruction.
-                assert_eq!(
-                    prompt
-                        .text
-                        .contains("2. Merge factory/merge-w into epic/test"),
-                    !push_required,
-                    "{}",
-                    prompt.text
+                    (disagreement, push_action, merge_action),
+                    (push_required, push_required, !push_required),
+                    "{}", prompt.text,
                 );
             }
             _ => {

@@ -235,7 +235,9 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
     })));
     for text in ["# No journeys\n", "SEND and REPLY need PASS or FAIL rows\n",
         "| SEND-more | PASS |\n| REPLY | PASS |\n", "| SEND | PASS |\n",
-        "| SEND | NOT EXERCISED: |\n| REPLY | PASS |\n"] {
+        "| SEND | NOT EXERCISED: |\n| REPLY | PASS |\n",
+        "```markdown\n| SEND | PASS |\n| REPLY | PASS |\n```\n",
+        "| SEND | NOT EXERCISED: <reason> |\n| REPLY | PASS |\n"] {
         std::fs::write(&ledger, text).unwrap();
         let error = service.verification(request()).await.expect_err("missing journey verdict");
         assert!(error.message.contains("QA RECORD REJECTED"), "{}", error.message);
@@ -243,7 +245,7 @@ async fn qa_record_requires_each_live_journey_row_cas_06fe() {
             .unwrap().unwrap().state.is_active());
     }
     std::fs::write(&ledger,
-        "| Journey | Verdict |\n| --- | --- |\n| SEND | NOT EXERCISED: sandbox unavailable |\n| REPLY | NOT A ROUTE |\n").unwrap();
+        "| Journey | Verdict |\n| --- | --- |\n| SEND | NOT EXERCISED: sandbox unavailable |\n| REPLY | PASS — persisted reply read back |\n").unwrap();
     let result = extract_text(service.verification(request()).await.unwrap());
     assert!(result.contains("APPROVAL"), "{result}");
     assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task_id(&cas_dir, &task_id)).unwrap().status,

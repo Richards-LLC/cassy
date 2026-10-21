@@ -1625,6 +1625,8 @@ impl CasCore {
         {
             qa_task.description.push_str("\n\nJourney impact at the reviewed delivery:\n");
             qa_task.description.push_str(&super::qa_impact::render(impact));
+        } else {
+            qa_task.description.push_str("\n\nWARNING: journey impact is unavailable for this head; inspect the attributed diff and configured catalog. Existing QA evidence requirements still apply.\n");
         }
         qa_task.acceptance_criteria = "LEDGER.md with journeys, correctness and polish sections; \
              every finding cites a trace action and a screenshot; desktop+phone, light+dark \

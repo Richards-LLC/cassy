@@ -204,10 +204,15 @@ impl CasCore {
 }
 
 fn verdict(cell: &str) -> bool {
-    matches!(cell, "PASS" | "FAIL" | "NOT A ROUTE")
-        || cell
-            .strip_prefix("NOT EXERCISED:")
-            .is_some_and(|reason| !reason.trim().is_empty())
+    ["PASS", "FAIL", "NOT A ROUTE"].iter().any(|verdict| {
+        cell.strip_prefix(verdict).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'))
+        })
+    }) || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
+        let reason = reason.trim();
+        !reason.is_empty() && reason != "<reason>"
+    })
 }
 
 /// G8 reads the park-time report, never a new diff. Legacy catalog adoption

@@ -672,6 +672,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cas_337b_config_reset_removes_key_and_restores_fallback() {
+        use clap::Parser;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = "# keep host policy\n[hub]\ntailscale_serve = false\n";
+        std::fs::write(root.join("config.toml"), format!("{original}transport_mode = \"required\"\n")).unwrap();
+        let cli = Cli::parse_from(["cas", "config", "reset", "hub.transport_mode"]);
+        execute_reset(&ConfigResetArgs {
+            key: "hub.transport_mode".into(),
+            force: false,
+            store: Default::default(),
+        }, &cli, &root).unwrap();
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["hub"].get("transport_mode").is_none(), "reset persisted an override: {saved}");
+        assert_eq!(Config::load(&root).unwrap().hub.unwrap().transport_mode(), crate::config::HubTransportMode::Loopback);
+        assert_eq!(saved, original, "reset must preserve unrelated settings and comments");
+    }
+
+    #[test]
     fn config_get_explains_raw_blank_cassy_filing_fallback_cas_02a3() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();

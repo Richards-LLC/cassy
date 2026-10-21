@@ -1129,6 +1129,24 @@ mod tests {
     }
 
     #[test]
+    fn cas_337b_artifacts_do_not_inherit_foreign_home_store() {
+        let mut env = TestEnvGuard::temp_home();
+        let operator = TempDir::new().unwrap();
+        let host_store = operator.path().join("operator-home/.cas");
+        let artifacts = host_store.join("artifacts/task/qa");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(host_store.join("config.toml"), "[sync]\nenabled = false\n").unwrap();
+        // Even a project above the host store must not capture artifact commands.
+        let outer = operator.path().join(".cas");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::write(outer.join("config.toml"), "").unwrap();
+        env.set_current_dir(&artifacts);
+        assert!(matches!(find_cas_root(), Err(CasError::NotInitialized)));
+        std::fs::remove_file(host_store.join("config.toml")).unwrap();
+        assert!(matches!(find_cas_root(), Err(CasError::NotInitialized)));
+    }
+
+    #[test]
     fn cas_0f22_socket_only_directory_is_skipped_during_walk() {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
         let temp = TempDir::new().unwrap();

@@ -2290,6 +2290,7 @@ mod tests {
         assert!(!emit_failure(&queue, "factory-session", &failure).unwrap());
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
+        // pin: the durable relay source includes branch, workflow and SHA.
         assert_eq!(rows[0].source, "lifecycle-wake:ci-red-run:main:CI:abc123");
         assert!(rows[0].prompt.contains("Failing job: Fast Validation"));
     }

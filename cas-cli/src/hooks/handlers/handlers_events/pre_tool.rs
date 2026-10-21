@@ -4422,12 +4422,12 @@ fn factory_write_decision(
             return FactoryWriteDecision::Denied(violation);
         }
     }
-    let targets: Vec<(String, Option<WriteMode>)> = match tool {
+    let targets: Vec<(String, Option<WriteMode>, Option<String>)> = match tool {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
             .get("file_path")
             .or_else(|| tool_input.get("path"))
             .and_then(|value| value.as_str())
-            .map(|path| vec![(path.to_string(), None)])
+            .map(|path| vec![(path.to_string(), None, None)])
             .unwrap_or_default(),
         "Bash" => {
             // cas-3147 (GH #1169 item 4): once the operator has configured
@@ -4452,8 +4452,8 @@ fn factory_write_decision(
             }
             shell_effects.writes
                 .into_iter()
-                .map(|path| (path, None))
-                .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit))))
+                .map(|(path, redirection)| (path, None, if codex_missing_workdir { redirection } else { None }))
+                .chain(in_place.into_iter().map(|path| (path, Some(WriteMode::Edit), None)))
                 .collect()
         }
         // cas-49c0: Codex file edits arrive as `apply_patch`, with the patch
@@ -4464,20 +4464,13 @@ fn factory_write_decision(
             };
             apply_patch_write_targets_with_modes(patch)
                 .into_iter()
-                .map(|(path, mode)| (path, Some(mode)))
+                .map(|(path, mode)| (path, Some(mode), None))
                 .collect()
         }
         _ => return FactoryWriteDecision::Allowed,
     };
     let mut resolved_targets = Vec::with_capacity(targets.len() + link_targets.len());
-    for (raw_path, mode) in targets {
-        let relative_redirection = if codex_missing_workdir {
-            shell_effects.relative_redirections.iter().find_map(|(path, original)| {
-                (path == &raw_path).then(|| original.clone())
-            })
-        } else {
-            None
-        };
+    for (raw_path, mode, relative_redirection) in targets {
         match physical(&raw_path) {
             Ok(path) => resolved_targets.push((path, mode, relative_redirection)),
             Err(violation) => return FactoryWriteDecision::Denied(violation),

@@ -6,9 +6,8 @@ use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ShellEffects {
-    /// Effective target and original relative spelling of output redirections.
-    pub relative_redirections: Vec<(String, String)>,
-    pub writes: Vec<String>,
+    /// Effective target and, for relative redirections, its original spelling.
+    pub writes: Vec<(String, Option<String>)>,
     pub edits: Vec<String>,
     pub deletes: Vec<(String, bool)>,
     pub links: Vec<(ShellLink, PathBuf)>,
@@ -381,20 +380,22 @@ fn collect_script(
                 }
             }
 
-            for directory in &statement_dirs {
-                let base = directory.as_deref();
-                for pair in statement.windows(2) {
-                    if let [ShellToken::Operator('>'), ShellToken::Word(target)] = pair {
-                        for path in expand_factory_shell_word(target, &values) {
-                            if !Path::new(&path).is_absolute() && !path.starts_with('~') {
-                                effects.relative_redirections.push((rooted(&path, base, original)?, path));
-                            }
+            let mut relative_redirections = Vec::new();
+            for pair in statement.windows(2) {
+                if let [ShellToken::Operator('>'), ShellToken::Word(target)] = pair {
+                    for path in expand_factory_shell_word(target, &values) {
+                        if !Path::new(&path).is_absolute() && !path.starts_with('~') {
+                            relative_redirections.push(path);
                         }
                     }
                 }
+            }
+            for directory in &statement_dirs {
+                let base = directory.as_deref();
                 for raw in bash_write_targets(&command) {
                     for raw in expand_factory_shell_word(&raw, &values) {
-                        effects.writes.push(rooted(&raw, base, original)?);
+                        let redirection = relative_redirections.contains(&raw).then(|| raw.clone());
+                        effects.writes.push((rooted(&raw, base, original)?, redirection));
                     }
                 }
                 for raw in bash_in_place_edit_targets(&command) {

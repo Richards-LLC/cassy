@@ -559,14 +559,8 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         if let Some(run_url) = run.get("html_url").and_then(serde_json::Value::as_str) {
             url = Some(run_url.to_string());
         }
-        let status = run.get("status").and_then(serde_json::Value::as_str);
         let conclusion = run.get("conclusion").and_then(serde_json::Value::as_str);
-        if matches!(
-            conclusion,
-            Some(
-                "failure" | "action_required" | "timed_out" | "stale" | "startup_failure"
-            )
-        ) {
+        if check_run_failed(run) {
             return BranchCiState::Red {
                 sha: sha.to_string(),
                 url: run
@@ -643,14 +637,25 @@ fn check_run_unfinished(run: &serde_json::Value) -> bool {
         || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
 }
 
-/// cas-e845: the single "CI has finished" predicate over a commit's
-/// check-runs, shared by `worktree_merge` admission and the `ci_completed`
-/// reminder so a wake is never sent while admission would answer CI PENDING.
-/// Per check name only the latest non-cancelled run counts; a check whose
-/// runs were all cancelled is awaiting its rerun and is unfinished.
-pub(crate) fn check_runs_unfinished(runs: &[serde_json::Value]) -> bool {
-    let (latest, superseded) = select_latest_check_runs(runs);
-    superseded || latest.into_iter().any(check_run_unfinished)
+/// One check-run whose conclusion makes merge admission answer CI RED.
+fn check_run_failed(run: &serde_json::Value) -> bool {
+    matches!(
+        run.get("conclusion").and_then(serde_json::Value::as_str),
+        Some("failure" | "action_required" | "timed_out" | "stale" | "startup_failure")
+    )
+}
+
+/// cas-e845 / cas-ae6a: whether a `ci_completed` wake must keep waiting on a
+/// commit's check-runs. It shares merge admission's per-check rules (latest
+/// non-cancelled run per name; the same unfinished and red predicates), so a
+/// wake never fires while one of those checks is still running. A failed
+/// check settles at once, as admission answers CI RED. A check whose runs were
+/// all cancelled has no rerun at this SHA: admission waits for one before it
+/// merges, but a completion wake settles and reports the cancellation.
+pub(crate) fn check_runs_still_running(runs: &[serde_json::Value]) -> bool {
+    let (latest, _all_cancelled) = select_latest_check_runs(runs);
+    !latest.iter().any(|run| check_run_failed(run))
+        && latest.into_iter().any(check_run_unfinished)
 }
 
 /// The verdict-bearing run of each check: the newest (by id) non-cancelled

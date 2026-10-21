@@ -3228,6 +3228,10 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     // non-{project} base_path: repo_root.parent().join(base_path).
     let expected_root = repo.root.parent().unwrap().join(&unique).join("erin");
     repo.add_worktree(&expected_root, "factory/erin");
+    // A contained source is a no-op receipt (cas-4221); give erin work to merge.
+    std::fs::write(expected_root.join("erin.txt"), "erin work").unwrap();
+    run_git(&["add", "erin.txt"], &expected_root);
+    run_git(&["commit", "-m", "erin work"], &expected_root);
 
     // Sanity: this is NOT where the old hardcoded convention would look.
     assert_ne!(expected_root, cas_root.join("worktrees").join("erin"));
@@ -5912,7 +5916,12 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
         "task update epic= must move the WorkTarget onto the epic lane"
     );
 
-    for task_id in [None, Some(task.id.clone())] {
+    // The first merge lands the work; the repeat (now with task_id) resolves
+    // the same epic lane and reports the source as already contained (cas-4221).
+    for (task_id, expected) in [
+        (None, "to epic/c85e"),
+        (Some(task.id.clone()), "already in epic/c85e"),
+    ] {
         let mut req = coord_req("worktree_merge");
         req.id = Some("factory/alice".to_string());
         req.task_id = task_id.clone();
@@ -5923,7 +5932,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
                 .unwrap_or_else(|e| panic!("merge (task_id={task_id:?}): {}", e.message)),
         );
         assert!(
-            text.contains("Merged worktree") && text.contains("to epic/c85e"),
+            text.contains(expected) && (task_id.is_some() || text.contains("Merged worktree")),
             "must merge to the epic lane (task_id={task_id:?}):\n{text}"
         );
         assert!(

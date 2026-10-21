@@ -311,7 +311,7 @@ pub struct TaskRequest {
     /// Reason for close, cancel, request_changes, or a split takeover assignment. Close succeeds only once
     /// verification passes; the close response says what to do otherwise.
     #[schemars(
-        description = "Reason for close, cancel, request_changes, or supervisor-authorized split takeover assignment. Close succeeds only after verification passes; if close returns verification-required guidance, follow it."
+        description = "Reason for close, cancel, request_changes or split takeover. Close succeeds only after verification passes; if close returns verification-required guidance, follow it."
     )]
     #[serde(default)]
     pub reason: Option<String>,
@@ -331,7 +331,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override for close gates or task update assignee on a peer's split child. Split takeover requires a live registered supervisor and non-empty reason; records one start authorization bound to that worker. Close overrides require a registered supervisor and non-empty reason; logs the decision. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
+        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization for that worker). Live registered supervisor and non-empty reason required; decision logged. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,

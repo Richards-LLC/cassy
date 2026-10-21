@@ -4,7 +4,7 @@
 | --- | --- |
 | First two lines | The managed-files receipt says current, committed, staged, conflicts or commit failed, with the pending action where needed. |
 | Scannable | One compact managed-files line per project; doctor has one managed file drift finding. |
-| Readable | A refused standalone sync shows its cause and one hook-scope inspection command once, wrapped at 80 columns; staged changes and conflicts keep their existing explanations. |
+| Readable | A refused standalone sync shows its cause and one hook-scope inspection command once, wrapped at 80 columns; a staged repair names `git diff --cached` for review without assuming why the commit was held. |
 | Machine output | Update adds managed_files with outcome, untracked, staged, commit and conflicts to its existing JSON receipt; a failed commit adds commit_error and outcome commit_failed, while doctor retains its checks shape. |
 | Omitted | Builtin per-path inventories remain in JSON and existing verbose sync details; no push or unrelated project changes enter the repair commit. |
 
@@ -18,6 +18,12 @@ project phase supplies the sweep finding and nonzero final status; standalone
 sync also fails. It never becomes a user file-conflict warning. Hook enforcement
 and the existing summary renderer stay authoritative. User staging remains a
 pending commit for review, and no hook is bypassed or rewritten.
+
+Trunk, the configured epic base, and `epic/*` integration branches retain the
+repair as staged changes. Their managed-files receipt uses the existing
+`staged` outcome and null commit; it never implies that an automatic commit
+was attempted. The compact staged line is scoped for terminal QA, with the
+operator recovery procedure in ARCHITECTURE.md.
 
 ## Critique
 

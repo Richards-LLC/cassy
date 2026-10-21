@@ -2510,6 +2510,8 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     cas_6718_git(&project, &["config", "user.name", "Fixture"]);
     cas_6718_git(&project, &["add", "."]);
     cas_6718_git(&project, &["commit", "-qm", "project baseline"]);
+    cas_6718_git(&project, &["branch", "-M", "main"]);
+    cas_6718_git(&project, &["checkout", "-qb", "repair/managed-files"]);
     rule.content = "Current authoritative source content".into();
     store.update(&rule).unwrap();
     syncer.sync_rule(&rule).unwrap();
@@ -2863,7 +2865,8 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
-        cas_6718_git(&project, &["branch", "-M", "main"]);
+        // Hook refusal is tested on a branch where automatic commits are allowed.
+        cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
         let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let readme = project.join("README.md");
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();

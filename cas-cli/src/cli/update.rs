@@ -5226,7 +5226,7 @@ fn report_managed_files(
                 report.conflicts.len()
             )
         } else if report.outcome == "staged" {
-            "Managed files: staged; commit pending (index already had staged changes)".to_string()
+            "Managed files: staged; review with git diff --cached".to_string()
         } else {
             format!(
                 "Managed files: {} ({} untracked, {} staged)",

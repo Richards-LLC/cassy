@@ -241,7 +241,6 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-release-learning.py
 	cd .. && python3 scripts/test-release-publish-toolchain.py
 	cd .. && python3 scripts/test-release-binary-artifact.py
-	cd .. && python3 scripts/test-sign-macos.py
 	cd .. && ./scripts/test-check-operator-launch.sh
 	cd .. && ./scripts/test-release.sh
 	cd .. && ./scripts/test-release-publish.sh

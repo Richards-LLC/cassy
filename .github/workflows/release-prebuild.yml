@@ -20,13 +20,6 @@ name: Release Prebuild
 on:
   merge_group:
   workflow_call:
-    secrets:
-      MACOS_SIGNING_CERT_P12_BASE64:
-        required: false
-      MACOS_SIGNING_CERT_PASSWORD:
-        required: false
-      MACOS_SIGNING_TEAM_ID:
-        required: false
   workflow_dispatch:
 
 permissions:
@@ -249,17 +242,14 @@ jobs:
       # produces the Darwin bytes signs and verifies them; release.yml verifies
       # the signature again on the exact archive that ships.
       - name: Package
-        env:
-          MACOS_SIGNING_CERT_P12_BASE64: ${{ secrets.MACOS_SIGNING_CERT_P12_BASE64 }}
-          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
-          MACOS_SIGNING_TEAM_ID: ${{ secrets.MACOS_SIGNING_TEAM_ID }}
         run: |
           mkdir -p package
           cp "target/aarch64-apple-darwin/$RELEASE_DIR/cas" package/
           strip package/cas
-          # Sign after strip, before archiving. Secretless prebuilds remain
-          # green with an explicit unsigned/non-publishable candidate outcome.
-          ./scripts/sign-macos.sh prebuild package/cas
+          # `strip` invalidates an ad-hoc Mach-O signature. Re-sign the exact
+          # executable we publish, then fail before packaging if it is invalid.
+          codesign --sign - --force package/cas
+          codesign --verify --verbose=4 package/cas
           cp LICENSE package/
           cd package
           tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE

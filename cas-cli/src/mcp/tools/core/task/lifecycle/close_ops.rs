@@ -6143,7 +6143,8 @@ impl CasCore {
 
     /// cas-44e93: a recorded anchor origin never had is no delivery (the merge
     /// refuses it), and the descendant rule above can never move it back. A
-    /// close retry from the task's pushed tip re-anchors there instead, when:
+    /// close retry from the task's pushed tip re-anchors there instead, when
+    /// the prior SHA is unreachable from every ref and:
     /// - the measured branch is this task's own `factory/<assignee>-<task>`
     ///   (cas-00eb: a plain lane may carry the next task);
     /// - `candidate` is exactly `origin/<branch>`, which lacks the recorded anchor;
@@ -6168,9 +6169,15 @@ impl CasCore {
             return false;
         }
         let remote = format!("origin/{branch}");
+        let recorded_is_unreachable = git_stdout_lines(
+            repo_path,
+            &["for-each-ref", "--format=%(refname)", "--contains", recorded],
+        )
+        .is_ok_and(|refs| refs.is_empty());
         if !resolve_branch_sha(repo_path, &format!("{remote}^{{commit}}"))
             .is_some_and(|pushed| commit_ids_match(&pushed, candidate))
             || commit_ids_match(recorded, candidate)
+            || !recorded_is_unreachable
             || git_commit_is_ancestor(repo_path, recorded, &remote)
             || git_commit_is_ancestor(repo_path, candidate, target)
         {
@@ -6337,7 +6344,8 @@ impl CasCore {
                 &target,
             )
         } else {
-            self.rebased_tip_supersedes_anchor(task_store, task, repo_path, &tip, &target)
+            self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &tip, &target)
+                || self.rebased_tip_supersedes_anchor(task_store, task, repo_path, &tip, &target)
         };
         if !advance {
             return parking;
@@ -6366,8 +6374,10 @@ impl CasCore {
     /// with a commit-time snapshot is not required: request_changes may ask for
     /// different content. Every commit above the target must still name this
     /// task without a foreign task claim in its subject. The tip must be
-    /// unmerged, and no other open task may own an anchor
-    /// in that range. Already-parked retries retain their immutable-anchor rules.
+    /// unmerged, and no other open task may own an anchor in that range.
+    /// An amended commit-time anchor that is now unreachable from every ref may
+    /// rebind to the exact pushed tip of this task's own branch, as for a
+    /// re-close. Already-parked retries retain their immutable-anchor rules.
     fn rebased_tip_supersedes_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -25438,6 +25448,60 @@ mod merge_state_gate_tests {
             "{}",
             stored.notes
         );
+    }
+
+    /// cas-b0a5: an amended commit hook anchor is now unreachable, while the
+    /// replacement task tip is pushed. Both a first park and a re-close must
+    /// bind to that pushed tip instead of preserving the orphaned SHA.
+    #[tokio::test]
+    async fn cas_b0a5_park_replaces_orphaned_anchor_with_pushed_amended_tip() {
+        for status in [TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+            let fixture = unpushed_anchor_fixture(status, AnchorChoice::Local);
+            let repo = fixture.dir.path();
+            let orphaned_anchor = fixture.local.clone();
+            git(
+                repo,
+                &["commit", "--amend", "-q", "-m", "fix: amended after commit hook"],
+            );
+            let pushed_tip = rev_parse_local(repo, &fixture.branch);
+            assert_ne!(
+                pushed_tip, orphaned_anchor,
+                "amend must rewrite the recorded commit"
+            );
+            git(repo, &["push", "-q", "--force", "origin", &fixture.branch]);
+            git(repo, &["fetch", "-q", "origin"]);
+            let remote = format!("origin/{}", fixture.branch);
+            assert_eq!(rev_parse_local(repo, &remote), pushed_tip);
+            assert!(!git_commit_is_ancestor(repo, &orphaned_anchor, &remote));
+            let refs = git_command(
+                repo,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "--contains",
+                    &orphaned_anchor,
+                ],
+            )
+            .output()
+            .unwrap();
+            assert!(refs.status.success());
+            assert!(
+                String::from_utf8_lossy(&refs.stdout).trim().is_empty(),
+                "the pre-amend anchor must not be reachable from any ref"
+            );
+
+            let (is_error, text) = close_text(&fixture).await;
+            assert_eq!(is_error, Some(true), "{text}");
+            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            let stored = fixture.store.get(&fixture.task_id).unwrap();
+            assert_eq!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+            assert_eq!(
+                stored.deliverables.factory_branch_anchor.as_deref(),
+                Some(pushed_tip.as_str()),
+                "status {status:?}: {}",
+                stored.notes
+            );
+        }
     }
 
     #[tokio::test]

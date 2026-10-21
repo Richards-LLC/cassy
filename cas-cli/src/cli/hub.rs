@@ -2387,7 +2387,10 @@ fn status(cli: &Cli) -> Result<()> {
                     )
                 })
                 .unwrap_or_else(|| error.to_string());
-            anyhow::bail!("cas hub runtime record unavailable: {detail}");
+            return Err(super::JsonReportedFailure(anyhow::anyhow!(
+                "cas hub runtime record unavailable: {detail}"
+            ))
+            .into());
         }
     };
     let record_state = hub_display_state(&paths, &record);
@@ -2450,6 +2453,17 @@ fn status(cli: &Cli) -> Result<()> {
         println!("{}", render_audit_status(&audit));
         println!("{}", render_open_files_status(&open_files));
     }
+    status_verdict(live, service_warning, &transport, &audit)
+        .map_err(|error| super::JsonReportedFailure(error).into())
+}
+
+/// Failures found after `hub status` printed its report.
+fn status_verdict(
+    live: bool,
+    service_warning: Option<&str>,
+    transport: &HubTransportReport,
+    audit: &crate::hub::AuditWriterReport,
+) -> Result<()> {
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
     // supervision; that is an error, not a footnote.

@@ -150,7 +150,8 @@ fn main() -> ExitCode {
     sentry::add_command_breadcrumb(&args.join(" "));
 
     // Config and hub refusals are returned through the shared error path. Keep
-    // those failures machine-readable when their caller requested JSON.
+    // those failures machine-readable on stdout when their caller requested
+    // JSON; stderr keeps the human diagnostic either way.
     let json_refusal = cli.json
         && matches!(
             cli.command.as_ref(),
@@ -165,13 +166,20 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            if json_refusal {
+            // A command that already printed its JSON report keeps stdout to
+            // that one document; its failure still reaches stderr below.
+            let (e, already_reported) = match e.downcast::<cli::JsonReportedFailure>() {
+                Ok(reported) => (reported.0, true),
+                Err(e) => (e, false),
+            };
+            if json_refusal && !already_reported {
                 let message = e
                     .downcast_ref::<error::CasError>()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| format!("{e:#}"));
                 println!("{}", serde_json::json!({"status": "error", "message": message}));
-            } else {
+            }
+            {
                 use cas::ui::components::Formatter;
                 use cas::ui::theme::ActiveTheme;
 

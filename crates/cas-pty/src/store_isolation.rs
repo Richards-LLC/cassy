@@ -210,12 +210,11 @@ fn user_owned_ssh_config_dir() -> Option<PathBuf> {
     let mut files: Vec<(OsString, Vec<u8>)> = std::fs::read_dir(SSH_CONFIG_DIR)
         .ok()?
         .filter_map(|entry| {
+            // Follow symlinks: distributions link drop-ins from /usr/lib.
             let entry = entry.ok()?;
-            entry
-                .file_type()
-                .ok()?
-                .is_file()
-                .then(|| Some((entry.file_name(), std::fs::read(entry.path()).ok()?)))?
+            let path = entry.path();
+            std::fs::metadata(&path).ok()?.is_file().then_some(())?;
+            Some((entry.file_name(), std::fs::read(path).ok()?))
         })
         .collect();
     if files.is_empty() {

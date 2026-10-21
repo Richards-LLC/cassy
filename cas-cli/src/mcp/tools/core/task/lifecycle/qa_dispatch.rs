@@ -695,11 +695,27 @@ impl CasCore {
                     .ok()
             })
         });
+        // Explicit QA requests may precede park. Compute the same committed,
+        // attributed impact, so registry-owned API/CLI journeys dispatch too.
+        let impact = head.and_then(|head| match self.attach_delivery_qa_impact(task, repo, parent_branch, head) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "QA impact unavailable; dispatch keeps existing eligibility");
+                None
+            }
+        });
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
+        if let Some(journeys) = impact.as_ref().and_then(|report| report["journeys"].as_array()) {
+            for journey in journeys {
+                if let Some(id) = journey["id"].as_str() {
+                    eligibility.reasons.push(format!("journey:{id}"));
+                }
+            }
+        }
         if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
             // cas-74284: the supervisor's request is the reason on record,
             // whatever the diff alone would have said.
@@ -1518,6 +1534,13 @@ impl CasCore {
         qa_task.origin_project = delivery.origin_project.clone();
         qa_task.description =
             qa_task_description(delivery, pass, &reasons_list, ledger_dir, parent_branch);
+        if let Ok(Some(state)) = task_store.get_execution_state(&delivery.id)
+            && let Some(impact) = state.get("qa_impact")
+            && impact["head_sha"].as_str() == Some(pass.bound_head.as_str())
+        {
+            qa_task.description.push_str("\n\nJourney impact at the reviewed delivery:\n");
+            qa_task.description.push_str(&super::qa_impact::render(impact));
+        }
         qa_task.acceptance_criteria = "LEDGER.md with journeys, correctness and polish sections; \
              every finding cites a trace action and a screenshot; desktop+phone, light+dark \
              captures; visual-qa.mjs --strict output; verdict recorded with verification action=qa_record."

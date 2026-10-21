@@ -63,3 +63,41 @@ Text and Markdown put context warnings first. JSON preserves complete paths,
 metadata, matches and upkeep reasons for automation. See the
 [registry schema](journey-registry.md) and
 [adaptive QA brief](../design/adaptive-qa.brief.md) for the upkeep contracts.
+
+## Automatic task and QA context
+
+Task creation adds a **predicted** impact note using tracked paths, directories
+and globs named in the title, description, design and proof targets. This is a
+planning hint; the delivered diff determines the authoritative impact.
+
+Parking a delivery snapshots that impact into the task's execution state under
+`qa_impact`, with the JSON v1 report above plus `head_sha` and `base_sha`.
+It uses the same task attribution as close, including deleted and renamed paths,
+and reads registry metadata at the delivered commit. Repeating the same park
+reuses the snapshot. The state supports a bounded 1 MiB impact report separately
+from the existing 16 KiB resume fields. `state_patch.qa_impact=null` clears the
+field using the standard merge-patch rules.
+
+Independent QA dispatch includes a journey table with invariant statements,
+read-back checks and generated evidence requirements. An explicit QA request
+before park computes the same snapshot. Registry journeys can trigger independent
+QA even when their files are outside the configured UI/API path lists. Missing or
+malformed impact inputs produce a warning and leave the existing dispatch rules
+in force; impact collection itself never refuses a delivery.
+
+When a YAML registry exists and the snapshot lists live journeys, an approved
+`qa_record` requires a ledger row for **each** live journey. Use an exact journey
+ID cell and a verdict cell (`PASS`, `FAIL`, `NOT A ROUTE`, or
+`NOT EXERCISED: <reason>`), or a compact list row such as `- SEND: PASS`.
+A bare ID, a similar ID, an empty reason or an example inside a code fence does
+not count. Rejections remain recordable without these rows. Dark/dead journeys,
+legacy catalog reports and projects without a registry keep advisory context.
+
+```markdown
+| Journey | Verdict |
+| --- | --- |
+| SEND | NOT EXERCISED: the sandbox is unavailable |
+```
+
+The explicit disposition is the escape: approval may record an unexercised
+journey, while the ledger preserves why it was unexercised.

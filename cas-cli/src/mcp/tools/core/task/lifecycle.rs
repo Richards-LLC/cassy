@@ -56,6 +56,7 @@ pub(crate) mod merge_close;
 mod gate_error_tests;
 pub(crate) mod proof_scope;
 mod qa_dispatch;
+pub(crate) mod qa_impact;
 pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;
@@ -1331,7 +1332,7 @@ impl CasCore {
             _ => req.external_ref,
         };
         let issue_hint_note = crate::issue_reconcile::external_ref_hint_note(&issue_hint);
-        let task = Task {
+        let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
             origin_project: crate::cloud::resolve_canonical_id(&self.cas_root),
@@ -1371,6 +1372,10 @@ impl CasCore {
             depth,
             delivery_mode,
         };
+
+        let predicted = qa_impact::predicted(self, &task);
+        if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
+        task.notes.push_str(&predicted);
 
         // Associate the creation event and dependency metadata with the
         // current session. This is used by ambient recall to avoid feeding a

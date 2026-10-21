@@ -8425,6 +8425,14 @@ impl CasCore {
                         .ok()
                         .and_then(|stored| stored.deliverables.factory_branch_anchor)
                         .or(anchor);
+                    // G7 never refuses a park. Snapshot the attributed delivery
+                    // before QA dispatch, even if independent QA is disabled.
+                    let impact_warning = qa_anchor.as_deref().and_then(|head| {
+                        self.attach_delivery_qa_impact(&task, &close_project_root,
+                            &resolved_parent_branch, head).err()
+                    }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
+                        .unwrap_or_default();
+                    let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,

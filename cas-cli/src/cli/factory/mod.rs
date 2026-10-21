@@ -2317,6 +2317,53 @@ mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
 
+    #[cfg(unix)]
+    #[test]
+    fn preflight_session_diagnostics_retain_refusal_and_runtime_log_cas_c1881() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = project.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[logging]\nlog_dir = 'runtime-traces'\n")
+            .unwrap();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", bin.join("claude")).unwrap();
+        env.set("PATH", &bin);
+        let mut args = FactoryArgs {
+            name: Some("preflight-diagnostics".into()),
+            supervisor_cli: "invalid-harness".into(),
+            no_worktrees: true,
+            ..Default::default()
+        };
+        let path = crate::ui::factory::daemon_log_path(args.name.as_deref().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for previous in ["", "previous daemon stderr\n"] {
+            std::fs::write(&path, previous).unwrap();
+            let error = preflight_factory_launch(&args, &project, Some(&root))
+                .err()
+                .expect("invalid harness must refuse launch");
+            let error = format!("{error:#}");
+            assert!(error.contains("invalid-harness"), "{error}");
+            let diagnostics = std::fs::read_to_string(&path).unwrap();
+            assert!(diagnostics.starts_with(previous), "{diagnostics}");
+            assert!(diagnostics.contains("invalid-harness"), "{diagnostics}");
+            assert!(diagnostics.contains("before daemon startup"), "{diagnostics}");
+            assert!(diagnostics.contains(&root.join("runtime-traces").display().to_string()), "{diagnostics}");
+            assert!(diagnostics.contains("cas-"), "{diagnostics}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+        }
+
+        // A healthy launch also leaves the pointer when stderr would otherwise be empty.
+        std::fs::write(&path, "").unwrap();
+        args.supervisor_cli = "claude".into();
+        preflight_factory_launch(&args, &project, Some(&root)).unwrap();
+        let diagnostics = std::fs::read_to_string(&path).unwrap();
+        assert!(diagnostics.contains(&root.join("runtime-traces").display().to_string()), "{diagnostics}");
+        assert!(diagnostics.contains("daemon stderr"), "{diagnostics}");
+        assert!(!diagnostics.contains("invalid-harness"), "{diagnostics}");
+    }
+
     /// cas-31ec: `cas` exports its build knobs before the factory launch
     /// check runs. With `nice_cargo` and a pinned job count, an operator
     /// terminal carrying exactly what `apply_resource_contention_env` sets

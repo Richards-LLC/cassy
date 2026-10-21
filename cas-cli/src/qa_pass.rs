@@ -100,8 +100,7 @@ pub fn delivery_eligibility(
 /// The shared user-facing predicate (independent of any gate's on/off flag),
 /// so every QA gate agrees on which deliveries are user-facing (cas-619f,
 /// cas-0cd5). Epics, QA work items and docs/test/CI-only diffs are never
-/// user-facing. A known empty diff is authoritative too; an unavailable diff
-/// (`None`) still permits the demo/catalog fallback.
+/// user-facing.
 pub fn user_facing_reasons(
     task: &Task,
     qa: &QaConfig,
@@ -118,7 +117,10 @@ pub fn user_facing_reasons(
         .filter(|path| !is_non_surface_path(path))
         .cloned()
         .collect();
-    if changed_paths.is_some() && surface_paths.is_empty() {
+    if let Some(paths) = changed_paths
+        && !paths.is_empty()
+        && surface_paths.is_empty()
+    {
         return QaEligibility { reasons };
     }
     let rendered_paths: Vec<String> = surface_paths.iter()
@@ -1519,7 +1521,6 @@ mod tests {
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
         for only in [
-            vec![], // cas-255b: a known empty delivery has no surface to demonstrate.
             vec!["docs/qa/journeys.md", "README.md"],
             vec!["hub-web/e2e/journeys/reply.journey.spec.ts", "hub-web/playwright.config.ts"],
             vec!["cas-cli/tests/cli_test.rs", "crates/x/src/foo_tests.rs"],

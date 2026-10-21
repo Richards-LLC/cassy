@@ -160,7 +160,11 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
 
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
     );
     let source_path = "crates/widget/src/gear.rs";
     std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
@@ -176,6 +180,58 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+    );
+
+    let test_path = "crates/widget/tests/gear.rs";
+    std::fs::create_dir_all(f.worker_path.join("crates/widget/tests")).unwrap();
+    std::fs::write(f.worker_path.join(test_path), "#[test] fn gear_turns() {}\n").unwrap();
+    git(&f.worker_path, &["add", test_path]);
+    git(
+        &f.worker_path,
+        &["commit", "-q", "-m", "test(cas-br01): add gear coverage"],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale = call(&f.worker, close.clone()).await;
+    assert!(
+        stale.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover test change: {stale}"
+    );
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
+    );
+
+    let manifest_path = "crates/widget/Cargo.toml";
+    let manifest = std::fs::read_to_string(f.worker_path.join(manifest_path)).unwrap();
+    std::fs::write(
+        f.worker_path.join(manifest_path),
+        format!("{manifest}\n# build input changed\n"),
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", manifest_path]);
+    git(
+        &f.worker_path,
+        &["commit", "-q", "-m", "build(cas-br01): update crate manifest"],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale = call(&f.worker, close.clone()).await;
+    assert!(
+        stale.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover Cargo change: {stale}"
+    );
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
     );
 
     let doc_path = "docs/design/cli/update-managed-files.brief.md";

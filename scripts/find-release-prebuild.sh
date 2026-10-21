@@ -29,6 +29,7 @@ workflow="${RELEASE_PREBUILD_WORKFLOW:-release-prebuild.yml}"
 event="${RELEASE_PREBUILD_EVENT:-merge_group}"
 wait_seconds="${RELEASE_PREBUILD_WAIT_SECONDS:-900}"
 poll_seconds="${RELEASE_PREBUILD_POLL_SECONDS:-15}"
+api_timeout_seconds="${RELEASE_PREBUILD_API_TIMEOUT_SECONDS:-30}"
 required_artifacts=("cas-x86_64-unknown-linux-gnu" "cas-aarch64-apple-darwin")
 
 # Keep operator/test overrides bounded to non-negative integers. Invalid values
@@ -39,6 +40,11 @@ if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$poll_seconds" =~ ^[0-9]+$ ]]; then
     poll_seconds=15
+fi
+if ! [[ "$api_timeout_seconds" =~ ^[1-9][0-9]*$ ]] \
+    || (( ${#api_timeout_seconds} > 3 )) \
+    || (( api_timeout_seconds > 300 )); then
+    api_timeout_seconds=30
 fi
 
 decline() {
@@ -110,16 +116,33 @@ if [[ -z "$repo" ]]; then
     fi
 fi
 
+# Bound each API request independently. While polling, also cap the request to
+# the seconds remaining in the existing wait deadline. The Ubuntu release
+# runner provides coreutils `timeout`; gh errors stay private because they can
+# include response details or credentials.
+api_request() {
+    local deadline="${1:-}" timeout_seconds="$api_timeout_seconds" remaining
+    shift || return 2
+    if [[ -n "$deadline" ]]; then
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || return 124
+        if (( remaining < timeout_seconds )); then
+            timeout_seconds="$remaining"
+        fi
+    fi
+    timeout --signal=TERM "${timeout_seconds}s" "$gh_bin" api "$@" 2>/dev/null
+}
+
 # Runs for this exact commit, plus recent $event runs whose head commit has its
 # tree. A failed tree or recent-run lookup leaves only the exact-commit runs.
-target_tree="$("$gh_bin" api "repos/$repo/git/commits/$sha" --jq .tree.sha 2>/dev/null || true)"
+target_tree="$(api_request "" "repos/$repo/git/commits/$sha" --jq .tree.sha || true)"
 fetch_runs() {
-    local exact recent
-    exact="$("$gh_bin" api \
-        "repos/$repo/actions/workflows/$workflow/runs?head_sha=$sha&per_page=20" 2>/dev/null)" || return 1
+    local deadline="${1:-}" exact recent
+    exact="$(api_request "$deadline" \
+        "repos/$repo/actions/workflows/$workflow/runs?head_sha=$sha&per_page=20")" || return 1
     if [[ "$target_tree" =~ ^[0-9a-f]{40}$ ]] \
-        && recent="$("$gh_bin" api \
-            "repos/$repo/actions/workflows/$workflow/runs?event=$event&per_page=30" 2>/dev/null)" \
+        && recent="$(api_request "$deadline" \
+            "repos/$repo/actions/workflows/$workflow/runs?event=$event&per_page=30")" \
         && jq -s --arg tree "$target_tree" \
             '{workflow_runs: ([.[0].workflow_runs[]?]
               + [.[1].workflow_runs[]? | select(.head_commit.tree_id == $tree)] | unique_by(.id))}' \
@@ -136,7 +159,7 @@ has_pending_run() {
 
 complete_run_id=""
 find_complete_run() {
-    local runs_json="$1" run_id artifacts_json complete name live
+    local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
     complete_run_id=""
     mapfile -t run_ids < <(jq -r \
         '.workflow_runs[]? | select(.status == "completed" and .conclusion == "success") | .id // empty' \
@@ -144,8 +167,8 @@ find_complete_run() {
 
     for run_id in "${run_ids[@]}"; do
         artifacts_json=""
-        if ! artifacts_json="$("$gh_bin" api \
-            "repos/$repo/actions/runs/$run_id/artifacts?per_page=100" 2>/dev/null)"; then
+        if ! artifacts_json="$(api_request "$deadline" \
+            "repos/$repo/actions/runs/$run_id/artifacts?per_page=100")"; then
             continue
         fi
         complete=true
@@ -182,20 +205,45 @@ fi
 
 if has_pending_run "$runs_json"; then
     deadline=$((SECONDS + wait_seconds))
+    failed_polls=0
+    retry_backoff=1
+    retry_backoff_cap=30
+    next_poll_delay="$poll_seconds"
     while (( SECONDS < deadline )); do
         remaining=$((deadline - SECONDS))
-        sleep_for="$poll_seconds"
+        sleep_for="$next_poll_delay"
         if (( sleep_for > remaining )); then
             sleep_for="$remaining"
         fi
         if (( sleep_for > 0 )); then
             sleep "$sleep_for"
         fi
+        (( SECONDS < deadline )) || break
 
-        if ! runs_json="$(fetch_runs)"; then
-            decline "prebuild run lookup failed while waiting for run(s) for $sha"
+        polled_runs_json=""
+        if ! polled_runs_json="$(fetch_runs "$deadline")"; then
+            failed_polls=$((failed_polls + 1))
+            remaining=$((deadline - SECONDS))
+            if (( remaining > 0 )); then
+                printf 'warning: Release Prebuild lookup poll attempt %d failed; retrying within the remaining deadline\n' \
+                    "$failed_polls" >&2
+                next_poll_delay="$retry_backoff"
+                if (( retry_backoff < retry_backoff_cap )); then
+                    retry_backoff=$((retry_backoff * 2))
+                    if (( retry_backoff > retry_backoff_cap )); then
+                        retry_backoff="$retry_backoff_cap"
+                    fi
+                fi
+                continue
+            fi
+            printf 'warning: Release Prebuild lookup poll attempt %d failed at the deadline\n' \
+                "$failed_polls" >&2
+            break
         fi
-        if find_complete_run "$runs_json"; then
+        runs_json="$polled_runs_json"
+        retry_backoff=1
+        next_poll_delay="$poll_seconds"
+        if find_complete_run "$runs_json" "$deadline"; then
             printf 'found=true\n'
             printf 'run-id=%s\n' "$complete_run_id"
             printf 'reason=prebuild run %s completed during the bounded wait for %s\n' \

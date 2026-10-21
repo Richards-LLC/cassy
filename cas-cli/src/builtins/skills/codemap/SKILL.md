@@ -102,7 +102,7 @@ When in doubt, **name a concrete module or filename** that lives there.
 Follow [references/doc-hygiene.md](references/doc-hygiene.md) for the three steps this skill shares with `project-overview` and `design-spec`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
 - **Keep-blocks** most often wrap `## Cross-cutting` notes (hot paths, migration gotchas). Put them back in the section they came from.
-- **Pointer memory title:** `project_<slug>_codemap` (slug = lowercase kebab-case of project name). Body example: `See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.`
+- **Pointer memory title:** `project_<slug>_codemap` (slug = lowercase kebab-case of project name). Body example: ``See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.``
 - **Commit** `.claude/CODEMAP.md`. The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority, so the commit is what resets the signal. Verify with `cas codemap status` → `Status: up to date`. No manual `cas codemap clear` is required.
 - **Report back:** (a) total line count, (b) how many top-level subsystems are mapped, (c) anything notable about the layout (workspace? monorepo? polyglot?).
 

@@ -1287,9 +1287,21 @@ impl CasCore {
         // Judge from what the delivery actually integrated, so a
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
-        let changed = head
-            .as_deref()
-            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, &classification_target));
+        let changed = head.as_deref().and_then(|head| {
+            // Match the close's task window: once a multi-commit FF/rebase
+            // reaches the target, merge-base collapses onto its last commit.
+            let history = self.open_agent_store().ok()
+                .and_then(|store| store.get_lease_history(&task.id, None).ok())
+                .unwrap_or_default();
+            let window = super::close_ops::resolve_task_commit_receipt_window(
+                task.created_at, &history,
+                super::close_ops::task_commit_identity(task, Some(head.to_owned())),
+            );
+            let base = super::close_ops::task_attribution::delivery_base(
+                repo, &classification_target, &window, Some(head),
+            );
+            crate::qa_pass::integrated_paths(repo, head, &classification_target, base.as_deref())
+        });
         // cas-2387: a no-code task owes no review only while it delivered no
         // user-facing code. Then any round an earlier close opened for it is
         // withdrawn, so it cannot hold the close.

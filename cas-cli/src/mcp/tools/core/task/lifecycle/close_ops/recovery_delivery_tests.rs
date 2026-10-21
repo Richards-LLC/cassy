@@ -949,6 +949,7 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
                 "main",
                 Some(&f.final_tip),
                 Some(&[surface.into()]),
+                None,
             );
             assert!(
                 result.is_ok(),

@@ -35,7 +35,8 @@ use super::close_ops::resolve_branch_sha;
 /// Without a receipt, for a factory worker: the `factory/<assignee>` tip while
 /// it still carries unmerged work; once that tip is contained in the target,
 /// the anchor the park recorded (the tip may since have moved on to the
-/// worker's next task). Otherwise the repository HEAD.
+/// worker's next task). A deleted lane still uses its durable anchor before
+/// falling back to the repository HEAD.
 pub(crate) fn delivered_head(
     task: &Task,
     repo: &Path,
@@ -73,7 +74,8 @@ pub(crate) fn delivered_head(
             .and_then(rev)
             .or(Some(tip));
     }
-    rev("HEAD")
+    task.deliverables.factory_branch_anchor.as_deref().and_then(rev)
+        .or_else(|| rev("HEAD"))
 }
 
 /// Which evidence the shared user-facing reasons demand. `terminal_render`
@@ -155,7 +157,7 @@ pub(crate) fn qa_evidence_close_gate(
     target_branch: &str,
     commit_receipt: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None)
+    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None, None)
 }
 
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
@@ -246,6 +248,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     target_branch: &str,
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
+    recorded_base: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let Ok(config) = crate::config::Config::load(cas_root) else {
         return Ok(Vec::new());
@@ -267,7 +270,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         return Ok(Vec::new());
     };
     let range = (!target_branch.is_empty())
-        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch)))
+        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch), recorded_base))
         .flatten();
     // An empty attributed set is authoritative: a merge-only or formatting-
     // only task delivered no reviewable UI, even if the branch's merge diff
@@ -596,6 +599,13 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the live tip carries a web surface");
         assert!(refusal.contains("app.css"), "{refusal}");
+
+        // A deleted lane must not replace its durable delivery with the
+        // closing checkout's unrelated HEAD (cas-420af).
+        task.deliverables.factory_branch_anchor = Some(rust_only.clone());
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["branch", "-D", "factory/worker"]);
+        assert_eq!(delivered_head(&task, &repo, "main", None), Some(rust_only));
     }
 
     fn merged_receipt_fixture_gh1181(first: &str, later: Option<&str>) -> (tempfile::TempDir, String) {
@@ -629,7 +639,7 @@ mod tests {
         task.assignee = Some("worker".into());
         qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
             .expect("the earlier backend merge must not own the later UI merge");
-        let (from, to) = delivery_range(&repo, &receipt, "main").unwrap();
+        let (from, to) = delivery_range(&repo, &receipt, "main", None).unwrap();
         assert_eq!(to, receipt);
         assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
     }
@@ -676,7 +686,7 @@ mod tests {
         for head in [&worker_tip, &own_commit] {
             qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(head))
                 .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
-            let (from, to) = delivery_range(&repo, head, "main").unwrap();
+            let (from, to) = delivery_range(&repo, head, "main", None).unwrap();
             assert_eq!(to, integration, "head {head}");
             assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
         }
@@ -768,6 +778,7 @@ mod tests {
             "main",
             None,
             Some(own.as_slice()),
+            None,
         )
         .expect("only this task's backend change is judged");
         // Without attribution the branch diff still sees A's UI: this is why
@@ -784,6 +795,7 @@ mod tests {
             "main",
             None,
             Some(Vec::<String>::new().as_slice()),
+            None,
         )
         .expect("an attributed merge-only delivery has no UI change");
     }

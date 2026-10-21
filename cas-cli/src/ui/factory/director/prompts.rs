@@ -1051,14 +1051,14 @@ fn fresh_merge_alert_tip_evidence(
 pub(crate) fn refresh_ci_merge_signal(
     prompt: &mut Prompt,
     data: &DirectorData,
+    cas_dir: &Path,
     repo_root: &Path,
 ) -> bool {
     let Some(original) = prompt.merge_alert.clone() else {
         return prompt_is_still_deliverable(prompt, data, repo_root);
     };
-    let cas_root = repo_root.join(".cas");
-    let task = cas_root.join("cas.db").is_file().then(|| {
-        crate::store::open_task_store_local(&cas_root)
+    let task = cas_dir.join("cas.db").is_file().then(|| {
+        crate::store::open_task_store_local(cas_dir)
             .ok().and_then(|store| store.get(&original.task_id).ok())
     }).flatten();
     if let Some(task) = &task {
@@ -1069,7 +1069,8 @@ pub(crate) fn refresh_ci_merge_signal(
                 "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
                 original.factory_tip, original.task_id,
             );
-            prompt.merge_alert = None;
+            // Keep the original identity so subsequent release checks preserve
+            // this informational label instead of checking the mutable worker lane.
             tracing::info!(target: "cas::coordination", status = "superseded",
                 task_id = %original.task_id, delivery_tip = %original.factory_tip,
                 "CI-completed merge signal superseded before release");
@@ -1090,8 +1091,8 @@ pub(crate) fn refresh_ci_merge_signal(
                 &format!("(checked {} at {})", original.checked_epic_ref, original.epic_sha),
                 &format!("(checked {} at {})", current.checked_epic_ref, current.epic_sha),
             ).replace(
-                &format!("{} unmerged commit(s)", original.unmerged_count),
-                &format!("{} unmerged commit(s)", current.unmerged_count),
+                &format!("Live evidence: {} unmerged commit(s)", original.unmerged_count),
+                &format!("Live evidence: {} unmerged commit(s)", current.unmerged_count),
             );
             prompt.merge_alert = Some(current);
             true

@@ -586,7 +586,7 @@ impl DeliverabilityRequest {
                             // PTY batches cannot replace their already-rendered
                             // body. Suppress superseded signals here; native
                             // release can render that label if state changes later.
-                            return live && !current.text.starts_with("Superseded CI-completed delivery");
+                            return live && current.merge_alert.is_some();
                         }
                         crate::ui::factory::director::prompt_is_still_deliverable(
                             prompt,

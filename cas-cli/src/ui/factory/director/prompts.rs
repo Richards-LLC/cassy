@@ -1056,16 +1056,20 @@ pub(crate) fn refresh_ci_merge_signal(
     let Some(original) = prompt.merge_alert.clone() else {
         return prompt_is_still_deliverable(prompt, data, repo_root);
     };
-    let task = crate::store::open_task_store_local(&repo_root.join(".cas"))
-        .ok().and_then(|store| store.get(&original.task_id).ok());
+    let cas_root = repo_root.join(".cas");
+    let task = cas_root.join("cas.db").is_file().then(|| {
+        crate::store::open_task_store_local(&cas_root)
+            .ok().and_then(|store| store.get(&original.task_id).ok())
+    }).flatten();
     if let Some(task) = &task {
         if task.deliverables.declined_factory_anchors().contains(&original.factory_tip)
             || task.deliverables.factory_branch_anchor.as_ref().is_some_and(|anchor| anchor != &original.factory_tip)
         {
             prompt.text = format!(
-                "Superseded CI-completed delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
+                "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
                 original.factory_tip, original.task_id,
             );
+            prompt.merge_alert = None;
             tracing::info!(target: "cas::coordination", status = "superseded",
                 task_id = %original.task_id, delivery_tip = %original.factory_tip,
                 "CI-completed merge signal superseded before release");

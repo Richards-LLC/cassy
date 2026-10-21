@@ -8997,7 +8997,12 @@ mod workspace_contract_tests {
             let value = serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap();
             let specific = &value["hookSpecificOutput"];
             let reason = specific["permissionDecisionReason"].as_str().unwrap_or("");
-            if specific["permissionDecision"] != expected {
+            let decision = if value == serde_json::json!({}) {
+                "allow" // Codex accepts an empty response for no-op admission.
+            } else {
+                specific["permissionDecision"].as_str().unwrap_or("")
+            };
+            if decision != expected {
                 mismatches.push(format!("{command}, {:?}: expected {expected}, got {value}", input.tool_input));
             }
             if missing_workdir {

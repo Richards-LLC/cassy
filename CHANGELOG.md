@@ -47,8 +47,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Rebased delivery ownership** — Was: rebasing after a conflict could make a valid delivery look unrelated or let a foreign subject pass through a body reference. → Now: fresh parking binds to the task-owned rebased delivery and checks the commit subject independently of references in its body.
 
-- **Empty helper work** — Was: a truly empty helper delivery could be sent through code QA, while a superficially empty range could conceal unmerged work. → Now: only verified empty helper work skips irrelevant delivery gates. Unnamed code work, unmerged deliveries and shared QA fallback keep their checks.
-
 - **Squash receipt range** — Was: later documentation merges could distort the change range proved by a squash receipt. → Now: a first-parent squash receipt is measured against its own parent instead of a later target position.
 
 - **Released CI evidence** — Was: a queued success notice could outlive the exact delivery it had checked. → Now: release revalidates the immutable delivery and current CI evidence, marks superseded signals explicitly, and preserves relabeled prompts through native and batch handoff.

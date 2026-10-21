@@ -9379,6 +9379,7 @@ impl CasCore {
         // keeps normal close aligned with direct update-to-closed: neither
         // may select a process-cwd or merely most-recent worker checkout.
         let declared_hook_evidence = if !close_disposition.requires_delivery_gates()
+            || empty_delivery
             || task.execution_note.as_deref() == Some("no-code")
         {
             None
@@ -14402,6 +14403,8 @@ fn task_has_no_delivery(
     window: Option<&TaskCommitReceiptWindow>,
 ) -> bool {
     task.execution_note.is_none()
+        && task.branch.is_none()
+        && handoff_prior_holders(&task.notes).is_empty()
         && !has_recorded_code_delivery(task)
         && window.is_some_and(|window| {
             window.identity.known_commits.is_empty()
@@ -26847,8 +26850,8 @@ mod merge_state_gate_tests {
         task.deliverables.files_changed = vec!["product.rs".into()];
         store.add(&task).unwrap();
 
-        // Recorded code with missing delivery evidence must leave the task active, without parking
-        // a nonexistent branch or attempting merge-tree preflight.
+        // Recorded code with missing delivery evidence must leave the task
+        // active, without parking a nonexistent branch or merge-tree preflight.
         let request = serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "reason": "Delivery claimed"
         }))

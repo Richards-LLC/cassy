@@ -341,6 +341,12 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         &cas_types::VerificationProofBoundary::task(),
         chrono::Utc::now() + chrono::Duration::minutes(10), false,
     ).unwrap();
+    let pending = call(
+        &f.worker,
+        serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
+    ).await;
+    assert!(pending.contains("VERIFICATION"), "{pending}");
+    assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
     let mut verdict = cas_types::Verification::approved(
         "ver-empty-helper".into(), id.into(), "Simulator released; no code delivered".into(),
     );

@@ -1,5 +1,6 @@
 //! Diff-scoped registry upkeep at park (G1–G3).
 use super::*;
+use std::path::Path;
 use crate::config::QaConfig;
 
 #[allow(clippy::too_many_arguments)]

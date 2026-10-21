@@ -196,7 +196,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
 fn registry_upkeep_bug_requires_changed_case_for_task() {
     let mut f = Fixture::new(YAML);
     f.task.task_type = TaskType::Bug;
-    f.store.update(&f.task).unwrap();
+    f.task.updated_at = f.store.update(&f.task).unwrap();
     write(f.repo.path(), "src/pages/signup.ts", "fixed");
     let head = commit(f.repo.path());
     let error = f.run(&head).unwrap_err();
@@ -214,7 +214,7 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
     ] {
         let mut f = Fixture::new(YAML);
         f.task.task_type = TaskType::Bug;
-        f.store.update(&f.task).unwrap();
+        f.task.updated_at = f.store.update(&f.task).unwrap();
         write(f.repo.path(), "src/pages/signup.ts", "fixed");
         let updated = if case.starts_with("invariants:") {
             YAML.replace(

@@ -420,12 +420,13 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     assert_eq!(report.failed_count, 0, "{output}");
     let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
     for project in receipt["projects"].as_array().unwrap() {
-        assert_eq!(project["phase_documents"]["docs_upkeep"][0]["changes"].as_array().unwrap().len(), 2);
+        assert_eq!(project["phase_documents"]["docs_upkeep"][0]["changes"].as_array().unwrap().len(), 3);
     }
     for root in &roots {
         let config = crate::config::Config::load(root).unwrap();
         assert_eq!(config.upkeep().codemap(), crate::config::UpkeepStage::Observe);
         assert_eq!(config.upkeep().product_overview(), crate::config::UpkeepStage::Observe);
+        assert_eq!(config.qa().registry.enforce, crate::config::RegistryEnforcement::Observe);
         let raw = std::fs::read_to_string(root.join("proxy.toml")).unwrap();
         let doc: toml::Value = toml::from_str(&raw).unwrap();
         assert_eq!(

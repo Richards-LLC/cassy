@@ -739,6 +739,9 @@ impl Config {
             "qa.registry.enforce" => {
                 let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
                 self.qa.get_or_insert_with(QaConfig::default).registry.enforce = stage;
+                if let Some(upkeep) = self.upkeep.as_mut() {
+                    upkeep.observe_since.remove("registry");
+                }
             }
             "qa.registry.path" => {
                 let path = std::path::Path::new(value.trim());

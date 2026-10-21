@@ -4636,10 +4636,10 @@ mod spawn_base_tests {
         );
     }
 
-    /// Diverged local/remote: keep the local ref (the remote is not
-    /// automatically right) but say so, naming both SHAs.
+    /// cas-02ae: a diverged integration branch must refuse the real spawn
+    /// before a worker can test obsolete code, preserving both histories.
     #[test]
-    fn diverged_base_keeps_local_and_warns_with_both_shas_cas_d897() {
+    fn diverged_base_refuses_spawn_with_both_shas_cas_02ae() {
         let tmp = TempDir::new().unwrap();
         let origin = tmp.path().join("origin");
         std::fs::create_dir(&origin).unwrap();
@@ -4675,15 +4675,24 @@ mod spawn_base_tests {
 
         let local_sha = short_sha(&repo, "main");
         let remote_sha = short_sha(&repo, "origin/main");
-        let (base_ref, notice) = prefer_fresher_base_ref(&repo, "main");
-        assert_eq!(
-            base_ref, None,
-            "a diverged remote must not silently replace the local base"
-        );
-        let notice = notice.expect("divergence must be reported");
-        assert!(notice.contains(&local_sha), "{notice}");
-        assert!(notice.contains(&remote_sha), "{notice}");
-        assert!(notice.contains("DIVERGED"), "{notice}");
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"test\"\n").unwrap();
+        let mut task = cas_types::Task::new("cas-diverged".into(), "Diverged staging".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("a diverged base must refuse worker creation").to_string();
+        assert!(error.contains(&local_sha), "{error}");
+        assert!(error.contains(&remote_sha), "{error}");
+        assert!(error.contains("DIVERGED"), "{error}");
+        assert!(error.contains("local-only") && error.contains("remote-only"), "{error}");
+        assert_eq!(short_sha(&repo, "main"), local_sha);
+        assert_eq!(short_sha(&repo, "origin/main"), remote_sha);
+        assert!(!repo.join(".cas/worktrees/legacy-path-worker").exists());
+        assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
     }
 
     /// No `origin/<base>` at all (fresh local-only repo): nothing to compare,

@@ -257,3 +257,19 @@ pipe, C locale, `NO_COLOR` and colour. Their ledger:
 | Machine contract | 4 | `--json` and counts are unchanged; a full update still prints two documents (pre-existing) |
 
 Scored by happy-tiger-95 on 2026-10-17; floor holds.
+
+
+## Dry-run upkeep preview (cas-be63)
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | Existing update and project verdicts retain their dry-run status; no adoption is claimed as applied. |
+| Scannable | Each dry-run project detail block names its planned upkeep stages under migration. |
+| Readable | Wrapped upkeep notes explain the observe window and the command to pin an explicit stage. |
+| Machine output | The existing single receipt includes projects[].phase_documents.docs_upkeep[].changes with the planned notes; config bytes stay unchanged. |
+| Omitted | No extra success transcript, progress line or receipt document is added. |
+
+Schema migrations remain skipped in the native dry run. Upkeep planning runs
+with the real dry-run flag after successful or planned schema work; schema
+failures still prevent upkeep writes. Human notes fit within the existing
+80-column project detail block; JSON retains the complete notes as data.

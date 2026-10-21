@@ -81,16 +81,23 @@ pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) ->
     )
 }
 
-/// A feature map is opt-in by the target repository's directory. The caller
-/// supplies only feature files whose Touches globs matched delivered paths.
-pub(crate) fn feature_map_drift_message(
+/// G1–G6 share the same complete escape/retry contract, in the caller's harness.
+pub(crate) fn upkeep_message(
     task_id: &str,
-    stale: &[String],
+    input_path: &str,
+    title: &str,
+    detail: &str,
+    escape_token: &str,
+    warnings: &[String],
     caller_prefix: &str,
 ) -> String {
+    let warnings = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", warnings.join("\n"))
+    };
     format!(
-        "⚠️ FEATURE MAP DRIFT\n\nTask {task_id} changed paths listed by these feature files without updating them:\n{}\n\nUpdate the named feature files in docs/qa/features, or record a decision note with a non-empty reason: `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"map unchanged: <reason>\"`. Then retry `{caller_prefix}task action=close id={task_id}`.",
-        stale.iter().map(|file| format!("- {file}")).collect::<Vec<_>>().join("\n")
+        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
 }
 
@@ -268,24 +275,12 @@ pub(crate) fn verifier_spawn_denial(
 mod tests {
     use super::*;
 
-    #[test]
-    fn feature_map_refusal_names_file_and_harness_specific_escape() {
-        let message = feature_map_drift_message(
-            "cas-demo",
-            &["docs/qa/features/profile.md".to_string()],
-            "mcp__cs__",
-        );
-        assert!(message.contains("docs/qa/features/profile.md"), "{message}");
-        assert!(message.contains("mcp__cs__task action=notes id=cas-demo note_type=decision notes=\"map unchanged: <reason>\""), "{message}");
-        assert!(message.contains("mcp__cs__task action=close id=cas-demo"), "{message}");
-    }
-
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.
     // pin: Audit every close-gate source, including unexecuted refusal branches, for harness-prefixed fix commands.
-    const GATE_SOURCES: [(&str, &str); 11] = [
+    const GATE_SOURCES: [(&str, &str); 13] = [
         ("close_ops.rs", include_str!("../close_ops.rs")),
         ("stale_close_guard.rs", include_str!("../stale_close_guard.rs")),
         ("proof_scope.rs", include_str!("../proof_scope.rs")),
@@ -302,6 +297,8 @@ mod tests {
             include_str!("../../../../../../hooks/handlers/handlers_events/neon_sql_guard.rs"),
         ),
         ("gate_text.rs", include_str!("gate_text.rs")),
+        ("docs_upkeep.rs", include_str!("docs_upkeep.rs")),
+        ("registry_upkeep.rs", include_str!("registry_upkeep.rs")),
         ("snapshot_approval.rs", include_str!("snapshot_approval.rs")),
     ];
 

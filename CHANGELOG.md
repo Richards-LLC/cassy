@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.70.0] - 2026-10-21
+
+### Added — adaptive QA picks the journeys a change touches
+
+- **Journey registry** — Was: a project's user journeys lived only in prose QA docs, with nothing to check them against the code. → Now: `docs/qa/journeys.yaml` lists each journey's owners, specs and surfaces; `cas qa journeys --check` reports broken references, untracked specs and curation debt (such as a journey whose traffic share is not yet measured), `cas qa journeys --seed` drafts a registry from the project and keeps curated entries on re-seed, and `cas doctor` shows the registry's counts.
+- **Journey impact** — Was: QA chose which journeys to walk by hand. → Now: `cas qa impact` maps a diff, file list or task delivery to the journeys it touches, the evidence each one needs and the files no journey owns, as text, Markdown or versioned JSON; it exits 2 for usage errors and 3 for read errors. Parked deliveries carry this impact, and the QA ledger must account for each touched journey.
+- **Post-release check** — Was: nothing confirmed a release still worked after it shipped. → Now: a project can configure a read-only `[qa.post_release]` command; `cas serve` runs it over a window after the merge lands (by default at about +0, +15 and +30 minutes), records a clean, pending or failed receipt, and a release-notes post (flagged `--release-notes --epic …` or recognised by its rubric heading) waits for a clean receipt. Projects without the check are unaffected.
+- **Upkeep at park** — Was: a delivery could add a user-facing file or a journey, or change the layout, without updating the journey registry, `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`. → Now: park refuses until the delivery updates the affected document or records a decision with a reason (`registry unchanged:`, `no journey impact:`, `no case:`, `codemap unchanged:` or `overview unchanged:`); a bug fix that touches a live journey must add or extend its case. New projects enforce these checks; an existing project's first `cas update` sets them to `observe` for one release, noting would-be refusals in task notes, and the next release enforces them unless pinned with `cas config set`. Epic close counts the escapes. The old `docs/qa/features` close check is retired.
+
+### Fixed — machine hub settings follow the host
+
+- **`cas config` for `hub.*`** — Was: `cas config get|set|reset hub.*` and `cas config list --section hub` read and wrote the current project's config, so a value set inside a project never reached the machine hub, and outside a project the command needed `CAS_ROOT="$HOME/.cas" … --store cas-root`. → Now: these commands always use `~/.cas/config.toml`, from any directory, and `CAS_ROOT` and `--store` no longer redirect hub settings.
+
+### Fixed — release-notes draft lint matches the Slack hub
+
+- **300-character lines** — Was: draft lint accepted a line the Violet hub would refuse as `long_line`, so a draft passed preflight and was refused at post time. → Now: `release-train-announce.py --validate` and `--lint` name the body, line and length of any line over 300 characters (a `<url|label>` link counts as its label), and both release rubrics document the two-line `→ Now:` bullet form.
+- **Bullet ends at a section heading** — Was: lint counted every line up to the next bullet, so a two-line bullet followed by a bold section heading failed as a three-line bullet. → Now: a bullet ends at a blank line, the next bullet or a heading line; a real three-line bullet still fails.
+
+### Internal
+
+- **Adaptive QA plumbing** — Was: QA selection, registry checks and post-release checks had no shared code. → Now: `qa_registry`, `qa_impact`, `qa_seed` and `qa_post_release` modules back the CLI, the close gate's G1–G6 upkeep checks, `upkeep.*` and `qa.*` config keys, and the publication gate; built-in QA, worker, release-notes, codemap and overview skills teach the new flow.
+
 ## [3.69.0] - 2026-10-21
 
 ### Security — workers cannot read operator credential stores

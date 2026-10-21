@@ -215,9 +215,13 @@ Slack mrkdwn only:
 - A top-level message is exactly two lines. Line 1 is
   `*Live on production — User — Cassy vX.Y.Z*` (or `Staging` / `Dev`). Line 2
   is a Was → Now punch of 25 words or fewer.
+- No line may run over 300 characters, counting a `<url|label>` link as its
+  label: the Violet hub refuses the whole post as `long_line`, and
+  announcement lint refuses it first.
 - A reply has one bullet per shipped change, with no item cap. Each bullet
   starts `• *Short label* —`, contains Was → Now, stays within two lines, and
-  is separated from the next bullet by a blank line. Never chain items with
+  is separated from the next bullet by a blank line. A bullet too long for one
+  line starts `→ Now:` on its second line. Never chain items with
   semicolons. Put the install or validation trailer last, after a blank line,
   as plain lines exempt from Was → Now, with digests in backticks. If a reply
   grows past roughly 12 bullets, group them under bold sub-headings on their

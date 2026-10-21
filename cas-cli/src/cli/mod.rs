@@ -31,6 +31,9 @@ pub use knowledge_cmd::{
 mod known_repos;
 mod peers;
 mod project_overview_cmd;
+mod qa;
+mod qa_impact;
+pub(crate) mod qa_post_release;
 mod provider_default;
 mod release_report;
 mod sweep;
@@ -373,6 +376,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Project QA registry and checks
+    #[command(subcommand)]
+    Qa(qa::QaCommand),
+
     /// Structural git-history index (backfill/status)
     #[command(subcommand)]
     History(history_cmd::HistoryCommands),
@@ -485,6 +492,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Mcp(_)
         | Commands::Queue(_)
         | Commands::ClaudeMd(_)
+        | Commands::Qa(_)
         | Commands::Codemap(_)
         | Commands::History(_)
         | Commands::Index(_)
@@ -595,7 +603,13 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     initialize_telemetry();
 
-    let cas_root: Option<PathBuf> = find_cas_root().ok();
+    // Machine-scoped config follows HOME and does not require an initialized
+    // project. Project telemetry/tracing retain their own discovery paths.
+    let cas_root: Option<PathBuf> = match &cli.command {
+        Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
+            .or_else(|| find_cas_root().ok()),
+        _ => find_cas_root().ok(),
+    };
 
     // cas-e1c7: a command that would rewrite another store's identity or
     // config is refused before anything else runs (sign-in included).
@@ -731,6 +745,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Device(_) => "device".to_string(),
         Commands::Sync(_) => "sync".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
+        Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
@@ -754,6 +769,10 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
 type StoreGuard = Option<(&'static str, Option<store_choice::StoreChoice>)>;
 
 fn config_store_guard(cmd: &config::ConfigCommands) -> StoreGuard {
+    // Host policy ignores project-store selectors, just as the hub daemon does.
+    if config::host_root_for_command(cmd).is_some() {
+        return None;
+    }
     match cmd {
         config::ConfigCommands::Set(args) => Some(("cas config set", args.store.store)),
         config::ConfigCommands::Reset(args) => Some(("cas config reset", args.store.store)),
@@ -876,6 +895,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Device(cmd) => device::execute(cmd, cli),
         Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
+        Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

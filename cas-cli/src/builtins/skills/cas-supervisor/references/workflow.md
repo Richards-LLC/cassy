@@ -450,5 +450,5 @@ When a walk needs records a worker can't create (accounts, tokens or data in a s
    its refusal names the destination and its success receipt carries a loud trunk-push warning.
    `force=true` will not authorize trunk.
    If the tracked merge cannot act, stop and ask the operator to resolve it; do not use an untracked merge path.
-7. Close the epic and post release notes; a deployed product's notes wait for a clean [post-release check](reporting-and-routing.md#post-release-check).
+7. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
 8. Shut down the epic's workers by name: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`

@@ -1,6 +1,6 @@
 ---
 name: project-overview
-description: Use when asked what a project is, to create or update PRODUCT_OVERVIEW.md, or when onboarding needs product intent after code structure is understood.
+description: Use when asked what a project is, to create or update PRODUCT_OVERVIEW.md, when task close refuses with PRODUCT_OVERVIEW DRIFT, or when onboarding needs product intent after code structure is understood.
 metadata:
   managed_by: cas
 ---
@@ -143,6 +143,7 @@ This resets the pending-change counter that `SessionStart` uses to warn about dr
 
 - **First time:** no `docs/PRODUCT_OVERVIEW.md` exists → generate from scratch.
 - **Drift warning:** `SessionStart` reports the domain model changed → regenerate and keep-blocks survive.
+- **Drift at park (G6):** task close refuses `PRODUCT_OVERVIEW DRIFT` when the delivery changes a `project_overview.domain_paths` file, adds or deletes inside `watch_dirs`, or adds a `live` journey to (or moves one between `live` and `dead` in) `docs/qa/journeys.yaml`. Update the affected section in the same branch (a new or removed way in belongs under `## Primary Journeys`), commit, and retry close. When the product is unchanged (a refactor of a watched file), record `task action=notes note_type=decision notes="overview unchanged: <reason>"` instead.
 - **Manual:** user invokes `/project-overview` or asks for a product overview.
 - **Periodic:** if the doc is more than ~8 weeks old and the domain model has moved, refresh it.
 

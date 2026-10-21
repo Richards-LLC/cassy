@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural navigation at the v54 release freeze (`51b91ea82`). Regenerate with `/codemap` when modules move.
+> Structural navigation at the v55 release freeze (`00473c402`). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -58,6 +58,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/cli/update/bindings.rs`, `cas-cli/src/cli/update/discovery_probe.rs` - update binding checks and bounded workspace discovery.
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed-file inventory, Git reconciliation, and locking.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - config commands, accessors, metadata registry, and operator policy.
+- `cas-cli/src/cli/qa.rs`, `cas-cli/src/cli/qa_impact.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/config/upkeep.rs` - `cas qa journeys|impact|post-release` commands and upkeep stage config.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations and integration handlers.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/` - session/tool policy and native hook dispatch.
 - `cas-cli/src/cloud/`, `cas-cli/src/cloud/syncer/` - peer operations, store sync, and identity reconciliation.
@@ -71,6 +72,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/artifacts/retention.rs`, `cas-cli/src/task_simulators.rs` - task artifact retention and owned iOS simulator cleanup.
 - `cas-cli/src/task_ownership.rs`, `cas-cli/src/task_assignment.rs` - project ownership proof and assignment identity.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_batch.rs` - QA rounds, evidence gates, and batch receipts.
+- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_post_release.rs` - journey registry checks and seeding, diff-to-journey impact, and post-release read-only checks.
 - `cas-cli/src/builtins/` - canonical agents, skills, jobs, harness mirrors, and sync manifest.
 
 ## Factory runtime and terminals
@@ -98,6 +100,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/mcp/server/` - runtime, prompts, resources, watchdog, and allocator controls.
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifact, search, rule, and workflow handlers.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - task start/close, evidence validation, epic lanes, and merged-delivery closure.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/docs_upkeep.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` - pre-park G1–G6 upkeep checks, snapshot attribution, escapes, and observe accounting.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - task-owned diff attribution and shared hunk parsing.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merged_verification.rs` - verification dispatch for merged deliveries another close gate refuses.
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded candidate-repository discovery for task lifecycle calls.

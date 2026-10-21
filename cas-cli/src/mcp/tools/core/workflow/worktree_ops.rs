@@ -1465,6 +1465,19 @@ fn parked_merge_source(
     ))
 }
 
+fn contained_merge_receipt(
+    git: &crate::worktree::GitOperations,
+    source: &str,
+    target: &str,
+) -> Option<String> {
+    let source_tip = git.resolve_commit(source)?;
+    let target_tip = git.resolve_commit(target)?;
+    git.is_ancestor(&source_tip, &target_tip).then(|| format!(
+        "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
+         Source: {source} @ {source_tip}\nTarget: {target} @ {target_tip}"
+    ))
+}
+
 impl CasCore {
     fn parked_merge_source_for_task(
         &self,
@@ -3554,6 +3567,18 @@ impl CasCore {
             });
         }
 
+        // A contained source is a no-op, not a new green merge that may
+        // close the task or dispatch verification. Validate the parked source
+        // above first so an old worker ref cannot hide a newer delivery.
+        // Transactional retries still reconcile their durable delivery state.
+        if transactional_delivery.is_none()
+            && let Some(receipt) = contained_merge_receipt(
+                manager.git(), &worktree.branch, &worktree.parent_branch,
+            )
+        {
+            return Ok(Self::success(receipt));
+        }
+
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
         // cas-0a21: held from before the target tip is first read until after
@@ -3936,6 +3961,16 @@ impl CasCore {
                 )));
             }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
+
+            // Origin may have delivered this source while the local target
+            // was behind. Re-check the reconciled ref before merge side effects.
+            if transactional_delivery.is_none()
+                && let Some(receipt) = contained_merge_receipt(
+                    manager.git(), &worktree.branch, &worktree.parent_branch,
+                )
+            {
+                return Ok(Self::success(format!("{receipt}{reconcile_note}")));
+            }
 
             // A parked pushed ref is independent of the worker's next task.
             // Only the preserving path may bypass the source checkout gate;

@@ -2220,6 +2220,92 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
 }
 
 #[tokio::test]
+async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved() {
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    let origin = "https://github.com/org/merge-noop.git";
+    run_git(&["remote", "add", "origin", origin], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()), origin], &repo.root);
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[verification]\nenabled = true\n[project]\ncanonical_id = \"github.com/org/merge-noop\"\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    register_delivery_agent(&root, "supervisor-noop", "supervisor", AgentRole::Supervisor, "noop-session");
+    register_delivery_agent(&root, "worker-noop", "alice", AgentRole::Worker, "noop-session");
+    let worker = root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    std::fs::write(worker.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+    run_git(&["add", "delivery.rs"], &worker);
+    run_git(&["commit", "-m", "first delivery"], &worker);
+    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["merge", "--no-ff", "factory/alice", "-m", "already integrated"], &repo.root);
+    run_git(&["push", "origin", "main", "factory/alice"], &repo.root);
+    let before = git_stdout(&repo.root, &["rev-parse", "main"]);
+    let tasks = open_task_store(&root).unwrap();
+    let mut task = Task::new("cas-4221".into(), "No-op merge receipt".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some("alice".into());
+    task.deliverables.factory_branch_anchor = Some(anchor);
+    task.deliverables.parked_branch = Some("factory/alice".into());
+    task.deliverables.parked_close_reason = Some("parked delivery".into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:github.com/org/merge-noop".into(), target_branch: "main".into(),
+    });
+    tasks.add(&task).unwrap();
+    env.set_current_dir(&repo.root);
+    let service = delivery_service(&root, "supervisor-noop");
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("factory/alice".into());
+    request.task_id = Some(task.id.clone());
+    request.allow_trunk = Some(true);
+    request.cleanup = Some(false);
+    let mut failures = Vec::new();
+    for local_behind in [false, true] {
+        if local_behind {
+            run_git(&["reset", "--hard", &format!("{before}^")], &repo.root);
+        }
+        let result = service.coordination(Parameters(request.clone())).await.unwrap();
+        let text = get_text(&result);
+        if !text.contains("nothing new to merge") || !text.contains("already in main") {
+            failures.push(format!("contained source (local behind={local_behind}) must be explicit: {text}"));
+        }
+        if let Some(dispatch) = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap() {
+            failures.push(format!("no-op (local behind={local_behind}) opened verification {}", dispatch.id));
+        }
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+    }
+
+    // A later parked round uses a noncanonical suffix in the same checkout.
+    // The old worker ref is still contained; it must not mask the rework.
+    let rework = "factory/alice-cas-4221-r2";
+    run_git(&["switch", "-c", rework], &worker);
+    std::fs::write(worker.join("rework.rs"), "pub fn reworked() {}\n").unwrap();
+    run_git(&["add", "rework.rs"], &worker);
+    run_git(&["commit", "-m", "second delivery"], &worker);
+    let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", rework], &repo.root);
+    task.deliverables.factory_branch_anchor = Some(tip.clone());
+    task.deliverables.parked_branch = Some(rework.into());
+    tasks.update(&task).unwrap();
+    match service.coordination(Parameters(request)).await {
+        Ok(result) => {
+            if !get_text(&result).contains(rework)
+                || !Command::new("git").args(["merge-base", "--is-ancestor", &tip, "main"])
+                    .current_dir(&repo.root).status().unwrap().success()
+            {
+                failures.push(format!("latest parked tip must be merged: {}", get_text(&result)));
+            }
+        }
+        Err(error) if error.message.contains(rework) && error.message.contains(&tip) => {}
+        Err(error) => failures.push(format!("refusal must name parked branch and tip: {error}")),
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[tokio::test]
 async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
     let mut env = test_env();
     let fixture_parent = cas::test_paths::runtime_fixture_parent();

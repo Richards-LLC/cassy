@@ -64,13 +64,9 @@ pub struct Invariant {
     /// Graded against each fixture's `labels` entry instead of one universal rule.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labeled: bool,
-    /// How a measured value is graded against its baseline. Singleton-map
-    /// form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        with = "serde_yaml::with::singleton_map_recursive"
-    )]
-    pub compare: Option<Compare>,
+    /// How a measured value is graded against its baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare: Option<CompareSpec>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -103,6 +99,51 @@ pub enum Compare {
     Exact,
     /// Wording noise inside the band passes; the measured % stays visible.
     Banded(Band),
+}
+
+/// A criterion's `compare` as written. A malformed value stays a validation
+/// problem on that criterion instead of failing the whole registry load,
+/// which also feeds impact and close-time checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompareSpec {
+    Valid(Compare),
+    Invalid { raw: Value, error: String },
+}
+
+impl CompareSpec {
+    pub fn valid(&self) -> Option<&Compare> {
+        match self {
+            Self::Valid(compare) => Some(compare),
+            Self::Invalid { .. } => None,
+        }
+    }
+}
+
+/// Singleton-map form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
+impl<'de> Deserialize<'de> for CompareSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        Ok(
+            match serde_yaml::with::singleton_map_recursive::deserialize(raw.clone()) {
+                Ok(compare) => Self::Valid(compare),
+                Err(error) => Self::Invalid {
+                    raw,
+                    error: error.to_string(),
+                },
+            },
+        )
+    }
+}
+
+impl Serialize for CompareSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Valid(compare) => {
+                serde_yaml::with::singleton_map_recursive::serialize(compare, serializer)
+            }
+            Self::Invalid { raw, .. } => raw.serialize(serializer),
+        }
+    }
 }
 
 /// Exactly one bound: `min_ratio` is a floor of `baseline * min_ratio`;
@@ -184,13 +225,9 @@ pub struct ManualCheck {
     /// Graded against each fixture's `labels` entry instead of one universal rule.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labeled: bool,
-    /// How a measured value is graded against its baseline. Singleton-map
-    /// form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        with = "serde_yaml::with::singleton_map_recursive"
-    )]
-    pub compare: Option<Compare>,
+    /// How a measured value is graded against its baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare: Option<CompareSpec>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -455,9 +492,21 @@ impl ValidationReport {
         }
     }
 
-    fn compare(&mut self, subject: &str, compare: Option<&Compare>) {
-        if let Some(message) = compare.and_then(Compare::problem) {
-            self.problem("compare", subject, message);
+    fn compare(&mut self, subject: &str, compare: Option<&CompareSpec>) {
+        match compare {
+            Some(CompareSpec::Invalid { error, .. }) => self.problem(
+                "compare",
+                subject,
+                format!(
+                    "invalid compare ({error}); use exact or {{banded: {{min_ratio | max_delta}}}}"
+                ),
+            ),
+            Some(CompareSpec::Valid(compare)) => {
+                if let Some(message) = compare.problem() {
+                    self.problem("compare", subject, message);
+                }
+            }
+            None => {}
         }
     }
 
@@ -653,7 +702,6 @@ impl Registry {
             report.misspelled_fields(&subject, &invariant.extra, &INVARIANT_FIELDS);
             report.compare(&subject, invariant.compare.as_ref());
             if let Some(pending) = &invariant.pending_checker {
-                let subject = format!("invariants.{name}");
                 if let Some(summary) = report.pending_checker(&subject, pending, today) {
                     report.debt(
                         "pending_checker",
@@ -1102,11 +1150,19 @@ journeys:
             ["MANUAL-LOOK", "MANUAL-COUNT", "MANUAL-OLD"]
         );
         assert_eq!(
-            registry.invariants["INV-CLAIM"].compare,
+            registry.invariants["INV-CLAIM"]
+                .compare
+                .as_ref()
+                .and_then(CompareSpec::valid)
+                .copied(),
             Some(Compare::Exact)
         );
         assert_eq!(
-            registry.manual_checks["MANUAL-COUNT"].compare,
+            registry.manual_checks["MANUAL-COUNT"]
+                .compare
+                .as_ref()
+                .and_then(CompareSpec::valid)
+                .copied(),
             Some(Compare::Banded(Band {
                 min_ratio: Some(0.9),
                 max_delta: None
@@ -1328,6 +1384,19 @@ journeys:
                 vec![],
             ),
             (
+                "malformed compare is one problem per criterion, not a load failure",
+                with_criteria("2999-12-31")
+                    .replace("    compare: exact\n", "    compare: fuzzy\n")
+                    .replace("{banded: {min_ratio: 0.9}}", "{banded: {min_rato: 0.9}}"),
+                vec!["compare", "compare"],
+                vec![
+                    "pending_checker",
+                    "manual_checker_unwritten",
+                    "manual_human_judgment",
+                    "manual_unclassified",
+                ],
+            ),
+            (
                 "criterion id shared by an invariant and a manual check",
                 format!(
                     "{GABBER}manual_checks:\n  INV-CLAIM: {{statement: Dup, check: Dup, reason: human_judgment}}\n"
@@ -1379,6 +1448,25 @@ journeys:
                         .iter()
                         .any(|prefix| p.subject.starts_with(prefix))
             }));
+            if name.starts_with("malformed compare") {
+                let rows: Vec<_> = report
+                    .problems
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.subject.as_str(),
+                            p.message.contains("fuzzy") || p.message.contains("min_rato"),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    rows,
+                    [
+                        ("invariants.INV-CLAIM", true),
+                        ("manual_checks.MANUAL-COUNT", true)
+                    ]
+                );
+            }
             if let Some(owed) = report.debt.iter().find(|p| p.code == "unlabeled_fixture") {
                 assert_eq!(
                     owed.message,

@@ -55,7 +55,9 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             let qa = config.qa();
             if *seed || *status {
                 let result = if *seed {
-                    crate::qa_seed::seed(&project_root, &qa, *merge)?
+                    let result = crate::qa_seed::seed(&project_root, &qa, *merge)?;
+                    crate::config::refresh_upkeep(cas_root.unwrap_or(&local_cas), env!("CARGO_PKG_VERSION"), true, false)?;
+                    result
                 } else {
                     crate::qa_seed::status(&project_root, &qa)?
                 };

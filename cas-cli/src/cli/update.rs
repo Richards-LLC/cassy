@@ -1589,7 +1589,13 @@ fn refresh_all_projects_with_user_refresh(
         // in the receipt, but must not leave another project stale.
         let (migration, output, docs) = capture_phase_documents(cli, || {
             let phase = run_project_phase("migration", args.dry_run, || {
-                run_schema_migrations(args, cli, Some(&cas_root))
+                run_schema_migrations(args, cli, Some(&cas_root))?;
+                let notes = crate::config::refresh_upkeep(&cas_root, env!("CARGO_PKG_VERSION"), false, false)?;
+                if !notes.is_empty() {
+                    if cli.json { println!("{}", serde_json::json!({"docs_upkeep": notes})); }
+                    else { for note in notes { println!("{note}"); } }
+                }
+                Ok(())
             });
             name_store_lock_holders(phase, &cas_root)
         });

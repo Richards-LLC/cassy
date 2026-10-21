@@ -100,7 +100,11 @@ pub fn watch_targets(repo_root: &Path) -> WatchTargets {
     let Ok(content) = std::fs::read_to_string(&config_path) else {
         return WatchTargets::defaults();
     };
-    let Ok(raw): Result<RawConfig, _> = toml::from_str(&content) else {
+    watch_targets_from_content(Some(&content))
+}
+
+pub(crate) fn watch_targets_from_content(content: Option<&str>) -> WatchTargets {
+    let Ok(raw): Result<RawConfig, _> = toml::from_str(content.unwrap_or("")) else {
         return WatchTargets::defaults();
     };
     let Some(po) = raw.project_overview else {
@@ -176,8 +180,8 @@ fn filter_changes(
                     return true;
                 }
             }
-            let structural = matches!(c.change_type.as_str(), "A" | "D")
-                || c.change_type.starts_with('R');
+            let structural =
+                matches!(c.change_type.as_str(), "A" | "D") || c.change_type.starts_with('R');
             if !structural {
                 return false;
             }
@@ -218,10 +222,7 @@ fn head_commit(repo_root: &Path) -> Option<String> {
 
 /// `git diff-tree --name-status` for `commit` against its parent (with
 /// root-commit fallback).
-fn diff_tree_changes(
-    repo_root: &Path,
-    commit: &str,
-) -> Option<Vec<ProjectOverviewChange>> {
+fn diff_tree_changes(repo_root: &Path, commit: &str) -> Option<Vec<ProjectOverviewChange>> {
     let out = std::process::Command::new("git")
         .args([
             "diff-tree",
@@ -352,16 +353,16 @@ pub fn read_pending(repo_root: &Path) -> Result<Vec<ProjectOverviewPending>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let mut out = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let entry: ProjectOverviewPending = serde_json::from_str(line)
-            .with_context(|| format!("parse pending entry: {line}"))?;
+        let entry: ProjectOverviewPending =
+            serde_json::from_str(line).with_context(|| format!("parse pending entry: {line}"))?;
         out.push(entry);
     }
     Ok(out)
@@ -371,8 +372,7 @@ pub fn read_pending(repo_root: &Path) -> Result<Vec<ProjectOverviewPending>> {
 pub fn clear_pending(repo_root: &Path) -> Result<()> {
     let path = pending_path(repo_root);
     if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("remove {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
@@ -415,14 +415,12 @@ impl ProjectOverviewStaleness {
     /// Format as an XML-wrapped injection string.
     pub fn format_injection(&self, is_supervisor: bool) -> String {
         match self {
-            ProjectOverviewStaleness::Missing => {
-                "<project-overview-freshness severity=\"high\">\n\
+            ProjectOverviewStaleness::Missing => "<project-overview-freshness severity=\"high\">\n\
                  docs/PRODUCT_OVERVIEW.md is missing. Run `/project-overview` before \
                  planning cross-cutting work — agents waste tokens re-deriving domain \
                  shape without it.\n\
                  </project-overview-freshness>"
-                    .to_string()
-            }
+                .to_string(),
             ProjectOverviewStaleness::Stale {
                 total_changes,
                 file_list,
@@ -527,9 +525,7 @@ pub fn check_freshness(
     check_staleness_from_git(repo_root)
 }
 
-fn check_staleness_from_pending(
-    repo_root: &Path,
-) -> Result<Option<ProjectOverviewStaleness>> {
+fn check_staleness_from_pending(repo_root: &Path) -> Result<Option<ProjectOverviewStaleness>> {
     let entries = read_pending(repo_root)?;
     if entries.is_empty() {
         return Ok(None);
@@ -625,11 +621,7 @@ fn last_commit_timestamp(repo_root: &Path, path: &str) -> Option<String> {
 }
 
 /// All changes (M/A/D/R) to a single path since `since`.
-fn changes_for_path_since(
-    repo_root: &Path,
-    path: &str,
-    since: &str,
-) -> Vec<ProjectOverviewChange> {
+fn changes_for_path_since(repo_root: &Path, path: &str, since: &str) -> Vec<ProjectOverviewChange> {
     let Ok(out) = std::process::Command::new("git")
         .args([
             "log",
@@ -677,10 +669,7 @@ fn changes_for_path_since(
 
 /// Structural changes (A/D) anywhere in the repo since `since`. Renames are
 /// split to A+D via `--no-renames` (matches codemap behavior).
-fn structural_changes_since(
-    repo_root: &Path,
-    since: &str,
-) -> Option<Vec<ProjectOverviewChange>> {
+fn structural_changes_since(repo_root: &Path, since: &str) -> Option<Vec<ProjectOverviewChange>> {
     let out = std::process::Command::new("git")
         .args([
             "log",
@@ -855,10 +844,7 @@ mod tests {
 
     #[test]
     fn watch_targets_defaults_when_no_config() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_defaults_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_test_defaults_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -870,17 +856,10 @@ mod tests {
 
     #[test]
     fn watch_targets_defaults_when_section_absent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_no_section_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_test_no_section_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
-        std::fs::write(
-            tmp.join(".cas/config.toml"),
-            "[other]\nfoo = \"bar\"\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.join(".cas/config.toml"), "[other]\nfoo = \"bar\"\n").unwrap();
 
         let t = watch_targets(&tmp);
         assert_eq!(t, WatchTargets::defaults());
@@ -890,10 +869,7 @@ mod tests {
 
     #[test]
     fn watch_targets_reads_overrides() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_overrides_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_test_overrides_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
         std::fs::write(
@@ -915,10 +891,7 @@ watch_dirs = ["web/src"]
 
     #[test]
     fn watch_targets_partial_override_keeps_other_default() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_partial_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_test_partial_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
         std::fs::write(
@@ -941,10 +914,7 @@ domain_paths = ["db/schema.sql"]
 
     #[test]
     fn read_pending_empty_when_missing() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_read_empty_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_read_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let entries = read_pending(&tmp).unwrap();
@@ -954,10 +924,7 @@ domain_paths = ["db/schema.sql"]
 
     #[test]
     fn read_pending_parses_jsonl() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_read_jsonl_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_read_jsonl_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
         let line1 = r#"{"changes":[{"type":"A","path":"x"}],"commit":"abc","recorded_at":"2026-04-14T00:00:00Z"}"#;
@@ -978,10 +945,7 @@ domain_paths = ["db/schema.sql"]
 
     #[test]
     fn clear_pending_is_idempotent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_clear_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_clear_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
         let p = tmp.join(".cas/project-overview-pending.json");
@@ -1078,10 +1042,7 @@ domain_paths = ["db/schema.sql"]
 
     #[test]
     fn check_freshness_returns_missing_when_doc_absent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_cf_missing_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_cf_missing_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let r = check_freshness(&tmp, None).unwrap();
@@ -1091,10 +1052,7 @@ domain_paths = ["db/schema.sql"]
 
     #[test]
     fn check_freshness_uses_pending_when_doc_present() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_cf_pending_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("po_cf_pending_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
         std::fs::create_dir_all(tmp.join(".cas")).unwrap();
@@ -1111,9 +1069,9 @@ domain_paths = ["db/schema.sql"]
 
         let r = check_freshness(&tmp, None).unwrap();
         match r {
-            Some(ProjectOverviewStaleness::SignificantlyStale {
-                total_changes, ..
-            }) => assert_eq!(total_changes, 6),
+            Some(ProjectOverviewStaleness::SignificantlyStale { total_changes, .. }) => {
+                assert_eq!(total_changes, 6)
+            }
             other => panic!("expected SignificantlyStale, got {other:?}"),
         }
 
@@ -1163,11 +1121,8 @@ watch_dirs = ["**", "web/src"]
     fn last_commit_timestamp_returns_none_when_not_committed() {
         // Empty tmp dir — no git repo, no file, no history. Must not panic and
         // must not fabricate an mtime.
-        let tmp = std::env::temp_dir().join(format!(
-            "po_ts_none_{}_{}",
-            std::process::id(),
-            unique_id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("po_ts_none_{}_{}", std::process::id(), unique_id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(last_commit_timestamp(&tmp, DOC_PATH).is_none());
@@ -1211,11 +1166,8 @@ watch_dirs = ["**", "web/src"]
 
     #[test]
     fn detect_structural_changes_writes_pending_for_watched_file() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_detect_{}_{}",
-            std::process::id(),
-            unique_id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("po_detect_{}_{}", std::process::id(), unique_id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

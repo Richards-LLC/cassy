@@ -366,6 +366,11 @@ impl WizardConfig {
 
         Config {
             sync,
+            upkeep: Some(crate::config::UpkeepConfig {
+                codemap: Some(crate::config::UpkeepStage::Enforce),
+                product_overview: Some(crate::config::UpkeepStage::Enforce),
+                ..Default::default()
+            }),
             skill_validation: None,
             hooks: Some(HookConfig {
                 capture_enabled: true,

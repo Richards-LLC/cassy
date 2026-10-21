@@ -1228,6 +1228,9 @@ fn describe_target_reconcile(
             short_sha(from),
             short_sha(to)
         ),
+        TargetReconcile::PreparationFailed { reason } => format!(
+            "\n⚠️  Target sync: could not prepare local {target_branch} from origin: {reason}."
+        ),
         TargetReconcile::FetchFailed { local, reason } => {
             let local = local.as_deref().map(short_sha).unwrap_or("unresolved");
             format!(
@@ -3952,6 +3955,17 @@ impl CasCore {
             let reconcile = manager
                 .git()
                 .reconcile_target_with_origin(&worktree.parent_branch);
+            if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
+            {
+                return Err(McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Cannot prepare merge target {} from origin: {reason}. No merge was attempted.",
+                        worktree.parent_branch,
+                    )),
+                    data: None,
+                });
+            }
             if let crate::worktree::git::TargetReconcile::Diverged {
                 local,
                 remote,

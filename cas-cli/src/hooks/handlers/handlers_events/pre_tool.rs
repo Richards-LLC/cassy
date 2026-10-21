@@ -6346,8 +6346,10 @@ mod workspace_contract_tests {
     #[test]
     fn verifier_rust_builds_are_sent_to_the_capped_lane_cas_d95c() {
         let root = tempfile::tempdir().unwrap();
+        // A verifier subagent runs under its spawning supervisor's role.
         let verifier = |command: &str| HookInput {
             agent_type: Some("task-verifier".to_string()),
+            agent_role: Some("supervisor".to_string()),
             ..bash_input(command, root.path())
         };
         let output = handle_pre_tool_use_inner(

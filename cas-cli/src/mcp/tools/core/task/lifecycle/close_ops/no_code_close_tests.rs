@@ -332,6 +332,28 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
     helper.title = "Own the iOS simulator".into();
     f.put(&helper);
     claim(&f, id);
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    // A real exact-task verdict authorizes close, without any code anchor.
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    let mut verdict = cas_types::Verification::approved(
+        "ver-empty-helper".into(), id.into(), "Simulator released; no code delivered".into(),
+    );
+    verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("nocode-supervisor-session".into());
+    verdict.issuer_agent_id = verdict.agent_id.clone();
+    verdict.dispatch_id = Some(dispatch.id.clone());
+    use cas_store::VerificationStore;
+    cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+    ).unwrap();
     let response = call(
         &f.worker,
         serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),

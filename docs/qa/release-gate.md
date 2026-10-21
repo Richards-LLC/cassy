@@ -258,7 +258,12 @@ refuses with "No merge was attempted":
 | `invalid` or `internal` error, or a malformed response | `MIGRATION ADAPTER BUG` |
 | The delivery range cannot be diffed locally | `MIGRATION STATUS UNKNOWN` |
 
-A registered supervisor may override any refusal with
-`supervisor_override=true`, `task_id` and a non-empty `reason`. The override is
-logged as a decision note on the task. Cassy never applies a migration to a
+Each refusal names its next step: apply the migration, retry when the
+adapter can report status, or fix the adapter or its configuration.
+
+A registered supervisor may override a refusal with `supervisor_override=true`,
+`task_id` and a `reason` that names the refusal class, for example
+`MIGRATION PENDING applied by hand`. A reason written for another gate, such
+as red CI, does not accept a migration refusal the supervisor has not seen.
+The override is logged as a decision note on the task. Cassy never applies a migration to a
 shared environment.

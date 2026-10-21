@@ -123,28 +123,61 @@ fn admit_branch_ci(
     Ok(false)
 }
 
+/// The pending-migration check's inputs for one merge.
+struct MigrationGate<'a> {
+    root: &'a Path,
+    release: Option<&'a crate::qa_release::ReleaseConfig>,
+    target: &'a str,
+    tip: &'a str,
+}
+
+/// Lane CI admission, then the migration check. Returns whether the CI
+/// override was used and the migration refusal an override accepted, or the
+/// refusal kind and message.
+fn admit_merge(
+    ci_state: &BranchCiState,
+    migrations: Option<MigrationGate<'_>>,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<(bool, Option<String>), (&'static str, String)> {
+    let ci_override = admit_branch_ci(ci_state, override_requested, reason)
+        .map_err(|message| ("ci_refused", message))?;
+    let migration_override = match migrations {
+        Some(gate) => admit_release_migrations(gate, override_requested, reason)
+            .map_err(|message| ("migration_refused", message))?,
+        None => None,
+    };
+    Ok((ci_override, migration_override))
+}
+
 /// cas-87e0: a merge into `qa.release.integration_branch` that adds a
 /// migration needs the adapter to report it applied there. Other targets, and
-/// ranges adding no migration, make no adapter call. Fails closed; returns
-/// the refusal a supervisor override accepted, for its decision note.
+/// ranges adding no migration, make no adapter call. Fails closed.
+///
+/// cas-f8b2: an override accepts the refusal only when its reason names the
+/// refusal class, so an override given for another gate (red CI) cannot
+/// accept a migration refusal the supervisor has not seen. Returns the
+/// accepted refusal for its decision note.
 fn admit_release_migrations(
-    root: &Path,
-    release: Option<&crate::qa_release::ReleaseConfig>,
-    target: &str,
-    tip: &str,
+    gate: MigrationGate<'_>,
     override_requested: bool,
     reason: Option<&str>,
 ) -> Result<Option<String>, String> {
+    let MigrationGate { root, release, target, tip } = gate;
     let Some(release) = release.filter(|release| release.integration_branch == target) else {
         return Ok(None);
     };
     match crate::qa_release::check_migrations(root, release, target, tip) {
         Ok(_) => Ok(None),
-        Err(refusal) if override_requested && reason.is_some_and(|r| !r.trim().is_empty()) => {
+        Err(refusal)
+            if override_requested && reason.is_some_and(|r| r.contains(refusal.label())) =>
+        {
             Ok(Some(refusal.to_string()))
         }
         Err(refusal) => Err(format!(
-            "{refusal}. Refusing worktree_merge of {tip} into {target}: apply the migration there first. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
+            "{refusal}. Refusing worktree_merge of {tip} into {target}. {} A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a reason that names {}. No merge was attempted.",
+            refusal.next_step(),
+            refusal.label(),
         )),
     }
 }
@@ -3841,25 +3874,15 @@ impl CasCore {
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
         // integration gate (cas-6f48) is retired with the rolling sweep.
-        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason)
-            .map_err(|message| ("ci_refused", message))
-            .and_then(|ci_override| {
-                // An already-merged reconciliation runs no merge to gate.
-                let migration_override = if reconciled_delivery {
-                    None
-                } else {
-                    admit_release_migrations(
-                        &cwd,
-                        config.qa.as_ref().and_then(|qa| qa.release.as_ref()),
-                        &worktree.parent_branch,
-                        ci_source,
-                        supervisor_override,
-                        reason,
-                    )
-                    .map_err(|message| ("migration_refused", message))?
-                };
-                Ok((ci_override, migration_override))
-            });
+        // An already-merged reconciliation runs no merge to gate.
+        let migration_gate = (!reconciled_delivery).then(|| MigrationGate {
+            root: &cwd,
+            release: config.qa.as_ref().and_then(|qa| qa.release.as_ref()),
+            target: &worktree.parent_branch,
+            tip: ci_source,
+        });
+        let admission =
+            admit_merge(&branch_ci_state, migration_gate, supervisor_override, reason);
         let (ci_override, migration_override) = match admission {
             Ok(accepted) => accepted,
             Err((refusal_kind, message)) => {
@@ -4789,7 +4812,7 @@ impl CasCore {
 mod tests {
     use super::{
         BranchCiState, CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput,
-        admit_branch_ci, admit_release_migrations, migration_override_note,
+        admit_branch_ci, admit_merge, migration_override_note, MigrationGate,
         require_code_validation,
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
@@ -5502,6 +5525,8 @@ mod tests {
 
     /// cas-87e0: a merge into the integration branch that adds an unapplied
     /// migration is refused before Git runs; other targets skip the check.
+    /// cas-f8b2: an override given for red CI does not accept the migration
+    /// refusal; only a reason naming its class does.
     #[test]
     fn pending_migration_refuses_integration_merge() {
         use crate::qa_release::test_project::{Project, release_config};
@@ -5519,21 +5544,40 @@ mod tests {
         project.git(&["branch", "staging"]);
         project.git(&["checkout", "-qb", "factory/fox"]);
         project.commit("db/migrations/20261021_add/migration.sql", "add");
-        let admit = |target, override_requested, reason| {
-            admit_release_migrations(root, Some(&release), target, "factory/fox", override_requested, reason)
+        let green = BranchCiState::Green { sha: "abc123".into(), url: None, test_checks: vec![] };
+        let red = BranchCiState::Red { sha: "abc123".into(), url: None };
+        let admit = |ci: &BranchCiState, target, override_requested, reason| {
+            let gate = MigrationGate { root, release: Some(&release), target, tip: "factory/fox" };
+            admit_merge(ci, Some(gate), override_requested, reason)
         };
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"pending"}"#);
 
-        let refusal = admit("staging", false, None).unwrap_err();
+        let (kind, refusal) = admit(&green, "staging", false, None).unwrap_err();
+        assert_eq!(kind, "migration_refused");
         assert!(
             refusal.starts_with("MIGRATION PENDING: 20261021_add on staging.")
+                && refusal.contains("Apply the migration on staging, then retry.")
                 && refusal.ends_with("No merge was attempted."),
             "{refusal}"
         );
-        assert!(admit("staging", true, Some(" ")).is_err());
-        assert_eq!(admit("main", false, None), Ok(None));
-        let accepted = admit("staging", true, Some("applied by hand")).unwrap().unwrap();
-        let note = migration_override_note("supervisor-1", "factory/fox", "staging", &accepted, " applied by hand ");
+        assert_eq!(admit(&green, "main", false, None), Ok((false, None)));
+        let (kind, _) = admit(&red, "staging", true, Some("CI flake reviewed")).unwrap_err();
+        assert_eq!(kind, "migration_refused", "a red-CI override must not accept the migration");
+        let (ci_override, accepted) = admit(
+            &red,
+            "staging",
+            true,
+            Some("CI flake reviewed; MIGRATION PENDING applied by hand"),
+        )
+        .unwrap();
+        assert!(ci_override);
+        let note = migration_override_note(
+            "supervisor-1",
+            "factory/fox",
+            "staging",
+            &accepted.unwrap(),
+            " applied by hand ",
+        );
         assert!(
             note.contains("✅ DECISION Supervisor supervisor-1 overrode MIGRATION PENDING: 20261021_add")
                 && note.ends_with("into staging: applied by hand"),
@@ -5541,7 +5585,7 @@ mod tests {
         );
 
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
-        assert_eq!(admit("staging", false, None), Ok(None));
+        assert_eq!(admit(&green, "staging", false, None), Ok((false, None)));
     }
 
     #[test]

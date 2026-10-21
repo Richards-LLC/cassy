@@ -32,6 +32,9 @@ pub struct Registry {
     pub kinds: Option<Vec<String>>,
     pub owner_groups: BTreeMap<String, OwnerGroup>,
     pub invariants: BTreeMap<String, Invariant>,
+    /// Criteria graded by a person, or declared before their checker exists.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub manual_checks: BTreeMap<String, ManualCheck>,
     pub fixtures: Option<BTreeMap<String, Fixture>>,
     pub bug_families: BTreeMap<String, BugFamily>,
     pub journeys: Vec<Journey>,
@@ -52,6 +55,31 @@ pub struct Invariant {
     pub statement: String,
     pub check: String,
     pub bug: Option<Value>,
+    /// Declared criterion whose executable checker is not written yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_checker: Option<PendingChecker>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Automation debt with an accountable owner; overdue once `due` has passed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PendingChecker {
+    pub owner: String,
+    pub due: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManualCheck {
+    pub statement: String,
+    pub check: String,
+    /// `human_judgment` stays manual; `checker_unwritten` needs `pending_checker`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_checker: Option<PendingChecker>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -111,6 +139,8 @@ pub struct Journey {
     pub owner_groups: Vec<String>,
     pub owners: Owners,
     pub invariants: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub manual_checks: Vec<String>,
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
@@ -277,6 +307,44 @@ impl ValidationReport {
     }
 }
 
+fn iso_date(date: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .filter(|parsed| date.len() == 10 && parsed.format("%Y-%m-%d").to_string() == date)
+}
+
+impl ValidationReport {
+    /// Validate a pending checker; its owner/due summary when it is well formed.
+    fn pending_checker(
+        &mut self,
+        subject: &str,
+        pending: &PendingChecker,
+        today: chrono::NaiveDate,
+    ) -> Option<String> {
+        match iso_date(&pending.due) {
+            Some(due) if !pending.owner.trim().is_empty() => {
+                let summary = format!("owner {}, due {}", pending.owner, pending.due);
+                if due < today {
+                    self.problem(
+                        "overdue_checker",
+                        subject,
+                        format!("checker is overdue ({summary}); write it or move the date"),
+                    );
+                }
+                Some(summary)
+            }
+            _ => {
+                self.problem(
+                    "pending_checker",
+                    subject,
+                    "pending_checker needs owner and due (YYYY-MM-DD)",
+                );
+                None
+            }
+        }
+    }
+}
+
 fn valid_status(status: &str) -> bool {
     matches!(status, "live" | "dark" | "dead")
 }
@@ -316,12 +384,8 @@ impl Registry {
         if self.version != Some(1) {
             report.problem("version", "registry", "version must be 1");
         }
-        let date_valid = self.updated.as_deref().is_some_and(|date| {
-            date.len() == 10
-                && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == date)
-        });
-        if !date_valid {
+        let today = chrono::Local::now().date_naive();
+        if self.updated.as_deref().and_then(iso_date).is_none() {
             report.problem(
                 "updated",
                 "registry",
@@ -367,6 +431,53 @@ impl Registry {
                     &format!("invariants.{name}"),
                     "statement and check are required",
                 );
+            }
+            if let Some(pending) = &invariant.pending_checker {
+                let subject = format!("invariants.{name}");
+                if let Some(summary) = report.pending_checker(&subject, pending, today) {
+                    report.debt(
+                        "pending_checker",
+                        &subject,
+                        &format!("checker pending: {summary}"),
+                    );
+                }
+            }
+        }
+        for (name, manual) in &self.manual_checks {
+            let subject = format!("manual_checks.{name}");
+            if manual.statement.trim().is_empty() || manual.check.trim().is_empty() {
+                report.problem("manual_check", &subject, "statement and check are required");
+            }
+            match (manual.reason.as_deref(), &manual.pending_checker) {
+                (Some("human_judgment"), _) => report.debt(
+                    "manual_human_judgment",
+                    &subject,
+                    "manual check: needs human judgment",
+                ),
+                (Some("checker_unwritten"), Some(pending)) => {
+                    if let Some(summary) = report.pending_checker(&subject, pending, today) {
+                        report.debt(
+                            "manual_checker_unwritten",
+                            &subject,
+                            &format!("manual check: checker unwritten, {summary}"),
+                        );
+                    }
+                }
+                (Some("checker_unwritten"), None) => report.problem(
+                    "pending_checker",
+                    &subject,
+                    "reason checker_unwritten needs pending_checker {owner, due}",
+                ),
+                (None, _) => report.debt(
+                    "manual_unclassified",
+                    &subject,
+                    "manual check has no reason; set human_judgment or checker_unwritten",
+                ),
+                (Some(other), _) => report.problem(
+                    "manual_reason",
+                    &subject,
+                    format!("unknown reason {other:?}; use human_judgment or checker_unwritten"),
+                ),
             }
         }
         if let Some(fixtures) = &self.fixtures {
@@ -452,6 +563,15 @@ impl Registry {
                         "unknown_invariant",
                         id,
                         format!("unknown invariant {invariant:?}"),
+                    );
+                }
+            }
+            for manual in &journey.manual_checks {
+                if !self.manual_checks.contains_key(manual) {
+                    report.problem(
+                        "unknown_manual_check",
+                        id,
+                        format!("unknown manual check {manual:?}"),
                     );
                 }
             }
@@ -633,6 +753,30 @@ journeys:
     evidence: {verdict: PASS}
 "#;
 
+    /// GABBER plus a pending invariant checker and one manual check per reason.
+    fn with_criteria(due: &str) -> String {
+        GABBER
+            .replace(
+                "    bug: {task: cas-1234}\n",
+                &format!("    bug: {{task: cas-1234}}\n    pending_checker: {{owner: qa-team, due: \"{due}\"}}\n"),
+            )
+            .replace(
+                "    fixtures: [fresh]\n",
+                "    manual_checks: [MANUAL-LOOK, MANUAL-COUNT, MANUAL-OLD]\n    fixtures: [fresh]\n",
+            )
+            + &format!(
+                r#"manual_checks:
+  MANUAL-LOOK: {{statement: Slides read well, check: Look at 390px, reason: human_judgment}}
+  MANUAL-COUNT:
+    statement: One run per click
+    check: Count runs
+    reason: checker_unwritten
+    pending_checker: {{owner: qa-team, due: "{due}"}}
+  MANUAL-OLD: {{statement: Legacy entry, check: Walk it}}
+"#
+            )
+    }
+
     fn repo(contents: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -704,6 +848,49 @@ journeys:
     }
 
     #[test]
+    fn qa_registry_pending_checkers_and_manual_checks_are_debt_by_reason() {
+        let yaml = with_criteria("2999-12-31");
+        let registry = parse(&yaml).unwrap();
+        let pending = registry.invariants["INV-CLAIM"]
+            .pending_checker
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (pending.owner.as_str(), pending.due.as_str()),
+            ("qa-team", "2999-12-31")
+        );
+        assert_eq!(
+            registry.manual_checks["MANUAL-LOOK"].reason.as_deref(),
+            Some("human_judgment")
+        );
+        assert_eq!(
+            registry.journeys[0].manual_checks,
+            ["MANUAL-LOOK", "MANUAL-COUNT", "MANUAL-OLD"]
+        );
+        let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        let debt: Vec<_> = report
+            .debt
+            .iter()
+            .map(|p| (p.code.as_str(), p.subject.as_str()))
+            .collect();
+        assert_eq!(
+            debt,
+            [
+                ("pending_checker", "invariants.INV-CLAIM"),
+                ("manual_checker_unwritten", "manual_checks.MANUAL-COUNT"),
+                ("manual_human_judgment", "manual_checks.MANUAL-LOOK"),
+                ("manual_unclassified", "manual_checks.MANUAL-OLD"),
+            ]
+        );
+        assert!(
+            report.debt[0]
+                .message
+                .contains("owner qa-team, due 2999-12-31")
+        );
+    }
+
+    #[test]
     fn qa_registry_invalid_registries_and_seeded_debt() {
         let no_invariants = GABBER.replace(
             "    invariants: [INV-CLAIM]\n    fixtures:",
@@ -763,6 +950,35 @@ journeys:
                 vec!["traffic_basis"],
                 vec![],
             ),
+            (
+                "overdue pending checker fails",
+                with_criteria("2020-01-01"),
+                vec!["overdue_checker", "overdue_checker"],
+                vec![
+                    "pending_checker",
+                    "manual_checker_unwritten",
+                    "manual_human_judgment",
+                    "manual_unclassified",
+                ],
+            ),
+            (
+                "unwritten checker needs an owner and due date",
+                with_criteria("2999-12-31")
+                    .replace(
+                        "    pending_checker: {owner: qa-team, due: \"2999-12-31\"}\n  MANUAL-OLD",
+                        "  MANUAL-OLD",
+                    )
+                    .replace(
+                        "MANUAL-OLD: {statement: Legacy entry, check: Walk it}",
+                        "MANUAL-OLD: {statement: Legacy entry, check: Walk it, reason: later}",
+                    )
+                    .replace(
+                        "[MANUAL-LOOK, MANUAL-COUNT, MANUAL-OLD]",
+                        "[MANUAL-LOOK, MANUAL-GONE]",
+                    ),
+                vec!["pending_checker", "manual_reason", "unknown_manual_check"],
+                vec!["pending_checker", "manual_human_judgment"],
+            ),
         ];
         for (name, yaml, problems, debt) in cases {
             let dir = repo(&yaml);
@@ -786,13 +1002,11 @@ journeys:
                 debt,
                 "{name}"
             );
-            assert!(
-                report
-                    .problems
-                    .iter()
-                    .chain(&report.debt)
-                    .all(|p| p.subject == "B2-home")
-            );
+            assert!(report.problems.iter().chain(&report.debt).all(|p| {
+                p.subject == "B2-home"
+                    || p.subject.starts_with("invariants.")
+                    || p.subject.starts_with("manual_checks.")
+            }));
         }
     }
 

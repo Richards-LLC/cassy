@@ -29,6 +29,23 @@ def run(scope, command, **kwargs):
     scope.run(list(map(str, command)), check=True, **kwargs)
 
 
+def candidate_dir_for_task(repo, task):
+    if not task.startswith("cas-") or len(task) <= 4 or not all(
+        char.isascii() and (char.isalnum() or char == "-") for char in task
+    ):
+        raise ValueError(f"invalid task id {task!r}")
+    checkout = release_env.main_checkout(repo) or repo.resolve()
+    result = subprocess.run(
+        ["cas", "config", "get", "factory.artifacts_root"],
+        cwd=checkout, capture_output=True, text=True, check=True, timeout=5,
+    )
+    value = result.stdout.strip() or "~/.cas/artifacts"
+    artifacts = Path(value).expanduser()
+    if not artifacts.is_absolute():
+        artifacts = checkout / artifacts
+    return artifacts / release_env.project_key(release_env.cas_dir_for(repo)) / task / "candidate"
+
+
 def build(repo, revision, candidate_dir):
     repo = repo.resolve()
     candidate_dir = candidate_dir.absolute()
@@ -101,10 +118,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--rev", required=True)
-    parser.add_argument("--candidate-dir", type=Path, required=True)
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--candidate-dir", type=Path)
+    destination.add_argument("--task")
     args = parser.parse_args()
     try:
-        print(json.dumps(build(args.repo, args.rev, args.candidate_dir), sort_keys=True))
+        candidate_dir = args.candidate_dir or candidate_dir_for_task(args.repo, args.task)
+        print(json.dumps(build(args.repo, args.rev, candidate_dir), sort_keys=True))
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"candidate: {error}", file=sys.stderr)

@@ -130,7 +130,14 @@ impl BuildGuardSnapshot {
             // One attempt per admission, with the same provenance, quiet-window,
             // warm retention and nonblocking destructive locks as manual GC.
             match crate::factory_target_cache::reclaim_scratch_for_admission(
-                cas_root, policy, &probe,
+                cas_root, policy, |path, policy| {
+                    // GC reloads persisted configuration. A changed or absent
+                    // scratch setting must not redirect this admission's probe.
+                    if path != existing {
+                        return Err(std::io::Error::other("scratch filesystem changed during admission; cleanup deferred"));
+                    }
+                    probe(path, policy)
+                },
             ) {
                 Ok(report) => eprintln!(
                     "Build guard scratch GC: reclaimed {} bytes from {} target(s); warm, live and unverifiable targets retained",

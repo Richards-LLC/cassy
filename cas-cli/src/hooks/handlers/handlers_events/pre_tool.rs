@@ -18,8 +18,7 @@ pub fn handle_pre_tool_use(
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
     // Codex 0.163 reports the turn cwd and drops exec_command's workdir.
-    // Honor the execution directory when a newer projection supplies it;
-    // otherwise a relative redirection cannot be attributed to any root.
+    // Honor the execution directory when a newer projection supplies it.
     let mut execution_input = None;
     if input.tool_name.as_deref() == Some("Bash")
         && cas_core::env_overlay::var("CAS_HOOK_HARNESS")
@@ -30,14 +29,6 @@ pub fn handle_pre_tool_use(
             let mut resolved = input.clone();
             resolved.cwd = Path::new(&input.cwd).join(workdir).display().to_string();
             execution_input = Some(resolved);
-        } else if crate::harness_policy::is_factory_agent(input)
-            && let Some(command) = tool_input.get("command").and_then(|value| value.as_str())
-            && let Ok(effects) = shell_effects::collect(command, Path::new(&input.cwd))
-            && let Some(path) = effects.relative_redirection
-        {
-            return Ok(HookOutput::with_pre_tool_permission("deny", &format!(
-                "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve relative redirection `{path}` because the Codex hook input omits workdir. Use an absolute in-worktree path."
-            )));
         }
     }
     let input = execution_input.as_ref().unwrap_or(input);
@@ -4278,6 +4269,10 @@ fn factory_write_decision(
     let Some(tool_input) = input.tool_input.as_ref() else {
         return FactoryWriteDecision::Allowed;
     };
+    let codex_missing_workdir = tool == "Bash"
+        && cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .is_ok_and(|harness| harness.eq_ignore_ascii_case("codex"))
+        && !tool_input.get("workdir").and_then(|value| value.as_str()).is_some_and(|path| !path.is_empty());
     // cas-7d68: a link the command creates does not exist when this hook
     // runs, so resolving paths on disk would judge a write through it at the
     // link's own location. Resolve every link the command creates to its real
@@ -4476,14 +4471,21 @@ fn factory_write_decision(
     };
     let mut resolved_targets = Vec::with_capacity(targets.len() + link_targets.len());
     for (raw_path, mode) in targets {
+        let relative_redirection = if codex_missing_workdir {
+            shell_effects.relative_redirections.iter().find_map(|(path, original)| {
+                (path == &raw_path).then(|| original.clone())
+            })
+        } else {
+            None
+        };
         match physical(&raw_path) {
-            Ok(path) => resolved_targets.push((path, mode)),
+            Ok(path) => resolved_targets.push((path, mode, relative_redirection)),
             Err(violation) => return FactoryWriteDecision::Denied(violation),
         }
     }
     // Link paths are already resolved; never alias a link to itself.
-    resolved_targets.extend(link_targets);
-    for (raw_path, mode) in resolved_targets {
+    resolved_targets.extend(link_targets.into_iter().map(|(path, mode)| (path, mode, None)));
+    for (raw_path, mode, relative_redirection) in resolved_targets {
         if let Some(violation) = protected_violation(&raw_path, false) {
             return FactoryWriteDecision::Denied(violation);
         }
@@ -4527,10 +4529,17 @@ fn factory_write_decision(
             WriteMode::Create
         });
         if admit(resolved.clone(), mode, &mut uses).is_none() {
+            // Preserve ordinary admission, including inside relative logs and
+            // operator roots. Only an otherwise-refused relative redirection
+            // has an uncertain destination when Codex omitted its workdir.
+            let (evaluated_path, matched_rule) = match relative_redirection {
+                Some(path) => (path, "Codex hook input omits workdir"),
+                None => (raw_path, "none"),
+            };
             return FactoryWriteDecision::Denied(FactoryWriteViolation {
-                evaluated_path: raw_path,
+                evaluated_path,
                 resolved_path: resolved,
-                matched_rule: "none",
+                matched_rule,
             });
         }
     }
@@ -6049,6 +6058,12 @@ fn factory_workspace_contract_denial(
     configured_scratch_root: Option<&str>,
     worktree_root: Option<&std::path::Path>,
 ) -> String {
+    if violation.matched_rule == "Codex hook input omits workdir" {
+        return format!(
+            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve relative redirection `{}` because the Codex hook input omits workdir. Use an absolute in-worktree path.",
+            violation.evaluated_path,
+        );
+    }
     let artifacts = crate::config::resolved_factory_artifacts_root(configured_artifacts_root)
         .display()
         .to_string();

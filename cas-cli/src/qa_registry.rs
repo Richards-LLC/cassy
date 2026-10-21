@@ -350,6 +350,9 @@ pub struct Journey {
     pub known_failure: Option<String>,
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
+    /// Subject kinds and invariant IDs the gate may read back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readback: Option<crate::qa_readback::Declaration>,
     pub seeded: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

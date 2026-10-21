@@ -275,6 +275,21 @@ Dynamic system-prompt exclusion remains deferred pending a controlled cache,
 cost and context-correctness comparison. This change claims no startup-time,
 token or cost improvement.
 
+## Factory launch diagnostics
+
+Factory launch preflight writes `~/.cas/logs/factory/<session>/launch.log`,
+including refusals that happen before the daemon starts. A refused launch prints
+this path alongside its original reason. Repeated attempts append dated records.
+
+`launch.log` also identifies the project's runtime tracing file, using the
+resolved CAS root and `logging.log_dir` from its configuration. These files use
+the local date (`cas-YYYY-MM-DD.log`) and rotate daily. If file logging is
+disabled, the launch record says so.
+
+The session's `daemon.log` captures daemon stderr and can be empty or sparse
+while runtime tracing is active. Preflight diagnostics live in `launch.log`;
+an empty `daemon.log` does not indicate that preflight passed or tracing stopped.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

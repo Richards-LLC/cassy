@@ -686,6 +686,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn claude_cache_failure_keeps_real_auth_evidence_cas_eb0f() {
+        let mut env = claude_probe_fixture();
+        let cache = env.home().join(".cas/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        // A file in place of the cache directory fails even under privileged
+        // test runners; unlike chmod, it deterministically prevents caching.
+        std::fs::write(cache.join("claude-auth"), "not a directory").unwrap();
+        let calls = env.home().join("claude-calls");
+        for (index, (response, expected)) in [
+            (r#"{"loggedIn":false}"#, CapabilityAvailability::Unavailable),
+            (r#"{"loggedIn":true}"#, CapabilityAvailability::Available),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            env.set("CLAUDE_TEST_STATUS", response);
+            let evidence = fixture_claude_probe(&env, None, 10, false);
+            assert_eq!(
+                evidence.availability, expected,
+                "a broken optional cache must not hide the account's real auth status"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap().lines().count(),
+                index + 1,
+                "each failed-cache request must execute exactly one real auth probe"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn claude_ssh_locked_keychain_is_not_a_logout_cas_43b3() {
         let mut env = claude_probe_fixture();
         env.set("SSH_CONNECTION", "fixture");

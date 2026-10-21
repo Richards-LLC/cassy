@@ -388,8 +388,8 @@ async fn recovery_close_rejects_foreign_checkout_before_rebinding_cas_c6e1() {
     );
 }
 
-/// The supported audited recovery also exists in installed 520cd74: retire
-/// both stale active fields, keep their audit trail, then start a new cycle.
+/// A fresh review cycle must park the actual delivery after conflict resolution
+/// rewrites the commit-time anchor, without requiring an explicit receipt.
 #[tokio::test]
 async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt_cas_4fcb() {
     let mut env = TestEnvGuard::temp_home();
@@ -405,7 +405,7 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
     let verdict = text(supervisor.cas_task_request_changes(Parameters(
         crate::mcp::tools::TaskRequestChangesRequest {
             id: TASK.into(),
-            reason: "Preserve prior source work; correct stale branch/QA binding by re-delivering the reviewed final tip, with no source amendment".into(),
+            reason: "Rebase the reviewed correction onto the current target and deliver the resolved content".into(),
         }
     )).await.unwrap());
     let reopened = tasks.get(TASK).unwrap();

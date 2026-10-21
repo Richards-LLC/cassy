@@ -738,7 +738,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 );
             }
         }
-        if hold_startup {
+        if hold_startup || hold_publication {
             assert_eq!(
                 launched_starts, 1,
                 "exactly one restart reports launching the held winner"

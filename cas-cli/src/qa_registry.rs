@@ -1553,8 +1553,8 @@ journeys:
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
 
-        // Plain extension metadata stays valid; reading known fields directly
-        // must still reject duplicates in both record and fixture visitors.
+        // Plain metadata stays valid. Duplicate ordinary fields still fail
+        // parsing, while repeated sources remain local fixture problems.
         let plain = GABBER
             .replace(
                 fresh,
@@ -1572,11 +1572,29 @@ journeys:
             GABBER.replace("version: 1", "version: 1\nversion: 1"),
             GABBER.replace(
                 "provider: account-seed}",
-                "provider: account-seed, provider: other}",
+                "provider: account-seed, description: Other}",
+            ),
+            GABBER.replace(
+                "provider: account-seed}",
+                "provider: account-seed, labels: {}, labels: {}}",
             ),
         ] {
             assert!(parse(&duplicate).is_err(), "duplicate known field accepted");
         }
+        let repeated = GABBER.replace(
+            "provider: account-seed}",
+            "provider: account-seed, provider: other}",
+        );
+        let dir = repo(&repeated);
+        let report = check(dir.path(), Path::new(DEFAULT_PATH))
+            .expect("repeated sources must not fail the whole registry parse");
+        assert!(
+            matches!(report.problems.as_slice(), [problem]
+                if problem.code == "fixture" && problem.subject == "fixtures.fresh"
+                    && problem.message.contains("exactly one")),
+            "{:?}",
+            report.problems
+        );
     }
 
     #[test]

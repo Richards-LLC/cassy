@@ -3793,7 +3793,7 @@ impl CasCore {
 
         // cas-369f: force (dirty) ≠ cleanup (remove). System-B factory
         // workers default to preserving the worktree mid-session.
-        let do_cleanup =
+        let mut do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
         // Inspect the delivery range before Git changes the target. Never poll
@@ -4074,10 +4074,21 @@ impl CasCore {
                     );
                 }
                 result
-            } else if transactional_delivery.is_some() {
-                // Persisted delivery state must separate a successful Git
-                // merge from destructive cleanup.
-                manager.merge_preserving_worktree(&mut worktree, force, do_cleanup)
+            } else if let Some(source_sha) = parked_source_tip.as_deref() {
+                // The receipt names what CI reviewed. Keep branch identity
+                // intact while every Git merge operation consumes that SHA.
+                manager.merge_preserving_worktree_at(&mut worktree, force, do_cleanup, source_sha)
+                    .and_then(|commit| {
+                        if do_cleanup && transactional_delivery.is_none() {
+                            if manager.git().resolve_commit(&worktree.branch).as_deref() != Some(source_sha) {
+                                do_cleanup = false;
+                                pushed_source_note.push_str("\nCleanup deferred: source branch advanced after validation; worker worktree and branch retained.");
+                            } else {
+                                manager.cleanup_merged_worktree(&mut worktree)?;
+                            }
+                        }
+                        Ok(commit)
+                    })
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
@@ -4370,11 +4381,18 @@ impl CasCore {
             // next call can reconcile the exact receipt from target ancestry;
             // if it stops before removal, the next call safely retries cleanup.
             if do_cleanup && source_worktree_live {
-                manager
-                    .cleanup_merged_worktree(&mut worktree)
-                    .map_err(|error| {
-                        worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch)
-                    })?;
+                if manager.git().resolve_commit(&worktree.branch).as_deref()
+                    != Some(receipt.commit_sha.as_str())
+                {
+                    do_cleanup = false;
+                    pushed_source_note.push_str("\nCleanup deferred: source branch advanced after validation; worker worktree and branch retained.");
+                } else {
+                    manager
+                        .cleanup_merged_worktree(&mut worktree)
+                        .map_err(|error| {
+                            worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch)
+                        })?;
+                }
             }
 
             if let Some(task_id) = task_id {

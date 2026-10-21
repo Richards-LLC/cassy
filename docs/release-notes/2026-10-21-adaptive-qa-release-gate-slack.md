@@ -2,13 +2,21 @@
 
 Channel: #cas-internal (`C0B44GUKDK2`). Draft only; not posted.
 
-These are reply additions for the runtime cut that ships the adaptive QA release
-gate. The release owner incorporates them into the versioned
-[runtime release template](runtime-release-template.md), alongside that cut's
-other changes, before publication. The version, install receipts and publication
-timing belong to that assembled draft.
+This draft belongs to the runtime cut that ships the adaptive QA release gate.
+The release owner adds that cut's version, other changes, install receipts and
+publication timing using the [runtime release template](runtime-release-template.md)
+before publication. The versionless labels below are valid draft labels.
 
-## User reply additions
+## User thread
+
+Top-level:
+
+```text
+*Live on production — User — Cassy*
+Was: a stalled check could pass unnoticed. → Now: timeouts raise alerts and deployment failures identify what needs attention.
+```
+
+Reply:
 
 ```text
 • *Stalled checks raise an alert* — Was: a check that ran out of time could finish without a failure alert.
@@ -18,7 +26,16 @@ timing belong to that assembled draft.
 → Now: the first upgrade to this release can repeat one alert for each still-failing branch. Later polls stay quiet for that same failure.
 ```
 
-## Dev reply additions
+## Dev thread
+
+Top-level:
+
+```text
+*Live on production — Dev — Cassy*
+Was: CI timeouts were silent and deploy diagnostics were generic. → Now: timeouts count as red and alerts identify each failed workflow.
+```
+
+Reply:
 
 ```text
 • *CI timeouts count as red* — Was: only a completed CI run with `failure` was relayed.

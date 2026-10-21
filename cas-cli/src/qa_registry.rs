@@ -338,7 +338,9 @@ impl<'de> Deserialize<'de> for Fixture {
                 let mut fixture = Fixture::default();
                 let mut seen = std::collections::BTreeSet::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if FIXTURE_FIELDS.contains(&key.as_str()) && !seen.insert(key.clone()) {
+                    // Repeated sources belong in extra for a local exclusivity problem.
+                    if matches!(key.as_str(), "description" | "labels") && !seen.insert(key.clone())
+                    {
                         return Err(serde::de::Error::custom(format!("duplicate field {key:?}")));
                     }
                     match key.as_str() {

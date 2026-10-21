@@ -185,7 +185,7 @@ pub(crate) fn initial_factory_branch_reset_target(
 /// Keep a reused worker branch from silently carrying a prior task into a new
 /// target. A branch whose old tip is already reachable from the target is safe
 /// to reset; this task's own unmerged work is retained on resume. An unrelated
-/// tip is refused with the exact repair command.
+/// tip is refused with the first commit whose ownership could not be established.
 fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
     expected_branch: &str,
@@ -205,30 +205,33 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
 
-    // Factory repos commonly carry untracked CAS metadata (for example the
-    // test harness's `.cas/config.toml`). It survives a hard reset, so only
-    // tracked changes make this reconciliation unsafe.
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|error| {
-            format!("Cannot inspect reused factory branch {expected_branch}: {error}")
-        })?;
-    if !status.status.success() {
-        return Err(format!(
-            "Cannot inspect reused factory branch {expected_branch}: git status failed: {}",
-            String::from_utf8_lossy(&status.stderr).trim()
-        ));
-    }
-    if !status.stdout.is_empty() {
-        return Err(format!(
-            "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before rebasing with `git rebase {target_branch}`."
-        ));
-    }
+    // Tracked edits matter only when reconciliation would actually reset
+    // the branch. A task resuming on its own tip must keep its in-flight edits.
+    // Untracked CAS metadata survives resets and is deliberately ignored.
+    let require_clean_for_reset = || -> Result<(), String> {
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|error| {
+                format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+            })?;
+        if !status.status.success() {
+            return Err(format!(
+                "Cannot inspect reused factory branch {expected_branch}: git status failed: {}",
+                String::from_utf8_lossy(&status.stderr).trim()
+            ));
+        }
+        if !status.stdout.is_empty() {
+            return Err(format!(
+                "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before resetting it to `{target_branch}`."
+            ));
+        }
+        Ok(())
+    };
 
     // cas-21db: another merge can land after assignment or the worker's
-    // manual sync. Resolve the current target here, after the dirty check,
+    // manual sync. Resolve the current target before deciding to reset,
     // using the existing bounded fetch and local-only/offline fallback.
     let target = git.resolve_fresh_base(target_branch).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
@@ -242,6 +245,7 @@ fn reconcile_reused_factory_branch(
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
+        require_clean_for_reset()?;
         git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
@@ -251,18 +255,21 @@ fn reconcile_reused_factory_branch(
         return Ok(ReusedFactoryBranchStart::Reset);
     }
 
-    // cas-5eb1a: blocked -> open -> start is a resume, even before park
-    // recorded an anchor. Require attribution for EVERY off-target commit:
-    // an own tip/anchor must not hide another task lower in the branch.
-    // Bound the scan and fail closed on unreadable or excessive history.
+    // Every off-target commit needs identity, anchor ancestry, or a merge
+    // from the target. Anchor ancestry admits unnamed WIP, but never explicit
+    // foreign-task claims. Oldest-first diagnostics point to the obstruction
+    // rather than a later own tip or the bookkeeping merge above it.
+    let mut unattributed_commit = factory_tip.clone();
     let carries_only_task_commits = task_identity
         .and_then(|identity| {
             let history = crate::git_evidence::git_text(
                 worktree_path,
                 &[
                     "log",
+                    "--reverse",
+                    "--topo-order",
                     "--max-count=201",
-                    "--format=%H%x1f%B%x1e",
+                    "--format=%H %P%x1f%B%x1e",
                     &factory_tip,
                     &format!("^{target_tip}"),
                     "--",
@@ -273,26 +280,41 @@ fn reconcile_reused_factory_branch(
                 .map(str::trim)
                 .filter(|record| !record.is_empty())
                 .collect();
-            Some(
-                !records.is_empty()
-                    && records.len() <= 200
-                    && records.iter().all(|record| {
-                        let Some((sha, message)) = record.split_once('\u{1f}') else {
-                            return false;
-                        };
-                        let subject = message.trim().lines().next().unwrap_or("");
-                        !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
-                            && (identity
-                                .task_id
-                                .as_deref()
-                                .is_some_and(|id| close_ops::message_references_task(message, id))
-                                || close_ops::commit_is_task_attributable(
-                                    worktree_path,
-                                    sha,
-                                    identity,
-                                ))
-                    }),
-            )
+            if records.is_empty() || records.len() > 200 {
+                unattributed_commit = format!(
+                    "{factory_tip} (task history is empty or exceeds the 200-commit attribution limit)"
+                );
+                return Some(false);
+            }
+            let anchors: Vec<_> = identity
+                .known_commits
+                .iter()
+                .filter(|anchor| git.is_ancestor(anchor, &factory_tip))
+                .collect();
+            for record in records {
+                let (metadata, message) = record.split_once('\u{1f}')?;
+                let mut metadata = metadata.split_whitespace();
+                let sha = metadata.next()?;
+                let parents: Vec<_> = metadata.collect();
+                let subject = message.trim().lines().next().unwrap_or("");
+                let target_merge = parents.len() > 1
+                    && parents[1..]
+                        .iter()
+                        .all(|parent| git.is_ancestor(parent, &target_tip));
+                let owned = target_merge
+                    || (!close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                        && (identity
+                            .task_id
+                            .as_deref()
+                            .is_some_and(|id| close_ops::message_references_task(message, id))
+                            || close_ops::commit_is_task_attributable(worktree_path, sha, identity)
+                            || anchors.iter().any(|anchor| git.is_ancestor(sha, anchor))));
+                if !owned {
+                    unattributed_commit = format!("{sha} ({subject})");
+                    return Some(false);
+                }
+            }
+            Some(true)
         })
         .unwrap_or(false);
     if carries_only_task_commits {
@@ -303,6 +325,7 @@ fn reconcile_reused_factory_branch(
     // it under a local name and start the new task from its own target.
     // Nothing is pushed, so origin keeps the parked tip for its reviewer.
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        require_clean_for_reset()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
             .args(["branch", "-f", &keep, &factory_tip])
@@ -331,7 +354,7 @@ fn reconcile_reused_factory_branch(
     }
 
     Err(format!(
-        "Cannot start task: {expected_branch} carries commits not on target base `{target_branch}`. Rebase it before starting with `git rebase {target_branch}`."
+        "Cannot start task: {expected_branch} carries unattributed commit {unattributed_commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
     ))
 }
 
@@ -388,7 +411,7 @@ mod reused_factory_branch_tests {
     }
 
     #[test]
-    fn unrelated_prior_delivery_is_refused_with_exact_rebase_command() {
+    fn unrelated_prior_delivery_is_refused_with_commit_identity() {
         let repo = repo();
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
@@ -404,7 +427,8 @@ mod reused_factory_branch_tests {
         let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
-        assert!(error.contains("git rebase main"), "{error}");
+        assert!(error.contains(&worker_tip), "{error}");
+        assert!(!error.contains("git rebase"), "{error}");
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
     }
 

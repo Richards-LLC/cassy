@@ -10467,7 +10467,7 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 TaskStatus::InProgress
             );
         } else {
-            let error = result.expect_err("foreign work must refuse even under an own tip/anchor");
+            let error = result.expect_err("unsafe start must refuse without losing committed or dirty work");
             if after == "behind-dirty" {
                 assert!(error.message.contains("uncommitted changes"), "{error}");
             } else {

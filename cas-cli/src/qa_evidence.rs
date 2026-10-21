@@ -1056,13 +1056,38 @@ fn visual_qa_bounds_pair(
 const VISUAL_QA_TRANSLATION_METRICS: [&str; 5] =
     ["ratio", "threshold", "foreground", "background", "largeText"];
 
+/// GH #1321: an element's identity across builds. An inserted sibling shifts
+/// every later `:nth-of-type(n)`, so prefer the element's own `#id` or
+/// `data-testid`, then its DOM path without sibling positions. Tag and class
+/// names stay, so a renamed element is still a different one.
+fn visual_qa_stable_identity(finding: &serde_json::Value) -> String {
+    let selector = visual_qa_selector(finding);
+    let own = selector.rsplit('>').next().unwrap_or_default().trim();
+    if own.starts_with('#') || own.contains("[data-testid=") {
+        return own.to_string();
+    }
+    let mut stable = String::with_capacity(selector.len());
+    let mut rest = selector.as_str();
+    while let Some(start) = [":nth-of-type(", ":nth-child("]
+        .iter()
+        .filter_map(|pseudo| rest.find(pseudo))
+        .min()
+    {
+        stable.push_str(&rest[..start]);
+        rest = &rest[start..];
+        rest = rest.find(')').map_or("", |end| &rest[end + 1..]);
+    }
+    stable.push_str(rest);
+    stable
+}
+
 /// cas-5488 (GH #1152): content inserted above an element moves it without
-/// changing it. Pair a pure translation only when the exact DOM path, box
-/// size and measured defect all agree; a renamed or resized element still
-/// needs the strict position match above.
+/// changing it. Pair a pure translation only when the stable element
+/// identity, box size and measured defect all agree; a renamed or resized
+/// element still needs the strict position match above.
 fn visual_qa_translated_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    let selector = visual_qa_selector(left);
-    if selector.is_empty() || selector != visual_qa_selector(right) {
+    let identity = visual_qa_stable_identity(left);
+    if identity.is_empty() || identity != visual_qa_stable_identity(right) {
         return false;
     }
     let Some((left_bounds, right_bounds)) = visual_qa_bounds_pair(left, right) else {

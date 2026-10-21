@@ -14,8 +14,12 @@ use crate::cli::config::operator_ops::guard_operator_config;
 use crate::cli::config::util::{format_constraint, truncate_description};
 use crate::config::operator_policy::InvocationContext;
 
+pub(super) fn host_scoped_key(key: &str) -> bool {
+    key == "viktor.enabled" || key.starts_with("hub.")
+}
+
 fn config_root_for_key(key: &str, cas_root: &Path) -> PathBuf {
-    if key == "viktor.enabled" {
+    if host_scoped_key(key) {
         crate::config::host_config_dir()
     } else {
         cas_root.to_path_buf()
@@ -202,6 +206,11 @@ pub(crate) fn execute_list(
     let mut items: HashMap<String, String> = config.list().into_iter().collect();
     let host_config = Config::load(&crate::config::host_config_dir())?;
     items.insert("viktor.enabled".into(), host_config.viktor_enabled().to_string());
+    for (key, value) in host_config.list() {
+        if host_scoped_key(&key) {
+            items.insert(key, value);
+        }
+    }
     items.insert(
         "issues.repo".into(),
         config

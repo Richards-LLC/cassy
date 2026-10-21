@@ -751,6 +751,16 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout("true\n");
+    let list = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "config", "list", "--section", "hub"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["hub"]["hub.transport_mode"]["value"], "required");
     cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "hub.transport_mode", "loopback"])
@@ -769,6 +779,7 @@ fn test_config_get_set() {
         "host policy must not rewrite project config"
     );
     let outside = TempDir::new().unwrap();
+    git2::Repository::init(outside.path()).unwrap();
     cas_cmd(temp.path())
         .current_dir(&outside)
         .args(["config", "get", "hub.transport_mode"])
@@ -787,6 +798,36 @@ fn test_config_get_set() {
             .unwrap()
             .tailscale_serve,
         Some(true)
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "list", "--section", "hub", "--json"])
+        .assert()
+        .success();
+    let other = temp.path().join("other/.cas");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("config.toml"), "").unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env("CAS_ROOT", &other)
+        .args(["config", "set", "hub.transport_mode", "required"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("CAS_ROOT wins").not());
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .get("hub.transport_mode")
+            .as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        std::fs::read(root.join("config.toml")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("config.toml")).unwrap(),
+        ""
     );
     cas_cmd(temp.path())
         .current_dir(&outside)

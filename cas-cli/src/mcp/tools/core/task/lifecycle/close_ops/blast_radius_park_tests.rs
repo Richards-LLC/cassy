@@ -159,13 +159,49 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
 
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
+    // cas-0dac: a supervisor ran this selection in a scratch checkout while
+    // the worker's build lane was unavailable. Record it through the public
+    // factory action, then let the real park gate consume the normal receipt.
+    let scratch = tempfile::tempdir().unwrap();
+    let tested_repo = scratch.path().join("tested");
+    git(f.dir.path(), &["worktree", "add", "-q", "--detach", tested_repo.to_str().unwrap(), &tested_tip]);
+    let log = scratch.path().join("supervisor-test.log");
+    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    let proof = serde_json::json!({
+        "head": tested_tip, "repo": tested_repo,
+        "cargo_args": ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"],
+        "log_path": log, "exit_code": 0,
+    });
+    let request = |proof: &serde_json::Value| serde_json::from_value(serde_json::json!({
+        "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
+    })).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    assert!(f.worker.factory(Parameters(request(&proof))).await.is_err(), "a worker cannot attest supervisor evidence via an environment hint");
+    for (field, value) in [
+        ("head", serde_json::json!(git(&f.worker_path, &["rev-parse", "HEAD^"]))),
+        ("exit_code", serde_json::json!(100)),
+        ("cargo_args", serde_json::json!(["nextest", "run", "-p", "widget", "--lib", "-E", "all()"])),
+    ] {
+        let mut invalid = proof.clone();
+        invalid[field] = value;
+        assert!(f.supervisor.factory(Parameters(request(&invalid))).await.is_err(), "invalid {field} must not supply a test receipt");
+    }
+    std::fs::write(&log, "     Summary [ 0.01s] 0 tests run: 0 passed, 1 skipped\n").unwrap();
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "zero-test evidence must not count");
+    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    std::fs::write(tested_repo.join("dirty.rs"), "// not tested\n").unwrap();
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty supervisor checkout must not count");
+    std::fs::remove_file(tested_repo.join("dirty.rs")).unwrap();
+    let recorded = f.supervisor.factory(Parameters(request(&proof))).await;
+    assert!(recorded.is_ok(), "registered supervisor evidence must reach the worker receipt: {recorded:?}");
+    let parked = call(&f.worker, close.clone()).await;
+    assert!(parked.contains("MERGE REQUIRED"), "supervisor receipt must pass focused proof at park: {parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    assert!(f.task().notes.contains("br-supervisor-session"), "recording audits its registered issuer");
+    let reopened = call(&f.supervisor, serde_json::json!({
+        "action": "request_changes", "id": ID, "reason": "continue proof input regression",
+    })).await;
+    assert!(!reopened.contains("rejected"), "{reopened}");
     let source_path = "crates/widget/src/gear.rs";
     std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
     git(&f.worker_path, &["add", source_path]);

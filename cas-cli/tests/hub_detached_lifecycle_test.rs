@@ -563,6 +563,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 paths.read_process_record().is_err(),
                 "the publication barrier must precede the winning process record"
             );
+            std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
             let peer_waiters = wait_for_markers("peer-record-wait-", 1);
             if peer_waiters.len() != 1 {
                 let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");

@@ -912,6 +912,11 @@ impl Registry {
                     );
                 }
             }
+            if let Some(readback) = &journey.readback {
+                for message in readback.problems() {
+                    report.problem("readback", id, message);
+                }
+            }
             for invariant in &journey.invariants {
                 if !self.invariants.contains_key(invariant) {
                     report.problem(

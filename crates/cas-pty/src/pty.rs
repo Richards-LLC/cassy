@@ -2573,9 +2573,15 @@ impl Pty {
             })
             .map_err(|e| Error::pty(format!("Failed to open PTY: {e}")))?;
 
-        // Build command
-        let mut cmd = CommandBuilder::new(&config.command);
-        cmd.args(&config.args);
+        // Build command. A worker starts inside the credential-store mask
+        // when the operator has a store to hide (cas-5b3d).
+        let launch =
+            crate::store_isolation::worker_launch(&config.command, &config.args, &config.env)
+                .map_err(Error::pty)?;
+        let (program, args) =
+            launch.unwrap_or_else(|| (config.command.clone(), config.args.clone()));
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
 
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
@@ -3883,6 +3889,104 @@ mod tests {
         assert!(
             descendant_result == "descendant-clear",
             "descendant result was {descendant_result:?}"
+        );
+    }
+
+    /// Run `script` under `sh -c` in a PTY as `role` and return its output.
+    #[cfg(target_os = "linux")]
+    async fn probe_output(role: &str, script: &str, env: &[(String, String)]) -> Result<String> {
+        let mut env = env.to_vec();
+        env.push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: std::env::current_dir().ok(),
+            env,
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn(format!("store-mask-probe-{role}"), config)?;
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(_)) => break,
+                Some(PtyEvent::Output(bytes)) => output.extend_from_slice(&bytes),
+                Some(PtyEvent::Error(error)) => panic!("{role} probe failed: {error}"),
+                None => panic!("{role} probe did not exit before deadline"),
+            }
+        }
+        while let Some(PtyEvent::Output(bytes)) = pty.try_recv() {
+            output.extend_from_slice(&bytes);
+        }
+        pty.kill();
+        Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
+    /// cas-5b3d: a worker cannot read the operator's Neon or Vercel store by
+    /// any route the PreToolUse hook cannot parse (interpreter one-liners, a
+    /// piped shell, variable indirection, /proc), with no hook involved;
+    /// a supervisor running the same probe still reads it, and the worker's
+    /// git, gh, node, cargo and ssh config keep working.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn worker_launch_hides_operator_credential_stores_from_every_reader_cas_5b3d() {
+        let fixture = tempfile::tempdir().expect("fixture root");
+        let config_home = fixture.path().join("config");
+        let data_home = fixture.path().join("data");
+        std::fs::create_dir_all(config_home.join("neonctl")).unwrap();
+        std::fs::create_dir_all(data_home.join("com.vercel.cli")).unwrap();
+        std::fs::write(config_home.join("neonctl/credentials.json"), "MOCK_NEON_CANARY").unwrap();
+        std::fs::write(data_home.join("com.vercel.cli/auth.json"), "MOCK_VERCEL_CANARY").unwrap();
+        let env = vec![
+            ("XDG_CONFIG_HOME".to_string(), config_home.display().to_string()),
+            ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
+        ];
+        let script = r#"
+N="$XDG_CONFIG_HOME/neonctl/credentials.json"
+printf 'python='; python3 -c 'import sys; print(open(sys.argv[1]).read())' "$N" 2>/dev/null || echo denied
+printf 'perl='; perl -e 'open(F, "<", $ARGV[0]) or die; print <F>, "\n"' "$N" 2>/dev/null || echo denied
+printf 'pipe='; echo 'cat "$XDG_CONFIG_HOME/neonctl/credentials.json"; echo' | sh 2>/dev/null || echo denied
+d=neonctl; f=credentials.json
+printf 'indirect='; cat "$XDG_CONFIG_HOME/$d/$f" 2>/dev/null && echo || echo denied
+printf 'proc='; cat "/proc/$PPID/root$N" 2>/dev/null && echo || echo denied
+printf 'vercel='; cat "$XDG_DATA_HOME/com.vercel.cli/auth.json" 2>/dev/null && echo || echo denied
+for tool in git gh node cargo; do
+  command -v "$tool" >/dev/null || continue
+  "$tool" --version >/dev/null 2>&1 || echo "BROKEN_$tool"
+done
+if command -v ssh >/dev/null; then out=$(ssh -G github.com 2>&1 >/dev/null) || echo "BROKEN_ssh: $out"; fi
+echo SMOKE_DONE
+"#;
+
+        if crate::store_isolation::isolation_available().is_err() {
+            // No namespace here (e.g. already inside a masked worker): the
+            // worker must be refused, never started with the store visible.
+            let error = probe_output("worker", script, &env).await.unwrap_err();
+            assert!(error.to_string().contains("CAS_WORKER_STORE_ISOLATION"), "{error}");
+            return;
+        }
+
+        let supervisor = probe_output("supervisor", script, &env).await.unwrap();
+        for probe in ["python", "perl", "pipe", "indirect"] {
+            assert!(
+                supervisor.contains(&format!("{probe}=MOCK_NEON_CANARY")),
+                "supervisor {probe} probe must read the fixture store:\n{supervisor}"
+            );
+        }
+        assert!(supervisor.contains("vercel=MOCK_VERCEL_CANARY"), "{supervisor}");
+        assert!(
+            supervisor.contains("SMOKE_DONE") && !supervisor.contains("BROKEN_"),
+            "host tooling is broken before masking:\n{supervisor}"
+        );
+
+        let worker = probe_output("worker", script, &env).await.unwrap();
+        assert!(!worker.contains("MOCK_"), "worker read a masked store:\n{worker}");
+        for probe in ["python", "perl", "pipe", "indirect", "proc", "vercel"] {
+            assert!(worker.contains(&format!("{probe}=")), "{probe} did not run:\n{worker}");
+        }
+        assert!(
+            worker.contains("SMOKE_DONE") && !worker.contains("BROKEN_"),
+            "worker tooling broke:\n{worker}"
         );
     }
 

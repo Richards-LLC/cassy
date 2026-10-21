@@ -1039,6 +1039,14 @@ mod tests {
             target_branch: "staging".into(),
         });
         store.add(&task).unwrap();
+        // Another assignment can be queued without changing the active task.
+        let mut queued = Task::new("cas-next".into(), "Queued task".into());
+        queued.assignee = task.assignee.clone();
+        queued.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:upkeep-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&queued).unwrap();
         env.set("CAS_ROOT", &cas_root);
         env.set("CAS_AGENT_NAME", "upkeep-worker");
         env.set_current_dir(&worker);

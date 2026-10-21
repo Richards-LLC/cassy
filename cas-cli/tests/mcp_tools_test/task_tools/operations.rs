@@ -6469,6 +6469,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         "clone_path".to_string(),
         worker_checkout.to_string_lossy().into_owned(),
     );
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("assignment-session".into());
     agent_store.register(&worker).unwrap();
 
     let created = service
@@ -6505,7 +6507,6 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         }))
         .await
         .expect_err("stale assignment must reject the batch");
-    test_env.remove("CAS_FACTORY_MODE");
 
     let message = error.message.to_string();
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
@@ -6517,6 +6518,47 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     let stored = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(stored.execution_note.is_none());
     assert!(stored.assignee.is_none());
+
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let before = task_store.list(None).unwrap().len();
+    // Both entry points must reject the same stale name/session identity before
+    // persistence or dispatch; the worker is on main, not a resettable own lane.
+    for assignee in [&worker.name, &worker.id] {
+        let mut request = make_task_create_req("stale assigned creation");
+        request.assignee = Some(assignee.clone());
+        let error = service.cas_task_create(Parameters(request)).await
+            .expect_err("create must refuse the stale assignee just as update does");
+        assert!(error.message.contains("commits behind"), "{error}");
+        assert!(error.message.contains("not created"), "{error}");
+        assert_eq!(task_store.list(None).unwrap().len(), before);
+        assert!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+            .unwrap().is_empty(), "refused creation must never dispatch");
+    }
+
+    git(&worker_checkout, &["fetch", "-q", "origin"]);
+    git(&worker_checkout, &["merge", "--ff-only", "origin/main"]);
+    for assignee in [&worker.name, &worker.id] {
+        let mut request = make_task_create_req("fresh assigned creation");
+        request.assignee = Some(assignee.clone());
+        let receipt = extract_text(service.cas_task_create(Parameters(request)).await.unwrap());
+        let id = extract_task_id(&receipt).unwrap().to_string();
+        let stored = task_store.get(&id).unwrap();
+        assert_eq!(stored.assignee.as_deref(), Some(worker.name.as_str()));
+        // pin: Assignee is the operator-visible field in create/show receipts.
+        assert!(receipt.contains(&format!("Assignee: {}", worker.name)), "{receipt}");
+        let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+            id: id.clone(), with_deps: false,
+        })).await.unwrap());
+        assert!(shown.contains(&format!("Assignee: {}", worker.name)), "{shown}");
+        let dispatch = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
+            "accepted creation must reach the same worker it displays");
+    }
+    let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+        id: task_id, with_deps: false,
+    })).await.unwrap());
+    assert!(shown.contains("Assignee: (unassigned)"), "{shown}");
 }
 
 /// When CAS_FACTORY_MODE is set and a supervisor assigns a task using a

@@ -9028,6 +9028,8 @@ mod workspace_contract_tests {
             ("printf x > ../../outside.log".to_string(), Some(child), "deny", false),
             (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false),
             (format!("printf x > '{}'", outside.display()), None, "deny", false),
+            (format!(r#"printf x > '{}'; sh -c "cd '{}' && printf y > outside.log""#,
+                outside.display(), outside.parent().unwrap().display()), None, "deny", false),
         ] {
             // Codex 0.163 projects exec_command as Bash/command with turn cwd.
             // The optional workdir models the upstream projection once fixed.

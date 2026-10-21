@@ -92,8 +92,10 @@ impl StakeholderContactPolicy {
         let slack_id = |id: &str, prefix: char| {
             id.starts_with(prefix) && id.len() > 1 && id.bytes().all(|b| b.is_ascii_alphanumeric())
         };
-        if !slack_id(&self.workspace_id, 'T') || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
-            || self.minimum_interval_secs == 0 || self.minimum_interval_secs > i64::MAX as u64
+        if !slack_id(&self.workspace_id, 'T')
+            || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
+            || self.minimum_interval_secs == 0
+            || self.minimum_interval_secs > i64::MAX as u64
         {
             return Err("stakeholder_contacts requires Slack workspace T…, user U…/W…, and a positive minimum_interval_secs".into());
         }
@@ -402,18 +404,58 @@ pub enum QaMode {
 }
 
 impl QaMode {
-    pub fn is_per_task(&self) -> bool { *self == Self::PerTask }
+    pub fn is_per_task(&self) -> bool {
+        *self == Self::PerTask
+    }
 }
 
 impl std::fmt::Display for QaMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self { Self::PerTask => "per_task", Self::Batch => "batch" })
+        f.write_str(match self {
+            Self::PerTask => "per_task",
+            Self::Batch => "batch",
+        })
+    }
+}
+
+/// Registry upkeep rollout; strict only expands G2 to modified files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryEnforcement {
+    Off,
+    Observe,
+    #[default]
+    Enforce,
+    Strict,
+}
+impl std::fmt::Display for RegistryEnforcement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+            Self::Strict => "strict",
+        })
+    }
+}
+impl std::str::FromStr for RegistryEnforcement {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "observe" => Ok(Self::Observe),
+            "enforce" => Ok(Self::Enforce),
+            "strict" => Ok(Self::Strict),
+            _ => Err("qa.registry.enforce must be off, observe, enforce or strict"),
+        }
     }
 }
 
 /// Journey registry settings at `[qa.registry]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaRegistryConfig {
+    #[serde(default)]
+    pub enforce: RegistryEnforcement,
     #[serde(default = "default_registry_path")]
     pub path: String,
 }
@@ -424,7 +466,10 @@ fn default_registry_path() -> String {
 
 impl Default for QaRegistryConfig {
     fn default() -> Self {
-        Self { path: default_registry_path() }
+        Self {
+            path: default_registry_path(),
+            enforce: RegistryEnforcement::default(),
+        }
     }
 }
 
@@ -998,10 +1043,22 @@ impl FactoryConfig {
     pub(crate) fn retired_keys(&self) -> Vec<&'static str> {
         [
             ("merge_sweep", self.retired_merge_sweep.is_some()),
-            ("merge_sweep_timeout_secs", self.retired_merge_sweep_timeout_secs.is_some()),
-            ("merge_sweep_quiet_secs", self.retired_merge_sweep_quiet_secs.is_some()),
-            ("release_gate_home_dir", self.retired_release_gate_home_dir.is_some()),
-            ("merge_sweep_command", self.retired_merge_sweep_command.is_some()),
+            (
+                "merge_sweep_timeout_secs",
+                self.retired_merge_sweep_timeout_secs.is_some(),
+            ),
+            (
+                "merge_sweep_quiet_secs",
+                self.retired_merge_sweep_quiet_secs.is_some(),
+            ),
+            (
+                "release_gate_home_dir",
+                self.retired_release_gate_home_dir.is_some(),
+            ),
+            (
+                "merge_sweep_command",
+                self.retired_merge_sweep_command.is_some(),
+            ),
             ("merge_sweep_cwd", self.retired_merge_sweep_cwd.is_some()),
             ("merge_sweep_env", self.retired_merge_sweep_env.is_some()),
         ]
@@ -1085,9 +1142,13 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
     14
 }
 
-fn default_supervisor_message_debounce_secs() -> u64 { 20 }
+fn default_supervisor_message_debounce_secs() -> u64 {
+    20
+}
 
-fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
+fn default_supervisor_message_wakes_per_hour() -> u64 {
+    6
+}
 
 fn default_message_max_chars() -> usize {
     1200
@@ -2214,7 +2275,10 @@ mod tests {
         let saved = toml::to_string(fc).unwrap();
         assert!(!saved.contains("merge_sweep"), "{saved}");
         assert!(!saved.contains("release_gate_home_dir"), "{saved}");
-        assert!(!format!("{fc:?}").contains("hunter2"), "values are never kept");
+        assert!(
+            !format!("{fc:?}").contains("hunter2"),
+            "values are never kept"
+        );
     }
 
     #[test]

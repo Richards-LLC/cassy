@@ -197,12 +197,18 @@ async fn qa_dispatch_attaches_predicted_and_park_impact_cas_06fe() {
     let predicted = tasks.get(extract_task_id(&created).unwrap()).unwrap();
     assert!(predicted.notes.contains("Predicted QA impact"), "{}", predicted.notes);
     assert!(predicted.notes.contains("SEND"), "{}", predicted.notes);
+    // The reviewer may be on main, where the registry does not yet exist.
+    git(&repo, &["checkout", "-q", "main"]);
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
     let state = tasks.get_execution_state(&task_id).unwrap().expect("park impact state");
     assert_eq!(state["qa_impact"]["head_sha"], head);
     assert_eq!(state["qa_impact"]["journeys"][0]["id"], "SEND");
+    let cleared = service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"update", "id":task_id, "state_patch":{"qa_impact":null}
+    })).unwrap())).await.expect_err("public state updates cannot erase the G8 input");
+    assert!(cleared.message.contains("qa_impact is managed"), "{}", cleared.message);
     assert!(tasks.get(&task_id).unwrap().notes.contains("Authoritative QA impact"));
     let qa = tasks.get(&qa_task_id(&repo.join(".cas"), &task_id)).unwrap();
     for expected in ["SEND", "REPLY", "INV-COMPOSER", "The message remains visible",

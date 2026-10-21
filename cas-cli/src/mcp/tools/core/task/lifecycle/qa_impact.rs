@@ -109,7 +109,7 @@ pub(crate) fn predicted(core: &CasCore, task: &Task) -> String {
             for file in tracked.split('\0').filter(|file| !file.is_empty()) {
                 if file == path
                     || file.starts_with(&format!("{}/", path.trim_end_matches('/')))
-                    || crate::qa_registry::matches_path(path, file)
+                    || crate::qa_registry::matches_path([path], file)
                 {
                     paths.insert(file.to_string());
                 }

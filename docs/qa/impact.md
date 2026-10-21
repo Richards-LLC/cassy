@@ -75,8 +75,8 @@ Parking a delivery snapshots that impact into the task's execution state under
 It uses the same task attribution as close, including deleted and renamed paths,
 and reads registry metadata at the delivered commit. Repeating the same park
 reuses the snapshot. The state supports a bounded 1 MiB impact report separately
-from the existing 16 KiB resume fields. `state_patch.qa_impact=null` clears the
-field using the standard merge-patch rules.
+from the existing 16 KiB resume fields. Cassy manages `qa_impact`; public task updates cannot replace or clear
+it. A new delivery head refreshes the snapshot.
 
 Independent QA dispatch includes a journey table with invariant statements,
 read-back checks and generated evidence requirements. An explicit QA request

@@ -330,6 +330,16 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    // Batch deferral/approval can replace full proof, but cannot silently drop
+    // cells from a declared comparison. Only the authenticated exact-tip waiver
+    // above (or the close handler's recorded supervisor override) waives it.
+    if waiver.is_none()
+        && (tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some())
+    {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx).map_err(|refusal| {
+            format!("QA EVIDENCE REJECTED: {}. Next: {}", refusal.problem, refusal.command)
+        })?;
+    }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
         if waiver.is_some() || batch_receipt.is_some() || batch_defer || covering_pass.is_some() {

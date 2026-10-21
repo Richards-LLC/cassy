@@ -156,6 +156,7 @@ struct ManifestFiles {
     aria_json: Option<String>,
     #[serde(default)]
     cells: Vec<String>,
+    pairs: Option<String>,
     #[serde(default)]
     a11y: Vec<String>,
     #[serde(default)]
@@ -168,6 +169,147 @@ struct ManifestFiles {
     /// apart from findings the delivery introduced.
     visual_qa_baseline_json: Option<String>,
     critique: Option<String>,
+}
+
+/// Stable cell identity lives on the row; capture metadata belongs to each
+/// side, where later execution-state and independence checks can extend it.
+#[derive(Debug, Deserialize)]
+struct EvidenceCell {
+    id: String,
+    before: Option<CellCapture>,
+    after: Option<CellCapture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CellCapture {
+    png: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidencePairs {
+    schema: u32,
+    task_id: String,
+    head_sha: String,
+    #[serde(default)]
+    pairs: Vec<EvidenceCell>,
+    #[serde(default)]
+    unpaired: Vec<EvidenceCell>,
+}
+
+#[derive(Default)]
+struct PairFiles {
+    current: Vec<(String, PathBuf)>,
+    baseline: Vec<(String, PathBuf)>,
+}
+
+fn validate_pairs(
+    ctx: &EvidenceContext<'_>,
+    bundle_dir: &Path,
+    relative: &str,
+    head: &str,
+) -> Result<PairFiles, EvidenceRefusal> {
+    let repair = "capture AFTER evidence for every BEFORE cell, retain baseline-only cells in unpaired[], and regenerate files.pairs; only a recorded exact-tip qa_waive or supervisor_override can waive coverage";
+    let refuse = |problem: String| EvidenceRefusal::new(problem, repair);
+    // Journey bundles share task-level qa/pairs; keep containment at the
+    // task root, while side captures remain inside the pairs directory.
+    let candidate = bundle_dir.join(relative);
+    let path = resolve_inside_task_dir(ctx, &candidate.to_string_lossy())?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| refuse(format!("unreadable files.pairs: {e}")))?;
+    let pairs: EvidencePairs =
+        serde_json::from_str(&raw).map_err(|e| refuse(format!("malformed files.pairs: {e}")))?;
+    if pairs.schema != 1 || pairs.task_id != ctx.task_id || pairs.head_sha != head {
+        return Err(refuse(
+            "files.pairs must use schema 1 and match bundle task_id/head_sha".into(),
+        ));
+    }
+    let mut before = std::collections::BTreeMap::new();
+    let mut after = std::collections::BTreeMap::new();
+    for cell in pairs.pairs.iter().chain(&pairs.unpaired) {
+        if cell.id.trim().is_empty() || cell.id != cell.id.trim() {
+            return Err(refuse("files.pairs has a blank or padded cell id".into()));
+        }
+        if cell.before.is_none() && cell.after.is_none() {
+            return Err(refuse(format!(
+                "files.pairs cell {} has no capture",
+                cell.id
+            )));
+        }
+        for (phase, capture, cells) in [
+            ("BEFORE", &cell.before, &mut before),
+            ("AFTER", &cell.after, &mut after),
+        ] {
+            if let Some(capture) = capture {
+                if cells.insert(cell.id.as_str(), capture).is_some() {
+                    return Err(refuse(format!(
+                        "files.pairs repeats {phase} cell {}",
+                        cell.id
+                    )));
+                }
+            }
+        }
+    }
+    let missing: Vec<_> = before
+        .keys()
+        .filter(|id| !after.contains_key(*id))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(format!(
+            "AFTER evidence is missing BEFORE cell(s): {}",
+            missing.join(", ")
+        )));
+    }
+    let dir = path.parent().expect("resolved bundle file has a directory");
+    let mut files = PairFiles::default();
+    for (phase, cells, listed) in [
+        ("before", &before, &mut files.baseline),
+        ("after", &after, &mut files.current),
+    ] {
+        for (id, capture) in cells {
+            let key = format!("pairs.{phase}[{id}]");
+            let file = resolve_bundle_file(dir, &key, &capture.png)?;
+            if !std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+                return Err(refuse(format!("files.{key} must name a nonempty capture")));
+            }
+            listed.push((key, file));
+        }
+    }
+    files.current.push(("pairs".into(), path));
+    Ok(files)
+}
+
+/// Even when full bundle proof is deferred, a declared comparison cannot drop
+/// baseline cells. The caller alone authenticates and records explicit waivers.
+pub(crate) fn validate_cited_pair_coverage(
+    ctx: &EvidenceContext<'_>,
+) -> Result<(), EvidenceRefusal> {
+    let Some(cited) = cited_bundle_path(ctx.notes) else {
+        return Ok(());
+    };
+    let path = resolve_inside_task_dir(ctx, &cited)?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| EvidenceRefusal::new(format!("unreadable bundle: {e}"), cite_command(ctx)))?;
+    let manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| EvidenceRefusal::new(format!("malformed bundle: {e}"), cite_command(ctx)))?;
+    let Some(relative) = manifest
+        .pointer("/files/pairs")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let relative = relative.as_str().ok_or_else(|| missing_key("pairs"))?;
+    let head = manifest
+        .get("head_sha")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| EvidenceRefusal::new("bundle head_sha is missing", cite_command(ctx)))?;
+    validate_pairs(
+        ctx,
+        path.parent().expect("manifest directory"),
+        relative,
+        head,
+    )
+    .map(|_| ())
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the
@@ -371,6 +513,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             resolve_bundle_file(&bundle_dir, "cells", relative)?,
         ));
     }
+    let pair_files = files.pairs.as_deref()
+        .map(|relative| validate_pairs(ctx, &bundle_dir, relative, &manifest.head_sha))
+        .transpose()?.unwrap_or_default();
+    listed.extend(pair_files.current);
     for suffix in POLISH_RENDERS {
         if !files
             .polish_screenshots
@@ -630,7 +776,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 
     // cas-a6ab: an authenticated run must not carry its credentials.
     if manifest.deployed.is_some() {
-        check_no_secrets(&bundle_dir, &listed)?;
+        let mut scanned = listed.clone();
+        scanned.extend(pair_files.baseline);
+        check_no_secrets(&bundle_dir, &scanned)?;
     }
 
     // 6. Critique floor.

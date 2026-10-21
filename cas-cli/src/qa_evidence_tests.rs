@@ -217,6 +217,79 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+#[test]
+fn after_cells_must_preserve_before_carousels_cas_51f1() {
+    let fx = Fixture::new();
+    let before = ["G1", "G2", "G3", "G4", "G5"];
+    for (after, missing) in [
+        (vec!["G1", "G2", "G5"], vec!["G3", "G4"]),
+        (vec![], before.to_vec()),
+        (vec!["G1", "G2", "G3", "G4", "G5", "G6"], vec![]),
+    ] {
+        // A journey may cite the shared pairs directory outside its bundle.
+        let relative = if missing.is_empty() {
+            "../pairs/pairs.json"
+        } else {
+            "pairs/pairs.json"
+        };
+        fx.write_bundle(|manifest| manifest["files"]["pairs"] = relative.into());
+        let dir = if missing.is_empty() {
+            fx.task_dir.join("pairs")
+        } else {
+            fx.bundle_dir().join("pairs")
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pairs = Vec::new();
+        let mut unpaired = Vec::new();
+        for id in ["G1", "G2", "G3", "G4", "G5", "G6"] {
+            let mut cell = serde_json::json!({"id": id});
+            if before.contains(&id) {
+                let name = format!("{id}.before.png");
+                std::fs::write(dir.join(&name), "baseline capture").unwrap();
+                set_mtime_secs_ago(&dir.join(&name), 240);
+                cell["before"] = serde_json::json!({"png": name});
+            }
+            if after.contains(&id) {
+                let name = format!("{id}.after.png");
+                std::fs::write(dir.join(&name), "delivered capture").unwrap();
+                cell["after"] = serde_json::json!({"png": name});
+            }
+            if before.contains(&id) && after.contains(&id) {
+                pairs.push(cell);
+            } else if before.contains(&id) || after.contains(&id) {
+                unpaired.push(cell);
+            }
+        }
+        std::fs::write(
+            dir.join("pairs.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": fx.head,
+                "pairs": pairs, "unpaired": unpaired,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ctx = EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &fx.task_dir,
+            repo: &fx.repo,
+            delivered_head: &fx.head,
+            notes: &fx.notes(),
+            deployed_origins: &[],
+        };
+        let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
+        if missing.is_empty() {
+            assert!(result.is_ok(), "AFTER supersets must pass: {result:?}");
+        } else {
+            let refusal = result.expect_err("dropped carousel cells must refuse close");
+            assert!(
+                refusal.contains(&format!("missing BEFORE cell(s): {}", missing.join(", "))),
+                "{refusal}"
+            );
+        }
+    }
+}
+
 fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let mut fx = Fixture::new();
     let cas_root = fx.repo.join(".cas");

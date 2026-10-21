@@ -873,10 +873,29 @@ fn prefer_fresher_base_ref_observed(
     // prove freshness after a failed fetch. Managed epics own their observation
     // and publication policy, so they deliberately arrive with fetch=false.
     if verify_origin {
-        git.fetch_branch(branch).map_err(|error| format!(
-            "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
-            observed_state(),
-        ))?;
+        git.fetch_branch(branch).map_err(|error| {
+            // A failed fetch alone cannot distinguish missing publication from
+            // transport failure. Git's exit 2 means a reachable origin has no
+            // matching head; stderr and cached refs are not absence evidence.
+            let mut command = std::process::Command::new("git");
+            command.args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(repo_root);
+            let absent = crate::worktree::GitOperations::run_command_bounded(
+                command, std::time::Duration::from_secs(10),
+            ).is_ok_and(|output| output.status.code() == Some(2));
+            if absent {
+                format!(
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    observed_state(),
+                )
+            } else {
+                format!(
+                    "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
+                    observed_state(),
+                )
+            }
+        })?;
     }
     if base.starts_with("origin/") {
         return Ok((None, None));
@@ -997,9 +1016,6 @@ fn checkout_ref_for_spawn_base_observed(
     repo_root: &std::path::Path, parent_branch: &str, source: &SpawnBaseSource, fetch: bool,
 ) -> Result<(Option<String>, Option<String>, String), String> {
     let (mut base_ref, mut freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch)?;
-    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
-        freshness_notice = Some(format!("SPAWN BASE LOCAL-ONLY: '{parent_branch}' has no configured origin remote; using the local tip."));
-    }
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
@@ -1020,6 +1036,17 @@ fn checkout_ref_for_spawn_base_observed(
                 base_ref = Some(local_sha);
             }
         }
+    }
+    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
+        let selected = base_ref.as_deref().unwrap_or(parent_branch);
+        let sha = full_sha(repo_root, selected).unwrap_or_else(|| "unresolved".into());
+        let remote = format!("origin/{parent_branch}");
+        if base_ref.is_some() && full_sha(repo_root, &remote).as_deref() == Some(sha.as_str()) {
+            checkout_ref = remote;
+        }
+        freshness_notice = Some(format!(
+            "SPAWN BASE LOCAL-ONLY: origin is not configured; checkout '{checkout_ref}' ({sha})."
+        ));
     }
     Ok((base_ref, freshness_notice, checkout_ref))
 }
@@ -4746,6 +4773,21 @@ mod spawn_base_tests {
                 target_branch: "main".into(),
             });
             open_task_store_cached(&f.root).unwrap().add(&task).unwrap();
+            // cas-cd99: reachable origin lacks this local-only branch; the
+            // operator needs publication guidance, not an access repair.
+            super::spawn_readiness_tests::git(&f.repo, &["branch", "feature/unpublished"]);
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "feature/unpublished".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("unpublished branch must name the publication requirement").to_string();
+            assert!(error.contains("origin/feature/unpublished") && error.contains("not published"), "{error}");
+            assert!(error.contains("git push origin feature/unpublished"), "{error}");
+            assert!(!error.contains("restore origin access"), "{error}");
+            assert_eq!(full_sha(&f.repo, "feature/unpublished").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "main".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
             f.offline();
             let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
                 .err().expect("cached equal refs cannot prove a configured origin is current").to_string();
@@ -4770,6 +4812,21 @@ mod spawn_base_tests {
         assert_eq!(prefer_fresher_base_ref(&repo, "main"), (None, None));
         let (_, notice, _) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
         assert!(notice.unwrap().contains("LOCAL-ONLY"));
+
+        // cas-cd99: an origin-less repo can retain a tracking ref from a
+        // previous fetch. The notice must name that actual checkout source.
+        let local = full_sha(&repo, "main").unwrap();
+        commit_file(&repo, "cached-only.txt", "cached origin content");
+        let cached = full_sha(&repo, "main").unwrap();
+        super::spawn_readiness_tests::git(&repo, &["update-ref", "refs/remotes/origin/main", &cached]);
+        super::spawn_readiness_tests::git(&repo, &["reset", "--hard", &local]);
+        let (base_ref, notice, checkout_ref) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
+        assert_eq!(base_ref.as_deref(), Some(cached.as_str()));
+        assert_eq!(checkout_ref, "origin/main");
+        let notice = notice.unwrap();
+        assert!(notice.contains("LOCAL-ONLY") && notice.contains("origin/main"), "{notice}");
+        assert!(notice.contains(&cached), "{notice}");
+        assert_eq!(full_sha(&repo, "main").as_deref(), Some(local.as_str()));
     }
 
     #[test]

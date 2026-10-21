@@ -375,7 +375,8 @@ pub(crate) fn resolve_assignment_freshness_branch(
 /// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
 /// merge reads as far behind any other epic, but rebasing it would destroy
 /// the tip under review. Assignment proceeds with this note instead; `task
-/// start` keeps the parked tip and moves the branch onto the new target.
+/// start` can move the reusable base lane while preserving its old tip. An
+/// unmerged per-task delivery branch itself stays frozen.
 fn parked_assignment_note(
     task_store: &dyn cas_store::TaskStore,
     worker: &cas_types::Agent,
@@ -383,6 +384,18 @@ fn parked_assignment_note(
     let clone_path = worker.metadata.get("clone_path")?;
     let head = crate::mcp::tools::worktree_head(std::path::Path::new(clone_path))?;
     let parked = crate::mcp::tools::parked_delivery_at_tip(task_store, &worker.name, &head)?;
+    if let Some(branch) = crate::factory_isolation::branch_at(std::path::Path::new(clone_path))
+        .filter(|branch| {
+            crate::factory_isolation::own_task_branch_task_id(&worker.name, branch).is_some()
+        })
+    {
+        return Some(format!(
+            "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge) on {branch}, so it is not checked for staleness. While its tip remains unmerged, `task start` preserves that delivery branch and refuses starting another task there. Switch to the new task's own branch from its target before starting.",
+            name = worker.name,
+            tip8 = &parked.tip[..parked.tip.len().min(8)],
+            task = parked.task_id,
+        ));
+    }
     Some(format!(
         "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge), so it is not \
          checked for staleness. `task start` keeps that tip on origin and as local branch \

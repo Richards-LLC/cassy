@@ -10593,72 +10593,102 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
 /// proceed and say so instead of refusing.
 #[tokio::test]
 async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
-    let home = TempDir::new().expect("home tempdir");
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "gh1006-parked-worker";
-    // epic/requested is one real commit ahead of the worker's branch, as for
-    // the genuinely stale worker above; the difference is the parked delivery.
-    let worker_path = init_sync_repo(&env, worker);
-    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
-    for args in [&["add", "."][..], &["commit", "-q", "-m", "parked delivery"][..]] {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&worker_path)
-            .env("GIT_AUTHOR_NAME", "CAS Test")
-            .env("GIT_AUTHOR_EMAIL", "test@cas")
-            .env("GIT_COMMITTER_NAME", "CAS Test")
-            .env("GIT_COMMITTER_EMAIL", "test@cas")
-            .output()
-            .expect("git");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    }
-    let parked_tip = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&worker_path)
-            .output()
-            .expect("rev-parse")
-            .stdout,
-    )
-    .trim()
-    .to_string();
-    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
-
-    {
-        let store = env.agent_store();
-        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
-        agent.role = AgentRole::Worker;
-        agent.factory_session = Some("session-1006-parked".to_string());
-        agent.metadata.insert(
-            "clone_path".to_string(),
-            worker_path.to_str().unwrap().to_string(),
+    for per_task in [false, true] {
+        let home = TempDir::new().expect("home tempdir");
+        let _guard = EnvGuard::set_optional(&[
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
+            ("HOME", Some(home.path().to_str().unwrap())),
+        ]);
+        let env = FactoryTestEnv::new();
+        let worker = "gh1006-parked-worker";
+        let worker_path = init_sync_repo(&env, worker);
+        let branch = if per_task {
+            format!("factory/{worker}-cas-pk01")
+        } else {
+            format!("factory/{worker}")
+        };
+        if per_task {
+            git_stdout(&worker_path, &["checkout", "-b", &branch]);
+        }
+        std::fs::write(
+            env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"gh1006-fixture\"\n",
+        )
+        .unwrap();
+        std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
+        git_stdout(&worker_path, &["add", "parked.txt"]);
+        git_stdout(
+            &worker_path,
+            &["commit", "-m", "fix(cas-pk01): parked delivery"],
         );
-        store.register(&agent).expect("register worker");
-    }
-    // The delivery parked for merge (on another epic), anchored at the tip.
-    {
-        let store = env.task_store();
-        let mut parked = Task::new("cas-pk01".to_string(), "Parked hub delivery".to_string());
-        parked.status = TaskStatus::AwaitingMerge;
-        parked.assignee = Some(worker.to_string());
-        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
-        store.add(&parked).expect("add parked delivery");
-    }
+        let parked_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
 
-    let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
-    let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
-        panic!("a worker parked for another epic must be assignable: {error}")
-    });
-    assert!(text.contains("parked at") && text.contains("cas-pk01"), "{text}");
-    assert_eq!(
-        env.task_store().get(&task_b).expect("task").assignee.as_deref(),
-        Some(worker)
-    );
+        let mut agent = Agent::new("test-agent-id".into(), worker.into());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-1006-parked".into());
+        agent.metadata.insert(
+            "clone_path".into(),
+            worker_path.to_string_lossy().into_owned(),
+        );
+        env.agent_store().register(&agent).unwrap();
+
+        let store = env.task_store();
+        let mut parked = Task::new("cas-pk01".into(), "Parked hub delivery".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some(worker.into());
+        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+        parked.deliverables.parked_branch = Some(branch.clone());
+        store.add(&parked).unwrap();
+
+        let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
+        let mut task = store.get(&task_b).unwrap();
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:gh1006-fixture".into(),
+            target_branch: "epic/requested".into(),
+        });
+        store.update(&task).unwrap();
+        let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
+            panic!("a worker parked for another epic must be assignable: {error}")
+        });
+        assert!(
+            text.contains("parked at") && text.contains("cas-pk01"),
+            "{text}"
+        );
+        assert_eq!(
+            store.get(&task_b).unwrap().assignee.as_deref(),
+            Some(worker)
+        );
+
+        let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_b,
+        }))
+        .unwrap();
+        let started = env.service.task(Parameters(start)).await;
+        if per_task {
+            let error = started.expect_err("a parked per-task branch must stay frozen");
+            assert!(error.message.contains("parked for cas-pk01"), "{error}");
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), parked_tip);
+            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+            assert!(
+                !cas::worktree::GitOperations::new(worker_path.clone())
+                    .branch_exists(&format!("{branch}-cas-pk01"))
+                    .unwrap()
+            );
+        } else {
+            let text = get_text(&started.unwrap());
+            assert!(text.contains("PARKED BRANCH MOVED"), "{text}");
+            assert_eq!(
+                git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+                git_stdout(&worker_path, &["rev-parse", "epic/requested"])
+            );
+            assert_eq!(
+                git_stdout(&worker_path, &["rev-parse", &format!("{branch}-cas-pk01")]),
+                parked_tip
+            );
+        }
+    }
 }
 
 // ===========================================================================

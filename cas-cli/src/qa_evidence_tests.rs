@@ -1104,11 +1104,15 @@ fn delivery_range_before_and_after_merge() {
     // cas-420af: a fast-forward can integrate an entire delivery, rather
     // than one squash. Its recorded base must retain all three commits even
     // after unrelated target work follows it.
-    let ff_base = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/ff"]);
     commit(&fx.repo, "first.html", 9);
     commit(&fx.repo, "second.css", 8);
-    let ff_head = commit(&fx.repo, "third.md", 7);
+    commit(&fx.repo, "third.md", 7);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    let ff_base = commit(&fx.repo, "before-rebase.rs", 6);
+    git_ok(&fx.repo, &["checkout", "-q", "factory/ff"]);
+    git_ok(&fx.repo, &["rebase", "main"]);
+    let ff_head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     git_ok(&fx.repo, &["checkout", "-q", "main"]);
     git_ok(&fx.repo, &["merge", "-q", "--ff-only", "factory/ff"]);
     commit(&fx.repo, "later.rs", 6);

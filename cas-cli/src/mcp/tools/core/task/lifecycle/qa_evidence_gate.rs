@@ -596,6 +596,13 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the live tip carries a web surface");
         assert!(refusal.contains("app.css"), "{refusal}");
+
+        // A deleted lane must not replace its durable delivery with the
+        // closing checkout's unrelated HEAD (cas-420af).
+        task.deliverables.factory_branch_anchor = Some(rust_only.clone());
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["branch", "-D", "factory/worker"]);
+        assert_eq!(delivered_head(&task, &repo, "main", None), Some(rust_only));
     }
 
     fn merged_receipt_fixture_gh1181(first: &str, later: Option<&str>) -> (tempfile::TempDir, String) {

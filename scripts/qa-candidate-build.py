@@ -48,6 +48,12 @@ def candidate_dir_for_task(repo, task):
 
 def build(repo, revision, candidate_dir):
     repo = repo.resolve()
+    resolved = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
+        text=True,
+    ).strip()
+    if revision != resolved:
+        raise ValueError(f"--rev must be the full commit SHA ({resolved})")
     candidate_dir = candidate_dir.absolute()
     scratch = release_env.resolve_scratch(repo, durable=True, create=True)
     if scratch.problem or not scratch.base:

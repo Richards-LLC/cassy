@@ -2602,6 +2602,10 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         cas_6718_git(&project, &["update-ref", "refs/remotes/origin/production", "HEAD"]);
         cas_6718_git(&project, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/production"]);
         cas_6718_git(&project, &["checkout", "-qB", branch]);
+        if branch == "main" {
+            // A same-named tag must not change the checked-out branch identity.
+            cas_6718_git(&project, &["tag", "main", "HEAD"]);
+        }
         let path = root.join("config.toml");
         let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         config["factory"]["epic_base_branch"] = toml_edit::value("release/base");

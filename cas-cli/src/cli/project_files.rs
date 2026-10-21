@@ -78,10 +78,10 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 fn may_commit_managed_files(root: &Path) -> Result<bool> {
-    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .map(|branch| branch.trim().to_string())
+        .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
         .filter(|branch| !branch.is_empty())
     else {
         // Detached or unreadable HEAD is not permission to create history.

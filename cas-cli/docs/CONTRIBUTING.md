@@ -1371,6 +1371,14 @@ Daemon startup also tries to give its inherited interactive cgroup (including
 the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
 settings. Missing controllers or user-manager permissions leave startup working.
 
+Task verifiers use the same budget (cas-d95c). `cas factory verifier-test
+--cas-root <root> --head <bound head SHA> -- nextest run -p <crate> [--lib|--test
+<harness>] -E 'test(name)'` checks the bound head out at
+`<root>/worktrees/verify-<sha12>` and runs it through the capped runner, so the
+build takes a counted builder slot and is refused under the same PSI and cap
+rules. The PreToolUse guard sends a task-verifier subagent's plain Cargo build
+there.
+
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create
 the parent directory first. In-repo logs that Git does not ignore are refused

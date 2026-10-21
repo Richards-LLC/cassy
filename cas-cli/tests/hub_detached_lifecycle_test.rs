@@ -328,13 +328,17 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
 
     // Force both restart parents past their old-hub stop and into launch before
     // releasing either new hub. Holding their result observers then makes one
-    // parent deterministically see the peer's ready record. A second pass
-    // holds the winner in startup so the loser exercises early child exit.
-    for hold_startup in [false, true] {
+    // parent deterministically see the peer's ready record. Other passes hold
+    // the winner in startup and before record publication to exercise both
+    // early-exit paths.
+    for (hold_startup, hold_publication) in [(false, false), (true, false), (false, true)] {
         let race_home = private_home();
         let barrier = race_home.path().join("restart-race-barrier");
         std::fs::create_dir_all(&barrier).expect("create restart race barrier");
-        let session = format!("cas-3dc8-test-{}-{hold_startup}", std::process::id());
+        let session = format!(
+            "cas-3dc8-test-{}-{hold_startup}-{hold_publication}",
+            std::process::id()
+        );
         let initial = cas_command(race_home.path(), &path)
             .env("CAS_AGENT_ROLE", "worker")
             .env("CAS_FACTORY_SESSION", &session)
@@ -376,6 +380,9 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 .stderr(Stdio::piped());
             if hold_startup {
                 command.env("CAS_TEST_HUB_STARTUP_BARRIER", &barrier);
+            } else if hold_publication {
+                command.env("CAS_TEST_HUB_RECORD_PUBLICATION_BARRIER", &barrier);
+                command.env("CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER", &barrier);
             } else {
                 command.env("CAS_TEST_HUB_READY_BARRIER", &barrier);
             }
@@ -394,6 +401,8 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             let _ = std::fs::write(barrier.join("release"), b"release\n");
             let _ = std::fs::write(barrier.join("release-launchers"), b"release\n");
             let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
             let _ = first.take().unwrap().wait_with_output();
             panic!("old hub did not reach the deterministic release barrier");
         }
@@ -465,6 +474,8 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             let _ = std::fs::write(barrier.join("release-launchers"), b"release\n");
             let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
             let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
             let _ = first.take().unwrap().wait_with_output();
             let _ = second.take().unwrap().wait_with_output();
             panic!("both restarts did not launch before the barrier: {launchers:?}");
@@ -531,6 +542,52 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 std::thread::sleep(Duration::from_millis(10));
             }
             record.pid
+        } else if hold_publication {
+            let pending = wait_for_markers("hub-record-pending-", 1);
+            if pending.len() != 1 {
+                let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!("expected one hub held before publishing its process record: {pending:?}");
+            }
+            let winner_pid = pending[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .trim_start_matches("hub-record-pending-")
+                .parse::<u32>()
+                .unwrap();
+            assert!(
+                paths.read_process_record().is_err(),
+                "the publication barrier must precede the winning process record"
+            );
+            let peer_waiters = wait_for_markers("peer-record-wait-", 1);
+            if peer_waiters.len() != 1 {
+                let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!("losing restart did not observe the unpublished peer record");
+            }
+            std::fs::write(barrier.join("release-hub-record"), b"release\n").unwrap();
+            let record_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if paths.read_process_record().is_ok_and(|record| record.pid == winner_pid) {
+                    break;
+                }
+                if Instant::now() >= record_deadline {
+                    let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                    let _ = first.take().unwrap().wait_with_output();
+                    let _ = second.take().unwrap().wait_with_output();
+                    panic!("winning hub did not publish its process record");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(barrier.join("release-peer-record-wait"), b"release\n").unwrap();
+            winner_pid
         } else {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut running_pid = None;
@@ -555,7 +612,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             running_pid.unwrap()
         };
         std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
-        if !hold_startup {
+        if !hold_startup && !hold_publication {
             let ready_observers = wait_for_markers("ready-observer-", 2);
             std::fs::write(barrier.join("release-ready-observers"), b"release\n").unwrap();
             if ready_observers.len() < 2 {
@@ -568,9 +625,9 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         }
         let mut first_output = None;
         let mut second_output = None;
-        if hold_startup {
-            // The loser must report the live lock owner before we release its
-            // winner; otherwise a generic early-exit error can look plausible.
+        if hold_startup || hold_publication {
+            // Capture the loser only after its peer record has been published;
+            // the publication-gap case must attribute this already-exited child.
             let loser_deadline = Instant::now() + Duration::from_secs(10);
             let (loser_index, output) = loop {
                 if first
@@ -587,9 +644,11 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 }
                 if Instant::now() >= loser_deadline {
                     let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+                    let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                    let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
                     let _ = first.take().map(|child| child.wait_with_output());
                     let _ = second.take().map(|child| child.wait_with_output());
-                    panic!("losing launch did not exit while the winner was held starting");
+                    panic!("losing restart did not report while its peer owned the machine lock");
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };

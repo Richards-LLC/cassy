@@ -1713,6 +1713,14 @@ fn start_with_output_resolved(
                         .any(|holder| holder.pid == record.pid))
                 .then_some(record.pid)
             });
+            if winner_pid.is_none() {
+                hold_hub_test_barrier(
+                    "CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER",
+                    "peer-record-wait",
+                    "release-peer-record-wait",
+                    launcher_pid,
+                )?;
+            }
             if let Some(winner_pid) = winner_pid {
                 let error = anyhow::anyhow!(
                     "another cas hub instance won the machine lock (pid {winner_pid}); replacement process exited with {status} before becoming ready; inspect {}",
@@ -1970,6 +1978,12 @@ fn serve_foreground_logged(
             transport_warning: None,
             nofile_limit,
         };
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_RECORD_PUBLICATION_BARRIER",
+            "hub-record-pending",
+            "release-hub-record",
+            record.pid,
+        )?;
         paths.write_process_record(&record)?;
         hold_hub_test_barrier(
             "CAS_TEST_HUB_STARTUP_BARRIER",

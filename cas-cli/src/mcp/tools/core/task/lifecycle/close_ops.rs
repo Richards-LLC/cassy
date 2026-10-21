@@ -37648,7 +37648,7 @@ mod epic_status_gate_tests {
     /// re-strand epic 1.
     #[test]
     fn epic_close_uses_child_anchor_when_worker_branch_is_reused() {
-        let dir = init_epic_repo(&[("worker", 1)]);
+        let dir = init_epic_repo(&[("worker", 1), ("pending", 1)]);
         let p = dir.path();
         let task_a_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
 
@@ -37677,7 +37677,7 @@ mod epic_status_gate_tests {
         let task = epic("cas-epic-1");
         let req = base_req(&task.id);
 
-        let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a]);
+        let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a.clone()]);
         assert!(
             matches!(
                 out,
@@ -37685,6 +37685,37 @@ mod epic_status_gate_tests {
             ),
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
+        );
+
+        let mut pending = child("cas-unmerged", TaskStatus::Closed, Some("pending"));
+        pending.deliverables.factory_branch_anchor =
+            Some(epic_git_stdout(p, &["rev-parse", "factory/pending"]));
+        let children = [task_a, pending];
+        for summary in [false, true] {
+            let collection = collect_epic_branch_statuses_with_options(
+                &children,
+                "main",
+                p,
+                EpicStatusOptions {
+                    summary,
+                    ..EpicStatusOptions::full_unbounded()
+                },
+            );
+            assert_eq!(
+                collection.statuses[0].unmerged_count, 0,
+                "a merged child's receipt excludes later lane work (summary={summary})"
+            );
+            assert!(
+                collection.statuses[1].unmerged_count > 0,
+                "the other child's own unmerged anchor must remain visible (summary={summary})"
+            );
+        }
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(&task, &req, "main", p, &children),
+                EpicCloseGateOutcome::Reject(_)
+            ),
+            "genuinely unmerged child work must still block epic close"
         );
     }
 

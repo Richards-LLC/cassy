@@ -1326,6 +1326,61 @@ journeys:
     }
 
     #[test]
+    fn qa_registry_tagged_extras() {
+        let fresh = "{description: New account, provider: account-seed}";
+        let cases = [
+            (format!("{GABBER}\nnote: !custom value\n"), "registry"),
+            (
+                GABBER.replace("    bug: {task: cas-1234}", "    bug: {task: cas-1234}\n    note: !custom value"),
+                "invariants.INV-CLAIM",
+            ),
+            (
+                format!("{GABBER}\nmanual_checks:\n  LOOK: {{statement: Looks right, check: Inspect, reason: human_judgment, note: !custom value}}\n"),
+                "manual_checks.LOOK",
+            ),
+            (
+                GABBER.replace(fresh, "{description: New account, provider: account-seed, note: !custom value}"),
+                "fixtures.fresh",
+            ),
+            (
+                GABBER.replace(fresh, &format!("{{description: Frozen account, frozen: {{sha256: '{}', storage_key: account.json, note: !custom value}}}}", "a".repeat(64))),
+                "fixtures.fresh.frozen",
+            ),
+            (
+                GABBER.replace(fresh, "{description: Seed account, recipe: {name: seed, envs: [staging], provides: [account_id], ttl_mins: 1, note: !custom value}}"),
+                "fixtures.fresh.recipe",
+            ),
+            (
+                GABBER.replace("    fixtures: [fresh]", "    fixtures: [fresh]\n    note: {1: [!custom value]}"),
+                "B2-home",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (contents, subject) in cases {
+            // Exercise the same file loader as check/impact/seed consumers.
+            let dir = repo(&contents);
+            let result = load(&dir.path().join(DEFAULT_PATH)).and_then(|registry| {
+                // Unknown metadata must survive seed's serialization path too.
+                parse(&serde_yaml::to_string(&registry)?)
+            });
+            match result {
+                Ok(registry) => {
+                    let report = registry.validate(&[]);
+                    if !report.problems.iter().any(|problem| {
+                        problem.code == "unknown_field"
+                            && problem.subject == subject
+                            && problem.message.contains("unknown field \"note\"")
+                    }) {
+                        failures.push(format!("{subject}: missing unknown_field: {report:?}"));
+                    }
+                }
+                Err(error) => failures.push(format!("{subject}: {error:#}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
     fn qa_registry_gabber_fixture_validates() {
         let dir = repo(GABBER);
         let key = "qa.registry.path";

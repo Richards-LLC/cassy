@@ -6365,7 +6365,8 @@ impl CasCore {
     /// conflict resolution changed an earlier patch (cas-4fcb). Patch equality
     /// with a commit-time snapshot is not required: request_changes may ask for
     /// different content. Every commit above the target must still name this
-    /// task, the tip must be unmerged, and no other open task may own an anchor
+    /// task without a foreign task claim in its subject. The tip must be
+    /// unmerged, and no other open task may own an anchor
     /// in that range. Already-parked retries retain their immutable-anchor rules.
     fn rebased_tip_supersedes_anchor(
         &self,
@@ -6396,7 +6397,11 @@ impl CasCore {
         };
         let mut messages = log.split('\u{1e}').map(str::trim).filter(|m| !m.is_empty()).peekable();
         if messages.peek().is_none()
-            || !messages.all(|message| message_references_task(message, &task.id))
+            || !messages.all(|message| {
+                let subject = message.lines().next().unwrap_or("");
+                message_references_task(message, &task.id)
+                    && !message_claims_other_task(subject, Some(&task.id))
+            })
         {
             return false;
         }

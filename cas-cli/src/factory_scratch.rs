@@ -34,6 +34,14 @@ pub(crate) fn configured_scratch_root(cas_dir: &Path) -> Option<PathBuf> {
     parsed
 }
 
+/// The filesystem probed by build admission and target-cache GC, including
+/// before a configured scratch directory has been created.
+pub(crate) fn build_filesystem(cas_dir: &Path, config: &crate::config::FactoryConfig) -> PathBuf {
+    let target = cas_types::factory_scratch::parse_scratch_root(config.scratch_root.as_deref())
+        .unwrap_or_else(|| cas_dir.to_path_buf());
+    existing_ancestor(&target).unwrap_or(&target).to_path_buf()
+}
+
 /// The private Cargo target directory of a worker checkout.
 pub(crate) fn worker_target_dir(worktree: &Path) -> PathBuf {
     let root = cas_types::factory_scratch::managed_worktree_store(worktree)
@@ -43,7 +51,10 @@ pub(crate) fn worker_target_dir(worktree: &Path) -> PathBuf {
 
 /// Where published target baselines (`current` and `snapshots/`) live.
 pub(crate) fn build_cache_dir(cas_dir: &Path) -> PathBuf {
-    cas_types::factory_scratch::build_cache_dir(configured_scratch_root(cas_dir).as_deref(), cas_dir)
+    cas_types::factory_scratch::build_cache_dir(
+        configured_scratch_root(cas_dir).as_deref(),
+        cas_dir,
+    )
 }
 
 /// The release scratch base under the configured root (cas-baa8): release-gate
@@ -138,7 +149,37 @@ pub(crate) fn render_relocated(cas_dir: &Path) -> String {
             bytes_label(cache.bytes)
         ));
     }
-    out.push_str("  gc_cleanup reclaims in-tree worker targets only; retirement and park-time pruning cover relocated ones.\n");
+    out.push_str("  Worker targets use owner/liveness checks in TARGET_CACHE_STATUS_JSON; build-cache and unmanaged directories require review.\n");
+    let own_project = cas_types::factory_scratch::project_scratch_dir(&root, cas_dir);
+    let mut review: Vec<_> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() || kind.is_symlink())
+        })
+        .map(|entry| entry.path())
+        .filter(|path| *path != own_project)
+        // Other project namespaces are managed by their own store, never by this GC.
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.rsplit_once('-'))
+                .is_some_and(|(_, key)| {
+                    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })
+        .collect();
+    review.sort();
+    for path in review {
+        out.push_str(&format!(
+            "  review-only unmanaged scratch directory: {} (never auto-deleted)\n",
+            path.display()
+        ));
+    }
     out
 }
 
@@ -164,9 +205,8 @@ pub(crate) fn existing_ancestor(path: &Path) -> Option<&Path> {
 #[cfg(unix)]
 pub(crate) fn filesystem_id(path: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
-    let existing = existing_ancestor(path).ok_or_else(|| {
-        io::Error::other(format!("no existing ancestor for {}", path.display()))
-    })?;
+    let existing = existing_ancestor(path)
+        .ok_or_else(|| io::Error::other(format!("no existing ancestor for {}", path.display())))?;
     Ok(std::fs::metadata(existing)?.dev())
 }
 

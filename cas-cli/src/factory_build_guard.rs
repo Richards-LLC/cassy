@@ -16,6 +16,16 @@ use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 // per live/requested lane; the configurable target-cache watermark stays free.
 const ESTIMATED_LANE_GROWTH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// Shared projected disk admission. GC reserves the configured builder cap so
+/// it can restore headroom before the next capped build is refused.
+pub(crate) fn disk_pressure(disk: &FilesystemCapacity, lanes: usize) -> bool {
+    let growth = ESTIMATED_LANE_GROWTH_BYTES.saturating_mul(lanes as u64);
+    let available = disk.available_bytes.saturating_sub(growth);
+    let reserve =
+        (u128::from(disk.total_bytes) * u128::from(100 - disk.high_watermark_percent)) / 100;
+    disk.pressure || u128::from(available) <= reserve
+}
+
 /// Linux PSI stall percentages and reclaimable memory, with native macOS memory.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct HostPressure {
@@ -97,15 +107,9 @@ impl BuildGuardSnapshot {
         config: &FactoryConfig,
         probe: impl FnOnce(&Path, TargetCachePolicy) -> std::io::Result<FilesystemCapacity>,
     ) -> Self {
-        let target = cas_types::factory_scratch::parse_scratch_root(config.scratch_root.as_deref())
-            .unwrap_or_else(|| cas_root.to_path_buf());
-        // A scratch root may not have been created when spawn is admitted.
-        let existing = target
-            .ancestors()
-            .find(|path| path.exists())
-            .unwrap_or(&target);
+        let existing = crate::factory_scratch::build_filesystem(cas_root, config);
         self.disk = Some(
-            probe(existing, TargetCachePolicy::from(config)).map_err(|error| {
+            probe(&existing, TargetCachePolicy::from(config)).map_err(|error| {
                 format!(
                     "disk capacity unavailable for {}: {error}",
                     existing.display()
@@ -151,12 +155,7 @@ impl BuildGuardSnapshot {
                     let lanes = self
                         .live_cargo_workers
                         .saturating_add(self.requested_builders);
-                    let growth = ESTIMATED_LANE_GROWTH_BYTES.saturating_mul(lanes as u64);
-                    let available = disk.available_bytes.saturating_sub(growth);
-                    let reserve = (u128::from(disk.total_bytes)
-                        * u128::from(100 - disk.high_watermark_percent))
-                        / 100;
-                    if disk.pressure || u128::from(available) <= reserve {
+                    if disk_pressure(disk, lanes) {
                         violations.push(format!(
                             "disk {:.2}GiB available; estimated {} lane(s) x 10GiB growth would reach the {}% high watermark; free target caches before retrying",
                             disk.available_bytes as f64 / 1024_f64.powi(3),

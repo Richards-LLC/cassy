@@ -110,11 +110,12 @@ impl CasCore {
         };
 
         let mut output = format!(
-            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nDelivery mode: {}\nOrigin project: {}\nTarget: {}\n",
+            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nAssignee: {}\nPriority: P{}\nType: {}\nDepth: {}\nDelivery mode: {}\nOrigin project: {}\nTarget: {}\n",
             task.id,
             "=".repeat(task.id.len() + 6),
             task.title,
             task.status,
+            task.assignee.as_deref().unwrap_or("(unassigned)"),
             task.priority.0,
             task.task_type,
             task.depth,

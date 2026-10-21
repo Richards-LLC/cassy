@@ -5378,17 +5378,52 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
 /// session so `worker_status` reflects the reset.
 #[tokio::test]
 async fn test_clear_context_confirms_reset_from_new_session_transcript() {
-    let (guard, fixture) = clear_context_fixture("otter", "claude", "10");
+    let (mut guard, mut fixture) = clear_context_fixture("otter", "claude", "10");
+    guard._guard.set("CAS_FACTORY_SESSION", "resume-clear");
+    fixture.worker.factory_session = Some("resume-clear".into());
     let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
     let store = env.agent_store();
-    store
-        .register(&Agent::new(
-            "test-sup".to_string(),
-            "supervisor".to_string(),
-        ))
-        .expect("register supervisor");
+    let mut supervisor = Agent::new_with_role(
+        "test-sup".into(),
+        "supervisor".into(),
+        AgentRole::Supervisor,
+    );
+    supervisor.factory_session = Some("resume-clear".into());
+    store.register(&supervisor).unwrap();
     store.register(&fixture.worker).expect("register worker");
+
+    let mut task = Task::new("cas-ac92".into(), "Resume clear task".into());
+    task.assignee = Some("otter".into());
+    task.status = TaskStatus::InProgress;
+    let checkpoint = chrono::Utc::now() - chrono::Duration::minutes(2);
+    task.notes = format!(
+        "[{}] PROGRESS checkpoint",
+        checkpoint.format("%Y-%m-%d %H:%M")
+    );
+    env.task_store().add(&task).unwrap();
+    let answer = "Use the supplied candidate; the supervisor already answered this.";
+    let queue = env.prompt_queue();
+    let answer_id = queue
+        .enqueue_urgent_with_outcome(
+            "supervisor",
+            "otter",
+            answer,
+            Some("resume-clear"),
+            None,
+            None,
+            false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: supervisor.id.clone(),
+            }),
+        )
+        .unwrap()
+        .id();
+    queue
+        .record_recipient_surfaced(answer_id, "otter", cas_store::SurfacingSource::InboxPoll)
+        .unwrap();
+    queue.ack(answer_id).unwrap();
+    queue.mark_processed(answer_id).unwrap();
 
     // Stand in for the daemon + harness. The new transcript must appear after
     // the control row is queued, because clear_context snapshots existing
@@ -5407,6 +5442,14 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
                         && row.prompt == cas::factory_context_reset::CONTEXT_RESET_CONTROL
                 });
             if queued {
+                assert!(
+                    !queue
+                        .peek_all(20)
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.prompt.contains(answer)),
+                    "resume brief must wait for confirmed reset"
+                );
                 break;
             }
             assert!(
@@ -5427,7 +5470,10 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 
     let mut req = factory_req("clear_context");
     req.target = Some("otter".to_string());
-    let (result, ()) = tokio::join!(env.service.factory_request(Parameters(req)), write_transcript);
+    let (result, ()) = tokio::join!(
+        env.service.factory_request(Parameters(req)),
+        write_transcript
+    );
 
     let text = get_text(&result.expect("a confirmed reset must succeed"));
     assert!(text.contains("CONFIRMED"), "{text}");
@@ -5446,6 +5492,25 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
         Some("11112222-3333-4444-5555-666677778888"),
         "worker_status resolves transcripts by cc_session_id — it must follow the new session"
     );
+    let prompts = env.prompt_queue().peek_all(20).unwrap();
+    let briefs: Vec<_> = prompts
+        .iter()
+        // pin: a resume brief must tell the cleared worker how to re-take this task lease.
+        .filter(|row| row.prompt.contains("task action=start id=cas-ac92"))
+        .collect();
+    assert_eq!(
+        briefs.len(),
+        1,
+        "a confirmed clear queues one task resume brief: {prompts:?}"
+    );
+    // pin: the resume must remain in the cleared worker's authenticated factory session.
+    assert_eq!(briefs[0].factory_session.as_deref(), Some("resume-clear"));
+    assert!(
+        briefs[0].prompt.contains(answer),
+        "received answer must survive clear: {}",
+        briefs[0].prompt
+    );
+    assert!(briefs[0].prompt.contains(&format!("#{answer_id}")));
 }
 
 /// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls

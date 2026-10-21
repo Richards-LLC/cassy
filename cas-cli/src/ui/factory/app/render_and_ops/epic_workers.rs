@@ -6904,7 +6904,11 @@ mod tests {
                         .unwrap();
                 } else {
                     queue
-                        .record_recipient_surfaced(id, target, cas_store::SurfacingSource::InboxPoll)
+                        .record_recipient_surfaced(
+                            id,
+                            target,
+                            cas_store::SurfacingSource::InboxPoll,
+                        )
                         .unwrap();
                     queue.ack(id).unwrap();
                 }
@@ -7038,11 +7042,81 @@ mod tests {
                 .any(|row| row.prompt == "UNRECEIVED"),
             "building a brief never consumes pending mail"
         );
+        // Charge the section intro as well as entries. This payload fits the
+        // old entry-only cap, but not the whole history section.
+        let receive = |body: &str, at: &str| {
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    "wise-raven",
+                    body,
+                    Some("session-a622"),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll)
+                .unwrap();
+            queue.mark_processed(id).unwrap();
+            queue.ack(id).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
+            id
+        };
+        receive(&"λ".repeat(5950), "2026-10-20T12:40:00Z");
+        let capped = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        let history_bytes =
+            capped.len() - capped.find("Recent received supervisor messages").unwrap();
+        // More than a raw query page of newer, ineligible replies must not
+        // hide an older answer. Cover both task and per-task checkpoint filters.
+        for index in 0..65 {
+            let (body, at) = if index % 2 == 0 {
+                (
+                    format!("<cas-assignment task_id=\"cas-peer\"/> FILTERED_{index}"),
+                    "2026-10-20T12:50:00Z",
+                )
+            } else {
+                (
+                    format!("cas-96c0 FILTERED_STALE_{index}"),
+                    "2026-10-20T12:19:00Z",
+                )
+            };
+            receive(&body, at);
+        }
+        let filtered = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        assert_eq!(
+            (history_bytes <= 12_000, filtered.contains(&received[9].1)),
+            (true, true),
+            "history bytes including intro={history_bytes}; eligible answer must survive >64 filtered rows"
+        );
+        assert!(!filtered.contains("FILTERED_"));
     }
 
     #[test]
     fn a_worker_with_no_open_work_gets_no_resume_brief_cas_a622() {
         let (_temp, cas_dir) = seeded_cas_dir();
+        let mut untouched = "existing brief".to_string();
+        append_recycle_received_messages(
+            &cas_dir,
+            "idle-worker",
+            "session-a622",
+            &[],
+            &[],
+            &mut untouched,
+        );
+        assert_eq!(
+            untouched, "existing brief",
+            "empty held-task history is a no-op"
+        );
         assert_eq!(
             enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "idle-worker")
                 .unwrap(),

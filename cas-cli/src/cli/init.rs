@@ -565,7 +565,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let factory_tooling_result = factory_tooling::setup_factory_tooling(cwd).unwrap_or_default();
 
     if !keep_config {
-        config_data.save(&cas_dir)?;
+        save_new_project_config(&config_data, &cas_dir)?;
     }
 
     let steps = next_steps_needed(cwd);
@@ -1000,8 +1000,7 @@ fn apply_configuration(
         })?;
     } else {
         execute_step("Saving configuration", animate, || {
-            let cas_config = config.to_config();
-            cas_config.save(cas_dir)?;
+            save_new_project_config(&config.to_config(), cas_dir)?;
             Ok(".cas/config.toml".to_string())
         })?;
     }
@@ -1415,6 +1414,14 @@ mod integration_flag_tests {
     }
 }
 
+/// A new project starts every upkeep gate (G1–G3, G5, G6) at an explicit
+/// `enforce`, so a later `cas update` never opens the existing-project window.
+fn save_new_project_config(config: &Config, cas_dir: &Path) -> anyhow::Result<()> {
+    config.save(cas_dir)?;
+    crate::config::refresh_upkeep(cas_dir, env!("CARGO_PKG_VERSION"), true, false)?;
+    Ok(())
+}
+
 /// EPIC cas-8888 (cas-6f46, Phase 5): Grok config wiring — the
 /// `agents.grok` toggle and its detection.
 #[cfg(test)]
@@ -1433,6 +1440,18 @@ mod grok_agent_selection_tests {
         // claude/codex defaults.
         assert!(config.agents.claude);
         assert!(!config.agents.codex);
+    }
+
+    #[test]
+    fn new_project_config_opens_no_upkeep_adoption_window() {
+        let temp = TempDir::new().unwrap();
+        save_new_project_config(&WizardConfig::default().to_config(), temp.path()).unwrap();
+        let loaded = Config::load(temp.path()).unwrap();
+        assert_eq!(loaded.qa().registry.enforce, crate::config::RegistryEnforcement::Enforce);
+        assert!(
+            crate::config::refresh_upkeep(temp.path(), "99.0.0", false, false).unwrap().is_empty(),
+            "a later update must not move a new project into observe"
+        );
     }
 
     #[test]

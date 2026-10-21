@@ -68,6 +68,7 @@ impl Config {
 /// Preserve project-specific/unknown sections and comments. Never initialize a
 /// store here. A typed read also rejects invalid stage values before any write.
 /// Seeded/new projects use explicit enforce; only update adopts existing stores.
+/// Covers G5/G6 (`upkeep.*`) and G1–G3 (`qa.registry.enforce`).
 pub(crate) fn refresh_upkeep(
     root: &Path,
     release: &str,
@@ -87,67 +88,77 @@ pub(crate) fn refresh_upkeep(
     };
     let _: Config = toml::from_str(&raw)?;
     let mut document: DocumentMut = raw.parse()?;
-    if document.get("upkeep").is_none() {
-        document["upkeep"] = Item::Table(Table::new());
-    }
-    let upkeep = document["upkeep"]
-        .as_table_like_mut()
-        .ok_or_else(|| anyhow::anyhow!("upkeep must be a table"))?;
+    // Each gate: its marker key in [upkeep.observe_since], its table path and
+    // the key holding the stage. G1–G3 share the adoption window with G5/G6.
+    const GATES: [(&str, &[&str], &str); 3] = [
+        ("codemap", &["upkeep"], "codemap"),
+        ("product_overview", &["upkeep"], "product_overview"),
+        ("registry", &["qa", "registry"], "enforce"),
+    ];
     let mut notes = Vec::new();
-    for gate in ["codemap", "product_overview"] {
-        let generated = upkeep
-            .get("observe_since")
-            .and_then(|item| item.get(gate))
+    for (marker, table_path, key) in GATES {
+        let generated = document
+            .get("upkeep")
+            .and_then(|upkeep| upkeep.get("observe_since"))
+            .and_then(|markers| markers.get(marker))
             .and_then(Item::as_str)
             .map(str::to_owned);
-        let current = upkeep.get(gate).and_then(Item::as_str).map(str::to_owned);
+        let mut stage_table: Option<&Item> = Some(document.as_item());
+        for part in table_path {
+            stage_table = stage_table.and_then(|item| item.get(part));
+        }
+        let current = stage_table
+            .and_then(|item| item.get(key))
+            .and_then(Item::as_str)
+            .map(str::to_owned);
         let promote = current.as_deref() == Some("observe")
             && generated
                 .as_deref()
                 .is_some_and(|old| later_release(release, old));
+        // Seeding never downgrades the opt-in strict registry stage.
+        let seed = seed && current.as_deref() != Some("strict");
         if seed || current.is_none() || promote {
-            let stage = if seed || promote {
-                "enforce"
-            } else {
-                "observe"
-            };
-            upkeep.insert(gate, value(stage));
-            if stage == "observe" {
-                if upkeep.get("observe_since").is_none() {
-                    upkeep.insert("observe_since", Item::Table(Table::new()));
+            let stage = if seed || promote { "enforce" } else { "observe" };
+            let mut table = document.as_table_mut() as &mut dyn toml_edit::TableLike;
+            for part in table_path {
+                if table.get(part).is_none() {
+                    let mut child = Table::new();
+                    child.set_implicit(true);
+                    table.insert(part, Item::Table(child));
                 }
-                upkeep
-                    .get_mut("observe_since")
+                table = table
+                    .get_mut(part)
                     .and_then(Item::as_table_like_mut)
-                    .ok_or_else(|| anyhow::anyhow!("upkeep.observe_since must be a table"))?
-                    .insert(gate, value(release));
+                    .ok_or_else(|| anyhow::anyhow!("{part} must be a table"))?;
             }
-            notes.push(
-                format!(
-                    "upkeep.{gate} = {stage}{}",
-                    if stage == "observe" {
-                        "; one-release window; pin with cas config set upkeep.<gate> observe"
-                    } else {
-                        ""
-                    }
-                )
-                .replace("upkeep.<gate>", &format!("upkeep.{gate}")),
-            );
+            table.insert(key, value(stage));
+            let name = format!("{}.{key}", table_path.join("."));
+            if stage == "observe" {
+                markers_table(&mut document)?.insert(marker, value(release));
+            }
+            notes.push(if stage == "observe" {
+                format!("{name} = observe; one-release window; pin with cas config set {name} observe")
+            } else {
+                format!("{name} = enforce")
+            });
         }
         if (seed || promote || current.as_deref().is_some_and(|s| s != "observe"))
-            && let Some(markers) = upkeep
-                .get_mut("observe_since")
+            && let Some(markers) = document
+                .get_mut("upkeep")
+                .and_then(|upkeep| upkeep.get_mut("observe_since"))
                 .and_then(Item::as_table_like_mut)
         {
-            markers.remove(gate);
+            markers.remove(marker);
         }
     }
-    if upkeep
-        .get("observe_since")
-        .and_then(Item::as_table_like)
-        .is_some_and(|t| t.is_empty())
-    {
-        upkeep.remove("observe_since");
+    if let Some(upkeep) = document.get_mut("upkeep").and_then(Item::as_table_like_mut) {
+        if upkeep
+            .get("observe_since")
+            .and_then(Item::as_table_like)
+            .is_some_and(|t| t.is_empty())
+        {
+            upkeep.remove("observe_since");
+        }
     }
     let output = document.to_string();
     if !dry_run && output != raw {
@@ -158,6 +169,26 @@ pub(crate) fn refresh_upkeep(
 
 // Cargo releases have numeric major.minor.patch. A retry on the same release or
 // a downgrade must not consume the window. Prereleases wait for a later version.
+fn markers_table(
+    document: &mut toml_edit::DocumentMut,
+) -> anyhow::Result<&mut dyn toml_edit::TableLike> {
+    use toml_edit::{Item, Table};
+    let upkeep = document
+        .entry("upkeep")
+        .or_insert_with(|| {
+            let mut table = Table::new();
+            table.set_implicit(true);
+            Item::Table(table)
+        })
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("upkeep must be a table"))?;
+    upkeep
+        .entry("observe_since")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("upkeep.observe_since must be a table"))
+}
+
 fn later_release(current: &str, previous: &str) -> bool {
     fn tuple(version: &str) -> Option<(u64, u64, u64)> {
         let mut parts = version.split(['.', '-', '+']);

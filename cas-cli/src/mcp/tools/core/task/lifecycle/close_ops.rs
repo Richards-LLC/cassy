@@ -2651,15 +2651,29 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
 
 /// cas-c202: persist one close-transition flag change (pending verification,
 /// pending worktree merge, assignee) without rewriting the rest of the row.
+///
+/// A close reads its task snapshot before slow proof capture. Writing that
+/// snapshot back would silently revert anything committed meanwhile, such as
+/// a supervisor proof_scope_fix (status, proof_targets, notes). Apply only the
+/// flag edit to the current row, guarded by its clock, and retry if another
+/// write wins between the read and the write. The snapshot names the task.
 fn persist_close_flags(
     task_store: &dyn cas_store::TaskStore,
     snapshot: &Task,
     edit: impl Fn(&mut Task),
 ) -> cas_store::Result<()> {
-    let mut next = snapshot.clone();
-    edit(&mut next);
-    next.updated_at = chrono::Utc::now();
-    task_store.update(&next).map(|_| ())
+    let mut attempts = 0;
+    loop {
+        let current = task_store.get(&snapshot.id)?;
+        let mut next = current.clone();
+        edit(&mut next);
+        next.updated_at = chrono::Utc::now();
+        match task_store.update_if_current(&next, &current) {
+            Ok(_) => return Ok(()),
+            Err(cas_store::StoreError::Other(_)) if attempts < 3 => attempts += 1,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]

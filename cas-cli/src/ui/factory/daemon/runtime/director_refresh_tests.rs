@@ -93,6 +93,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
         if scenario == "superseded" {
+            // pin: this failure identifies the missing superseded-body batch handoff.
             assert!(batch.prompts[0].1, "superseded prompt must survive the batch handoff");
         }
         let expected_task = prompts[0].retract_task.clone();

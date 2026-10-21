@@ -1277,6 +1277,7 @@ fn is_branch_ci_verdict(run: &CiRun) -> bool {
 pub(crate) fn collect_failures(
     transport: &dyn CiTransport,
     watched_branches: &BTreeSet<String>,
+    _cas_dir: Option<&Path>,
 ) -> Result<Vec<CiFailure>, CiWatchError> {
     let runs = transport.completed_runs()?;
     let mut latest_by_branch = BTreeMap::<String, &CiRun>::new();
@@ -1790,7 +1791,7 @@ mod tests {
             calls: Cell::new(0),
         };
         let watched = BTreeSet::from(["main".to_string(), "factory/bright-otter".to_string()]);
-        let failures = collect_failures(&transport, &watched).unwrap();
+        let failures = collect_failures(&transport, &watched, None).unwrap();
         assert_eq!(failures.len(), 1);
         let body = relay_body(&failures[0]);
         assert!(body.contains("branch=\"factory/bright-otter\""));
@@ -1817,6 +1818,9 @@ mod tests {
             self.job_lookups.set(self.job_lookups.get() + 1);
             Ok(self.failed_job.map(str::to_string))
         }
+        fn failed_job_detail(&self, id: u64) -> Result<Option<FailedJob>, CiWatchError> {
+            Ok(self.failing_job(id)?.map(|name| FailedJob { name, step: Some("Apply migrations".into()) }))
+        }
         fn branch_tip(&self, _: &str) -> Result<Option<String>, CiWatchError> {
             Ok(self.tip.map(str::to_string))
         }
@@ -1834,6 +1838,96 @@ mod tests {
         }
     }
 
+    fn deploy_config(cas_dir: &Path) {
+        let mut config = crate::config::Config::default();
+        config.set("qa.release.integration_branch", "staging").unwrap();
+        // Also exercises the public config accessors, not only TOML decoding.
+        config.set("qa.release.deploy_workflows", "Deploy Backend,Deploy Frontend").unwrap();
+        assert_eq!(config.get("qa.release.deploy_workflows").as_deref(), Some("Deploy Backend,Deploy Frontend"));
+        config.save(cas_dir).unwrap();
+    }
+
+    #[test]
+    fn red_deploy_on_integration_branch_is_blocker() {
+        for event in ["push", "workflow_dispatch"] {
+            let temp = tempfile::TempDir::new().unwrap();
+            deploy_config(temp.path());
+            let mut backend = run_with("staging", "red-deploy", 100, Some("failure"));
+            backend.name = "Deploy Backend".into();
+            backend.event = event.into();
+            let mut frontend = backend.clone();
+            frontend.id = 101;
+            frontend.name = "Deploy Frontend".into();
+            frontend.conclusion = Some("timed_out".into());
+            let transport = TipTransport {
+                runs: vec![backend, frontend, run_with("staging", "red-deploy", 200, Some("success"))],
+                tip: Some("red-deploy"),
+                failed_job: Some("Deploy service"),
+                job_lookups: Cell::new(0),
+            };
+            let failures = collect_failures(&transport, &BTreeSet::new(), Some(temp.path())).unwrap();
+            assert_eq!(failures.len(), 2, "each configured workflow needs its own verdict");
+            let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            queue.init().unwrap();
+            for failure in &failures {
+                assert_eq!(failure.merged_into.as_deref(), Some("staging"));
+                assert!(emit_failure(&queue, "factory-session", failure).unwrap());
+                assert!(!emit_failure(&queue, "factory-session", failure).unwrap());
+            }
+            let rows = queue.peek_all(10).unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.priority, NotificationPriority::Critical);
+                assert!(row.summary.as_deref().unwrap().contains("BLOCKER"));
+                assert!(row.prompt.contains("Deploy service"));
+                assert!(row.prompt.contains("Apply migrations"));
+                assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(&row.prompt));
+            }
+        }
+    }
+
+    #[test]
+    fn path_filtered_deploy_red_survives_moved_tip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        deploy_config(temp.path());
+        let mut deploy = run_with("staging", "old-tip", 100, Some("failure"));
+        deploy.name = "Deploy Backend".into();
+        let mut transport = TipTransport {
+            runs: vec![deploy.clone()],
+            tip: Some("moved-tip"),
+            failed_job: Some("Deploy service"),
+            job_lookups: Cell::new(0),
+        };
+        let collect = |transport: &TipTransport| collect_failures(transport, &BTreeSet::new(), Some(temp.path())).unwrap();
+        let red = collect(&transport);
+        assert_eq!(red.len(), 1, "a path-filtered deploy remains red after the tip moves");
+        // A fresh collector reads persisted observations when the old deploy
+        // falls outside GitHub's 100-run window (also covers daemon restart).
+        transport.runs = (200..300).map(|id| run_with("main", "moved-tip", id, Some("success"))).collect();
+        assert_eq!(collect(&transport), red);
+        for (event, workflow, conclusion, id) in [
+            ("push", "Deploy Backend", "success", 99),
+            ("push", "Deploy Backend", "cancelled", 301),
+            ("push", "Deploy Backend", "neutral", 302),
+            ("pull_request", "Deploy Backend", "success", 303),
+            ("push", "Deploy Frontend", "success", 304),
+        ] {
+            let mut unrelated = deploy.clone();
+            unrelated.id = id;
+            unrelated.event = event.into();
+            unrelated.name = workflow.into();
+            unrelated.conclusion = Some(conclusion.into());
+            transport.runs = vec![unrelated];
+            assert_eq!(collect(&transport), red, "only newer green for the same deploy clears red");
+        }
+        deploy.id = 305;
+        deploy.conclusion = Some("success".into());
+        transport.runs = vec![deploy];
+        assert!(collect(&transport).is_empty());
+        transport.runs.clear();
+        assert!(collect(&transport).is_empty());
+    }
+
     #[test]
     fn cas_233e_watchdog_failure_is_not_main_ci_and_enqueues_no_relay() {
         let mut watchdog = run("main", Some("failure"));
@@ -1843,7 +1937,7 @@ mod tests {
             runs: vec![watchdog], tip: Some("deadbeef"),
             failed_job: Some("Cancel stale non-merge-group queued runs"), job_lookups: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None).unwrap();
         let temp = tempfile::TempDir::new().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
@@ -1864,7 +1958,7 @@ mod tests {
             runs: vec![old_watchdog, run_with("main", "deadbeef", 41, Some("failure")), green_watchdog],
             tip: Some("deadbeef"), failed_job: Some("Fast Validation"), job_lookups: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None).unwrap();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].run_id, 41);
         assert!(failures[0].suppressed_red_runs.is_empty());
@@ -1886,7 +1980,7 @@ mod tests {
                 runs: vec![ci], tip: Some("deadbeef"),
                 failed_job: Some("Fast Validation"), job_lookups: Cell::new(0),
             };
-            let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+            let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None).unwrap();
             assert_eq!(!failures.is_empty(), eligible, "{name}/{event}");
         }
     }
@@ -1907,7 +2001,7 @@ mod tests {
             failed_job: Some("Fast Validation"),
             job_lookups: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None)
             .expect("the run list is valid");
         assert!(failures.is_empty());
         assert_eq!(
@@ -1927,7 +2021,7 @@ mod tests {
             failed_job: None,
             job_lookups: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None)
             .expect("the run list is valid");
         assert!(failures.is_empty());
         assert!(job_conclusion_is_failure(Some("failure")));
@@ -1947,7 +2041,7 @@ mod tests {
             failed_job: Some("Fast Validation"),
             job_lookups: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None)
             .expect("the run list is valid");
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].failing_job, "Fast Validation");
@@ -1968,7 +2062,7 @@ mod tests {
             calls: Cell::new(0),
         };
 
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None)
             .expect("the run list is valid");
 
         assert!(failures.is_empty());
@@ -1990,7 +2084,7 @@ mod tests {
             calls: Cell::new(0),
         };
 
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None)
             .expect("the run list is valid");
 
         assert_eq!(failures.len(), 1);
@@ -2173,7 +2267,7 @@ mod tests {
             log: None,
             calls: Cell::new(0),
         };
-        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()])).unwrap();
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]), None).unwrap();
         assert!(failures.is_empty());
         assert_eq!(transport.calls.get(), 0);
     }
@@ -2493,7 +2587,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            collect_failures(&NoAuth, &BTreeSet::new()),
+            collect_failures(&NoAuth, &BTreeSet::new(), None),
             Err(CiWatchError::Unavailable(_))
         ));
     }

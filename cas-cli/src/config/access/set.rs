@@ -700,6 +700,32 @@ impl Config {
                 let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
                 post.env = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
             }
+            "qa.release.integration_branch" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.integration_branch = value.trim().to_string();
+            }
+            "qa.release.branches" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.branches = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.release.adapter" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.adapter = value.trim().to_string();
+            }
+            "qa.release.env" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.env = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.release.timeout_secs" => {
+                let secs = value.parse().ok().filter(|secs| *secs > 0).ok_or_else(|| MemError::Parse("Expected a positive integer".into()))?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.timeout_secs = secs;
+            }
+            "qa.release.components" => {
+                let components = crate::qa_release::ReleaseConfig::parse_components(value).map_err(MemError::Parse)?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.components = components;
+            }
             "qa.preflight_hook" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_hook = if value.trim().is_empty() {

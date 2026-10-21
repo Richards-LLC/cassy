@@ -522,6 +522,9 @@ pub struct QaConfig {
     pub registry: QaRegistryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_release: Option<crate::qa_post_release::PostReleaseConfig>,
+    /// Release gate seam: adapter, branches and served components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<crate::qa_release::ReleaseConfig>,
 
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
     #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
@@ -688,6 +691,7 @@ impl Default for QaConfig {
     fn default() -> Self {
         Self {
             post_release: None,
+            release: None,
             mode: QaMode::PerTask,
             registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),

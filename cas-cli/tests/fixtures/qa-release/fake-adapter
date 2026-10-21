@@ -1,0 +1,15 @@
+#!/bin/sh
+# Fake project QA adapter for qa_release tests (protocol v1). It runs through
+# the real qa_command sandbox: only allow-listed variables reach it.
+set -eu
+[ -z "${FAKE_PRIVATE:-}" ] || exit 1
+[ "$#" -eq 1 ] && [ "$1" = served ] || exit 1
+request=$(cat)
+case "$request" in *'"v":1'*) ;; *) exit 1 ;; esac
+case "$request" in *'"verb":"served"'*) ;; *) exit 1 ;; esac
+case "$request" in *'"env":"staging"'*) ;; *) exit 1 ;; esac
+if [ -n "${FAKE_ERROR_KIND:-}" ]; then
+  printf '{"v":1,"ok":false,"error":{"kind":"%s","provider":"fake-health","status":429,"retry_after_s":30,"message":"slow down"}}\n' "$FAKE_ERROR_KIND"
+  exit 0
+fi
+printf '{"v":1,"ok":true,"data":[{"component":"backend","sha":"%s","deploy_ref":"fake-deploy"}]}\n' "$FAKE_SERVED_SHA"

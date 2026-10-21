@@ -194,6 +194,12 @@ impl Config {
             "qa.post_release.timeout_secs" => Some(qa.post_release.clone().unwrap_or_default().timeout_secs.to_string()),
             "qa.post_release.release_branches" => Some(qa.post_release.clone().unwrap_or_default().release_branches.join(",")),
             "qa.post_release.env" => Some(qa.post_release.clone().unwrap_or_default().env.join(",")),
+            "qa.release.integration_branch" => Some(qa.release.clone().unwrap_or_default().integration_branch),
+            "qa.release.branches" => Some(qa.release.clone().unwrap_or_default().branches.join(",")),
+            "qa.release.adapter" => Some(qa.release.clone().unwrap_or_default().adapter),
+            "qa.release.env" => Some(qa.release.clone().unwrap_or_default().env.join(",")),
+            "qa.release.timeout_secs" => Some(qa.release.clone().unwrap_or_default().timeout_secs.to_string()),
+            "qa.release.components" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().components).expect("serializable components")),
             "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
             "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),
             // Dev section

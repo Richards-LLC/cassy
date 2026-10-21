@@ -84,6 +84,21 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         keywords: &["qa", "post-release", "canary"],
         use_cases: &["Observe a release before announcing it or closing its epic"],
     });
+    for (key, name, description, value_type, default, constraint) in [
+        ("qa.release.integration_branch", "Release integration branch", "Branch the release gate walks, for example staging.", ConfigType::String, "", Constraint::None),
+        ("qa.release.branches", "Release promotion branches", "Promotion targets whose PRs need a clean release gate.", ConfigType::StringList, "", Constraint::None),
+        ("qa.release.adapter", "Release adapter", "Project-relative QA adapter executable, called as `<adapter> <verb>` with protocol v1 JSON on stdin and stdout; no shell. Empty leaves the gate off.", ConfigType::String, "", Constraint::None),
+        ("qa.release.env", "Release adapter env", "Environment variable names allowed into the adapter.", ConfigType::StringList, "", Constraint::None),
+        ("qa.release.timeout_secs", "Release adapter timeout secs", "Per-call adapter timeout.", ConfigType::Int, "120", Constraint::Min(1)),
+        ("qa.release.components", "Release served components", "JSON object of served component name to repository paths, for served-SHA equivalence.", ConfigType::String, "{}", Constraint::None),
+    ] {
+        registry.register(ConfigMeta {
+            key, section: "qa", name, description, value_type, default, constraint,
+            advanced: true, requires_feature: None,
+            keywords: &["qa", "release-gate", "adapter", "staging"],
+            use_cases: &["Gate staging-to-production promotion on one evidence pack"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "qa.mode", section: "qa", name: "QA Mode",
         description: "per_task keeps per-delivery evidence and independent QA. batch defers evidence at park and accepts one published staging ledger for its listed delivery anchors after integration; no automatic per-task QA is dispatched. Explicit QA requests remain available.",

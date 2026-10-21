@@ -16,7 +16,8 @@ The executable runs from the project root, with whitespace-separated arguments
 and no shell expansion. Its path must stay inside the project. The environment
 contains a minimal PATH and LANG plus only the named allow-list variables.
 Scripts must implement read-only access; Cassy cannot enforce database permissions.
-Use read-only credentials. Raw error stdout/stderr is never stored.
+Use read-only credentials. Raw error stdout/stderr is never stored. The release
+gate adapter shares this sandbox; see [release gate](release-gate.md).
 
 Start after the merge lands:
 

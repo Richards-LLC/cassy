@@ -2182,6 +2182,17 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
     for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
         assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
     }
+    let lines = output.lines().collect::<Vec<_>>();
+    let warning = lines
+        .iter()
+        .position(|line| line.contains("serve  Tailscale Serve inactive:"))
+        .expect("hub Serve finding is printed");
+    assert!(lines[warning].trim_end().ends_with("Tailscale Serve inactive:"), "{output}");
+    assert_eq!(
+        lines[warning + 1].trim(),
+        "tailscale is stopped; hub remains loopback-only",
+        "the transport cause belongs on its own indented line:\n{output}"
+    );
     assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
 

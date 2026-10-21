@@ -1096,6 +1096,32 @@ journeys:
     }
 
     #[test]
+    fn qa_registry_fixture_union() {
+        let yaml = GABBER.replace(
+            "  fresh: {description: New account, provider: account-seed}",
+            &format!(r#"  fresh: {{description: New account, provider: account-seed}}
+  media: {{description: Frozen media, frozen: {{sha256: "{}", storage_key: golden/video.mp4}}}}
+  persona: {{description: Past due account, recipe: {{name: past_due, envs: [staging], provides: [account_id], ttl_mins: 30}}}}
+  live: {{description: Live media, provider: "https://example.test/media/1"}}"#, "a".repeat(64)),
+        );
+        let dir = repo(&yaml);
+        let report = check(dir.path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(report.debt.iter().any(|d| d.code == "live_url_fixture" && d.subject == "fixtures.live"));
+        let registry = load(&dir.path().join(DEFAULT_PATH)).unwrap();
+        let roundtrip = serde_yaml::to_string(&registry).unwrap();
+        assert!(parse(&roundtrip).unwrap().validate(&[]).problems.iter().all(|p| p.code != "fixture"));
+        for (from, to) in [
+            ("golden/video.mp4", "''"),
+            ("ttl_mins: 30", "ttl_mins: 0"),
+            ("envs: [staging]", "envs: []"),
+        ] {
+            let invalid = parse(&yaml.replace(from, to)).unwrap().validate(&[]);
+            assert!(invalid.problems.iter().any(|p| p.code == "fixture"), "{invalid:?}");
+        }
+    }
+
+    #[test]
     fn qa_registry_gabber_fixture_validates() {
         let dir = repo(GABBER);
         let key = "qa.registry.path";

@@ -30,8 +30,8 @@
     → cas update --sync --json
   ⚠ Documents/Accounting    skills 2 managed file conflict(s)
     → cas update --sync --json
-  ⚠ hub                     serve  Tailscale Serve inactive: tailscale is
-                                   stopped; hub remains loopback-only
+  ⚠ hub                     serve  Tailscale Serve inactive:
+      tailscale is stopped; hub remains loopback-only
     → Check `tailscale status`, then run `cas hub restart`.
   ℹ ~/scratch/old-clone            not refreshed: not a Git project root
     → cas known-repos forget <path>

@@ -314,24 +314,14 @@ fn probe_claude_auth_with(
                 "Retry doctor after one minute; a transient probe failure is not an unavailable account.",
             ),
         )?;
-        let evidence = if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
-            unknown(
-                now_ms,
-                "macOS login keychain locked in ssh session",
-                "Unlock the login keychain from a local macOS session, then retry doctor after one minute.",
-            )
-        } else {
-            probe_claude_auth_uncached(account_dir, now_ms, deadline, run)
-        };
-        write_claude_auth_cache(&mut file, &evidence)?;
+        let evidence = probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run);
+        // A completed probe already supplies real evidence. Persistence failure
+        // must neither hide that result nor launch the auth command a second time.
+        let _ = write_claude_auth_cache(&mut file, &evidence);
         Ok(evidence)
     })();
     cached.unwrap_or_else(|_| {
-        unknown(
-            now_ms,
-            "Claude auth probe cache could not be accessed",
-            "Restore read/write access to ~/.cas/cache/claude-auth, then retry doctor.",
-        )
+        probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run)
     })
 }
 
@@ -382,12 +372,20 @@ fn probe_claude_auth_uncached(
     account_dir: Option<&str>,
     now_ms: u64,
     deadline: Deadline,
+    macos_ssh: bool,
     run: &mut impl FnMut(
         &mut Command,
         Deadline,
         Duration,
     ) -> Result<std::process::Output, BoundedCommandError>,
 ) -> CapabilityEvidence {
+    if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
+        return unknown(
+            now_ms,
+            "macOS login keychain locked in ssh session",
+            "Unlock the login keychain from a local macOS session, then retry doctor after one minute.",
+        );
+    }
     let mut command = Command::new("claude");
     if let Some(account_dir) = account_dir.filter(|dir| !dir.trim().is_empty()) {
         command

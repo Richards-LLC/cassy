@@ -28,9 +28,6 @@ pub(super) fn at_park(
         }
     };
     let qa = config.qa();
-    if qa.registry.enforce == RegistryEnforcement::Off {
-        return Ok(vec![]);
-    }
     let (base, head, paths) = match delivery_snapshot(task, repo, target, window, receipt) {
         Ok(snapshot) => snapshot,
         Err(message) => return warning(store, task, message),
@@ -262,10 +259,21 @@ fn check(
     paths: Option<&[String]>,
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    let mut qa = qa.clone();
+    // Resolve policy from the delivered head before considering local Off.
+    // A checkout edit and a local observe/off setting cannot relax this header.
+    if let Some(stage) = tracked(repo, head)
+        .ok()
+        .and_then(|files| read(repo, head, &qa.registry.path, &files).ok().flatten())
+        .and_then(|text| crate::qa_registry::parse(&text).ok())
+        .and_then(|registry| registry.enforce)
+    {
+        qa.registry.enforce = stage;
+    }
     if qa.registry.enforce == RegistryEnforcement::Off {
         return Ok(vec![]);
     }
-    let result = inspect(task, repo, qa, base, head, paths);
+    let result = inspect(task, repo, &qa, base, head, paths);
     match result {
         Ok((findings, warnings)) => finish(
             store,
@@ -388,11 +396,7 @@ fn inspect(
             problem_lines(&caused)
         )));
     }
-    let codemap = read(repo, head, ".claude/CODEMAP.md", &after_paths)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let impact = crate::qa_impact::impact_for_changes(Some(&registry), qa, &changes, &codemap);
+    let impact = crate::qa_impact::analyze(repo, qa, &changes, Some(base), Some(head))?;
     let unowned: Vec<_> = impact
         .unowned
         .iter()

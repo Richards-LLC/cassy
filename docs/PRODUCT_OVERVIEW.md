@@ -23,7 +23,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
 - **Worktree** - a separate Git checkout and branch that isolates a worker's changes.
 - **Close gate** - the evidence, test-receipt and merge checks that decide whether a parked delivery may close.
-- **Journey registry** - a project's `docs/qa/journeys.yaml` (drafted by `cas qa journeys --seed`): each user journey's owner files, specs, surfaces and live, dark or dead status.
+- **Journey registry** - a project's `docs/qa/journeys.yaml` (drafted by `cas qa journeys --seed`): each user journey's owner files, specs, surfaces and live, dark or dead status. Cassy's Commander registry preserves import and CSS selector coverage, with enforcement declared in the tracked registry.
 - **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns.
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.

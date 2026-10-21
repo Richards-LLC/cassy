@@ -30,6 +30,8 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | --- | --- |
 | `version` | Required integer `1`. |
 | `updated` | Required ISO date, `YYYY-MM-DD`, of the last curated edit. |
+| `selection` | Optional `globs` (default) or `legacy_catalog`. The latter preserves the existing Markdown catalog's import and CSS selector coverage; YAML still supplies journey metadata and ownership. |
+| `enforce` | Optional `off`, `observe`, `enforce`, or `strict`. The delivered registry header is authoritative when set; local `qa.registry.enforce` is the fallback only when this header has no policy. |
 | `seeded_from` | Optional list of source descriptions. |
 | `traffic_snapshot` | Optional free-form map; counts and sources are not validated. |
 | `ignore` | Optional ordered path filters ignored by impact and ownership checks. |
@@ -68,6 +70,27 @@ A seeded journey remains responsible for a valid entry, ownership and references
 Seeded journeys are reported as debt. Live journeys with explicit
 `traffic.share_pct: null` produce traffic debt, never a validation error. Curate
 a seed by adding steps, invariant checks and traffic, then removing `seeded`.
+
+### Preserving a semantic catalog
+
+cas-src uses `selection: legacy_catalog` to keep HUB-J1–HUB-J21 selection through
+`scripts/journeys-for-diff.py` and `docs/qa/journeys.md`. Both files must be tracked.
+The selector, catalog and import graph come from the reviewed head; a diff also
+supplies its base for CSS, composition and fixture hunks. Paths-only requests use
+the selector's conservative behavior when hunk context is unavailable. No arbitrary
+selector command can be configured.
+
+The selector's IDs determine the touched journeys, including an empty selection.
+An ID missing from YAML is an error. Names, steps, specs, invariants, fixtures and
+traffic come from YAML. Owner globs independently determine file ownership: a
+selected journey can have no direct glob match, and selection never makes an
+unowned file owned. Ignore filters apply before selection. Ordinary registries
+remain a pure glob pass and do not launch the Python selector.
+
+Keep the Markdown narrative, stable IDs and YAML metadata aligned when a journey
+changes. Extend YAML owners when source dependencies change; the semantic selector
+tracks imports dynamically. cas-src deliberately leaves new, uncatalogued source
+files unowned so G2 requires ownership or an explicit decision in that delivery.
 
 ## Example
 
@@ -141,7 +164,10 @@ G1–G3 run before the merge request, using the committed delivery head and the 
 attributed diff (including deletions and rename sources). They read Git snapshots;
 uncommitted changes do not repair a delivery. Missing registries disable these gates.
 
-`qa.registry.enforce` accepts `off`, `observe`, `enforce` (default), or `strict`.
+Header `enforce` accepts `off`, `observe`, `enforce`, or `strict`, and takes precedence
+over local `qa.registry.enforce`. The local setting is used only when the delivered
+header has no policy; its default is `enforce`. A local setting cannot downgrade a
+tracked policy, and uncommitted YAML cannot change a delivered policy.
 `observe` persists would-be refusals as task notes and passes. `strict` is explicit
 opt-in and also checks modified unowned surface files. The stage
 is operator-controlled; strict is never selected automatically. Existing

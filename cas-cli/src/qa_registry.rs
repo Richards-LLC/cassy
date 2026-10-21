@@ -8,11 +8,22 @@ use serde_yaml::{Mapping, Value};
 
 pub const DEFAULT_PATH: &str = "docs/qa/journeys.yaml";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    #[default]
+    Globs,
+    LegacyCatalog,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Registry {
     pub version: Option<u32>,
     pub updated: Option<String>,
+    pub selection: Selection,
+    /// Tracked policy wins; local qa.registry.enforce is fallback only.
+    pub enforce: Option<crate::config::RegistryEnforcement>,
     pub seeded_from: Vec<String>,
     pub traffic_snapshot: Option<Mapping>,
     pub ignore: Vec<String>,
@@ -319,6 +330,17 @@ impl Registry {
         }
         if self.journeys.is_empty() {
             report.problem("journeys", "registry", "journeys must be a non-empty list");
+        }
+        if self.selection == Selection::LegacyCatalog {
+            for path in ["docs/qa/journeys.md", "scripts/journeys-for-diff.py"] {
+                if !tracked.iter().any(|file| file == path) {
+                    report.problem(
+                        "untracked_spec",
+                        "selection",
+                        format!("legacy_catalog requires tracked {path}"),
+                    );
+                }
+            }
         }
         let ids: BTreeSet<_> = self.journeys.iter().map(|j| j.id.as_str()).collect();
         let mut seen = BTreeSet::new();

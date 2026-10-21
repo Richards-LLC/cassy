@@ -6394,7 +6394,7 @@ mod cas_7ce6_parked_merge_source_tests {
         git(path, &["branch", "factory/w-cas-park", &anchor]);
         let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
             .unwrap().expect("an exact delivery branch remains usable");
-        assert_eq!(source, "factory/w-cas-park");
+        assert_eq!(git(path, &["rev-parse", &source]), anchor);
         git(path, &["checkout", "-q", "main"]);
         git(path, &["merge", "--no-ff", "-m", "integrate parked source", &source]);
         assert!(path.join("parked").is_file());

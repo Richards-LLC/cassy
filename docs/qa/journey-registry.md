@@ -331,8 +331,8 @@ positive count is known. Local missing/invalid registry verdicts still apply.
 Changing `upkeep.codemap`, `upkeep.product_overview`, or `qa.registry.enforce`
 from `off`/`observe` to `enforce` saves the setting, then warns about positive
 drift for that artifact, naming the same measured ref and status command. Zero,
-unknown, repeated `enforce`, and already-stricter registry policy do not produce
-that warning. Failure to measure never turns a successful save into a failure.
+unknown, repeated `enforce`, and `strict` to `enforce` writes do not produce that
+warning. Failure to measure never turns a successful save into a failure.
 Config `--json` preserves `key`, `old_value`, and `new_value`, and adds `warnings`
 as an array in the same document. Tracked registry enforcement remains authoritative.
 

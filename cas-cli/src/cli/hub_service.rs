@@ -1402,12 +1402,21 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
             terminal_width
         };
         let mut paths_shortened = false;
+        let launch_issues = report
+            .launch_readiness
+            .iter()
+            .filter(|readiness| !readiness.ready)
+            .count();
+        let launch_summary = match launch_issues {
+            0 => "launches ready".to_owned(),
+            1 => "1 launch issue".to_owned(),
+            count => format!("{count} launch issues"),
+        };
         match report.supervision {
-            "manual" => {
-                println!("Hub service: manual supervision on this host");
-                println!("  Fix: install systemd --user for automatic startup.");
-                println!("  Start at login with: cas hub start --tailscale-serve");
-            }
+            "manual" => println!(
+                "Hub service: manual; hub {}; {launch_summary}",
+                report.hub_state.replace('_', " ")
+            ),
             manager => {
                 let manager = if manager == "systemd-user" {
                     "systemd"
@@ -1415,40 +1424,36 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                     manager
                 };
                 println!(
-                    "Hub service ({manager}): {}; {}; {}; hub {}",
+                    "Hub service ({manager}): {}; hub {}; {launch_summary}",
                     if report.installed {
                         "installed"
                     } else {
                         "not installed"
                     },
-                    match report.enabled {
-                        Some(true) => "enabled",
-                        Some(false) => "disabled",
-                        None => "enablement?",
-                    },
-                    match report.active {
-                        Some(true) => "active",
-                        Some(false) => "inactive",
-                        None => "activity?",
-                    },
-                    report.hub_state.replace('_', " "),
+                    report.hub_state.replace('_', " ")
                 );
-                if let Some(log_path) = report.log_path {
-                    let (log_path, shortened) = readiness_path(
-                        Path::new(&log_path),
-                        &home,
-                        cli.full,
-                        terminal_width,
-                    );
-                    paths_shortened |= shortened;
-                    println!("  Logs: {log_path}");
-                }
             }
         }
-        if let Some(warning) = report.manager_warning {
-            println!("  Warning: {warning}");
+
+        let first_repair = report
+            .launch_readiness
+            .iter()
+            .position(|readiness| readiness.repair.is_some());
+        if let Some(repair) = first_repair
+            .and_then(|index| report.launch_readiness[index].repair.as_deref())
+        {
+            println!("  Fix: {repair}");
+        } else if report.manager_warning.is_some() {
+            println!("  Retry: cas hub status");
+        } else if report.supervision == "manual" {
+            println!("  Fix: install systemd --user for automatic startup.");
+        } else if !report.installed {
+            println!("  Fix: cas hub service install");
+        } else {
+            println!("  Launch readiness: healthy");
         }
-        for readiness in &report.launch_readiness {
+
+        for (index, readiness) in report.launch_readiness.iter().enumerate() {
             if readiness.ready {
                 println!("  {} launch: ready", readiness.cli);
                 continue;
@@ -1462,9 +1467,38 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                 paths_shortened |= shortened;
                 println!("    path: {path}");
             }
-            if let Some(repair) = &readiness.repair {
+            if Some(index) != first_repair
+                && let Some(repair) = &readiness.repair
+            {
                 println!("    Fix: {repair}");
             }
+        }
+        if report.supervision == "manual" {
+            println!("  Start at login: cas hub start --tailscale-serve");
+        } else {
+            println!(
+                "  Supervision: {}; {}; {}",
+                report.supervision,
+                match report.enabled {
+                    Some(true) => "enabled",
+                    Some(false) => "disabled",
+                    None => "enablement unknown",
+                },
+                match report.active {
+                    Some(true) => "active",
+                    Some(false) => "inactive",
+                    None => "activity unknown",
+                }
+            );
+        }
+        if let Some(warning) = report.manager_warning {
+            println!("  Warning: {warning}");
+        }
+        if let Some(log_path) = report.log_path {
+            let (log_path, shortened) =
+                readiness_path(Path::new(&log_path), &home, cli.full, terminal_width);
+            paths_shortened |= shortened;
+            println!("  Logs: {log_path}");
         }
         if paths_shortened {
             println!("  Full paths: cas hub service status --full or --json");

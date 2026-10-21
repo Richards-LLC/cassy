@@ -2522,6 +2522,12 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
         human.lines().all(|line| line.chars().count() <= 80),
         "service status exceeded 80 columns:\n{human}"
     );
+    // pin: service status puts the first copyable repair command under its verdict.
+    assert_eq!(
+        human.lines().nth(1),
+        Some("  Fix: cas claude login main"),
+        "the first repair command should follow the service summary"
+    );
     assert!(human.contains("path: ~/.claude"), "{human}");
     assert!(human.contains("Fix: cas claude login main"), "{human}");
     assert!(human.contains("path: ~/.codex"), "{human}");

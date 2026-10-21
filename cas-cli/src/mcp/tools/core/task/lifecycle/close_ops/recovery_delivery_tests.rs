@@ -919,6 +919,33 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
     let cas_dir = f.dir.path().join(".cas");
+    let task_dir = fresh_ledger(&f);
+    std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
+    std::fs::write(
+        task_dir.join("pairs.json"),
+        serde_json::json!({
+            "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
+            "pairs": [], "unpaired": [{"id": "G3", "before": {"png": "before.png"}}],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let manifest = task_dir.join("bundle.json");
+    std::fs::write(
+        &manifest,
+        serde_json::json!({
+            "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.notes
+        .push_str(&format!("\nqa-bundle: {}", manifest.display()));
+    tasks.update(&task).unwrap();
+    let refusal = close_output(&f).await;
+    assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
     cas_store::waive_qa_pass(
         &cas_dir,
         TASK,

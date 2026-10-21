@@ -226,8 +226,18 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
         (vec![], before.to_vec()),
         (vec!["G1", "G2", "G3", "G4", "G5", "G6"], vec![]),
     ] {
-        fx.write_bundle(|manifest| manifest["files"]["pairs"] = "pairs/pairs.json".into());
-        let dir = fx.bundle_dir().join("pairs");
+        // A journey may cite the shared pairs directory outside its bundle.
+        let relative = if missing.is_empty() {
+            "../pairs/pairs.json"
+        } else {
+            "pairs/pairs.json"
+        };
+        fx.write_bundle(|manifest| manifest["files"]["pairs"] = relative.into());
+        let dir = if missing.is_empty() {
+            fx.task_dir.join("pairs")
+        } else {
+            fx.bundle_dir().join("pairs")
+        };
         std::fs::create_dir_all(&dir).unwrap();
         let mut pairs = Vec::new();
         let mut unpaired = Vec::new();

@@ -210,7 +210,10 @@ fn validate_pairs(
 ) -> Result<PairFiles, EvidenceRefusal> {
     let repair = "capture AFTER evidence for every BEFORE cell, retain baseline-only cells in unpaired[], and regenerate files.pairs; only a recorded exact-tip qa_waive or supervisor_override can waive coverage";
     let refuse = |problem: String| EvidenceRefusal::new(problem, repair);
-    let path = resolve_bundle_file(bundle_dir, "pairs", relative)?;
+    // Journey bundles share task-level qa/pairs; keep containment at the
+    // task root, while side captures remain inside the pairs directory.
+    let candidate = bundle_dir.join(relative);
+    let path = resolve_inside_task_dir(ctx, &candidate.to_string_lossy())?;
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| refuse(format!("unreadable files.pairs: {e}")))?;
     let pairs: EvidencePairs =

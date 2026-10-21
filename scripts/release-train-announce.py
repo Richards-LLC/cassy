@@ -41,6 +41,7 @@ TOP_LEVEL_LABEL = re.compile(
     r"^\*(?:Live on production|Staging|Source on main) — "
     r"(?:User|Dev) — Cassy(?: v[0-9]+\.[0-9]+\.[0-9]+)?\*$"
 )
+SECTION_HEADING = re.compile(r"\*[^*\n]+\*")
 
 
 def fail(message: str) -> None:
@@ -105,9 +106,14 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
             fail(f"body {BODY_NAMES[index]} bullet lacks a bold label")
         if position and (line_number == 0 or lines[line_number - 1].strip()):
             fail(f"body {BODY_NAMES[index]} bullets need blank lines between items")
-        next_bullet = bullets[position + 1] if position + 1 < len(bullets) else len(lines)
-        nonempty = [line for line in lines[line_number:next_bullet] if line.strip()]
-        if len(nonempty) > 2:
+        # A bullet ends at a blank line or a section heading (a line of only
+        # *bold* text), so a two-line bullet may precede the next section.
+        span = 1
+        for line in lines[line_number + 1:]:
+            if not line.strip() or line.startswith("• ") or SECTION_HEADING.fullmatch(line):
+                break
+            span += 1
+        if span > 2:
             fail(f"body {BODY_NAMES[index]} bullet spans more than two lines")
 
 

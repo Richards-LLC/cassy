@@ -590,19 +590,24 @@ pub fn check_freshness(
     agent_role: Option<&str>,
 ) -> Result<Option<ProjectOverviewStaleness>> {
     let _ = agent_role;
-    let doc_path = repo_root.join(DOC_PATH);
-    if !doc_path.exists() {
+    let local_store = repo_root.join(".cas");
+    let store = crate::store::find_cas_root_from(repo_root).unwrap_or(local_store);
+    check_freshness_at(&super::docs_freshness::Measurement::at(repo_root, &store))
+}
+
+pub(crate) fn check_freshness_at(
+    measurement: &super::docs_freshness::Measurement,
+) -> Result<Option<ProjectOverviewStaleness>> {
+    let Some(overview) = measurement.read(DOC_PATH) else {
         return Ok(Some(ProjectOverviewStaleness::Missing));
+    };
+    // Pending entries describe this checkout, never a different remote tree.
+    if measurement.reference == "HEAD" {
+        if let Some(staleness) = check_staleness_from_pending(&measurement.root)? {
+            return Ok(Some(staleness));
+        }
     }
-
-    // Supplement: in-session pending file (catches changes from this session).
-    if let Some(staleness) = check_staleness_from_pending(repo_root)? {
-        return Ok(Some(staleness));
-    }
-
-    // Primary: git history since PRODUCT_OVERVIEW.md's last commit, filtered
-    // through watch_targets.
-    check_staleness_from_git(repo_root)
+    check_staleness_from_git(measurement, &overview)
 }
 
 fn check_staleness_from_pending(
@@ -636,20 +641,27 @@ fn check_staleness_from_pending(
     Ok(Some(make_staleness(total, files, commit_info)))
 }
 
-fn check_staleness_from_git(repo_root: &Path) -> Result<Option<ProjectOverviewStaleness>> {
-    let Some(ts) = last_commit_timestamp(repo_root, DOC_PATH) else {
+fn check_staleness_from_git(
+    measurement: &super::docs_freshness::Measurement, overview: &str,
+) -> Result<Option<ProjectOverviewStaleness>> {
+    let repo_root = &measurement.root;
+    let Some(commit) = measurement.last_commit(DOC_PATH) else {
         return Ok(None);
     };
 
-    let targets = watch_targets(repo_root);
+    let range = format!("{commit}..{}", measurement.reference);
+    let config = measurement.read(".cas/config.toml")
+        .or_else(|| std::fs::read_to_string(measurement.store.join("config.toml")).ok())
+        .and_then(|text| config_section(&text));
+    let targets = resolve_watch_targets(config, Some(overview), || measurement.tracked());
 
     // Domain paths — any change since timestamp.
     let mut collected: Vec<ProjectOverviewChange> = Vec::new();
     for dp in &targets.domain_paths {
-        collected.extend(changes_for_path_since(repo_root, dp, &ts));
+        collected.extend(changes_for_path_since(repo_root, dp, &range));
     }
     // Watch dirs — structural only (A/D/R).
-    let structural = structural_changes_since(repo_root, &ts).unwrap_or_default();
+    let structural = structural_changes_since(repo_root, &range).unwrap_or_default();
     for c in structural {
         let hit = targets.is_in_watch_dir(&c.path)
             || c.old_path
@@ -679,30 +691,7 @@ fn check_staleness_from_git(repo_root: &Path) -> Result<Option<ProjectOverviewSt
     Ok(Some(make_staleness(total, files, String::new())))
 }
 
-/// Timestamp (RFC3339) of the last commit that touched `path` (relative to
-/// `repo_root`).
-///
-/// Returns `None` if the file has never been committed. The earlier design
-/// fell back to file mtime, but an uncommitted mtime can be arbitrarily old
-/// (or in the future on skewed clocks), which made `git log --since=<mtime>`
-/// flood every SessionStart with unrelated history and triggered a permanent
-/// `SignificantlyStale` warning until someone committed the file. Returning
-/// `None` lets the pending-file path be the only in-session signal for
-/// uncommitted docs.
-fn last_commit_timestamp(repo_root: &Path, path: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["log", "-1", "--format=%cI", "--", path])
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let ts = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if ts.is_empty() { None } else { Some(ts) }
-}
-
-/// All changes (M/A/D/R) to a single path since `since`.
+/// All changes (M/A/D/R) to a single path in the strict doc-commit..ref range.
 fn changes_for_path_since(
     repo_root: &Path,
     path: &str,
@@ -711,7 +700,7 @@ fn changes_for_path_since(
     let Ok(out) = std::process::Command::new("git")
         .args([
             "log",
-            &format!("--since={since}"),
+            since,
             "--name-status",
             "--format=",
             "--no-renames",
@@ -753,7 +742,7 @@ fn changes_for_path_since(
     changes
 }
 
-/// Structural changes (A/D) anywhere in the repo since `since`. Renames are
+/// Structural changes (A/D) anywhere in the doc-commit..ref range. Renames are
 /// split to A+D via `--no-renames` (matches codemap behavior).
 fn structural_changes_since(
     repo_root: &Path,
@@ -764,7 +753,7 @@ fn structural_changes_since(
             "log",
             "--diff-filter=ADR",
             "--name-status",
-            &format!("--since={since}"),
+            since,
             "--format=",
             "--no-renames",
             "-z",
@@ -1208,7 +1197,7 @@ watch_dirs = ["**", "web/src"]
     // --- last_commit_timestamp (no-mtime-fallback contract) ---------------
 
     #[test]
-    fn last_commit_timestamp_returns_none_when_not_committed() {
+    fn last_commit_returns_none_when_not_committed() {
         // Empty tmp dir — no git repo, no file, no history. Must not panic and
         // must not fabricate an mtime.
         let tmp = std::env::temp_dir().join(format!(
@@ -1218,7 +1207,7 @@ watch_dirs = ["**", "web/src"]
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        assert!(last_commit_timestamp(&tmp, DOC_PATH).is_none());
+        assert!(super::super::docs_freshness::Measurement::at(&tmp, &tmp.join(".cas")).last_commit(DOC_PATH).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

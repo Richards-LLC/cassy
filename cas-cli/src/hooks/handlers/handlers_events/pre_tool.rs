@@ -668,19 +668,21 @@ fn handle_pre_tool_use_inner(
         let is_gated =
             is_codemap_gated_tool_call(tool_name, action, crate::harness_policy::own_tool_prefix());
         if is_gated {
+            let measurement = super::docs_freshness::Measurement::at(Path::new(&input.cwd), cas_root);
             if let Some(
                 crate::hooks::handlers::handlers_events::CodemapStaleness::SignificantlyStale {
                     total_changes,
                     ..
                 },
-            ) = crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
+            ) = super::codemap::evaluate_codemap_at(&measurement).and_then(|evaluation| evaluation.staleness)
             {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
                     &format!(
-                        "🗺️  CODEMAP.md is significantly out of date ({total_changes} structural changes).\n\n\
+                        "🗺️  CODEMAP.md is significantly out of date ({total_changes} structural changes).\n\
+                        Measured ref: {} ({}).\n\n\
                         Workers rely on CODEMAP for codebase orientation — dispatching against a stale map wastes tokens.\n\n\
-                        Run `/codemap` to refresh, then retry."
+                        Run `/codemap` to refresh, then retry.", measurement.reference, measurement.root.display()
                     ),
                 ));
             }

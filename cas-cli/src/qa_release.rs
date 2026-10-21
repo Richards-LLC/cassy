@@ -502,6 +502,30 @@ pub enum MigrationRefusal {
     AdapterBug(String),
 }
 
+impl MigrationRefusal {
+    /// The refusal class, which an override reason must name.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Pending { .. } => "MIGRATION PENDING",
+            Self::StatusUnknown(_) => "MIGRATION STATUS UNKNOWN",
+            Self::AdapterBug(_) => "MIGRATION ADAPTER BUG",
+        }
+    }
+
+    /// What clears this refusal without an override.
+    pub fn next_step(&self) -> String {
+        match self {
+            Self::Pending { env, .. } => format!("Apply the migration on {env}, then retry."),
+            Self::StatusUnknown(_) => {
+                "Retry when the adapter can report migration status.".into()
+            }
+            Self::AdapterBug(_) => {
+                "Fix the project adapter or [qa.release] configuration, then retry.".into()
+            }
+        }
+    }
+}
+
 /// The migration id `pattern`'s single `*` captures in `path`, if it matches.
 fn migration_id<'p>(pattern: &str, path: &'p str) -> Option<&'p str> {
     let pattern: Vec<&str> = pattern.split('/').collect();
@@ -639,19 +663,24 @@ pub(crate) mod test_project {
     use std::path::Path;
     use std::process::Command;
 
-    pub(crate) struct Project(tempfile::TempDir);
+    pub(crate) struct Project {
+        dir: tempfile::TempDir,
+        /// The adapter configuration the fixture installed.
+        pub(crate) installed: ReleaseConfig,
+    }
 
     impl Project {
         /// A git repository on `main` with the fake adapter installed, uncommitted.
         pub(crate) fn new() -> Self {
-            let project = Self(tempfile::tempdir().unwrap());
+            let dir = tempfile::tempdir().unwrap();
+            let installed = fake_adapter(dir.path(), "");
+            let project = Self { dir, installed };
             project.git(&["init", "-q", "-b", "main"]);
-            fake_adapter(project.root(), "");
             project
         }
 
         pub(crate) fn root(&self) -> &Path {
-            self.0.path()
+            self.dir.path()
         }
 
         pub(crate) fn git(&self, args: &[&str]) -> String {
@@ -735,6 +764,7 @@ mod tests {
             ("branches", "main"),
             ("timeout_secs", "5"),
         ]);
+        assert_eq!(config.adapter, project.installed.adapter);
         env.set("FAKE_SERVED_SHA", &served);
         env.set("FAKE_PRIVATE", "must-not-inherit");
 
@@ -838,7 +868,7 @@ mod tests {
         let log = calls.path().join("calls.log");
         let config = release_config(&[
             ("adapter", "./scripts/qa/fake-adapter"),
-            ("env", "FAKE_MIGRATIONS,FAKE_ERROR_KIND,FAKE_CALL_LOG"),
+            ("env", "FAKE_MIGRATIONS,FAKE_ERROR_KIND,FAKE_CALL_LOG,FAKE_SLEEP"),
             ("integration_branch", "staging"),
             ("migrations.paths", "db/migrations/*/migration.sql"),
             ("migrations.env", "staging"),
@@ -856,6 +886,9 @@ mod tests {
         project.git(&["checkout", "-q", "main"]);
         project.git(&["checkout", "-qb", "migration"]);
         let tip = project.commit("db/migrations/20261021_add/migration.sql", "add");
+        // The target moves past the merge base with a migration of its own.
+        project.git(&["checkout", "-q", "main"]);
+        project.commit("db/migrations/20261022_main/migration.sql", "main");
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
         assert_eq!(check_migrations(root, &config, "main", "migration").unwrap(), ["20261021_add"]);
         let request = std::fs::read_to_string(&log).unwrap();
@@ -873,6 +906,7 @@ mod tests {
         for (kind, prefix) in [
             ("rate_limited", "MIGRATION STATUS UNKNOWN: "),
             ("external", "MIGRATION STATUS UNKNOWN: "),
+            ("insufficient", "MIGRATION STATUS UNKNOWN: "),
             ("internal", "MIGRATION ADAPTER BUG: "),
             ("invalid", "MIGRATION ADAPTER BUG: "),
         ] {
@@ -880,5 +914,10 @@ mod tests {
             let refusal = check_migrations(root, &config, "main", "migration").unwrap_err().to_string();
             assert!(refusal.starts_with(prefix), "{kind}: {refusal}");
         }
+        env.remove("FAKE_ERROR_KIND");
+        env.set("FAKE_SLEEP", "3");
+        let impatient = ReleaseConfig { timeout_secs: 1, ..config };
+        let refusal = check_migrations(root, &impatient, "main", "migration").unwrap_err();
+        assert!(matches!(refusal, MigrationRefusal::StatusUnknown(_)), "{refusal}");
     }
 }

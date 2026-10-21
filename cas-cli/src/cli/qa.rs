@@ -1,6 +1,10 @@
 //! Project QA commands; registry checking uses the shared in-process validator.
 
-use std::{collections::BTreeMap, path::{Path, PathBuf}, process::{Command, Stdio}};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Args, Subcommand};
@@ -326,25 +330,59 @@ struct CandidateReceipt {
 }
 
 fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    ensure!(output.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     let CandidateCommand::Build { task, rev, plan } = &args.command;
-    ensure!(task.starts_with("cas-") && task.len() > 4 && task.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'), "invalid task id {task:?}");
+    ensure!(
+        task.starts_with("cas-")
+            && task.len() > 4
+            && task
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid task id {task:?}"
+    );
     let cas_root = cas_root.context("No Cassy project; run cas init first")?;
     let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
-    let revision = git_text(&project, &["rev-parse", "--verify", "--end-of-options", &format!("{rev}^{{commit}}")])?;
-    ensure!(revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()), "resolved revision is not a full commit SHA");
+    let revision = git_text(
+        &project,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )?;
+    ensure!(
+        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "resolved revision is not a full commit SHA"
+    );
     let config = crate::config::Config::load(cas_root)?;
-    let artifacts = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let artifacts = if artifacts.is_absolute() { artifacts } else { project.join(artifacts) };
+    let artifacts =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let artifacts = if artifacts.is_absolute() {
+        artifacts
+    } else {
+        project.join(artifacts)
+    };
     let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
-        .join(task).join("candidate");
+        .join(task)
+        .join("candidate");
     let layout = CandidatePlan {
-        task: task.clone(), revision: revision.clone(),
+        task: task.clone(),
+        revision: revision.clone(),
         binary: candidate_dir.join("cas"),
         version_file: candidate_dir.join("VERSION.txt"),
         checksums_file: candidate_dir.join("SHA256SUMS"),
@@ -355,26 +393,57 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&layout)?);
         } else {
-            println!("Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json", layout.candidate_dir.display(), layout.revision);
+            println!(
+                "Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json",
+                layout.candidate_dir.display(),
+                layout.revision
+            );
         }
         return Ok(());
     }
-    ensure!(std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("worker"), "candidate builds are supervisor/operator-owned; ask the supervisor for the exact-tip binary");
+    ensure!(
+        std::env::var("CAS_AGENT_ROLE").ok().as_deref() != Some("worker"),
+        "candidate builds are supervisor/operator-owned; ask the supervisor for the exact-tip binary"
+    );
     let script = project.join("scripts/qa-candidate-build.py");
-    ensure!(script.is_file(), "QA candidate builder missing: {}", script.display());
+    ensure!(
+        script.is_file(),
+        "QA candidate builder missing: {}",
+        script.display()
+    );
     let output = Command::new("python3")
-        .arg(script).arg("--repo").arg(&project)
-        .arg("--rev").arg(&revision)
-        .arg("--candidate-dir").arg(&layout.candidate_dir)
-        .stdout(Stdio::piped()).stderr(Stdio::inherit()).output()
+        .arg(script)
+        .arg("--repo")
+        .arg(&project)
+        .arg("--rev")
+        .arg(&revision)
+        .arg("--candidate-dir")
+        .arg(&layout.candidate_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()
         .context("run QA candidate build")?;
-    ensure!(output.status.success(), "QA candidate build exited {}", output.status);
-    let receipt: CandidateReceipt = serde_json::from_slice(&output.stdout).context("read QA candidate build receipt")?;
-    ensure!(receipt.revision == revision && receipt.candidate_dir == layout.candidate_dir, "candidate receipt does not match requested revision and path");
+    ensure!(
+        output.status.success(),
+        "QA candidate build exited {}",
+        output.status
+    );
+    let receipt: CandidateReceipt =
+        serde_json::from_slice(&output.stdout).context("read QA candidate build receipt")?;
+    ensure!(
+        receipt.revision == revision && receipt.candidate_dir == layout.candidate_dir,
+        "candidate receipt does not match requested revision and path"
+    );
     if cli.json {
         print!("{}", String::from_utf8(output.stdout)?);
     } else {
-        println!("Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}", receipt.candidate_dir.display(), receipt.version, receipt.revision, receipt.sha256);
+        println!(
+            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}",
+            receipt.candidate_dir.display(),
+            receipt.version,
+            receipt.revision,
+            receipt.sha256
+        );
     }
     Ok(())
 }

@@ -238,7 +238,7 @@ impl CiWake {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
     #[serde(default)]
@@ -1270,24 +1270,44 @@ fn is_branch_ci_verdict(run: &CiRun) -> bool {
 
 /// The last observed deploy verdict, including its actionable failure detail.
 /// Keeping green watermarks prevents an older red snapshot from resurrecting it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DeployObservation {
     run: CiRun,
     failure: Option<CiFailure>,
 }
 
-/// Deployment setup must never silence the ordinary branch watcher. Warn once
-/// per affected path per process, even though the poll itself remains healthy.
-fn warn_deploy_watch_once(path: &Path, error: impl std::fmt::Display) {
-    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
-    let first = WARNED
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DeployWatchErrorClass {
+    Read,
+    Parse,
+    Write,
+}
+
+static DEPLOY_WATCH_WARNED: std::sync::Mutex<BTreeSet<(PathBuf, DeployWatchErrorClass)>> =
+    std::sync::Mutex::new(BTreeSet::new());
+
+/// Deployment setup must never silence ordinary CI. Deduplicate each error
+/// class until its operation recovers, so repairs rearm the diagnostic.
+fn warn_deploy_watch_once(
+    path: &Path,
+    class: DeployWatchErrorClass,
+    error: impl std::fmt::Display,
+) {
+    let first = DEPLOY_WATCH_WARNED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(path.to_path_buf());
+        .insert((path.to_path_buf(), class));
     if first {
-        tracing::warn!(path = %path.display(), %error,
+        tracing::warn!(path = %path.display(), error_class = ?class, %error,
             "Deploy watcher setup/state unavailable; ordinary CI watching continues");
     }
+}
+
+fn clear_deploy_watch_warnings(path: &Path, classes: &[DeployWatchErrorClass]) {
+    DEPLOY_WATCH_WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(warned_path, class)| warned_path != path || !classes.contains(class));
 }
 
 fn load_deploy_observations(path: &Path) -> Result<Vec<DeployObservation>, CiWatchError> {
@@ -1311,12 +1331,23 @@ pub(crate) fn collect_failures(
 ) -> Result<Vec<CiFailure>, CiWatchError> {
     let (release, config_loaded) = match cas_dir {
         Some(dir) => match crate::config::Config::load(dir) {
-            Ok(config) => (
-                config.qa.and_then(|qa| qa.release).unwrap_or_default(),
-                true,
-            ),
+            Ok(config) => {
+                clear_deploy_watch_warnings(
+                    dir,
+                    &[DeployWatchErrorClass::Read, DeployWatchErrorClass::Parse],
+                );
+                (
+                    config.qa.and_then(|qa| qa.release).unwrap_or_default(),
+                    true,
+                )
+            }
             Err(error) => {
-                warn_deploy_watch_once(dir, error);
+                let class = if matches!(&error, crate::error::CasError::Io(_)) {
+                    DeployWatchErrorClass::Read
+                } else {
+                    DeployWatchErrorClass::Parse
+                };
+                warn_deploy_watch_once(dir, class, error);
                 (crate::qa_release::ReleaseConfig::default(), false)
             }
         },
@@ -1341,7 +1372,11 @@ pub(crate) fn collect_failures(
     if let Some(path) = &state_path {
         match load_deploy_observations(path) {
             Ok(saved) => {
-                for observation in saved.into_iter().filter(|o| is_configured_deploy(&o.run)) {
+                clear_deploy_watch_warnings(
+                    path,
+                    &[DeployWatchErrorClass::Read, DeployWatchErrorClass::Parse],
+                );
+                for observation in saved {
                     deploys.insert(
                         (
                             observation.run.head_branch.clone(),
@@ -1352,7 +1387,11 @@ pub(crate) fn collect_failures(
                 }
             }
             Err(error) => {
-                warn_deploy_watch_once(path, error);
+                let class = match &error {
+                    CiWatchError::Malformed(_) => DeployWatchErrorClass::Parse,
+                    CiWatchError::Unavailable(_) => DeployWatchErrorClass::Read,
+                };
+                warn_deploy_watch_once(path, class, error);
                 deploy_available = false;
             }
         }
@@ -1362,6 +1401,8 @@ pub(crate) fn collect_failures(
         // overwriting lost red or green watermarks with a fresh empty state.
         state_path = None;
     }
+    let previous_deploys = deploys.clone();
+    deploys.retain(|_, saved| is_configured_deploy(&saved.run));
     let is_deploy = |run: &CiRun| deploy_available && is_configured_deploy(run);
 
     let runs = transport.completed_runs()?;
@@ -1478,11 +1519,18 @@ pub(crate) fn collect_failures(
         }
     }
     failures.extend(deploys.values().filter_map(|saved| saved.failure.clone()));
+    if deploys == previous_deploys {
+        if let Some(path) = &state_path {
+            // A healthy read that already matches the current observations
+            // also proves there is no unresolved persistence failure.
+            clear_deploy_watch_warnings(path, &[DeployWatchErrorClass::Write]);
+        }
+    }
     // Atomic replacement keeps restart recovery from reading a partial write.
     // Save before relaying: a crash between save and enqueue is recovered by
     // the next poll, while the prompt queue's stable key prevents duplicates.
     if let Some(path) = state_path
-        && (!release.deploy_workflows.is_empty() || path.exists())
+        && deploys != previous_deploys
     {
         let saved: Vec<_> = deploys.into_values().collect();
         let written = serde_json::to_string(&saved)
@@ -1494,7 +1542,9 @@ pub(crate) fn collect_failures(
         if let Err(error) = written {
             // Current observations are still useful if their persistence fails.
             // In particular, ordinary CI relays must remain available.
-            warn_deploy_watch_once(&path, error);
+            warn_deploy_watch_once(&path, DeployWatchErrorClass::Write, error);
+        } else {
+            clear_deploy_watch_warnings(&path, &[DeployWatchErrorClass::Write]);
         }
     }
     Ok(failures)
@@ -1566,8 +1616,13 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
         ),
         None => "This red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.".to_string(),
     };
+    let subject = if failure.merged_into.as_deref() == Some(failure.branch.as_str()) {
+        format!("Deploy {}", failure.workflow)
+    } else {
+        "CI".to_string()
+    };
     format!(
-        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nWorkflow: {}\nFailing job: {}{}{}\n{next}\n</ci-red-run>",
+        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\n{subject} failed on branch {} at {}.\nRun: {}\nWorkflow: {}\nFailing job: {}{}{}\n{next}\n</ci-red-run>",
         failure.branch,
         failure.head_sha,
         failure.run_id,
@@ -2057,6 +2112,8 @@ mod tests {
             assert_eq!(rows.len(), 2);
             for row in rows {
                 assert_eq!(row.priority, NotificationPriority::Critical);
+                // pin: deploy alerts identify the workflow as a deployment failure.
+                assert!(row.prompt.contains("Deploy Deploy Backend failed") || row.prompt.contains("Deploy Deploy Frontend failed"));
                 assert!(row.summary.as_deref().unwrap().contains("BLOCKER"));
                 // pin: the supervisor must see GitHub's failed job and step.
                 assert!(row.prompt.contains("Deploy service"));
@@ -2074,7 +2131,48 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_ordinary_ci_run_is_a_red_alert() {
+        let transport = TipTransport {
+            runs: vec![run_with("main", "current", 101, Some("timed_out"))],
+            tip: Some("current"),
+            failed_job: Some("Integration checks"),
+            job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".into()]), None).unwrap();
+        assert_eq!(failures.len(), 1);
+        let temp = tempfile::tempdir().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(emit_failure(&queue, "factory-session", &failures[0]).unwrap());
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].priority, NotificationPriority::High);
+        // pin: a timed-out run names the job that needs attention.
+        assert!(rows[0].prompt.contains("Failing job: Integration checks"));
+    }
+
+    #[test]
     fn deploy_configuration_errors_preserve_ordinary_ci_alerts() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || Capture(sink.clone()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let mut errors = Vec::new();
         for (file, damaged) in [
             ("config.toml", "[qa.release]\nintegration_branch = ["),
@@ -2108,13 +2206,66 @@ mod tests {
                     Err(error) => errors.push(format!("{file}: {error}")),
                 }
             }
-            assert_eq!(std::fs::read_to_string(damaged_path).unwrap(), damaged);
+            assert_eq!(std::fs::read_to_string(&damaged_path).unwrap(), damaged);
             if errors.is_empty() {
                 let rows = queue.peek_all(10).unwrap();
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].priority, NotificationPriority::High);
             }
+            if file == "config.toml" {
+                deploy_config(temp.path());
+            } else {
+                std::fs::write(&damaged_path, "[]").unwrap();
+            }
+            collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+            std::fs::write(&damaged_path, damaged).unwrap();
+            for _ in 0..2 {
+                collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+            }
+            if file == "ci-deploy-watch.json" {
+                // Parse -> read error without recovery must produce a new warning.
+                std::fs::remove_file(&damaged_path).unwrap();
+                std::fs::create_dir(&damaged_path).unwrap();
+                for _ in 0..2 {
+                    collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+                }
+                #[cfg(unix)]
+                {
+                    // A readable symlink deterministically fails atomic writes.
+                    std::fs::remove_dir(&damaged_path).unwrap();
+                    let target = temp.path().join("readable-state.json");
+                    std::fs::write(&target, "[]").unwrap();
+                    std::os::unix::fs::symlink(&target, &damaged_path).unwrap();
+                    for _ in 0..2 {
+                        assert_eq!(
+                            collect_failures(&transport, &watched, Some(temp.path()))
+                                .unwrap()
+                                .len(),
+                            2
+                        );
+                    }
+                    std::fs::remove_file(&damaged_path).unwrap();
+                    std::fs::write(&damaged_path, "[]").unwrap();
+                    collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+                    std::fs::remove_file(&damaged_path).unwrap();
+                    std::os::unix::fs::symlink(&target, &damaged_path).unwrap();
+                    for _ in 0..2 {
+                        collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+                    }
+                }
+            }
         }
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        // pin: count warning episodes for the actionable ordinary-CI diagnostic.
+        #[cfg(unix)]
+        let expected_warnings = 7;
+        #[cfg(not(unix))]
+        let expected_warnings = 5;
+        assert_eq!(
+            logs.matches("ordinary CI watching continues").count(),
+            expected_warnings,
+            "each error class warns once, and a healthy read rearms the warning: {logs}"
+        );
         assert!(
             errors.is_empty(),
             "deploy setup silenced ordinary CI: {errors:?}"
@@ -2142,12 +2293,24 @@ mod tests {
             1,
             "a path-filtered deploy remains red after the tip moves"
         );
+        #[cfg(unix)]
+        let state_inode = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(temp.path().join("ci-deploy-watch.json")).unwrap(),
+        );
         // A fresh collector reads persisted observations when the old deploy
         // falls outside GitHub's 100-run window (also covers daemon restart).
         transport.runs = (200..300)
             .map(|id| run_with("main", "moved-tip", id, Some("success")))
             .collect();
         assert_eq!(collect(&transport), red);
+        #[cfg(unix)]
+        assert_eq!(
+            state_inode,
+            std::os::unix::fs::MetadataExt::ino(
+                &std::fs::metadata(temp.path().join("ci-deploy-watch.json")).unwrap()
+            ),
+            "an unchanged observation must not replace the state file"
+        );
         for (event, workflow, conclusion, id) in [
             ("push", "Deploy Backend", "success", 99),
             ("push", "Deploy Backend", "cancelled", 301),

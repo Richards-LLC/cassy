@@ -1920,6 +1920,9 @@ impl CasCore {
             }
             None => String::new(),
         };
+        // Cloud admission below awaits I/O. A reassignment or another start
+        // must invalidate this snapshot before its grant can be consumed.
+        let split_start_snapshot = (!split_note.is_empty()).then(|| task.clone());
 
         // cas-7844 / GH #259: Gate tasks are supervisor-owned decisions,
         // not worker execution. Reuse the same live registered-supervisor
@@ -2596,7 +2599,11 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        task.updated_at = match task_store.update(&task) {
+        let start_update = match split_start_snapshot.as_ref() {
+            Some(expected) => task_store.update_if_current(&task, expected),
+            None => task_store.update(&task),
+        };
+        task.updated_at = match start_update {
             Ok(updated_at) => updated_at,
             Err(error) => {
                 if matches!(error, crate::store::StoreError::SyncDegradedAfterCommit { .. }) {

@@ -401,6 +401,8 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
     assert!(task.notes.contains(reason) && task.notes.contains(&id), "{}", task.notes);
     assert!(serde_json::to_value(&task).unwrap()["deliverables"].get("split_takeover").is_none());
     assert_eq!(cloud_holder(&cloud, "cas-d3").as_deref(), Some("pr"));
+    let refused = soundwave.start("cas-d3", true).await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "consumed grant cannot be replayed: {refused}");
 
     // The peers detail view shows the split on both sides.
     for supervisor in [&soundwave, &prowl] {

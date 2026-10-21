@@ -144,7 +144,9 @@ uncommitted changes do not repair a delivery. Missing registries disable these g
 `qa.registry.enforce` accepts `off`, `observe`, `enforce` (default), or `strict`.
 `observe` persists would-be refusals as task notes and passes. `strict` is explicit
 opt-in and also checks modified unowned surface files. The stage
-is operator-controlled; strict is never selected automatically.
+is operator-controlled; strict is never selected automatically. Existing
+projects get the one-release observe window described in
+[documentation upkeep](docs-upkeep.md#stages-and-adoption).
 
 | Gate | Refusal | Decision escape |
 | --- | --- | --- |

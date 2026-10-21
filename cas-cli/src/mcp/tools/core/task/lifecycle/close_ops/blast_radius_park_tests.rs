@@ -136,10 +136,8 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     }
 }
 
-/// cas-eac2 (D1): lane CI no longer runs broad Rust for factory pushes, so a
-/// delivery changing `widget` without a worker test receipt there at the
-/// exact tip is refused at park. Widening proof_targets (the cas-d6eb
-/// remedy) does not substitute for the test, and a receipt in `widget` parks.
+/// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input
+/// change, but can be rebound across a docs-only commit without rerunning.
 #[tokio::test]
 async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let mut env = TestEnvGuard::temp_home();
@@ -160,13 +158,64 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let widened = call(&f.worker, close.clone()).await;
     assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
 
-    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let input_changes = [
+        (
+            "Cargo.toml",
+            "\n[workspace.metadata.cas95e0]\nproof = true\n",
+            "build(cas-br01): update package proof metadata",
+        ),
+        (
+            "crates/widget/tests/gear.rs",
+            "#[test]\nfn gear_turns() {}\n",
+            "test(cas-br01): add gear coverage",
+        ),
+        (
+            "crates/widget/src/gear.rs",
+            "pub fn turn() { let _ = 2; }\n",
+            "fix(cas-br01): update gear behavior",
+        ),
+    ];
+    let mut tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
     );
+    for (path, contents, message) in input_changes {
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(f.worker_path.join(parent)).unwrap();
+        }
+        std::fs::write(f.worker_path.join(path), contents).unwrap();
+        git(&f.worker_path, &["add", path]);
+        git(&f.worker_path, &["commit", "-q", "-m", message]);
+        git(&f.worker_path, &["push", "-q", "origin", LANE]);
+        let stale = call(&f.worker, close.clone()).await;
+        assert!(
+            stale.contains("FOCUSED PROOF REQUIRED"),
+            "receipt at {tested_tip} must not cover proof-input change {path}: {stale}"
+        );
+        assert_eq!(f.task().status, TaskStatus::InProgress, "{path}: {stale}");
+        tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        crate::factory_worker_check::record_passing_test_for_tests(
+            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+        );
+    }
+
+    let doc_path = "docs/design/cli/update-managed-files.brief.md";
+    std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
+    std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();
+    git(&f.worker_path, &["add", doc_path]);
+    git(&f.worker_path, &["commit", "-q", "-m", "docs(cas-br01): update managed files brief"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    assert_ne!(tested_tip, delivered_tip);
     let parked = call(&f.worker, close).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    let task = f.task();
+    assert_eq!(task.status, TaskStatus::AwaitingMerge);
+    assert!(
+        task.notes.contains(&format!("rebound from {tested_tip} to {delivered_tip}")),
+        "the close must record the receipt rebind: {}",
+        task.notes
+    );
 }
 
 /// AC2: a worker receipt in `widget` at the parked tip already covers

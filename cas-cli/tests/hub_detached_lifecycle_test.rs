@@ -179,6 +179,12 @@ fn hub_record_proves_its_own_session_and_cli_launcher() {
 fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     let home = private_home();
     let path = std::env::var_os("PATH").unwrap_or_default();
+    let occupied_listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port for failed replacement");
+    let occupied_port = occupied_listener
+        .local_addr()
+        .expect("occupied listener address")
+        .port();
     let initial = cas_command(home.path(), &path)
         .args([
             "--json",
@@ -223,6 +229,68 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     assert_eq!(receipt["start"]["version"], initial["version"], "{receipt}");
     assert_ne!(receipt["start"]["pid"], initial["pid"], "{receipt}");
 
+    let failed_restart = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "restart",
+            "--port",
+            &occupied_port.to_string(),
+        ])
+        .output()
+        .expect("restart into an occupied port");
+    assert!(
+        !failed_restart.status.success(),
+        "restart unexpectedly succeeded on occupied port {}",
+        occupied_port
+    );
+    let failure: Value = serde_json::from_slice(&failed_restart.stdout)
+        .expect("one JSON error value when replacement start fails");
+    assert_eq!(failure["status"], "error", "{failure}");
+    assert_eq!(failure["stop"]["stopped"], true, "{failure}");
+    assert_eq!(failure["stop"]["pid"], receipt["start"]["pid"], "{failure}");
+    assert_eq!(failure["stop"]["already_satisfied"], false, "{failure}");
+    let message = failure["message"].as_str().expect("failure message");
+    assert!(
+        String::from_utf8_lossy(&failed_restart.stderr).contains(message),
+        "human diagnostic must remain on stderr: stdout={} stderr={}",
+        String::from_utf8_lossy(&failed_restart.stdout),
+        String::from_utf8_lossy(&failed_restart.stderr),
+    );
+
+    let expected_stop_keys = [
+        "already_satisfied",
+        "pid",
+        "stopped",
+        "tailscale_serve_removed",
+        "tailscale_warning",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    for stop in [&receipt["stop"], &failure["stop"]] {
+        let keys = stop
+            .as_object()
+            .expect("restart stop object")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(keys, expected_stop_keys, "{stop}");
+    }
+
+    let help = cas_command(home.path(), &path)
+        .args(["hub", "restart", "--help"])
+        .output()
+        .expect("restart help");
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("detached hub"),
+        "restart JSON help must scope its response shape to detached hubs: {}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+
+    drop(occupied_listener);
     let stop = cas_command(home.path(), &path)
         .args(["--json", "hub", "stop"])
         .output()

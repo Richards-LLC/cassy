@@ -38,7 +38,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         fixture
             .app
             .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
-        let (_, prompts, _) = fixture
+        let (_, mut prompts, _) = fixture
             .app
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
@@ -49,7 +49,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 .contains("CI completed successfully for delivery")
         );
         assert!(prompts[0].retract_task.is_some());
-        let verdicts = fixture.app.deliverability_request().read(None, &prompts);
+        let verdicts = fixture.app.deliverability_request().read(None, &mut prompts);
         assert_eq!(
             verdicts,
             vec![true],
@@ -92,6 +92,9 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             assert!(Instant::now() < deadline, "batch recheck did not complete");
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
+        if scenario == "superseded" {
+            assert!(batch.prompts[0].1, "superseded prompt must survive the batch handoff");
+        }
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.join("fallback.txt");

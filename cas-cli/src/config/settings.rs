@@ -517,7 +517,7 @@ impl Default for QaRegistryConfig {
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
-    /// Journey registry location; enforcement stages are added by the upkeep gates.
+    /// Journey registry location and staged upkeep enforcement.
     #[serde(default)]
     pub registry: QaRegistryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]

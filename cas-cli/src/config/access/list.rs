@@ -339,6 +339,7 @@ impl Config {
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),
+            ("qa.registry.enforce".into(), qa.registry.enforce.to_string()),
             ("qa.registry.path".to_string(), qa.registry.path.clone()),
             ("qa.post_release.command".into(), self.get("qa.post_release.command").unwrap()),
             ("qa.post_release.window_mins".into(), self.get("qa.post_release.window_mins").unwrap()),

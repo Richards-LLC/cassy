@@ -81,6 +81,26 @@ pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) ->
     )
 }
 
+/// G1–G3 share the same complete escape/retry contract, in the caller's harness.
+pub(crate) fn registry_upkeep_message(
+    task_id: &str,
+    registry_path: &str,
+    title: &str,
+    detail: &str,
+    escape_token: &str,
+    warnings: &[String],
+    caller_prefix: &str,
+) -> String {
+    let warnings = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", warnings.join("\n"))
+    };
+    format!(
+        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {registry_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
+    )
+}
+
 /// A feature map is opt-in by the target repository's directory. The caller
 /// supplies only feature files whose Touches globs matched delivered paths.
 pub(crate) fn feature_map_drift_message(

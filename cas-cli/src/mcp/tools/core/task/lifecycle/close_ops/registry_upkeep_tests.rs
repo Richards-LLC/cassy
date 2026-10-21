@@ -70,14 +70,17 @@ impl Fixture {
         }
     }
     fn run(&mut self, head: &str) -> Result<(), String> {
-        check(
+        let mut config = crate::config::Config::default();
+        config.qa = Some(self.qa.clone());
+        config.save(self._db.path()).unwrap();
+        at_park(
             &self.store,
             &mut self.task,
+            self._db.path(),
             self.repo.path(),
-            &self.qa,
             &self.base,
-            head,
             None,
+            Some(head),
             None,
         )
     }
@@ -236,6 +239,16 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
 
 #[test]
 fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
+    let mut config = crate::config::Config::default();
+    let key = "qa.registry.enforce";
+    assert_eq!(config.get(key).as_deref(), Some("enforce"));
+    assert!(crate::config::meta::registry().get(key).is_some());
+    for stage in ["off", "observe", "enforce", "strict"] {
+        config.set(key, stage).unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(stage));
+        assert!(config.list().contains(&(key.into(), stage.into())));
+    }
+    assert!(config.set(key, "automatic").is_err());
     let mut f = Fixture::new(YAML);
     f.qa.registry.enforce = RegistryEnforcement::Observe;
     write(f.repo.path(), "src/pages/new.ts", "entry");

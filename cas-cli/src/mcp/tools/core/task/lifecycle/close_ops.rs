@@ -8227,6 +8227,13 @@ impl CasCore {
                     qa_receipt,
                 )
             });
+            if let Err(message) = registry_upkeep::at_park(
+                task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
+                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
+                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+            ) {
+                return Ok(Self::tool_error(message));
+            }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,

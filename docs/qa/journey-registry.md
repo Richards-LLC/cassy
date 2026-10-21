@@ -9,7 +9,7 @@ The default file is `docs/qa/journeys.yaml`. Set another project-relative path
 with `cas config set qa.registry.path docs/qa/custom.yaml`. Run from the project
 checkout; global `--json` returns one `{problems, debt}` object. Each array contains
 `{code, subject, message}` rows. The same loader and validator serve future impact
-and upkeep consumers; checking alone does not install a close gate.
+and upkeep consumers. Registry upkeep also runs automatically at task park.
 
 ## Path filters
 
@@ -111,3 +111,36 @@ cas-src's existing Markdown catalog and selector remain available to their
 current callers. Registry validation does not convert that catalog. The planned
 impact command prefers YAML, then the legacy catalog, then CODEMAP fallback;
 see [the adaptive QA brief](../design/adaptive-qa.brief.md).
+
+## Registry upkeep at task park
+
+G1–G3 run before the merge request, using the committed delivery head and the task's
+attributed diff (including deletions and rename sources). They read Git snapshots;
+uncommitted changes do not repair a delivery. Missing registries disable these gates.
+
+`qa.registry.enforce` accepts `off`, `observe`, `enforce` (default), or `strict`.
+`observe` persists would-be refusals as task notes and passes. `strict` is explicit
+opt-in and also checks modified unowned surface files. The stage
+is operator-controlled; strict is never selected automatically.
+
+| Gate | Refusal | Decision escape |
+| --- | --- | --- |
+| G1 | New schema/reference problems when the registry changed; deletion or rename that leaves a previously matching owner/group/surface glob or spec orphaned | `registry unchanged: <reason>` |
+| G2 | Added or renamed surface file without a journey owner, owner group or ignore match; strict also checks modified files | `no journey impact: <reason>` |
+| G3 | Bug task touches a live journey but has no changed bug-family entry naming the task in `tasks`, or changed invariant naming it in `bug.task` / `bug.tasks` | `no case: <reason>` |
+
+Own a new file in the same delivery to resolve G2. For G3, add or extend the case
+with the invariant that would have caught the incident; an unchanged historical
+case does not cover a new fix. Pre-existing validation debt and an untouched
+malformed registry warn without refusing unrelated delivery.
+
+An escape requires `task action=notes id=<task> note_type=decision notes="<token> <reason>"`.
+The token starts the decision body and the reason must be non-empty; quoting it in
+progress or warning text does not waive a gate. Retry close after recording it.
+Authenticated `supervisor_override=true` with a non-empty close reason also waives
+these gates and records the refusal waived.
+
+Accounting is durable and deduplicated across retries: notes start with
+`UPKEEP OBSERVE G1|G2|G3:` or `UPKEEP ESCAPE G1|G2|G3:`. The original typed
+`✅ DECISION` remains available to the verifier. Status, QA descriptions and epic
+summaries can count these rows without executing a check again.

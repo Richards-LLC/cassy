@@ -433,8 +433,10 @@ fn clean_idle_assignment_note(
     if !super::repo_context::repo_answers_to(&repo_root, &target.repo_selector) {
         return None;
     }
-    let branch = crate::factory_isolation::expected_worker_branch(&worker.name);
-    if crate::factory_isolation::branch_at(path).as_deref() != Some(branch.as_str()) {
+    let branch = crate::factory_isolation::branch_at(path)?;
+    if crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch))
+        != crate::factory_isolation::WorkerBinding::Own
+    {
         return None;
     }
     let status = std::process::Command::new("git")

@@ -1980,8 +1980,19 @@ impl CasCore {
                             "Cannot start task: worker checkout belongs to another repository",
                         ));
                     }
-                    let worker_branch =
-                        crate::factory_isolation::expected_worker_branch(&worker.name);
+                    // A completed per-task lane is owned just like the base
+                    // lane. Reconcile the branch actually checked out so an
+                    // accepted clean-idle assignment also starts on fresh code.
+                    let worker_branch = crate::factory_isolation::branch_at(worker_checkout)
+                        .filter(|branch| {
+                            crate::factory_isolation::classify_worker_binding(
+                                &worker.name,
+                                Some(branch),
+                            ) == crate::factory_isolation::WorkerBinding::Own
+                        })
+                        .unwrap_or_else(|| {
+                            crate::factory_isolation::expected_worker_branch(&worker.name)
+                        });
                     match reconcile_reused_factory_branch(
                         worker_checkout,
                         &worker_branch,

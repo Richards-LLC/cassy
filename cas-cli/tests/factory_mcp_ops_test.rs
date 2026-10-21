@@ -10234,6 +10234,128 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     );
 }
 
+/// A review hold must preserve this task's work without admitting a prior task.
+#[tokio::test]
+async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a() {
+    let home = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-review-resume")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "review-resume-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"review-resume-fixture\"\n",
+    )
+    .unwrap();
+    let mut agent = Agent::new("test-agent-id".into(), worker.into());
+    agent.role = AgentRole::Worker;
+    agent.factory_session = Some("session-review-resume".into());
+    agent.metadata.insert(
+        "clone_path".into(),
+        worker_path.to_string_lossy().into_owned(),
+    );
+    env.agent_store().register(&agent).unwrap();
+    let mut task = Task::new("cas-5eb1a".into(), "Resume after review".into());
+    task.assignee = Some(worker.into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:review-resume-fixture".into(),
+        target_branch: "main".into(),
+    });
+    env.task_store().add(&task).unwrap();
+    let base = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    for (message, anchor, foreign, allowed) in [
+        ("fix(cas-5eb1a): own work", None, false, true),
+        ("unnamed delivery", Some("current"), false, true),
+        ("unnamed delivery", Some("historical"), false, true),
+        ("fix(cas-5eb1a): own work", None, true, false),
+        ("fix(cas-5eb1a): own work", Some("historical"), true, false),
+        ("fix(cas-5eb1ab): another task", None, false, false),
+        (
+            "fix(cas-abcd): foreign work\n\nContext: cas-5eb1a",
+            None,
+            false,
+            false,
+        ),
+    ] {
+        git_stdout(&worker_path, &["reset", "--hard", &base]);
+        env.task_store().update(&task).unwrap();
+        let start = || {
+            serde_json::from_value::<TaskRequest>(serde_json::json!({
+                "action": "start", "id": task.id, "brief": true
+            }))
+            .unwrap()
+        };
+        env.service
+            .task(Parameters(start()))
+            .await
+            .expect("initial start");
+        if foreign {
+            git_stdout(
+                &worker_path,
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "fix(cas-abcd): foreign work",
+                ],
+            );
+        }
+        std::fs::write(worker_path.join("own.txt"), "reviewed work\n").unwrap();
+        git_stdout(&worker_path, &["add", "own.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", message]);
+        let tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        if let Some(anchor) = anchor {
+            let store = env.task_store();
+            let mut delivered = store.get(&task.id).unwrap();
+            if anchor == "current" {
+                delivered.deliverables.factory_branch_anchor = Some(tip.clone());
+            } else {
+                delivered
+                    .deliverables
+                    .historical_factory_branch_anchors
+                    .push(tip.clone());
+            }
+            store.update(&delivered).unwrap();
+        }
+        for status in ["blocked", "open"] {
+            let update = serde_json::from_value(serde_json::json!({
+                "action": "update", "id": task.id, "status": status
+            }))
+            .unwrap();
+            env.service
+                .task(Parameters(update))
+                .await
+                .expect("review hold transition");
+        }
+        let result = env.service.task(Parameters(start())).await;
+        if allowed {
+            result.unwrap_or_else(|error| {
+                panic!("own work must resume ({message}, {anchor:?}): {error}")
+            });
+            assert_eq!(
+                env.task_store().get(&task.id).unwrap().status,
+                TaskStatus::InProgress
+            );
+        } else {
+            let error = result.expect_err("foreign work must refuse even under an own tip/anchor");
+            assert!(error.message.contains("git rebase main"), "{error}");
+            assert_eq!(
+                env.task_store().get(&task.id).unwrap().status,
+                TaskStatus::Open
+            );
+        }
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(
+            std::fs::read_to_string(worker_path.join("own.txt")).unwrap(),
+            "reviewed work\n"
+        );
+    }
+}
+
 /// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for
 /// merge (under independent QA on another epic) reads as behind any other
 /// epic. Rebasing it would destroy the tip under review, so assignment must

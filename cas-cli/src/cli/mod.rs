@@ -1026,8 +1026,7 @@ mod tests {
             "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
             "Render a PDF with Playwright after rendering the HTML",
             "Re-fetch sources and replace the Markdown source, including a manual source",
-            "A standalone `release-latency.receipt` from scripts/release-latency-receipt.sh <tag> --run-dir <dir>",
-            "its run directory is read alongside ~/.cas/artifacts/release",
+            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside ~/.cas/artifacts/release",
         ];
 
         for width in [80, 120] {

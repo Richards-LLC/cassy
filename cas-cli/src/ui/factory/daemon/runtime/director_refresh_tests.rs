@@ -183,9 +183,16 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 assert!(refresh.take_deliverability(&mut daemon.queue_jobs).is_empty());
             }
             let name = daemon.app.supervisor_name().to_string();
-            let marker = "sync-fallback-check-finished";
-            daemon.app.mux.inject(&name, marker).await.unwrap();
+            // A Codex inject retains the submit boundary after writing its body.
+            // Wait for ownership to clear before issuing the marker; otherwise
+            // inject correctly defers it and there is nothing for cat to drain.
             let deadline = Instant::now() + Duration::from_secs(2);
+            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(!daemon.app.mux.pane_submit_pending(&name));
+            let marker = "sync-fallback-check-finished";
+            assert_eq!(daemon.app.mux.inject(&name, marker).await.unwrap(), cas_mux::InjectOutcome::Delivered);
             while !std::fs::read_to_string(&capture).unwrap_or_default().contains(marker)
                 && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(5)).await;

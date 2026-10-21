@@ -147,6 +147,29 @@ pub(crate) fn set_config_value(
     cas_root: &Path,
     context: impl FnOnce() -> InvocationContext,
 ) -> anyhow::Result<String> {
+    update_config_in_place(
+        config,
+        key,
+        cas_root,
+        |before, after| {
+            let old_value = before.get(key).unwrap_or_default();
+            after.set(key, value)?;
+            Ok(old_value)
+        },
+        |before, after| guard_operator_config(before, after, context),
+    )
+}
+
+/// Apply a validated mutation through the config editor without serializing
+/// unrelated defaults back into the document. The guard lets the operator-only
+/// write-roots path retain its separate cgroup policy.
+pub(crate) fn update_config_in_place<T>(
+    config: &mut Config,
+    key: &str,
+    cas_root: &Path,
+    update: impl FnOnce(&Config, &mut Config) -> anyhow::Result<T>,
+    guard: impl FnOnce(&Config, &Config) -> anyhow::Result<()>,
+) -> anyhow::Result<T> {
     let _lock = crate::config::lock_project_config(cas_root)?;
     let path = cas_root.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
@@ -159,21 +182,25 @@ pub(crate) fn set_config_value(
     } else {
         toml::from_str(&raw)?
     };
-    let old_value = before.get(key).unwrap_or_default();
     let mut after = before.clone();
-    after.set(key, value)?;
+    let result = update(&before, &mut after)?;
 
     let serialized_after = toml::to_string(&after)?;
     let after_document = toml_edit::Document::parse(serialized_after)?;
-    let replacement = config_document_item(after_document.as_item(), key).cloned();
     let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    set_config_document_item(&mut document, key, replacement)?;
+    let (serialized_path, stored_path, alternate_path) =
+        config_document_paths(&document, key);
+    let replacement = config_document_item(after_document.as_item(), serialized_path).cloned();
+    set_config_document_item(&mut document, stored_path, replacement)?;
+    if let Some(alternate_path) = alternate_path {
+        set_config_document_item(&mut document, alternate_path, None)?;
+    }
     if let Some(marker) = upkeep_observe_marker_for_set(key) {
         set_config_document_item(&mut document, marker, None)?;
     }
     let contents = document.to_string();
     let saved: Config = toml::from_str(&contents)?;
-    guard_operator_config(&before, &saved, context)?;
+    guard(&before, &saved)?;
     if contents != raw {
         crate::config::atomic_replace_project_config(&path, &contents)?;
     }
@@ -181,12 +208,44 @@ pub(crate) fn set_config_value(
     if key == "viktor.enabled" {
         crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
     }
-    Ok(old_value)
+    Ok(result)
 }
 
 fn config_document_item<'a>(item: &'a toml_edit::Item, path: &str) -> Option<&'a toml_edit::Item> {
     path.split('.')
         .try_fold(item, |item, part| item.as_table_like()?.get(part))
+}
+
+fn config_document_paths<'a>(
+    document: &toml_edit::DocumentMut,
+    key: &'a str,
+) -> (&'a str, &'a str, Option<&'a str>) {
+    let (serialized_path, alternate_path) = match key {
+        "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+            ("factory.cargo_build_jobs", Some("factory.worker_build_jobs"))
+        }
+        "staging.staging_dir" | "staging.large_artifact_dir" => {
+            ("staging.staging_dir", Some("staging.large_artifact_dir"))
+        }
+        _ => (key, None),
+    };
+    let stored_path = if config_document_item(document.as_item(), serialized_path).is_some() {
+        serialized_path
+    } else if let Some(alternate_path) = alternate_path.filter(|path| {
+        config_document_item(document.as_item(), path).is_some()
+    }) {
+        alternate_path
+    } else {
+        serialized_path
+    };
+    let remove_path = alternate_path.map(|alternate_path| {
+        if stored_path == serialized_path {
+            alternate_path
+        } else {
+            serialized_path
+        }
+    });
+    (serialized_path, stored_path, remove_path)
 }
 
 fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {

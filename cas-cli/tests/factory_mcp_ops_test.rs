@@ -10268,6 +10268,7 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
     env.task_store().add(&task).unwrap();
     let base = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
     for (message, anchor, prior, after, allowed) in [
+        ("", None, "", "fresh-dirty", false),
         ("fix(cas-5eb1a): own work", None, "", "", true),
         ("unnamed delivery", Some("current"), "", "", true),
         ("unnamed delivery", Some("historical"), "", "", true),
@@ -10340,6 +10341,43 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             }))
             .unwrap()
         };
+        if after == "fresh-dirty" {
+            std::fs::write(worker_path.join("README"), "prior task left edits\n").unwrap();
+            git_stdout(&worker_path, &["add", "README"]);
+            let status = git_stdout(
+                &worker_path,
+                &["status", "--porcelain", "--untracked-files=no"],
+            );
+            let error = env
+                .service
+                .task(Parameters(start()))
+                .await
+                .expect_err("a fresh task cannot inherit prior uncommitted tracked edits");
+            assert!(error.message.contains("uncommitted changes"), "{error}");
+            assert_eq!(
+                env.task_store().get(&task.id).unwrap().status,
+                TaskStatus::Open
+            );
+            assert!(
+                env.agent_store()
+                    .list_agent_leases("test-agent-id")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), base);
+            assert_eq!(
+                git_stdout(
+                    &worker_path,
+                    &["status", "--porcelain", "--untracked-files=no"]
+                ),
+                status
+            );
+            assert_eq!(
+                std::fs::read_to_string(worker_path.join("README")).unwrap(),
+                "prior task left edits\n"
+            );
+            continue;
+        }
         env.service
             .task(Parameters(start()))
             .await
@@ -10467,7 +10505,8 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 TaskStatus::InProgress
             );
         } else {
-            let error = result.expect_err("unsafe start must refuse without losing committed or dirty work");
+            let error = result
+                .expect_err("unsafe start must refuse without losing committed or dirty work");
             if after == "behind-dirty" {
                 assert!(error.message.contains("uncommitted changes"), "{error}");
             } else {

@@ -308,6 +308,9 @@ fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
 #[test]
 fn signed_out_hub_start_requires_explicit_loopback() {
     let home = private_home();
+    // This refusal is the explicit required policy; auto may retain loopback.
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     install_tailscale_mock(
@@ -335,6 +338,9 @@ fn signed_out_hub_start_requires_explicit_loopback() {
 #[test]
 fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     let home = private_home();
+    // Restart refuses a stopped daemon only under the required policy (cas-3f03e).
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
@@ -2470,4 +2476,56 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     );
     assert_eq!(status["runtime_receipt"]["hub"]["state"], "unknown");
     assert!(!home.path().join(".cas/hub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_status_prefers_live_lock_holder_over_dead_record_cas_ebbb() {
+    let home = private_home();
+    let paths = cas::hub::HubRuntimePaths::for_home(home.path());
+    let mut lock = paths.acquire_instance_lock().unwrap();
+    let mut exited = ProcessCommand::new("/usr/bin/true").spawn().unwrap();
+    let dead_pid = exited.id();
+    assert!(exited.wait().unwrap().success());
+    let record = serde_json::from_value(serde_json::json!({
+        "pid": dead_pid, "bind": "127.0.0.1", "port": 0,
+        "version": "old-record", "started_at": "2020-01-01T00:00:00Z",
+    })).unwrap();
+    paths.write_process_record(&record).unwrap();
+
+    for (phase, kinds) in [
+        ("starting", &["starting", "startup_wedged"][..]),
+        ("stopping", &["stopping"][..]),
+        ("running", &["unresponsive"][..]),
+    ] {
+        lock.set_phase(phase).unwrap();
+        let output = cas_command(home.path(), &system_path())
+            .args(["hub", "status", "--json"])
+            .output().unwrap();
+        assert!(!output.status.success(), "a lock holder alone is not ready");
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(kinds.contains(&json["state"]["kind"].as_str().unwrap()), "{json}");
+        assert_eq!(json["state"]["pid"], std::process::id(), "{json}");
+        assert_eq!(json["record"]["pid"], dead_pid, "keep the historical record");
+        assert_eq!(json["running"], false);
+        assert!(!json["state"]["remedy"].as_str().unwrap().contains("`cas hub start`"));
+        let output = cas_command(home.path(), &system_path())
+            .args(["hub", "status"])
+            .output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.starts_with(&format!("Cassy hub: pid {} is ", std::process::id())), "{text}");
+        assert!(!text.contains(&format!("last pid {dead_pid} exited")), "{text}");
+        assert!(!text.contains("`cas hub start`"), "{text}");
+    }
+
+    drop(lock);
+    // The test process is still alive; remove its released lock metadata.
+    fs::remove_file(paths.lock_path()).unwrap();
+    let output = cas_command(home.path(), &system_path())
+        .args(["hub", "status", "--json"])
+        .output().unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["state"]["kind"], "exited");
+    assert_eq!(json["state"]["pid"], dead_pid);
+    assert_eq!(json["state"]["remedy"], "Run `cas hub start`.");
 }

@@ -50,9 +50,9 @@ pub struct VerificationAddRequest {
     #[serde(default)]
     pub verifier_capability: Option<String>,
 
-    /// Exact dispatch to resolve. Required for supervisor-direct verdicts.
+    /// Exact dispatch to resolve; a supervisor may omit it for one live active cycle.
     #[schemars(
-        description = "Exact durable verification dispatch ID; required for supervisor-direct add"
+        description = "Exact durable verification dispatch ID; supervisor add may infer the unique unexpired active dispatch; expired recovery requires an explicit ID"
     )]
     #[serde(default)]
     pub dispatch_id: Option<String>,

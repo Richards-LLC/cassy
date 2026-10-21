@@ -1278,10 +1278,18 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     // cas-d626: past the inline limit a managed reply fails before any call.
     let big = write_file(&dir, "big.bin", &vec![b'a'; INLINE_LIMIT as usize + 1]);
     let too_big = ["post", "--channel", "gabber-internal", "--reply-to", root, "--file", big.to_str().unwrap()];
+    let gate_calls = RefCell::new(Vec::new());
+    let refusing_gate = |post: &Value| {
+        gate_calls.borrow_mut().push(post.clone());
+        Some("PUBLICATION BLOCKED (verification_pending)".to_string())
+    };
     let hub = ScriptedHub::with(Vec::new());
-    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+    let error = run_cli_claimed(&too_big, &hub, false, &refusing_gate, Some(intent.clone()))
+        .1
+        .unwrap_err();
     assert_eq!(error.code, "invalid_input");
-    assert!(error.message.contains(&INLINE_LIMIT.to_string()), "{error}");
+    assert!(error.message.contains("1 MiB"), "{error}");
+    assert!(gate_calls.borrow().is_empty(), "publication gate ran before the size refusal");
     assert_eq!(hub.connects(), 0);
 
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,

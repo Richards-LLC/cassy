@@ -9848,7 +9848,8 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
-                    tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", name,
+                    tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
+                        target_agent = %name, "Attempting prompt injection to '{}': {}", name,
                         queued.prompt.chars().take(50).collect::<String>());
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent
@@ -10108,7 +10109,8 @@ impl FactoryDaemon {
                 if renudge_granted {
                     self.reserve_renudge_attempt(queued.id);
                 }
-                tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", target,
+                tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
+                    target_agent = %pane_target, "Attempting prompt injection to '{}': {}", target,
                     queued.prompt.chars().take(50).collect::<String>());
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
@@ -14799,6 +14801,7 @@ mod tests {
             "swift-fox",
             "demo_statement",
             crate::prompt_revalidation::QaDeliveryLocation::ParkedForMerge,
+            None,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(

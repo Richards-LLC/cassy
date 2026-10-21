@@ -111,3 +111,26 @@ cas-src's existing Markdown catalog and selector remain available to their
 current callers. Registry validation does not convert that catalog. The planned
 impact command prefers YAML, then the legacy catalog, then CODEMAP fallback;
 see [the adaptive QA brief](../design/adaptive-qa.brief.md).
+
+## Bootstrap and status
+
+Run `cas qa journeys --seed` inside the checkout to create a registry. It refuses
+an existing file; use `cas qa journeys --seed --merge` to add newly discovered
+routes while preserving the bytes of curated entries. Stage new source files
+first: discovery and `--check` use Git's tracked-file index, including additions.
+Repeated merge runs add nothing when the routes have not changed.
+
+Discovery scans file routers (`pages`, `routes`, Next `app/**/page.*`), controller
+decorators, Express router/app calls and axum `.route(...)` calls. Source routes
+are guesses: the command does not execute code or resolve dynamic route values.
+PRODUCT_OVERVIEW flow/journey headings rename matching route candidates; unmatched
+flows become dark journeys. CODEMAP directory rows provide shared owner groups.
+Configured user-facing/API globs and discovered route directories define surfaces;
+remaining surface files receive explicit seed ownership. All generated journeys
+carry `seeded: true` and need review before they describe verified user behavior.
+No source or product context means seeding refuses instead of inventing a journey.
+
+`cas qa journeys --status` reports missing/invalid registries, journey and seed
+counts, debt, and unowned surfaces. `--json` returns the same data as one object.
+`cas doctor` includes a journey-registry row; a missing registry points to the seed
+command. Neither status nor doctor runs journey specs or installs gates.

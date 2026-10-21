@@ -1068,6 +1068,7 @@ pub fn emit_qa_dispatch_handoff(
     implementer: &str,
     reasons: &str,
     location: crate::prompt_revalidation::QaDeliveryLocation<'_>,
+    reviewer: Option<&str>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::qa_dispatch_envelope(
         pass_id,
@@ -1079,6 +1080,7 @@ pub fn emit_qa_dispatch_handoff(
         implementer,
         reasons,
         location,
+        reviewer,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{QA_DISPATCH_SOURCE_PREFIX}{pass_id}");

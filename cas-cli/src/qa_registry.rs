@@ -1217,15 +1217,89 @@ journeys:
             );
         }
         let mixed = yaml.replace("provider: account-seed}", "provider: account-seed, recipe: {name: seed, envs: [staging], provides: [id], ttl_mins: 1}}");
-        if let Ok(registry) = parse(&mixed) {
-            assert!(
-                registry
-                    .validate(&[])
-                    .problems
-                    .iter()
-                    .any(|p| p.code == "fixture")
-            );
+        let mut parse_failures = Vec::new();
+        let fresh = "{description: New account, provider: account-seed}";
+        let mut cases = vec![
+            ("empty fixture", GABBER.replace(fresh, "{}"), "fixture", ""),
+            (
+                "no source",
+                GABBER.replace(fresh, "{description: New account}"),
+                "fixture",
+                "",
+            ),
+            (
+                "source typo",
+                GABBER.replace("provider:", "provder:"),
+                "unknown_field",
+                "did you mean provider",
+            ),
+            (
+                "frozen typo",
+                yaml.replace("storage_key:", "storage_ke:"),
+                "unknown_field",
+                "did you mean storage_key",
+            ),
+            (
+                "recipe typo",
+                yaml.replace("ttl_mins:", "ttl_min:"),
+                "unknown_field",
+                "did you mean ttl_mins",
+            ),
+            (
+                "multiple sources",
+                yaml.replace(
+                    "provider: account-seed}",
+                    "provider: account-seed, frozen: {sha256: bad, storage_key: key}}",
+                ),
+                "fixture",
+                "",
+            ),
+        ];
+        for (name, value) in [
+            ("tagged readback extra", "!custom value"),
+            ("map readback extra", "{1: value}"),
+        ] {
+            cases.push((name, GABBER.replace("    fixtures: [fresh]\n", &format!(
+                "    fixtures: [fresh]\n    readback: {{subjects: [account_id], invariants: [INV-CLAIM], subjets: {value}}}\n"
+            )), "readback", "unknown field"));
         }
+        for (name, contents, code, hint) in cases {
+            match parse(&contents) {
+                Ok(registry) => {
+                    let report = registry.validate(&[]);
+                    if !report
+                        .problems
+                        .iter()
+                        .any(|p| p.code == code && p.message.contains(hint))
+                    {
+                        parse_failures.push(format!("{name}: missing {code}/{hint}: {report:?}"));
+                    }
+                    if report
+                        .problems
+                        .iter()
+                        .any(|p| p.message.contains("did you mean frozen"))
+                    {
+                        parse_failures.push(format!(
+                            "{name}: source collision mislabeled as typo: {report:?}"
+                        ));
+                    }
+                }
+                Err(error) => parse_failures.push(format!("{name}: {error:#}")),
+            }
+        }
+        assert!(
+            parse_failures.is_empty(),
+            "registry parse must survive validation errors:\n{}",
+            parse_failures.join("\n")
+        );
+        assert!(
+            parse(&mixed)
+                .unwrap()
+                .validate(&[])
+                .problems
+                .iter()
+                .any(|p| p.code == "fixture")
+        );
     }
 
     #[test]

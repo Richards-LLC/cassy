@@ -908,6 +908,49 @@ fn test_config_set_validation() {
 }
 
 #[test]
+fn config_set_preserves_comments_order_and_only_removes_the_documented_marker() {
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let original = "# hand-maintained configuration\n\
+[upkeep]\n\
+# codemap policy\n\
+codemap = \"off\" # retain this inline comment\n\
+product_overview = \"observe\"\n\
+\n\
+[upkeep.observe_since]\n\
+codemap = \"old-codemap-marker\"\n\
+product_overview = \"keep-this-marker\"\n\
+\n\
+[sync]\n\
+# unrelated sync policy\n\
+min_helpful = 3 # retain this too\n\
+target = \"custom-rules\"\n\
+\n\
+[hub]\n\
+tailscale_serve = false\n\
+transport_mode = \"required\"\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "upkeep.codemap", "enforce"])
+        .assert()
+        .success();
+
+    let expected = original
+        .replace("codemap = \"off\"", "codemap = \"enforce\"")
+        .replace("codemap = \"old-codemap-marker\"\n", "");
+    // pin: config set must retain every unrelated byte, comment and table order.
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), expected);
+}
+
+#[test]
 fn test_config_list_section_filter() {
     let temp = TempDir::new().unwrap();
 

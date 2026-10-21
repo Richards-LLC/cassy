@@ -1034,7 +1034,7 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
         let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-        git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge previous delivery"]);
+        git(repo, &["merge", "-q", "--ff-only", LANE]);
         git(repo, &["push", "-q", "origin", "main"]);
         let base = git(repo, &["rev-parse", "main"]);
         let agents = open_agent_store(&f.cas_dir()).unwrap();

@@ -147,15 +147,109 @@ pub(crate) fn set_config_value(
     cas_root: &Path,
     context: impl FnOnce() -> InvocationContext,
 ) -> anyhow::Result<String> {
-    let before = config.clone();
-    let old_value = config.get(key).unwrap_or_default();
-    config.set(key, value)?;
-    guard_operator_config(&before, config, context)?;
-    config.save(cas_root)?;
+    let _lock = crate::config::lock_project_config(cas_root)?;
+    let path = cas_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = if raw.is_empty() {
+        config.clone()
+    } else {
+        toml::from_str(&raw)?
+    };
+    let old_value = before.get(key).unwrap_or_default();
+    let mut after = before.clone();
+    after.set(key, value)?;
+
+    let serialized_after = toml::to_string(&after)?;
+    let after_document = toml_edit::Document::parse(serialized_after)?;
+    let replacement = config_document_item(after_document.as_item(), key).cloned();
+    let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    set_config_document_item(&mut document, key, replacement)?;
+    if let Some(marker) = upkeep_observe_marker_for_set(key) {
+        set_config_document_item(&mut document, marker, None)?;
+    }
+    let contents = document.to_string();
+    let saved: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &saved, context)?;
+    if contents != raw {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    *config = saved;
     if key == "viktor.enabled" {
         crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
     }
     Ok(old_value)
+}
+
+fn config_document_item<'a>(item: &'a toml_edit::Item, path: &str) -> Option<&'a toml_edit::Item> {
+    path.split('.')
+        .try_fold(item, |item, part| item.as_table_like()?.get(part))
+}
+
+fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {
+    match key {
+        "upkeep.codemap" => Some("upkeep.observe_since.codemap"),
+        "upkeep.product_overview" => Some("upkeep.observe_since.product_overview"),
+        "qa.registry.enforce" => Some("upkeep.observe_since.registry"),
+        _ => None,
+    }
+}
+
+fn set_config_document_item(
+    document: &mut toml_edit::DocumentMut,
+    path: &str,
+    replacement: Option<toml_edit::Item>,
+) -> anyhow::Result<()> {
+    let parts: Vec<_> = path.split('.').collect();
+    anyhow::ensure!(!parts.is_empty(), "config key must not be empty");
+    set_config_document_path(document.as_item_mut(), &parts, replacement)
+}
+
+fn set_config_document_path(
+    item: &mut toml_edit::Item,
+    parts: &[&str],
+    replacement: Option<toml_edit::Item>,
+) -> anyhow::Result<()> {
+    let Some((part, rest)) = parts.split_first() else {
+        return Ok(());
+    };
+    let table = item
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("config key path parent for {part} is not a table"))?;
+
+    if rest.is_empty() {
+        if let Some(replacement) = replacement {
+            let mut replacement = replacement;
+            if let Some(existing) = table.get_mut(part) {
+                let old_decor = existing.as_value().map(|value| value.decor().clone());
+                if let (Some(decor), Some(new_value)) = (old_decor, replacement.as_value_mut()) {
+                    *new_value.decor_mut() = decor;
+                }
+                *existing = replacement;
+            } else {
+                table.insert(part, replacement);
+            }
+        } else {
+            table.remove(part);
+        }
+        return Ok(());
+    }
+
+    if table.get(part).is_none() {
+        if replacement.is_none() {
+            return Ok(());
+        }
+        let mut child = toml_edit::Table::new();
+        child.set_implicit(true);
+        table.insert(part, toml_edit::Item::Table(child));
+    }
+    let child = table
+        .get_mut(part)
+        .expect("just-created or previously present config table");
+    set_config_document_path(child, rest, replacement)
 }
 
 /// Remove the stored override without serializing defaults back into the file.

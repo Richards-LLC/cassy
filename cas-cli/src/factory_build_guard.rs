@@ -16,6 +16,12 @@ use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 // per live/requested lane; the configurable target-cache watermark stays free.
 const ESTIMATED_LANE_GROWTH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// cas-f8a6 (red): cooldown constants only; behaviour unchanged.
+#[cfg(test)]
+const ADMISSION_GC_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+#[cfg(test)]
+const ADMISSION_GC_STATE: &str = "build-guard-admission-gc.json";
+
 /// Shared projected disk admission. GC reserves the configured builder cap so
 /// it can restore headroom before the next capped build is refused.
 pub(crate) fn disk_pressure(disk: &FilesystemCapacity, lanes: usize) -> bool {
@@ -130,11 +136,15 @@ impl BuildGuardSnapshot {
             // One attempt per admission, with the same provenance, quiet-window,
             // warm retention and nonblocking destructive locks as manual GC.
             match crate::factory_target_cache::reclaim_scratch_for_admission(
-                cas_root, policy, |path, policy| {
+                cas_root,
+                policy,
+                |path, policy| {
                     // GC reloads persisted configuration. A changed or absent
                     // scratch setting must not redirect this admission's probe.
                     if path != existing {
-                        return Err(std::io::Error::other("scratch filesystem changed during admission; cleanup deferred"));
+                        return Err(std::io::Error::other(
+                            "scratch filesystem changed during admission; cleanup deferred",
+                        ));
                     }
                     probe(path, policy)
                 },
@@ -688,6 +698,77 @@ mod tests {
             fs::read_to_string(unmanaged.join("proof")).unwrap(),
             "review only"
         );
+    }
+
+    /// cas-f8a6: a fruitless admission GC is not repeated on every request.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fruitless_admission_gc_cools_down_but_still_measures_cas_f8a6() {
+        use std::cell::Cell;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let cas = env.home().join("repo/.cas");
+        let scratch = env.home().join("scratch");
+        std::fs::create_dir_all(cas.join("worktrees")).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(
+            cas.join("config.toml"),
+            format!(
+                "[factory]\nscratch_root = {:?}\n",
+                scratch.display().to_string()
+            ),
+        )
+        .unwrap();
+        let config = crate::config::Config::load(&cas).unwrap().factory();
+        let gib = 1024_u64.pow(3);
+        let available = Cell::new(10 * gib);
+        let probes = Cell::new(0);
+        let admit = || {
+            let before = probes.get();
+            let snapshot =
+                evaluate(32, Some(0.0), 0, 1, 1).with_disk_probe(&cas, &config, |path, policy| {
+                    probes.set(probes.get() + 1);
+                    crate::factory_target_cache::capacity_status_with(path, policy, |_| {
+                        Ok(crate::fs_space::FsSpace {
+                            total_bytes: 100 * gib,
+                            available_bytes: available.get(),
+                            free_bytes: available.get(),
+                        })
+                    })
+                });
+            (probes.get() - before, snapshot)
+        };
+        let (first, _) = admit();
+        assert!(
+            first > 1,
+            "pressured admission runs the scratch GC: {first} probe(s)"
+        );
+        let (second, snapshot) = admit();
+        assert_eq!(
+            second, 1,
+            "nothing was reclaimable: no rescan inside the cooldown"
+        );
+        assert!(
+            snapshot
+                .refusal_message()
+                .contains("Waiting for build admission: disk 10.00GiB available"),
+            "the refusal still reports freshly measured usage: {}",
+            snapshot.refusal_message()
+        );
+        available.set(4 * gib);
+        let (changed, _) = admit();
+        assert!(
+            changed > 1,
+            "a material change in free bytes ends the cooldown"
+        );
+        let state = cas.join(ADMISSION_GC_STATE);
+        let mut attempt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        attempt["at_unix_secs"] =
+            (attempt["at_unix_secs"].as_u64().unwrap() - ADMISSION_GC_COOLDOWN.as_secs() - 1)
+                .into();
+        std::fs::write(&state, attempt.to_string()).unwrap();
+        let (expired, _) = admit();
+        assert!(expired > 1, "an expired cooldown runs the scratch GC again");
     }
 
     #[test]

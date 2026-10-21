@@ -34,7 +34,9 @@ frontend = ["apps/web", "packages/shared"]
 | `components` | Served component name to the repository paths it is built from. |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes
-the components as one JSON object.
+the components as one JSON object. Paths must stay inside the repository: an
+absolute path, a `..` segment or git pathspec magic (`:(glob)…`, `:!…`) is
+refused when the config is set.
 
 ## Sandbox
 
@@ -108,6 +110,9 @@ journeys:
       subjects: [account_uid, workspace_id]
       invariants: [INV-ACCOUNT, INV-WORKSPACE]
 ```
+
+`cas qa journeys --check` rejects a `readback` block with an unknown key, an
+empty list or an entry that is not an identifier.
 
 Cassy forwards only allow-listed values to the adapter's `readback` verb: the
 declared subject kinds with their opaque ids, and the declared invariant IDs.

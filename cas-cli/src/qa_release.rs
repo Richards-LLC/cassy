@@ -58,13 +58,21 @@ impl ReleaseConfig {
             if name.trim().is_empty() || paths.is_empty() {
                 return Err("Each qa.release.components entry needs a name and paths".into());
             }
-            if paths
-                .iter()
-                .any(|p| p.trim().is_empty() || Path::new(p).is_absolute())
-            {
-                return Err(format!(
-                    "qa.release.components.{name} paths must be repository-relative"
-                ));
+            for path in paths {
+                let escapes = Path::new(path)
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir));
+                if path.trim().is_empty() || Path::new(path).is_absolute() || escapes {
+                    return Err(format!(
+                        "qa.release.components.{name} path {path:?} must stay inside the repository"
+                    ));
+                }
+                // `:(...)` and `:!x` are git pathspec magic, not paths.
+                if path.starts_with(':') {
+                    return Err(format!(
+                        "qa.release.components.{name} path {path:?} uses git pathspec magic"
+                    ));
+                }
             }
         }
         Ok(components)
@@ -352,8 +360,8 @@ pub fn readback(
     journey: &crate::qa_registry::Journey,
     subjects: &BTreeMap<String, String>,
 ) -> Result<crate::qa_readback::Outcome, String> {
-    let declaration = journey.readback.as_ref();
-    let args = crate::qa_readback::request_args(&journey.id, declaration, subjects)?;
+    let (declaration, args) =
+        crate::qa_readback::request_args(&journey.id, journey.readback.as_ref(), subjects)?;
     let answer = call(
         project_root,
         config,
@@ -367,7 +375,7 @@ pub fn readback(
     );
     Ok(crate::qa_readback::classify(
         &journey.id,
-        declaration.expect("request_args refuses a missing declaration"),
+        declaration,
         subjects,
         answer,
     ))
@@ -537,6 +545,7 @@ mod tests {
             readback: Some(Declaration {
                 subjects: vec!["account_uid".into(), "workspace_id".into()],
                 invariants: vec!["INV-ACCOUNT".into(), "INV-WORKSPACE".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };

@@ -225,6 +225,10 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
             );
             f.base = commit(f.repo.path());
         }
+        if change == "watched" {
+            write(f.repo.path(), "src/pages/existing.ts", "existing page");
+            f.base = commit(f.repo.path());
+        }
         if change == "malformed" {
             write(
                 f.repo.path(),
@@ -260,7 +264,8 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
         f.decision("overview unchanged:");
         assert!(f.run(&head).is_err());
         f.decision("overview unchanged: existing flow description already covers this model");
-        assert!(f.run(&head).is_ok());
+        let result = f.run(&head);
+        assert!(result.is_ok(), "{change}: {result:?}");
         assert!(f.task.notes.contains("UPKEEP ESCAPE G6"));
     }
     let mut f = Fixture::new();

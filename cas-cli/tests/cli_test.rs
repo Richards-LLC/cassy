@@ -48,6 +48,8 @@ fn test_version() {
 fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
+    assert!(std::process::Command::new("git").args(["init", "-q", "-b", "main"])
+        .current_dir(root).status().unwrap().success());
     cas_cmd(root).current_dir(root).args(["init", "--yes"]).assert().success();
     let registry = root.join("docs/qa/journeys.yaml");
     std::fs::create_dir_all(registry.parent().unwrap()).unwrap();

@@ -3671,7 +3671,11 @@ impl FactoryDaemon {
                         );
                         let failures = super::ci_watch::mark_merged_failures(
                             &project,
-                            super::ci_watch::collect_failures(&transport, &watched_branches)?,
+                            super::ci_watch::collect_failures(
+                                &transport,
+                                &watched_branches,
+                                Some(&watch_cas_dir),
+                            )?,
                         );
                         let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
                             &transport,

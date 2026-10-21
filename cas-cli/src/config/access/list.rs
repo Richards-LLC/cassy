@@ -351,6 +351,7 @@ impl Config {
             ("qa.post_release.env".into(), self.get("qa.post_release.env").unwrap()),
             ("qa.release.integration_branch".into(), self.get("qa.release.integration_branch").unwrap()),
             ("qa.release.branches".into(), self.get("qa.release.branches").unwrap()),
+            ("qa.release.deploy_workflows".into(), self.get("qa.release.deploy_workflows").unwrap()),
             ("qa.release.adapter".into(), self.get("qa.release.adapter").unwrap()),
             ("qa.release.env".into(), self.get("qa.release.env").unwrap()),
             ("qa.release.timeout_secs".into(), self.get("qa.release.timeout_secs").unwrap()),

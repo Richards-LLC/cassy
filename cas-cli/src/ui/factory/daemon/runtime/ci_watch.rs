@@ -187,7 +187,29 @@ pub(crate) fn ci_completed_runs(
         })
         .collect();
     let done = !runs.is_empty() && runs.iter().all(|run| run.status == "completed");
-    Ok(done.then_some(runs))
+    if !done {
+        return Ok(None);
+    }
+    // cas-e845: a run reports completed/success while one of its jobs is still
+    // in_progress. Gate on the same check-run predicate worktree_merge admits
+    // on, limited to these runs' check suites so scheduled or unrelated
+    // workflows never hold the wake. Runs without a suite id keep run status.
+    let suites: Option<Vec<u64>> = runs.iter().map(|run| run.check_suite_id).collect();
+    if let (Some(suites), Some(checks)) = (suites, transport.check_runs_for_sha(&condition.sha)?) {
+        let ours: Vec<serde_json::Value> = checks
+            .into_iter()
+            .filter(|check| {
+                check
+                    .pointer("/check_suite/id")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|suite| suites.contains(&suite))
+            })
+            .collect();
+        if crate::mcp::tools::core::workflow::check_runs_unfinished(&ours) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(runs))
 }
 
 /// Probe each pending `ci_completed` reminder once; a failed read leaves

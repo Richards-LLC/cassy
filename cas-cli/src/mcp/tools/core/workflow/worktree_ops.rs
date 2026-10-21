@@ -575,7 +575,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
                     .map(str::to_string),
             };
         }
-        if status.is_some_and(|status| status != "completed") || conclusion.is_none() {
+        if check_run_unfinished(run) {
             pending = true;
         } else if !matches!(conclusion, Some("success" | "neutral" | "skipped")) {
             return BranchCiState::Unknown {
@@ -633,6 +633,24 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
             test_checks: passed_test_checks,
         }
     }
+}
+
+/// One check-run still running: a non-`completed` status or no conclusion yet.
+fn check_run_unfinished(run: &serde_json::Value) -> bool {
+    run.get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status != "completed")
+        || run.get("conclusion").and_then(serde_json::Value::as_str).is_none()
+}
+
+/// cas-e845: the single "CI has finished" predicate over a commit's
+/// check-runs, shared by `worktree_merge` admission and the `ci_completed`
+/// reminder so a wake is never sent while admission would answer CI PENDING.
+/// Per check name only the latest non-cancelled run counts; a check whose
+/// runs were all cancelled is awaiting its rerun and is unfinished.
+pub(crate) fn check_runs_unfinished(runs: &[serde_json::Value]) -> bool {
+    let (latest, superseded) = select_latest_check_runs(runs);
+    superseded || latest.into_iter().any(check_run_unfinished)
 }
 
 /// The verdict-bearing run of each check: the newest (by id) non-cancelled

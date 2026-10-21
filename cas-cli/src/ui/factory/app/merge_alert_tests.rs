@@ -381,6 +381,7 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
         }
         let deliver = f.app.deliverability_request().refresh_merge_prompt(&mut prompt);
         match outcome {
+            // pin: the released signal's text is included when an integrated tip is wrongly actionable.
             "merged" => assert!(!deliver, "already-integrated tip must not borrow the next lane tip: {}", prompt.text),
             "superseded" => {
                 // pin: released director signals must name a declined tip as superseded.

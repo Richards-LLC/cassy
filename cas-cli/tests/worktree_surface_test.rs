@@ -2262,16 +2262,21 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     request.task_id = Some(task.id.clone());
     request.allow_trunk = Some(true);
     request.cleanup = Some(false);
-    let result = service.coordination(Parameters(request.clone())).await.unwrap();
-    let text = get_text(&result);
     let mut failures = Vec::new();
-    if !text.contains("nothing new to merge") || !text.contains("already in main") {
-        failures.push(format!("contained source must be explicit: {text}"));
+    for local_behind in [false, true] {
+        if local_behind {
+            run_git(&["reset", "--hard", &format!("{before}^")], &repo.root);
+        }
+        let result = service.coordination(Parameters(request.clone())).await.unwrap();
+        let text = get_text(&result);
+        if !text.contains("nothing new to merge") || !text.contains("already in main") {
+            failures.push(format!("contained source (local behind={local_behind}) must be explicit: {text}"));
+        }
+        if let Some(dispatch) = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap() {
+            failures.push(format!("no-op (local behind={local_behind}) opened verification {}", dispatch.id));
+        }
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
     }
-    if let Some(dispatch) = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap() {
-        failures.push(format!("no-op opened verification {}", dispatch.id));
-    }
-    assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
 
     // A later parked round uses a noncanonical suffix in the same checkout.
     // The old worker ref is still contained; it must not mask the rework.

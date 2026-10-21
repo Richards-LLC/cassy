@@ -50,6 +50,7 @@ mod error;
 pub mod input_queue;
 pub mod opencode;
 mod pty;
+pub mod store_isolation;
 pub mod violet_env;
 
 pub use claude_trust::{

@@ -2387,7 +2387,10 @@ fn status(cli: &Cli) -> Result<()> {
                     )
                 })
                 .unwrap_or_else(|| error.to_string());
-            anyhow::bail!("cas hub runtime record unavailable: {detail}");
+            return Err(super::JsonReportedFailure(anyhow::anyhow!(
+                "cas hub runtime record unavailable: {detail}"
+            ))
+            .into());
         }
     };
     let record_state = hub_display_state(&paths, &record);
@@ -2450,6 +2453,17 @@ fn status(cli: &Cli) -> Result<()> {
         println!("{}", render_audit_status(&audit));
         println!("{}", render_open_files_status(&open_files));
     }
+    status_verdict(live, service_warning, &transport, &audit)
+        .map_err(|error| super::JsonReportedFailure(error).into())
+}
+
+/// Failures found after `hub status` printed its report.
+fn status_verdict(
+    live: bool,
+    service_warning: Option<&str>,
+    transport: &HubTransportReport,
+    audit: &crate::hub::AuditWriterReport,
+) -> Result<()> {
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
     // supervision; that is an error, not a footnote.
@@ -2976,11 +2990,19 @@ fn finish_update_hub_verification(
             outcome.prior_state,
         );
         if let Some(warning) = outcome.transport_warning.as_deref() {
-            eprintln!("cas update: {warning}");
+            eprintln!("{}", format_update_transport_warning(warning));
             if let Some(remedy) = outcome.remedy.as_deref() {
                 eprintln!("cas update: {remedy}");
             }
         }
+    }
+}
+
+fn format_update_transport_warning(warning: &str) -> String {
+    if let Some(cause) = warning.strip_prefix("Tailscale Serve inactive: ") {
+        format!("cas update: Tailscale Serve inactive:\n  {cause}")
+    } else {
+        format!("cas update: {warning}")
     }
 }
 
@@ -4222,11 +4244,11 @@ mod tests {
     fn update_transport_failure_is_a_warning_with_working_recovery() {
         let verification = unavailable_update_transport("tailscale CLI is unavailable");
         assert_eq!(verification.transport_verified, Some(false));
-        assert!(
-            verification
-                .transport_warning
-                .unwrap()
-                .contains("Tailscale Serve inactive")
+        assert_eq!(
+            format_update_transport_warning(
+                verification.transport_warning.as_deref().unwrap()
+            ),
+            "cas update: Tailscale Serve inactive:\n  tailscale CLI is unavailable; hub remains loopback-only"
         );
         assert!(verification.remedy.unwrap().contains("cas hub restart"));
     }

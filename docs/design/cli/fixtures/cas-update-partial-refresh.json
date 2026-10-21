@@ -14,7 +14,7 @@
   "transport_warning": "Tailscale Serve inactive: tailscale is stopped; hub remains loopback-only",
   "remedy": "Check `tailscale status`, then run `cas hub restart`.",
   "stdout": "cas update: hub was running → verified at loopback (Tailscale Serve inactive)\n",
-  "stderr": "cas update: Tailscale Serve inactive: tailscale is stopped; hub remains loopback-only\ncas update: Check `tailscale status`, then run `cas hub restart`.\n"
+  "stderr": "cas update: Tailscale Serve inactive:\n  tailscale is stopped; hub remains loopback-only\ncas update: Check `tailscale status`, then run `cas hub restart`.\n"
  },
  "refresh_ms": 4000,
  "user_level": "ok: migrated /home/pippenz/.cas; built-ins current",

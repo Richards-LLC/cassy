@@ -324,6 +324,17 @@ fn signed_out_hub_start_requires_explicit_loopback() {
         .unwrap();
     assert!(!start.status.success(), "signed-out start must fail");
     assert!(String::from_utf8_lossy(&start.stderr).contains("--loopback"));
+
+    let json_start = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!json_start.status.success(), "signed-out JSON start must fail");
+    let error: Value = serde_json::from_slice(&json_start.stdout)
+        .expect("--json hub refusal must emit one JSON document");
+    assert_eq!(error["status"], "error", "{error}");
+    assert!(error["message"].as_str().unwrap_or_default().contains("--loopback"), "{error}");
+
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     assert!(paths.read_process_record().is_err(), "refused start must not leave a hub");
     let loopback = cas_command(home.path(), bin.as_os_str())

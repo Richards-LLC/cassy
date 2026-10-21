@@ -959,7 +959,8 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         let target = crate::factory_scratch::worker_target_dir(&worker);
         std::fs::create_dir_all(target.join("debug")).unwrap();
         std::fs::write(target.join("debug/output"), "regenerable").unwrap();
-        std::fs::write(target.join("worker-check.log"), "proof survives").unwrap();
+        let proof = b"proof survives";
+        std::fs::write(target.join("worker-check.log"), proof).unwrap();
         register_idle_worker(&cas, name);
         let agents = open_agent_store(&cas).unwrap();
         let mut agent = agents.get(&format!("agent-{name}")).unwrap();
@@ -978,7 +979,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         assert!(walkdir::WalkDir::new(env.home().join("artifacts")).into_iter().flatten().any(|entry| {
             // pin: retirement must preserve the capped runner proof log by its artifact basename.
             entry.file_name() == "worker-check.log"
-                && std::fs::read_to_string(entry.path()).unwrap() == "proof survives"
+                && std::fs::read(entry.path()).unwrap() == proof
         }), "proof must be durable before scratch is removed");
     }
 }

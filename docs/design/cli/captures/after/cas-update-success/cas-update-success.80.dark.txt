@@ -4,5 +4,5 @@
   ✓ all 12 projects current · 5 not cloud-linked
     cassy, pantheon, prospect_path, gabber-studio, pulse-card, rocketship-templ…
   ✓ user-level store current
-  Cassy 3.62.0 · 12 projects refreshed · 0 failed · 4.0s
+  Cassy 3.68.0 · 12 projects refreshed · 0 failed · 4.0s
   cas update --verbose shows every project and phase output

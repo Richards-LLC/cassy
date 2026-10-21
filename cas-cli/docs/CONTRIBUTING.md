@@ -1322,6 +1322,36 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+When worker admission is unavailable but a supervisor has already run the
+selection in a scratch checkout, a **live registered supervisor** may record
+that run without executing it again. Use `factory action=record_test_receipt
+ task_id=<task> payload=<JSON>` (MCP), or `cas factory record-test-receipt
+--task-id <task> --request <evidence.json>` (CLI). The JSON is:
+
+```json
+{
+  "head": "<full tested commit SHA>",
+  "repo": "/absolute/supervisor-tested-checkout",
+  "cargo_args": ["nextest", "run", "-p", "cas", "--lib", "-E", "test(module::name)"],
+  "log_path": "/absolute/selected-nextest-run.log",
+  "exit_code": 0
+}
+```
+
+This is an explicit supervisor attestation of the recorded process exit code.
+The task must be assigned to a registered worker; its checkout and the tested
+checkout must both still be clean at `head`. The command must satisfy the same
+single-package, named-test and explicit-harness rules as a worker run. The
+non-empty UTF-8 log (at most 25 MiB) must contain exactly one nextest summary,
+with a nonzero selection and every executed test passed. Supply the selected
+run's log, without separate guard-run summaries. A failed recorded retry removes
+that exact command's previous receipt. An active worker run refuses recording.
+The action writes the normal worker-check receipt key and adds
+`supervisor-recorded` provenance to both its displayed receipt and task audit
+note, including the issuer, tested checkout, command and log SHA-256. Park reads
+it through the existing receipt contract; the recording action runs no Cargo
+command and changes no worker admission guard.
+
 Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
 `some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
 Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not

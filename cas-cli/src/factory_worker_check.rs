@@ -695,7 +695,7 @@ fn receipt_range_has_no_proof_inputs(
         && changes.stdout.split(|byte| *byte == 0).all(|path| {
             path.is_empty()
                 || std::str::from_utf8(path)
-                    .is_ok_and(|path| !is_test_or_build_input_path(path))
+                    .is_ok_and(|path| !is_test_or_build_input_path(repo, path))
         })
 }
 
@@ -714,8 +714,20 @@ fn valid_git_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn is_test_or_build_input_path(path: &str) -> bool {
+fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    if is_workspace_crate_path(repo, path)
+        || lower == ".env"
+        || lower == "docs/qa/batch-qa.md"
+        || lower == "docs/qa/journeys.md"
+        || lower == "docs/design/petrastella-design-language.md"
+        || lower.starts_with("docs/review/")
+        || lower.ends_with(".capture.txt")
+        || lower == "hub-web/dist"
+        || lower.starts_with("hub-web/dist/")
+    {
+        return true;
+    }
     let parts = lower.split('/').collect::<Vec<_>>();
     let name = parts.last().copied().unwrap_or_default();
     if parts.iter().any(|part| {
@@ -768,6 +780,26 @@ fn is_test_or_build_input_path(path: &str) -> bool {
             | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
             | "proto" | "graphql" | "nix"
     )
+}
+
+/// Cargo inputs are not limited to source-code extensions: `include_str!`,
+/// `include_bytes!`, and package build scripts can consume any file beneath a
+/// crate directory. Treat those files as proof inputs regardless of suffix.
+/// The repository's build script also watches a few assets outside crate roots;
+/// those are covered by the explicit paths above.
+fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
+    let path = Path::new(path);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component.as_os_str());
+        if prefix != Path::new(".") && repo.join(&prefix).join("Cargo.toml").is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates

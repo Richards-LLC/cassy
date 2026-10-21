@@ -58,6 +58,12 @@ pub struct Invariant {
     /// Declared criterion whose executable checker is not written yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_checker: Option<PendingChecker>,
+    /// What counts, so a grader can apply the criterion without a judgment call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Graded against each fixture's `labels` entry instead of one universal rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub labeled: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -80,6 +86,12 @@ pub struct ManualCheck {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_checker: Option<PendingChecker>,
+    /// What counts, so a grader can apply the criterion without a judgment call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Graded against each fixture's `labels` entry instead of one universal rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub labeled: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -89,6 +101,9 @@ pub struct ManualCheck {
 pub struct Fixture {
     pub description: String,
     pub provider: String,
+    /// Expected value per labeled criterion ID for this fixture.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -374,6 +389,74 @@ impl Registry {
                 .chain(&qa.api_paths)
                 .map(String::as_str)
                 .collect(),
+        }
+    }
+
+    /// `(definition, labeled)` for an invariant or manual-check ID.
+    fn criterion(&self, id: &str) -> Option<(Option<&str>, bool)> {
+        self.invariants
+            .get(id)
+            .map(|c| (c.definition.as_deref(), c.labeled))
+            .or_else(|| {
+                self.manual_checks
+                    .get(id)
+                    .map(|c| (c.definition.as_deref(), c.labeled))
+            })
+    }
+
+    /// Labeled criteria need a definition and a label on every fixture a journey pairs them with.
+    fn validate_labels(&self, report: &mut ValidationReport) {
+        let criteria = self.invariants.keys().map(|id| ("invariants", id));
+        for (kind, id) in criteria.chain(self.manual_checks.keys().map(|id| ("manual_checks", id)))
+        {
+            if let Some((definition, true)) = self.criterion(id)
+                && !present(definition)
+            {
+                report.problem(
+                    "missing_definition",
+                    &format!("{kind}.{id}"),
+                    "labeled criteria need a definition of what counts",
+                );
+            }
+        }
+        let Some(fixtures) = &self.fixtures else {
+            return;
+        };
+        for (name, fixture) in fixtures {
+            for criterion in fixture.labels.keys() {
+                if self.criterion(criterion).is_none() {
+                    report.problem(
+                        "unknown_label",
+                        &format!("fixtures.{name}"),
+                        format!("label for unknown criterion {criterion:?}"),
+                    );
+                }
+            }
+        }
+        let mut owed = std::collections::BTreeMap::new();
+        for journey in &self.journeys {
+            for fixture in &journey.fixtures {
+                let Some(labels) = fixtures.get(fixture).map(|f| &f.labels) else {
+                    continue;
+                };
+                for criterion in journey.invariants.iter().chain(&journey.manual_checks) {
+                    if self
+                        .criterion(criterion)
+                        .is_some_and(|(_, labeled)| labeled)
+                        && !labels.contains_key(criterion)
+                    {
+                        owed.entry((fixture.as_str(), criterion.as_str()))
+                            .or_insert(journey.id.as_str());
+                    }
+                }
+            }
+        }
+        for ((fixture, criterion), journey) in owed {
+            report.debt(
+                "unlabeled_fixture",
+                &format!("fixtures.{fixture}"),
+                &format!("no label for labeled criterion {criterion} (journey {journey})"),
+            );
         }
     }
 
@@ -675,6 +758,7 @@ impl Registry {
                 }
             }
         }
+        self.validate_labels(&mut report);
         for (name, family) in &self.bug_families {
             let subject = format!("bug_families.{name}");
             if family.title.trim().is_empty() {
@@ -888,6 +972,48 @@ journeys:
                 .message
                 .contains("owner qa-team, due 2999-12-31")
         );
+    }
+
+    #[test]
+    fn qa_registry_labeled_criteria_grade_against_fixture_labels() {
+        let yaml = GABBER
+            .replace(
+                "    check: Count workspaces and read claimed_at\n",
+                "    check: Count workspaces and read claimed_at\n    definition: An authored text overlay, not text inside a photo\n    labeled: true\n",
+            )
+            .replace(
+                "  fresh: {description: New account, provider: account-seed}\n",
+                "  fresh: {description: New account, provider: account-seed, labels: {INV-CLAIM: {authored_text_slides: [2]}}}\n  jersey: {description: Photo carousel, provider: frozen}\n  typo: {description: Stale, provider: frozen, labels: {INV-GONE: 1}}\n",
+            )
+            .replace("    fixtures: [fresh]\n", "    fixtures: [fresh, jersey]\n");
+        let registry = parse(&yaml).unwrap();
+        let fresh = &registry.fixtures.as_ref().unwrap()["fresh"];
+        assert_eq!(
+            serde_yaml::to_string(&fresh.labels["INV-CLAIM"]).unwrap(),
+            "authored_text_slides:\n- 2\n"
+        );
+        let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
+        let rows = |rows: &[Problem]| {
+            rows.iter()
+                .map(|p| format!("{} {} {}", p.code, p.subject, p.message))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&report.problems),
+            ["unknown_label fixtures.typo label for unknown criterion \"INV-GONE\""]
+        );
+        assert_eq!(
+            rows(&report.debt),
+            [
+                "unlabeled_fixture fixtures.jersey no label for labeled criterion INV-CLAIM (journey B2-home)"
+            ]
+        );
+        let undefined = yaml.replace(
+            "    definition: An authored text overlay, not text inside a photo\n",
+            "",
+        );
+        let report = check(repo(&undefined).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert_eq!(report.problems[0].code, "missing_definition");
     }
 
     #[test]

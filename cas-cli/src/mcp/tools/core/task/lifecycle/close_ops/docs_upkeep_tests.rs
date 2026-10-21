@@ -41,21 +41,26 @@ fn commit(repo: &Path) -> String {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with(&[
+            ("src/account/start.ts", "entry"),
+            ("schema/model.sql", "model"),
+            (
+                ".claude/CODEMAP.md",
+                "- `src/account/` — Accounts\n- `schema/model.sql` — Model\n",
+            ),
+            ("docs/PRODUCT_OVERVIEW.md", "# Product\n"),
+            (
+                ".cas/config.toml",
+                "[project_overview]\ndomain_paths = ['schema/model.sql']\nwatch_dirs = ['src/pages']\n",
+            ),
+        ])
+    }
+    fn with(files: &[(&str, &str)]) -> Self {
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "-q", "-b", "main"]);
-        write(repo.path(), "src/account/start.ts", "entry");
-        write(repo.path(), "schema/model.sql", "model");
-        write(
-            repo.path(),
-            ".claude/CODEMAP.md",
-            "- `src/account/` — Accounts\n- `schema/model.sql` — Model\n",
-        );
-        write(repo.path(), "docs/PRODUCT_OVERVIEW.md", "# Product\n");
-        write(
-            repo.path(),
-            ".cas/config.toml",
-            "[project_overview]\ndomain_paths = ['schema/model.sql']\nwatch_dirs = ['src/pages']\n",
-        );
+        for (path, body) in files {
+            write(repo.path(), path, body);
+        }
         let base = commit(repo.path());
         let db = tempfile::tempdir().unwrap();
         let store = cas_store::SqliteTaskStore::open(db.path()).unwrap();
@@ -277,4 +282,47 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
     );
     let head = commit(f.repo.path());
     assert!(f.run(&head).is_ok());
+}
+
+#[test]
+fn docs_upkeep_overview_watch_targets_come_from_the_tracked_overview() {
+    // cas-src shape: .cas/ is ignored, so no config travels with the delivery.
+    let overview = "# Product\n<!-- cas:project-overview\ndomain_paths = ['crates/cas-types/src/task.rs']\nwatch_dirs = ['cas-cli/src/cli']\n-->\n";
+    let files = [
+        (".gitignore", ".cas/\n"),
+        ("cas-cli/src/cli/mod.rs", "cli"),
+        ("crates/cas-types/src/task.rs", "task"),
+        ("docs/PRODUCT_OVERVIEW.md", overview),
+    ];
+    let mut f = Fixture::with(&files);
+    write(f.repo.path(), "cas-cli/src/cli/new_command.rs", "new surface");
+    let head = commit(f.repo.path());
+    let error = f.run(&head).unwrap_err();
+    assert!(
+        error.contains("PRODUCT_OVERVIEW DRIFT") && error.contains("cas-cli/src/cli/new_command.rs"),
+        "{error}"
+    );
+    // A local project config override still wins over the tracked block.
+    let mut config = crate::config::Config::default();
+    config.project_overview = Some(crate::config::ProjectOverviewConfig {
+        domain_paths: Some(vec![]),
+        watch_dirs: Some(vec![]),
+    });
+    config.save(f.db.path()).unwrap();
+    assert!(f.run(&head).is_ok());
+
+    // Nothing declared and nothing derivable: park passes but says so.
+    let mut f = Fixture::with(&[
+        ("cas-cli/src/cli/mod.rs", "cli"),
+        ("docs/PRODUCT_OVERVIEW.md", "# Product\n"),
+    ]);
+    write(f.repo.path(), "cas-cli/src/cli/new_command.rs", "new surface");
+    let head = commit(f.repo.path());
+    let notices = f.run(&head).unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.starts_with("UPKEEP WARNING G6: no product paths are watched")),
+        "{notices:?}"
+    );
 }

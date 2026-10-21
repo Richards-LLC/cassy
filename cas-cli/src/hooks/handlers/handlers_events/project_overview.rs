@@ -43,30 +43,18 @@ const SIGNIFICANT_STALENESS_THRESHOLD: usize = 5;
 // ---------------------------------------------------------------------------
 
 /// Files and directory globs that should trigger project-overview staleness.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WatchTargets {
     /// Exact file paths where any change (M/A/D/R) counts.
     pub domain_paths: Vec<String>,
     /// Directory globs where only structural changes (A/D/R) count.
     pub watch_dirs: Vec<String>,
+    /// Set when nothing was declared or derived, or the overview's declaration
+    /// block is malformed: G6 then checks journey-registry changes only.
+    pub warning: Option<String>,
 }
 
 impl WatchTargets {
-    fn defaults() -> Self {
-        Self {
-            domain_paths: vec![
-                "apps/backend/prisma/schema.prisma".to_string(),
-                "prisma/schema.prisma".to_string(),
-            ],
-            watch_dirs: vec![
-                "apps/*/src/components".to_string(),
-                "apps/*/src/pages".to_string(),
-                "app".to_string(),
-                "components/dashboard".to_string(),
-            ],
-        }
-    }
-
     /// True when `path` matches a `domain_paths` entry (exact string match).
     pub fn is_domain_path(&self, path: &str) -> bool {
         self.domain_paths.iter().any(|p| p == path)
@@ -83,35 +71,127 @@ impl WatchTargets {
     }
 }
 
+/// Opening marker of the tracked declaration block in `docs/PRODUCT_OVERVIEW.md`.
+/// Its body is TOML with the `[project_overview]` keys, closed by `-->`.
+pub(crate) const OVERVIEW_BLOCK: &str = "<!-- cas:project-overview";
+
+/// Directories derived when nothing is declared; only those holding a tracked
+/// file are used. Every tracked `schema.prisma` becomes a domain path.
+const DERIVED_WATCH_DIRS: &[&str] = &[
+    "apps/*/src/components",
+    "apps/*/src/pages",
+    "apps/*/src/routes",
+    "app",
+    "components/dashboard",
+    "src/pages",
+    "src/routes",
+];
+
 #[derive(Debug, serde::Deserialize, Default)]
 struct RawConfig {
     project_overview: Option<crate::config::ProjectOverviewConfig>,
 }
 
-/// Load watch targets from `<repo_root>/.cas/config.toml`, falling back to defaults.
-pub fn watch_targets(repo_root: &Path) -> WatchTargets {
-    let config_path = repo_root.join(".cas").join("config.toml");
-    let Ok(content) = std::fs::read_to_string(&config_path) else {
-        return WatchTargets::defaults();
-    };
-    watch_targets_from_content(Some(&content))
+/// The `[project_overview]` section of a `.cas/config.toml` body, if any.
+pub(crate) fn config_section(content: &str) -> Option<crate::config::ProjectOverviewConfig> {
+    toml::from_str::<RawConfig>(content)
+        .ok()
+        .and_then(|raw| raw.project_overview)
 }
 
-pub(crate) fn watch_targets_from_content(content: Option<&str>) -> WatchTargets {
-    let Ok(raw): Result<RawConfig, _> = toml::from_str(content.unwrap_or("")) else {
-        return WatchTargets::defaults();
+/// Resolve overview watch targets per key: the `[project_overview]` config
+/// section, then the overview's tracked [`OVERVIEW_BLOCK`], then targets
+/// derived from `tracked` (called only while a key is still undeclared).
+/// An explicitly empty declaration is an opt-out and carries no warning.
+pub(crate) fn resolve_watch_targets(
+    config: Option<crate::config::ProjectOverviewConfig>,
+    overview: Option<&str>,
+    tracked: impl FnOnce() -> Vec<String>,
+) -> WatchTargets {
+    let mut warning = None;
+    let block = match overview.map(overview_block).unwrap_or(Ok(None)) {
+        Ok(block) => block.unwrap_or_default(),
+        Err(error) => {
+            warning = Some(format!(
+                "the `{OVERVIEW_BLOCK}` block in {DOC_PATH} is malformed ({error}); fix its TOML"
+            ));
+            Default::default()
+        }
     };
-    let Some(po) = raw.project_overview else {
-        return WatchTargets::defaults();
+    let config = config.unwrap_or_default();
+    let declared_paths = config.domain_paths.or(block.domain_paths);
+    let declared_dirs = config.watch_dirs.or(block.watch_dirs);
+    let declared = declared_paths.is_some() || declared_dirs.is_some();
+    let (domain_paths, watch_dirs) = match (declared_paths, declared_dirs) {
+        (Some(paths), Some(dirs)) => (paths, dirs),
+        (paths, dirs) => {
+            let tracked = tracked();
+            let paths = paths.unwrap_or_else(|| {
+                tracked
+                    .iter()
+                    .filter(|p| p.rsplit('/').next() == Some("schema.prisma"))
+                    .cloned()
+                    .collect()
+            });
+            let dirs = dirs.unwrap_or_else(|| {
+                DERIVED_WATCH_DIRS
+                    .iter()
+                    .filter(|dir| tracked.iter().any(|p| dir_glob_matches(dir, p)))
+                    .map(|dir| dir.to_string())
+                    .collect()
+            });
+            (paths, dirs)
+        }
     };
-    let defaults = WatchTargets::defaults();
-    WatchTargets {
-        domain_paths: po.domain_paths.unwrap_or(defaults.domain_paths),
-        watch_dirs: po
-            .watch_dirs
-            .map(sanitize_watch_dirs)
-            .unwrap_or(defaults.watch_dirs),
+    let watch_dirs = sanitize_watch_dirs(watch_dirs);
+    if !declared && warning.is_none() && domain_paths.is_empty() && watch_dirs.is_empty() {
+        warning = Some(format!(
+            "no product paths are watched; declare domain_paths and watch_dirs in a \
+             `{OVERVIEW_BLOCK} ... -->` block in {DOC_PATH}"
+        ));
     }
+    WatchTargets {
+        domain_paths,
+        watch_dirs,
+        warning,
+    }
+}
+
+fn overview_block(text: &str) -> Result<Option<crate::config::ProjectOverviewConfig>, String> {
+    let Some((_, rest)) = text.split_once(OVERVIEW_BLOCK) else {
+        return Ok(None);
+    };
+    let Some((body, _)) = rest.split_once("-->") else {
+        return Err("missing closing -->".into());
+    };
+    toml::from_str(body)
+        .map(Some)
+        .map_err(|e| e.message().trim().to_string())
+}
+
+/// Watch targets for a working tree: `<repo_root>/.cas/config.toml`, then the
+/// block in `<repo_root>/docs/PRODUCT_OVERVIEW.md`, then `git ls-files`.
+pub fn watch_targets(repo_root: &Path) -> WatchTargets {
+    let config = std::fs::read_to_string(repo_root.join(".cas").join("config.toml"))
+        .ok()
+        .and_then(|content| config_section(&content));
+    let overview = std::fs::read_to_string(repo_root.join(DOC_PATH)).ok();
+    resolve_watch_targets(config, overview.as_deref(), || {
+        std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// Strip degenerate globs like `*` / `**` / empty strings that would match every
@@ -768,6 +848,7 @@ mod tests {
         WatchTargets {
             domain_paths: vec!["schema.prisma".to_string()],
             watch_dirs: vec!["apps/*/src/components".to_string()],
+            warning: None,
         }
     }
 
@@ -852,38 +933,20 @@ mod tests {
     // --- watch_targets / config --------------------------------------------
 
     #[test]
-    fn watch_targets_defaults_when_no_config() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_defaults_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let t = watch_targets(&tmp);
-        assert_eq!(t, WatchTargets::defaults());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn watch_targets_defaults_when_section_absent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_no_section_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join(".cas")).unwrap();
-        std::fs::write(
-            tmp.join(".cas/config.toml"),
-            "[other]\nfoo = \"bar\"\n",
-        )
-        .unwrap();
-
-        let t = watch_targets(&tmp);
-        assert_eq!(t, WatchTargets::defaults());
-
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn watch_targets_warn_when_nothing_is_declared_or_derived() {
+        // Old built-in defaults (prisma/apps) that do not exist never arm G6.
+        let t = resolve_watch_targets(None, Some("# Product\n"), || vec!["src/lib.rs".into()]);
+        assert!(t.domain_paths.is_empty() && t.watch_dirs.is_empty(), "{t:?}");
+        assert!(
+            t.warning.as_deref().is_some_and(|w| w.contains(OVERVIEW_BLOCK)),
+            "{t:?}"
+        );
+        let t = resolve_watch_targets(None, None, || {
+            vec!["prisma/schema.prisma".into(), "app/page.tsx".into()]
+        });
+        assert_eq!(t.domain_paths, vec!["prisma/schema.prisma".to_string()]);
+        assert_eq!(t.watch_dirs, vec!["app".to_string()]);
+        assert_eq!(t.warning, None);
     }
 
     #[test]
@@ -912,27 +975,14 @@ watch_dirs = ["web/src"]
     }
 
     #[test]
-    fn watch_targets_partial_override_keeps_other_default() {
-        let tmp = std::env::temp_dir().join(format!(
-            "po_test_partial_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join(".cas")).unwrap();
-        std::fs::write(
-            tmp.join(".cas/config.toml"),
-            r#"
-[project_overview]
-domain_paths = ["db/schema.sql"]
-"#,
-        )
-        .unwrap();
-
-        let t = watch_targets(&tmp);
+    fn watch_targets_config_overrides_overview_block_per_key() {
+        let overview = "# P\n<!-- cas:project-overview\ndomain_paths = [\"a.rs\"]\nwatch_dirs = [\"web\"]\n-->\n";
+        let config = config_section("[project_overview]\ndomain_paths = [\"db/schema.sql\"]\n");
+        let t = resolve_watch_targets(config, Some(overview), || panic!("fully declared"));
         assert_eq!(t.domain_paths, vec!["db/schema.sql".to_string()]);
-        assert_eq!(t.watch_dirs, WatchTargets::defaults().watch_dirs);
-
-        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(t.watch_dirs, vec!["web".to_string()]);
+        let t = resolve_watch_targets(None, Some("<!-- cas:project-overview\nwatch_dirs = [\n-->"), Vec::new);
+        assert!(t.warning.is_some_and(|w| w.contains("malformed")));
     }
 
     // --- pending file I/O --------------------------------------------------

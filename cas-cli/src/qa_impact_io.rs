@@ -204,8 +204,11 @@ pub(super) fn analyze(
         sort_journeys(&mut report.journeys);
     }
     let mut warnings = Vec::new();
+    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
     if !overview_present {
         warnings.push("PRODUCT_OVERVIEW.md is missing: journeys have no product context. Run the project-overview skill.".into());
+    } else if let Some(warning) = &watch.warning {
+        warnings.push(format!("PRODUCT_OVERVIEW watch targets: {warning}."));
     }
     if codemap.is_none() {
         warnings.push(
@@ -243,7 +246,7 @@ pub(super) fn analyze(
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
     report.upkeep = upkeep(
-        repo,
+        &watch,
         changes,
         &report,
         codemap.as_deref(),
@@ -332,7 +335,7 @@ fn legacy_metadata(text: &str) -> Vec<crate::qa_registry::Journey> {
 }
 
 fn upkeep(
-    repo: &Path,
+    watch: &crate::hooks::handlers::handlers_events::project_overview::WatchTargets,
     changes: &[Change],
     report: &Impact,
     codemap: Option<&str>,
@@ -342,7 +345,6 @@ fn upkeep(
     base_paths: &[String],
     head_paths: &[String],
 ) -> Upkeep {
-    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
     let mut upkeep = docs_upkeep(
         changes,
         &report.registry.path,
@@ -350,7 +352,7 @@ fn upkeep(
         overview,
         registry,
         previous,
-        &watch,
+        watch,
         base_paths,
         head_paths,
     );

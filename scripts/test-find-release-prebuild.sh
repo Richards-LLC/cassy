@@ -73,7 +73,7 @@ case "$2" in
       printf '%s\n' "$count" >"$count_file"
       sequence_file="$FAKE_RUNS_SEQUENCE_DIR/$count.json"
       if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.fail" ]]; then
-        echo "request failed: authorization: Bearer fixture-secret" >&2
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
         if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then sleep 5; fi
         exit 1
       fi
@@ -168,32 +168,37 @@ mkdir -p "$tmp/transient-sequence"
 echo '{"workflow_runs":[{"id":555,"status":"in_progress","conclusion":null}]}' \
   >"$tmp/transient-sequence/1.json"
 touch "$tmp/transient-sequence/2.fail"
-touch "$tmp/transient-sequence/2.timeout"
 echo '{"workflow_runs":[{"id":555,"status":"completed","conclusion":"success"}]}' \
   >"$tmp/transient-sequence/3.json"
 printf '%s' "$both_live" >"$tmp/artifacts/555.json"
 rm -f "$tmp/transient-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/transient-sequence"
 out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
-  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 \
   "$lookup" transientcommit 2>"$tmp/transient.err")"
 expect_field "$out" found true 'a failed in-flight poll is retried and then adopted'
 expect_field "$out" run-id 555 'retry adoption names the completed run'
-if grep -qF 'attempt 1 failed' "$tmp/transient.err" \
-    && ! grep -qF 'fixture-secret' "$tmp/transient.err"; then
-  printf 'ok   a failed poll logs its attempt without leaking API error contents\n'
+if grep -qF 'attempt 1 failed (HTTP 502)' "$tmp/transient.err" \
+    && ! grep -qF 'fixture-secret' "$tmp/transient.err" \
+    && ! grep -qF 'request failed' "$tmp/transient.err"; then
+  printf 'ok   a failed poll logs its HTTP status without leaking API error contents\n'
   pass=$((pass + 1))
 else
-  printf 'FAIL retry diagnostic missing attempt count or leaked API error: %s\n' \
+  printf 'FAIL retry diagnostic missing HTTP status or leaked API error: %s\n' \
     "$(<"$tmp/transient.err")"
   fail=$((fail + 1))
 fi
 unset FAKE_RUNS_SEQUENCE_DIR
 
-# 9. A prebuild that remains in flight past the bound falls back with a warning.
+# 9. A timed-out poll stays within the deadline and falls back with a sanitized
+# timeout diagnostic.
+mkdir -p "$tmp/timeout-sequence"
 echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
-  >"$tmp/runs.json"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=0 "$lookup" timeoutcommit 2>&1)"
+  >"$tmp/timeout-sequence/1.json"
+touch "$tmp/timeout-sequence/2.fail" "$tmp/timeout-sequence/2.timeout"
+rm -f "$tmp/timeout-sequence/count"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 "$lookup" timeoutcommit 2>&1)"
 expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
 if grep -qF 'falling back to the cold release build' <<<"$out"; then
   printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
@@ -202,6 +207,15 @@ else
   printf 'FAIL in-flight timeout omitted its cold-build warning\n'
   fail=$((fail + 1))
 fi
+if grep -qF 'attempt 1 failed (timeout (exit 124))' <<<"$out" \
+    && ! grep -qF 'fixture-secret' <<<"$out"; then
+  printf 'ok   a timed-out poll reports exit 124 without leaking API error contents\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL timeout diagnostic missing exit 124 or leaked API error: %s\n' "$out"
+  fail=$((fail + 1))
+fi
+unset FAKE_RUNS_SEQUENCE_DIR
 
 # 10. A missing commit declines rather than crash the workflow step.
 out="$(GITHUB_SHA= "$lookup")"

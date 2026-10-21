@@ -116,21 +116,46 @@ if [[ -z "$repo" ]]; then
     fi
 fi
 
+api_failure_file="$(mktemp)"
+trap 'rm -f "$api_failure_file"' EXIT
+
 # Bound each API request independently. While polling, also cap the request to
 # the seconds remaining in the existing wait deadline. The Ubuntu release
 # runner provides coreutils `timeout`; gh errors stay private because they can
 # include response details or credentials.
 api_request() {
-    local deadline="${1:-}" timeout_seconds="$api_timeout_seconds" remaining
+    local deadline="${1:-}" timeout_seconds="$api_timeout_seconds" remaining status http_status failure_reason
     shift || return 2
+    : >"$api_failure_file"
     if [[ -n "$deadline" ]]; then
         remaining=$((deadline - SECONDS))
-        (( remaining > 0 )) || return 124
+        if (( remaining <= 0 )); then
+            printf 'timeout (exit 124)\n' >"$api_failure_file"
+            return 124
+        fi
         if (( remaining < timeout_seconds )); then
             timeout_seconds="$remaining"
         fi
     fi
-    timeout --signal=TERM "${timeout_seconds}s" "$gh_bin" api "$@" 2>/dev/null
+    if timeout --signal=TERM "${timeout_seconds}s" "$gh_bin" api "$@" 2>"$api_failure_file"; then
+        : >"$api_failure_file"
+        return 0
+    else
+        status=$?
+    fi
+
+    if (( status == 124 )); then
+        failure_reason='timeout (exit 124)'
+    else
+        http_status="$(grep -oE 'HTTP [0-9]{3}' "$api_failure_file" | head -n1 || true)"
+        if [[ -n "$http_status" ]]; then
+            failure_reason="$http_status"
+        else
+            failure_reason="exit code $status"
+        fi
+    fi
+    printf '%s\n' "$failure_reason" >"$api_failure_file"
+    return "$status"
 }
 
 # Runs for this exact commit, plus recent $event runs whose head commit has its
@@ -193,7 +218,8 @@ find_complete_run() {
 
 runs_json=""
 if ! runs_json="$(fetch_runs)"; then
-    decline "prebuild run lookup failed for $sha"
+    failure_reason="$(<"$api_failure_file")"
+    decline "prebuild run lookup failed for $sha (${failure_reason:-exit code 1})"
 fi
 
 if find_complete_run "$runs_json"; then
@@ -224,9 +250,11 @@ if has_pending_run "$runs_json"; then
         if ! polled_runs_json="$(fetch_runs "$deadline")"; then
             failed_polls=$((failed_polls + 1))
             remaining=$((deadline - SECONDS))
+            failure_reason="$(<"$api_failure_file")"
+            failure_reason="${failure_reason:-exit code 1}"
             if (( remaining > 0 )); then
-                printf 'warning: Release Prebuild lookup poll attempt %d failed; retrying within the remaining deadline\n' \
-                    "$failed_polls" >&2
+                printf 'warning: Release Prebuild lookup poll attempt %d failed (%s); retrying within the remaining deadline\n' \
+                    "$failed_polls" "$failure_reason" >&2
                 next_poll_delay="$retry_backoff"
                 if (( retry_backoff < retry_backoff_cap )); then
                     retry_backoff=$((retry_backoff * 2))
@@ -236,8 +264,8 @@ if has_pending_run "$runs_json"; then
                 fi
                 continue
             fi
-            printf 'warning: Release Prebuild lookup poll attempt %d failed at the deadline\n' \
-                "$failed_polls" >&2
+            printf 'warning: Release Prebuild lookup poll attempt %d failed (%s) at the deadline\n' \
+                "$failed_polls" "$failure_reason" >&2
             break
         fi
         runs_json="$polled_runs_json"

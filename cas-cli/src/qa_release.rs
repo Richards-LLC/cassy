@@ -500,6 +500,9 @@ pub enum MigrationRefusal {
     /// The adapter or its configuration is broken.
     #[error("MIGRATION ADAPTER BUG: {0}")]
     AdapterBug(String),
+    /// Local git could not list the delivery's added migrations.
+    #[error("MIGRATION CHECK FAILED: local git: {0}")]
+    CheckFailed(String),
 }
 
 impl MigrationRefusal {
@@ -509,6 +512,7 @@ impl MigrationRefusal {
             Self::Pending { .. } => "MIGRATION PENDING",
             Self::StatusUnknown(_) => "MIGRATION STATUS UNKNOWN",
             Self::AdapterBug(_) => "MIGRATION ADAPTER BUG",
+            Self::CheckFailed(_) => "MIGRATION CHECK FAILED",
         }
     }
 
@@ -521,6 +525,9 @@ impl MigrationRefusal {
             }
             Self::AdapterBug(_) => {
                 "Fix the project adapter or [qa.release] configuration, then retry.".into()
+            }
+            Self::CheckFailed(_) => {
+                "Make the target and delivery tip local commits (fetch them), then retry.".into()
             }
         }
     }
@@ -607,7 +614,7 @@ pub fn check_migrations(
         return Ok(Vec::new());
     };
     let (tip_sha, ids) = added_migrations(root, &migrations.paths, target, tip)
-        .map_err(|detail| MigrationRefusal::StatusUnknown(format!("cannot list added migrations: {detail}")))?;
+        .map_err(MigrationRefusal::CheckFailed)?;
     if ids.is_empty() {
         return Ok(ids);
     }
@@ -886,8 +893,11 @@ mod tests {
         project.git(&["checkout", "-q", "main"]);
         project.git(&["checkout", "-qb", "migration"]);
         let tip = project.commit("db/migrations/20261021_add/migration.sql", "add");
-        // The target moves past the merge base with a migration of its own.
+        // The target moves past the merge base: it adds a migration and drops
+        // one the tip inherited. Diffing target..tip in either direction,
+        // instead of from the merge base, would report one of them as added.
         project.git(&["checkout", "-q", "main"]);
+        project.git(&["rm", "-q", "db/migrations/20260101_init/migration.sql"]);
         project.commit("db/migrations/20261022_main/migration.sql", "main");
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
         assert_eq!(check_migrations(root, &config, "main", "migration").unwrap(), ["20261021_add"]);
@@ -916,8 +926,14 @@ mod tests {
         }
         env.remove("FAKE_ERROR_KIND");
         env.set("FAKE_SLEEP", "3");
-        let impatient = ReleaseConfig { timeout_secs: 1, ..config };
+        let impatient = ReleaseConfig { timeout_secs: 1, ..config.clone() };
         let refusal = check_migrations(root, &impatient, "main", "migration").unwrap_err();
         assert!(matches!(refusal, MigrationRefusal::StatusUnknown(_)), "{refusal}");
+        let refusal = check_migrations(root, &config, "main", "no-such-branch").unwrap_err();
+        assert!(
+            matches!(refusal, MigrationRefusal::CheckFailed(_))
+                && refusal.next_step().contains("fetch them"),
+            "{refusal}"
+        );
     }
 }

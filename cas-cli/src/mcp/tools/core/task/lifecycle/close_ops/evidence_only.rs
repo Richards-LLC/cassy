@@ -148,7 +148,7 @@ fn measure_workflow_proof(repo: &Path, task: &Task, target: &str, branch: &str) 
             }
         }
     }
-    let identity = super::TaskCommitIdentity { task_id: Some(task.id.clone()), known_commits: Vec::new() };
+    let identity = super::TaskCommitIdentity { start_base: None, task_id: Some(task.id.clone()), known_commits: Vec::new() };
     let commits: Vec<String> = unmerged_commits(repo, &tips, target)?.into_iter()
         .filter(|commit| required.contains(commit)
             || !super::task_attribution::commit_claims_another_task(repo, commit, &identity))

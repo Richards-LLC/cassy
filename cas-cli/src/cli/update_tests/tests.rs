@@ -2581,6 +2581,45 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
 }
 
 #[test]
+fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let home = env.home().to_path_buf();
+    for (branch, can_commit) in [
+        ("main", false),
+        ("staging", false),
+        ("production", false),
+        ("release/base", false),
+        ("epic/shared", false),
+        ("repair/managed", true),
+    ] {
+        let project = cas_6718_drifted_project(&home.join(branch));
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        cas_6718_git(&project, &["update-ref", "refs/remotes/origin/production", "HEAD"]);
+        cas_6718_git(&project, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/production"]);
+        cas_6718_git(&project, &["checkout", "-qB", branch]);
+        let path = root.join("config.toml");
+        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        config["factory"]["epic_base_branch"] = toml_edit::value("release/base");
+        std::fs::write(path, config.to_string()).unwrap();
+        let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+        let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        assert_eq!(after != before, can_commit, "reconcile moved {branch}");
+        assert_eq!(report.commit.is_some(), can_commit, "{branch}");
+        assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
+        if !can_commit {
+            assert_eq!(report.outcome, "staged", "{branch}");
+            assert!(report.staged > 0);
+            assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        }
+        assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
+    }
+}
+
+#[test]
 fn cas_6718_update_repairs_managed_git_drift_and_is_idempotent() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");

@@ -1666,6 +1666,11 @@ fn start_with_output_resolved(
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
+                let already_satisfied = record.pid != launcher_pid
+                    || record.launched_at.as_deref() != Some(launched_at.as_str());
+                if already_satisfied {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                }
                 if let Err(error) = hold_hub_test_barrier(
                     "CAS_TEST_HUB_READY_BARRIER",
                     "ready-observer",
@@ -1694,19 +1699,27 @@ fn start_with_output_resolved(
                 }
                 return Ok(HubStartOutcome {
                     record,
-                    already_satisfied: false,
+                    already_satisfied,
                 });
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
-            if let Ok(record) = paths.read_process_record()
-                && record_is_ready(&paths, &record)
-            {
-                anyhow::bail!(
-                    "another cas hub instance won the machine lock (pid {}); replacement process exited with {}",
-                    record.pid,
-                    status
+            let winner_pid = paths.read_process_record().ok().and_then(|record| {
+                (record.pid != launcher_pid
+                    && process_is_running(record.pid)
+                    && paths
+                        .lock_holders()
+                        .iter()
+                        .any(|holder| holder.pid == record.pid))
+                .then_some(record.pid)
+            });
+            if let Some(winner_pid) = winner_pid {
+                let error = anyhow::anyhow!(
+                    "another cas hub instance won the machine lock (pid {winner_pid}); replacement process exited with {status} before becoming ready; inspect {}",
+                    paths.log_path().display()
                 );
+                terminate_failed_launch(&mut child, cgroup.as_deref());
+                return Err(error);
             }
             let error = anyhow::anyhow!(
                 "cas hub replacement exited with {status} before becoming ready; inspect {}",

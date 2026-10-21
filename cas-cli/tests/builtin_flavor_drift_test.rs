@@ -87,20 +87,17 @@ const TAILORED: &[Tailored] = &[Tailored {
 }];
 
 /// Canonical files a twin catalog deliberately omits: (catalog path, flavor, rationale).
-const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[
-    (
-        "skills/cas-supervisor-checklist/SKILL.md",
-        "codex",
-        "Codex ships the renamed twin skills/cas-codex-supervisor-checklist instead (cas-59ee), \
+const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
+    "skills/cas-supervisor-checklist/SKILL.md",
+    "codex",
+    "Codex ships the renamed twin skills/cas-codex-supervisor-checklist instead (cas-59ee), \
      which covers Codex hook trust and explicit tool calls (cas-d0fe).",
-    ),
-    (
-        "agents/task-verifier.md",
-        "codex",
-        "Audit D6 (cas-6b97): Codex custom agents are TOML with developer_instructions, and \
+), (
+    "agents/task-verifier.md",
+    "codex",
+    "Audit D6 (cas-6b97): Codex custom agents are TOML with developer_instructions, and \
      Codex ignores .codex/agents/*.md, so Cassy installs no .md agents for Codex.",
-    ),
-];
+)];
 
 /// Files only a twin catalog ships: (flavor, catalog path, source path, rationale).
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
@@ -343,11 +340,7 @@ fn twin_source_trees_hold_only_sanctioned_files() {
         .iter()
         .filter_map(|t| t.source.map(str::to_string))
         .collect();
-    sanctioned.extend(
-        ALLOWED_FLAVOR_ONLY
-            .iter()
-            .map(|(_, _, source, _)| source.to_string()),
-    );
+    sanctioned.extend(ALLOWED_FLAVOR_ONLY.iter().map(|(_, _, source, _)| source.to_string()));
     let mut on_disk = Vec::new();
     for (_, name) in TWINS {
         for entry in walkdir::WalkDir::new(builtins.join(name))
@@ -403,10 +396,7 @@ fn every_catalog_names_tools_by_bare_name() {
             }
         }
         let skills = skill_catalog_for_harness(harness);
-        for role in [
-            "skills/cas-worker/SKILL.md",
-            "skills/cas-supervisor/SKILL.md",
-        ] {
+        for role in ["skills/cas-worker/SKILL.md", "skills/cas-supervisor/SKILL.md"] {
             let body = skills
                 .iter()
                 .find(|b| b.path == role)
@@ -477,14 +467,8 @@ fn verifier_artifact_fetch_is_available_for_every_harness() {
 fn opencode_projection_is_the_canonical_catalog() {
     let mut compared = 0usize;
     for (catalog, projected) in [
-        (
-            BUILTIN_SKILLS,
-            skill_catalog_for_harness(SupervisorCli::OpenCode),
-        ),
-        (
-            BUILTIN_AGENTS,
-            agent_catalog_for_harness(SupervisorCli::OpenCode),
-        ),
+        (BUILTIN_SKILLS, skill_catalog_for_harness(SupervisorCli::OpenCode)),
+        (BUILTIN_AGENTS, agent_catalog_for_harness(SupervisorCli::OpenCode)),
     ] {
         assert_eq!(catalog.len(), projected.len());
         for builtin in catalog {
@@ -512,10 +496,7 @@ fn opencode_projection_is_the_canonical_catalog() {
             compared += 1;
         }
     }
-    assert!(
-        compared > 130,
-        "expected over 130 OpenCode projections, got {compared}"
-    );
+    assert!(compared > 130, "expected over 130 OpenCode projections, got {compared}");
 }
 
 /// The guard must fail on injected drift: an edited twin, a tailored twin
@@ -536,10 +517,7 @@ fn guard_detects_injected_drift() {
         &[("skills/x/SKILL.md", "# X\ncall `task action=reopen`\n")],
         &canonical_of,
     );
-    assert!(
-        edited.iter().any(|f| f.starts_with("TWIN DRIFT")),
-        "{edited:?}"
-    );
+    assert!(edited.iter().any(|f| f.starts_with("TWIN DRIFT")), "{edited:?}");
 
     let identical = twin_catalog_failures(
         "codex",
@@ -550,26 +528,18 @@ fn guard_detects_injected_drift() {
 
     let tailored_ok = twin_catalog_failures(
         "grok",
-        &[(
-            "agents/task-verifier.md",
-            "---\ntools: Read, cas__task\n---\nbody\n",
-        )],
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nbody\n")],
         &canonical_of,
     );
     assert!(tailored_ok.is_empty(), "{tailored_ok:?}");
 
     let tailored_extra = twin_catalog_failures(
         "grok",
-        &[(
-            "agents/task-verifier.md",
-            "---\ntools: Read, cas__task\n---\nother body\n",
-        )],
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nother body\n")],
         &canonical_of,
     );
     assert!(
-        tailored_extra
-            .iter()
-            .any(|f| f.starts_with("TAILORED DRIFT")),
+        tailored_extra.iter().any(|f| f.starts_with("TAILORED DRIFT")),
         "{tailored_extra:?}"
     );
 
@@ -583,17 +553,13 @@ fn guard_detects_injected_drift() {
     };
     let stale = apply_tailoring(canonical_of("agents/stale.md").unwrap(), &stale_entry);
     assert!(
-        stale
-            .as_ref()
-            .is_err_and(|e| e.contains("no longer occurs")),
+        stale.as_ref().is_err_and(|e| e.contains("no longer occurs")),
         "{stale:?}"
     );
 
     let orphan = twin_catalog_failures("grok", &[("skills/y/SKILL.md", "y")], &canonical_of);
     assert!(
-        orphan
-            .iter()
-            .any(|f| f.starts_with("UNSANCTIONED FLAVOR-ONLY")),
+        orphan.iter().any(|f| f.starts_with("UNSANCTIONED FLAVOR-ONLY")),
         "{orphan:?}"
     );
 
@@ -606,7 +572,9 @@ fn guard_detects_injected_drift() {
     // pstack denylist: naming the harness on the line does not excuse a prefix.
     assert!(unsanctioned_prefixed_tool_lines("In Claude Code, call `mcp__cas__task`.").len() == 1);
     assert!(unsanctioned_prefixed_tool_lines("run `ToolSearch(select:mcp__cas__task)`").len() == 1);
-    assert!(unsanctioned_prefixed_tool_lines("tools: Read, mcp__cas__task").is_empty());
+    assert!(
+        unsanctioned_prefixed_tool_lines("tools: Read, mcp__cas__task").is_empty()
+    );
 }
 
 /// cas-c7c2: memory lifecycle guidance is a reference file so the always-loaded
@@ -657,17 +625,10 @@ fn cli_routing_skill_is_shared_by_every_harness() {
             "@petrastella.io",
             "docs/SLACK_POSTING_RUNBOOK.md",
         ] {
-            assert!(
-                !claude.contains(banned),
-                "{rel} ships operator-specific text: {banned:?}"
-            );
+            assert!(!claude.contains(banned), "{rel} ships operator-specific text: {banned:?}");
         }
         for (flavor, name) in TWINS {
-            assert_eq!(
-                builtin_catalog::find(flavor, rel),
-                claude,
-                "{rel} drifted for {name}"
-            );
+            assert_eq!(builtin_catalog::find(flavor, rel), claude, "{rel} drifted for {name}");
         }
     }
 }
@@ -876,6 +837,7 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
         "status capture must not mutate the caller shell's errexit mode"
     );
 }
+
 
 // ---------------------------------------------------------------------------
 // Root projections and bundled resources
@@ -1093,6 +1055,7 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
     );
 }
 
+
 /// Release-report templates and Python helpers must be installed with the skill,
 /// including assets outside the markdown corpus.
 #[test]
@@ -1112,11 +1075,7 @@ fn release_report_bundle_is_complete_for_every_harness() {
         let source = builtin_catalog::find(Flavor::Claude, &path);
         assert!(!source.is_empty(), "empty report resource: {path}");
         for (flavor, name) in TWINS {
-            assert_eq!(
-                builtin_catalog::find(flavor, &path),
-                source,
-                "{name} {path}"
-            );
+            assert_eq!(builtin_catalog::find(flavor, &path), source, "{name} {path}");
         }
         let projected = opencode
             .iter()

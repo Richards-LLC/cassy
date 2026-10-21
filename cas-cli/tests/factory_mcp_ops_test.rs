@@ -10038,200 +10038,249 @@ async fn test_assignment_is_not_blocked_by_the_workers_own_merged_lane_cas_f8bc(
 
 #[tokio::test]
 async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
-    let home = TempDir::new().expect("home tempdir");
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "c54f-idle-worker";
-    // The task's explicit branch differs from its parent epic's branch.
-    let worker_path = init_sync_repo(&env, worker);
-    std::fs::write(
-        env.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"c54f-fixture\"\n",
-    )
-    .unwrap();
-    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
-
-    {
-        let store = env.agent_store();
-        let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
-        agent.role = AgentRole::Worker;
-        agent.factory_session = Some("session-f8bc-stale".to_string());
-        agent.metadata.insert(
-            "clone_path".to_string(),
-            worker_path.to_str().unwrap().to_string(),
-        );
-        store.register(&agent).expect("register worker");
-    }
-
-    let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
-    let store = env.task_store();
-    let mut targeted = store.get(&task_b).unwrap();
-    targeted.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:c54f-fixture".to_string(),
-        target_branch: "epic/foreign".to_string(),
-    });
-    store.update(&targeted).unwrap();
-    let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
-    active.assignee = Some(worker.to_string());
-    active.status = TaskStatus::InProgress;
-    env.task_store().add(&active).unwrap();
-    let busy = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a mid-task worker must still be refused");
-    assert!(busy.contains("commits behind"), "{busy}");
-    active.status = TaskStatus::Closed;
-    env.task_store().update(&active).unwrap();
-
-    std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
-    let dirty = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a dirty worker must still be refused");
-    assert!(dirty.contains("commits behind"), "{dirty}");
-    git_stdout(&worker_path, &["checkout", "--", "README"]);
-
-    // Clean is insufficient when the worker still carries unmerged commits.
-    std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
-    git_stdout(&worker_path, &["add", "unmerged.txt"]);
-    git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
-    let stale = assign(&env, &task_b, worker)
-        .await
-        .expect_err("genuinely stale worker must be refused");
-    assert!(
-        stale.contains("commits behind") && stale.contains("epic/foreign"),
-        "{stale}"
-    );
-    git_stdout(&worker_path, &["reset", "--hard", "main"]);
-
-    let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-        "action": "update", "id": task_b, "assignee": worker, "status": "blocked"
-    }))
-    .unwrap();
-    let blocked = env
-        .service
-        .task(Parameters(blocked_assignment))
-        .await
-        .expect_err("a batched status change must not promise a reset");
-    assert!(blocked.message.contains("commits behind"), "{blocked}");
-    assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-
-    // An assignment must not promise a reset that task start would skip.
-    let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-    for (label, declared, status, current_anchor, historical_anchor) in [
-        ("no declared target", false, TaskStatus::Open, false, false),
-        ("not Open", true, TaskStatus::Blocked, false, false),
-        ("prior anchor", true, TaskStatus::Open, true, false),
-        ("historical anchor", true, TaskStatus::Open, false, true),
+    for (worker_branch, assignee) in [
+        ("factory/c54f-idle-worker", "c54f-idle-worker"),
+        ("factory/c54f-idle-worker", "test-agent-id"),
+        ("factory/c54f-idle-worker-cas-prior", "c54f-idle-worker"),
+        ("factory/c54f-idle-worker-cas-prior", "test-agent-id"),
     ] {
-        let mut candidate = targeted.clone();
-        if !declared {
-            candidate.deliverables.work_target = None;
+        let home = TempDir::new().expect("home tempdir");
+        let _guard = EnvGuard::set_optional(&[
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
+            ("HOME", Some(home.path().to_str().unwrap())),
+        ]);
+        let env = FactoryTestEnv::new();
+        let worker = "c54f-idle-worker";
+        // The task's explicit branch differs from its parent epic's branch.
+        let worker_path = init_sync_repo(&env, worker);
+        // cas-17e34: the previous delivery is merged, but this owned branch is
+        // still behind the target. Both the base lane and per-task lane qualify.
+        if worker_branch != format!("factory/{worker}") {
+            git_stdout(&worker_path, &["checkout", "-b", worker_branch]);
         }
-        candidate.status = status;
-        candidate.deliverables.factory_branch_anchor = current_anchor.then(|| head.clone());
-        candidate.deliverables.historical_factory_branch_anchors = if historical_anchor {
-            vec![head.clone()]
-        } else {
-            Vec::new()
-        };
-        store.update(&candidate).unwrap();
-        let refused = assign(&env, &task_b, worker).await.expect_err(label);
-        assert!(refused.contains("commits behind"), "{label}: {refused}");
+        std::fs::write(worker_path.join("prior.txt"), "landed prior delivery\n").unwrap();
+        git_stdout(&worker_path, &["add", "prior.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "prior delivery"]);
+        let clean_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        let project = env.cas_root.parent().unwrap();
+        git_stdout(project, &["checkout", "epic/foreign"]);
+        git_stdout(
+            project,
+            &[
+                "merge",
+                "--no-ff",
+                worker_branch,
+                "-m",
+                "land prior delivery",
+            ],
+        );
+        git_stdout(project, &["checkout", "main"]);
+        std::fs::write(
+            env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"c54f-fixture\"\n",
+        )
+        .unwrap();
+        add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+        {
+            let store = env.agent_store();
+            let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
+            agent.role = AgentRole::Worker;
+            agent.status = AgentStatus::Idle;
+            agent.factory_session = Some("session-f8bc-stale".to_string());
+            agent.metadata.insert(
+                "clone_path".to_string(),
+                worker_path.to_str().unwrap().to_string(),
+            );
+            store.register(&agent).expect("register worker");
+        }
+
+        let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
+        let store = env.task_store();
+        let mut targeted = store.get(&task_b).unwrap();
+        targeted.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:c54f-fixture".to_string(),
+            target_branch: "epic/foreign".to_string(),
+        });
+        store.update(&targeted).unwrap();
+        let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
+        active.assignee = Some(worker.to_string());
+        active.status = TaskStatus::InProgress;
+        env.task_store().add(&active).unwrap();
+        let busy = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a mid-task worker must still be refused");
+        assert!(busy.contains("commits behind"), "{busy}");
+        active.status = TaskStatus::Closed;
+        env.task_store().update(&active).unwrap();
+
+        std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
+        let dirty = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a dirty worker must still be refused");
+        assert!(dirty.contains("commits behind"), "{dirty}");
+        git_stdout(&worker_path, &["checkout", "--", "README"]);
+
+        // Clean is insufficient when the worker still carries unmerged commits.
+        std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
+        git_stdout(&worker_path, &["add", "unmerged.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
+        let stale = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("genuinely stale worker must be refused");
+        assert!(
+            stale.contains("commits behind") && stale.contains("epic/foreign"),
+            "{stale}"
+        );
+        git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
+
+        let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task_b, "assignee": assignee, "status": "blocked"
+        }))
+        .unwrap();
+        let blocked = env
+            .service
+            .task(Parameters(blocked_assignment))
+            .await
+            .expect_err("a batched status change must not promise a reset");
+        assert!(blocked.message.contains("commits behind"), "{blocked}");
+        assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+
+        // An assignment must not promise a reset that task start would skip.
+        let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        for (label, declared, status, current_anchor, historical_anchor) in [
+            ("no declared target", false, TaskStatus::Open, false, false),
+            ("not Open", true, TaskStatus::Blocked, false, false),
+            ("prior anchor", true, TaskStatus::Open, true, false),
+            ("historical anchor", true, TaskStatus::Open, false, true),
+        ] {
+            let mut candidate = targeted.clone();
+            if !declared {
+                candidate.deliverables.work_target = None;
+            }
+            candidate.status = status;
+            candidate.deliverables.factory_branch_anchor = current_anchor.then(|| head.clone());
+            candidate.deliverables.historical_factory_branch_anchors = if historical_anchor {
+                vec![head.clone()]
+            } else {
+                Vec::new()
+            };
+            store.update(&candidate).unwrap();
+            let refused = assign(&env, &task_b, assignee).await.expect_err(label);
+            assert!(refused.contains("commits behind"), "{label}: {refused}");
+            assert!(store.get(&task_b).unwrap().assignee.is_none());
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+        }
+        store.update(&targeted).unwrap();
+
+        // A valid checkout for a different project must be refused before reset.
+        let foreign = FactoryTestEnv::new();
+        let foreign_path = init_sync_repo(&foreign, worker);
+        std::fs::write(
+            foreign.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"different-c54f-repo\"\n",
+        )
+        .unwrap();
+        let foreign_head = git_stdout(&foreign_path, &["rev-parse", "HEAD"]);
+        let agents = env.agent_store();
+        let mut agent = agents.get("test-agent-id").unwrap();
+        agent.metadata.insert(
+            "clone_path".into(),
+            foreign_path.to_string_lossy().into_owned(),
+        );
+        agents.update(&agent).unwrap();
+        let foreign_assignment = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a different repository cannot receive the clean-idle waiver");
+        assert!(
+            foreign_assignment.contains("commits behind"),
+            "{foreign_assignment}"
+        );
         assert!(store.get(&task_b).unwrap().assignee.is_none());
-        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+        let start: cas_mcp::TaskRequest =
+            serde_json::from_value(serde_json::json!({"action":"start", "id": task_b})).unwrap();
+        let different_repo = env
+            .service
+            .task(Parameters(start))
+            .await
+            .expect_err("foreign repository must be refused");
+        assert!(
+            different_repo
+                .message
+                .contains("belongs to another repository"),
+            "{different_repo}"
+        );
+        assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+        assert_eq!(
+            git_stdout(&foreign_path, &["rev-parse", "HEAD"]),
+            foreign_head
+        );
+        agent.metadata.insert(
+            "clone_path".into(),
+            worker_path.to_string_lossy().into_owned(),
+        );
+        agents.update(&agent).unwrap();
+
+        // cas-21db: assignment and start straddle another worker's merge. Keep
+        // the local epic ref stale, as it is in an idle worker's private clone.
+        let project = env.cas_root.parent().unwrap();
+        let remote = home.path().join("origin.git");
+        git_stdout(project, &["init", "--bare", remote.to_str().unwrap()]);
+        git_stdout(
+            project,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_stdout(project, &["push", "origin", "epic/foreign"]);
+        let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
+
+        let assigned = assign(&env, &task_b, assignee)
+            .await
+            .expect("a clean idle worker may accept work behind its target");
+        assert!(
+            assigned.contains("assignee") && assigned.contains("epic/foreign"),
+            "{assigned}"
+        );
+        assert_eq!(
+            store.get(&task_b).unwrap().assignee.as_deref(),
+            Some(worker)
+        );
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
+        git_stdout(project, &["checkout", "epic/foreign"]);
+        std::fs::write(project.join("merged.txt"), "another worker landed\n").unwrap();
+        git_stdout(project, &["add", "merged.txt"]);
+        git_stdout(
+            project,
+            &["commit", "-m", "merge between assignment and start"],
+        );
+        let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
+        git_stdout(project, &["push", "origin", "epic/foreign"]);
+        git_stdout(project, &["reset", "--hard", &assigned_target]);
+        git_stdout(
+            project,
+            &[
+                "update-ref",
+                "refs/remotes/origin/epic/foreign",
+                &assigned_target,
+            ],
+        );
+
+        let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_b
+        }))
+        .unwrap();
+        let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
+        assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
+        assert_eq!(
+            git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+            merged_target,
+            "start must fetch the epic that moved after assignment"
+        );
+        assert_eq!(
+            git_stdout(&worker_path, &["branch", "--show-current"]),
+            worker_branch
+        );
     }
-    store.update(&targeted).unwrap();
-
-    // A valid checkout for a different project must be refused before reset.
-    let foreign = FactoryTestEnv::new();
-    let foreign_path = init_sync_repo(&foreign, worker);
-    std::fs::write(
-        foreign.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"different-c54f-repo\"\n",
-    )
-    .unwrap();
-    let foreign_head = git_stdout(&foreign_path, &["rev-parse", "HEAD"]);
-    let agents = env.agent_store();
-    let mut agent = agents.get("test-agent-id").unwrap();
-    agent.metadata.insert(
-        "clone_path".into(),
-        foreign_path.to_string_lossy().into_owned(),
-    );
-    agents.update(&agent).unwrap();
-    let foreign_assignment = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a different repository cannot receive the clean-idle waiver");
-    assert!(
-        foreign_assignment.contains("commits behind"),
-        "{foreign_assignment}"
-    );
-    assert!(store.get(&task_b).unwrap().assignee.is_none());
-    let start: cas_mcp::TaskRequest =
-        serde_json::from_value(serde_json::json!({"action":"start", "id": task_b})).unwrap();
-    let different_repo = env
-        .service
-        .task(Parameters(start))
-        .await
-        .expect_err("foreign repository must be refused");
-    assert!(
-        different_repo
-            .message
-            .contains("belongs to another repository"),
-        "{different_repo}"
-    );
-    assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-    assert_eq!(
-        git_stdout(&foreign_path, &["rev-parse", "HEAD"]),
-        foreign_head
-    );
-    agent.metadata.insert(
-        "clone_path".into(),
-        worker_path.to_string_lossy().into_owned(),
-    );
-    agents.update(&agent).unwrap();
-
-    // cas-21db: assignment and start straddle another worker's merge. Keep
-    // the local epic ref stale, as it is in an idle worker's private clone.
-    let project = env.cas_root.parent().unwrap();
-    let remote = home.path().join("origin.git");
-    git_stdout(project, &["init", "--bare", remote.to_str().unwrap()]);
-    git_stdout(project, &["remote", "add", "origin", remote.to_str().unwrap()]);
-    git_stdout(project, &["push", "origin", "epic/foreign"]);
-    let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
-
-    let assigned = assign(&env, &task_b, worker)
-        .await
-        .expect("a clean idle worker may accept work behind its target");
-    assert!(
-        assigned.contains("assignee") && assigned.contains("epic/foreign"),
-        "{assigned}"
-    );
-    git_stdout(project, &["checkout", "epic/foreign"]);
-    std::fs::write(project.join("merged.txt"), "another worker landed\n").unwrap();
-    git_stdout(project, &["add", "merged.txt"]);
-    git_stdout(project, &["commit", "-m", "merge between assignment and start"]);
-    let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
-    git_stdout(project, &["push", "origin", "epic/foreign"]);
-    git_stdout(project, &["reset", "--hard", &assigned_target]);
-    git_stdout(
-        project,
-        &["update-ref", "refs/remotes/origin/epic/foreign", &assigned_target],
-    );
-
-    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-        "action": "start", "id": task_b
-    }))
-    .unwrap();
-    let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
-    assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
-    assert_eq!(
-        git_stdout(&worker_path, &["rev-parse", "HEAD"]),
-        merged_target,
-        "start must fetch the epic that moved after assignment"
-    );
 }
 
 /// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for

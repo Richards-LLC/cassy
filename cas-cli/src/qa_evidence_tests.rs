@@ -217,15 +217,82 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+#[test]
+fn after_cells_must_preserve_before_carousels_cas_51f1() {
+    let fx = Fixture::new();
+    let before = ["G1", "G2", "G3", "G4", "G5"];
+    for (after, missing) in [
+        (vec!["G1", "G2", "G5"], vec!["G3", "G4"]),
+        (vec![], before.to_vec()),
+        (vec!["G1", "G2", "G3", "G4", "G5", "G6"], vec![]),
+    ] {
+        fx.write_bundle(|manifest| manifest["files"]["pairs"] = "pairs/pairs.json".into());
+        let dir = fx.bundle_dir().join("pairs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pairs = Vec::new();
+        let mut unpaired = Vec::new();
+        for id in ["G1", "G2", "G3", "G4", "G5", "G6"] {
+            let mut cell = serde_json::json!({"id": id});
+            if before.contains(&id) {
+                let name = format!("{id}.before.png");
+                std::fs::write(dir.join(&name), "baseline capture").unwrap();
+                set_mtime_secs_ago(&dir.join(&name), 240);
+                cell["before"] = serde_json::json!({"png": name});
+            }
+            if after.contains(&id) {
+                let name = format!("{id}.after.png");
+                std::fs::write(dir.join(&name), "delivered capture").unwrap();
+                cell["after"] = serde_json::json!({"png": name});
+            }
+            if before.contains(&id) && after.contains(&id) {
+                pairs.push(cell);
+            } else if before.contains(&id) || after.contains(&id) {
+                unpaired.push(cell);
+            }
+        }
+        std::fs::write(
+            dir.join("pairs.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": fx.head,
+                "pairs": pairs, "unpaired": unpaired,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ctx = EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &fx.task_dir,
+            repo: &fx.repo,
+            delivered_head: &fx.head,
+            notes: &fx.notes(),
+            deployed_origins: &[],
+        };
+        let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
+        if missing.is_empty() {
+            assert!(result.is_ok(), "AFTER supersets must pass: {result:?}");
+        } else {
+            let refusal = result.expect_err("dropped carousel cells must refuse close");
+            assert!(
+                refusal.contains(&format!("missing BEFORE cell(s): {}", missing.join(", "))),
+                "{refusal}"
+            );
+        }
+    }
+}
+
 fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let mut fx = Fixture::new();
     let cas_root = fx.repo.join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
     let base = fx.task_dir.parent().unwrap().to_path_buf();
-    std::fs::write(cas_root.join("config.toml"), format!(
-        "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
-        base.display().to_string()
-    )).unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        format!(
+            "[factory]\nartifacts_root = {:?}\n[qa]\nuser_facing_paths = [\"web/**\"]\n",
+            base.display().to_string()
+        ),
+    )
+    .unwrap();
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, TASK);
     std::fs::remove_dir(&fx.task_dir).unwrap();
     fx.task_dir = scoped.clone();
@@ -249,7 +316,12 @@ fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String
     let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
     task.notes = notes.into();
     crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
-        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+        cas_root,
+        &task,
+        &fx.repo,
+        "",
+        Some(&fx.head),
+        Some(&["web/app.css".into()]),
     )
 }
 
@@ -264,17 +336,29 @@ fn scoped_hook_bundle_satisfies_close_with_either_citation_gh_1061() {
     let decision = hook_bundle_write(&fx, &cas_root, &bundle);
     assert_eq!(decision["permissionDecision"], "allow", "{decision}");
     fx.write_bundle(|_| {});
-    assert!(!legacy.exists(), "no flat directory exists in the reported incident");
+    assert!(
+        !legacy.exists(),
+        "no flat directory exists in the reported incident"
+    );
     for legacy_directory_exists in [false, true] {
         if legacy_directory_exists {
             std::fs::create_dir_all(&legacy).unwrap();
             std::fs::write(legacy.join("LEDGER.md"), "historical ledger").unwrap();
         }
         for citation in [bundle.clone(), legacy.join("qa/bundle.json")] {
-            let notes = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display()))
-                .unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
-            assert!(notes.iter().any(|note| note.contains(bundle.to_str().unwrap())
-                && note.contains("1 passing Expect")), "{notes:?}");
+            let notes = scoped_close(
+                &fx,
+                &cas_root,
+                &format!("qa-bundle: {}", citation.display()),
+            )
+            .unwrap_or_else(|error| panic!("citation {}: {error}", citation.display()));
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains(bundle.to_str().unwrap())
+                        && note.contains("1 passing Expect")),
+                "{notes:?}"
+            );
         }
     }
 }
@@ -285,17 +369,28 @@ fn missing_bundle_refusal_requests_hook_writable_path_gh_1061() {
     env.set("CAS_AGENT_ROLE", "worker");
     let (fx, cas_root, legacy) = scoped_factory_fixture();
     let bundle = fx.task_dir.join("qa/bundle.json");
-    for notes in [String::new(), format!("qa-bundle: {}", legacy.join("qa/bundle.json").display())] {
+    for notes in [
+        String::new(),
+        format!("qa-bundle: {}", legacy.join("qa/bundle.json").display()),
+    ] {
         let error = scoped_close(&fx, &cas_root, &notes).unwrap_err();
         let (_, next) = error.split_once("Next: ").unwrap();
         assert!(next.contains(bundle.to_str().unwrap()), "{error}");
         assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
-        assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+        assert_eq!(
+            hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"],
+            "allow"
+        );
     }
     let denied = hook_bundle_write(&fx, &cas_root, &legacy.join("qa/bundle.json"));
     assert_eq!(denied["permissionDecision"], "deny", "{denied}");
-    assert!(denied["permissionDecisionReason"].as_str().unwrap()
-        .contains(fx.task_dir.parent().unwrap().to_str().unwrap()), "{denied}");
+    assert!(
+        denied["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains(fx.task_dir.parent().unwrap().to_str().unwrap()),
+        "{denied}"
+    );
 }
 
 #[test]
@@ -307,39 +402,86 @@ fn citation_migration_preserves_validation_boundaries_gh_1061() {
     let historical = legacy.join("qa/bundle.json");
     std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
     std::fs::write(&historical, "invalid historical manifest").unwrap();
-    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
-    assert!(error.contains("malformed") && error.contains(historical.to_str().unwrap()), "{error}");
-    assert!(error.split_once("Next: ").unwrap().1.contains("rewrite bundle.json"), "{error}");
+    let error = scoped_close(
+        &fx,
+        &cas_root,
+        &format!("qa-bundle: {}", historical.display()),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("malformed") && error.contains(historical.to_str().unwrap()),
+        "{error}"
+    );
+    assert!(
+        error
+            .split_once("Next: ")
+            .unwrap()
+            .1
+            .contains("rewrite bundle.json"),
+        "{error}"
+    );
     let next = error.split_once("Next: ").unwrap().1;
     assert!(next.contains(bundle.to_str().unwrap()), "{error}");
     assert!(!next.contains(historical.to_str().unwrap()), "{error}");
-    assert_eq!(hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"], "allow");
+    assert_eq!(
+        hook_bundle_write(&fx, &cas_root, &bundle)["permissionDecision"],
+        "allow"
+    );
 
     // A valid bundle elsewhere cannot be substituted for a cited task file.
-    let unrelated = legacy.parent().unwrap().join("other-project/qa/bundle.json");
+    let unrelated = legacy
+        .parent()
+        .unwrap()
+        .join("other-project/qa/bundle.json");
     std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
     std::fs::copy(&bundle, &unrelated).unwrap();
-    for citation in [unrelated.clone(), legacy.join("../other-project/qa/bundle.json")] {
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
+    for citation in [
+        unrelated.clone(),
+        legacy.join("../other-project/qa/bundle.json"),
+    ] {
+        let error = scoped_close(
+            &fx,
+            &cas_root,
+            &format!("qa-bundle: {}", citation.display()),
+        )
+        .unwrap_err();
         assert!(error.contains("outside the task"), "{error}");
     }
     // Remapping still enforces the delivered commit, rather than trusting the
     // presence of a scoped manifest alone.
     std::fs::remove_file(&historical).unwrap();
     fx.write_bundle(|manifest| manifest["head_sha"] = serde_json::json!("0".repeat(40)));
-    let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+    let error = scoped_close(
+        &fx,
+        &cas_root,
+        &format!("qa-bundle: {}", historical.display()),
+    )
+    .unwrap_err();
     assert!(error.contains("stale"), "{error}");
     #[cfg(unix)]
     {
         std::fs::remove_file(&bundle).unwrap();
         std::os::unix::fs::symlink(&unrelated, &bundle).unwrap();
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
+        let error = scoped_close(
+            &fx,
+            &cas_root,
+            &format!("qa-bundle: {}", historical.display()),
+        )
+        .unwrap_err();
         assert!(error.contains("outside the task"), "{error}");
         // A dangling historical symlink is an existing unsafe citation,
         // never permission to switch to a different bundle.
         std::os::unix::fs::symlink(legacy.join("absent.json"), &historical).unwrap();
-        let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
-        assert!(error.contains("does not exist") && error.contains(historical.to_str().unwrap()), "{error}");
+        let error = scoped_close(
+            &fx,
+            &cas_root,
+            &format!("qa-bundle: {}", historical.display()),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("does not exist") && error.contains(historical.to_str().unwrap()),
+            "{error}"
+        );
     }
 }
 
@@ -533,10 +675,26 @@ fn a_library_context_trace_is_refused_with_the_runner_recipe_cas_b10d() {
         ],
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("has no test.trace"), "{}", refusal.problem);
-    assert!(refusal.problem.contains("library context.tracing"), "{}", refusal.problem);
-    assert!(refusal.command.contains("Playwright test runner"), "{}", refusal.command);
-    assert!(refusal.command.contains("--scrub-trace"), "{}", refusal.command);
+    assert!(
+        refusal.problem.contains("has no test.trace"),
+        "{}",
+        refusal.problem
+    );
+    assert!(
+        refusal.problem.contains("library context.tracing"),
+        "{}",
+        refusal.problem
+    );
+    assert!(
+        refusal.command.contains("Playwright test runner"),
+        "{}",
+        refusal.command
+    );
+    assert!(
+        refusal.command.contains("--scrub-trace"),
+        "{}",
+        refusal.command
+    );
 }
 
 /// cas-b10d: skipping the recipe's scrub leaves the runner's recorded
@@ -552,11 +710,22 @@ fn an_unscrubbed_signed_in_runner_trace_is_refused_cas_b10d() {
     );
     entries_zip(
         &fx.bundle_dir().join("trace.zip"),
-        &[("test.trace", PASSING.join("\n")), ("trace.network", raw_network)],
+        &[
+            ("test.trace", PASSING.join("\n")),
+            ("trace.network", raw_network),
+        ],
     );
     let refusal = fx.validate_with_origins(&staging()).unwrap_err();
-    assert!(refusal.problem.contains("carrying credentials"), "{}", refusal.problem);
-    assert!(refusal.problem.contains("trace.network"), "{}", refusal.problem);
+    assert!(
+        refusal.problem.contains("carrying credentials"),
+        "{}",
+        refusal.problem
+    );
+    assert!(
+        refusal.problem.contains("trace.network"),
+        "{}",
+        refusal.problem
+    );
 }
 
 #[test]
@@ -578,11 +747,19 @@ fn passing_poll_and_to_pass_ignore_caught_inner_expect_retries_gh1013() {
         r#"{"type":"after","callId":"toPass@1"}"#,
     ];
     trace_zip(&fx.bundle_dir().join("trace.zip"), &events);
-    assert_eq!(trace_expect_summary(&fx.bundle_dir().join("trace.zip")).unwrap(), ExpectSummary { passed: 2, failed: 0 });
-    fx.validate(&fx.notes()).expect("the final poll outcomes passed");
+    assert_eq!(
+        trace_expect_summary(&fx.bundle_dir().join("trace.zip")).unwrap(),
+        ExpectSummary {
+            passed: 2,
+            failed: 0
+        }
+    );
+    fx.validate(&fx.notes())
+        .expect("the final poll outcomes passed");
 
     let mut terminal_failure = events.to_vec();
-    terminal_failure[5] = r#"{"type":"after","callId":"poll@1","error":{"message":"poll timed out"}}"#;
+    terminal_failure[5] =
+        r#"{"type":"after","callId":"poll@1","error":{"message":"poll timed out"}}"#;
     trace_zip(&fx.bundle_dir().join("trace.zip"), &terminal_failure);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("failing run"), "{refusal:?}");
@@ -1007,23 +1184,37 @@ fn qa_range_paths_ignore_deleted_html_css_and_whitespace_vue_gh_1027_1037() {
     let base = fx.head.clone();
     commit(&fx.repo, "old.html", 60);
     commit(&fx.repo, "old.css", 50);
-    std::fs::write(fx.repo.join("app.vue"), "<template><p>Hello</p></template>\n").unwrap();
+    std::fs::write(
+        fx.repo.join("app.vue"),
+        "<template><p>Hello</p></template>\n",
+    )
+    .unwrap();
     git_ok(&fx.repo, &["add", "app.vue"]);
     git_ok(&fx.repo, &["commit", "-qm", "initial vue"]);
     let before = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     std::fs::remove_file(fx.repo.join("old.html")).unwrap();
     std::fs::remove_file(fx.repo.join("old.css")).unwrap();
-    std::fs::write(fx.repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+    std::fs::write(
+        fx.repo.join("app.vue"),
+        "<template> <p>Hello</p> </template>\n",
+    )
+    .unwrap();
     git_ok(&fx.repo, &["add", "-A"]);
     git_ok(&fx.repo, &["commit", "-qm", "remove and format"]);
     let after = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
     assert!(range_paths(&fx.repo, &before, &after).unwrap().is_empty());
-    assert_eq!(range_paths(&fx.repo, &base, &before).unwrap(), vec!["app.vue", "old.css", "old.html"]);
+    assert_eq!(
+        range_paths(&fx.repo, &base, &before).unwrap(),
+        vec!["app.vue", "old.css", "old.html"]
+    );
     // cas-833c: `--name-only` lists top-relative paths, so the per-path probe
     // must not resolve them against a subdirectory repo argument.
     let subdir = fx.repo.join("sub");
     std::fs::create_dir(&subdir).unwrap();
-    assert_eq!(range_paths(&subdir, &base, &before).unwrap(), vec!["app.vue", "old.css", "old.html"]);
+    assert_eq!(
+        range_paths(&subdir, &base, &before).unwrap(),
+        vec!["app.vue", "old.css", "old.html"]
+    );
 }
 
 #[test]
@@ -1277,7 +1468,8 @@ fn single_source_visual_qa_report_is_authority_over_text_markers_gh_1017_1025() 
     });
     let report_path = fx.bundle_dir().join("visual-qa/visual-qa.json");
     std::fs::write(&report_path, report.to_string()).unwrap();
-    fx.validate(&fx.notes()).expect("real single-source PASS needs no hand-edited markers");
+    fx.validate(&fx.notes())
+        .expect("real single-source PASS needs no hand-edited markers");
 
     for (field, value) in [
         ("totalIssues", serde_json::json!(1)),
@@ -1289,7 +1481,10 @@ fn single_source_visual_qa_report_is_authority_over_text_markers_gh_1017_1025() 
         let mut failed = report.clone();
         failed[field] = value;
         std::fs::write(&report_path, failed.to_string()).unwrap();
-        assert!(fx.validate(&fx.notes()).is_err(), "{field} must invalidate the run");
+        assert!(
+            fx.validate(&fx.notes()).is_err(),
+            "{field} must invalidate the run"
+        );
     }
 }
 
@@ -1409,7 +1604,8 @@ fn scoped_visual_qa_refuses_a_finding_the_delivery_introduced() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(
-        refusal.problem.contains("introduced 1 visual-QA finding") && refusal.problem.contains("#send"),
+        refusal.problem.contains("introduced 1 visual-QA finding")
+            && refusal.problem.contains("#send"),
         "{refusal:?}"
     );
     assert!(refusal.command.contains("merge-base"), "{refusal:?}");
@@ -1494,7 +1690,10 @@ fn per_render_fixture(tip_issues: serde_json::Value) -> Fixture {
         &dir.join("visual-qa-baseline/visual-qa.json"),
         chrono::Utc::now() - chrono::Duration::days(1),
         &format!("{BASE}/?fixture=home"),
-        renders(serde_json::json!([render_issue("footer a"), render_issue("header nav a")])),
+        renders(serde_json::json!([
+            render_issue("footer a"),
+            render_issue("header nav a")
+        ])),
     );
     fx
 }
@@ -1513,7 +1712,8 @@ fn scoped_visual_qa_compares_per_render_issue_reports_gh_1166() {
     ]));
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(
-        refusal.problem.contains("introduced 1 visual-QA finding") && refusal.problem.contains("#send"),
+        refusal.problem.contains("introduced 1 visual-QA finding")
+            && refusal.problem.contains("#send"),
         "{refusal:?}"
     );
 }
@@ -1544,7 +1744,10 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     let fx = scoped_fixture();
     fx.write_bundle(|manifest| manifest["visual_qa_status"] = serde_json::json!("scoped"));
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("visual_qa_baseline_json"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("visual_qa_baseline_json"),
+        "{refusal:?}"
+    );
 
     // A base run that did not check the delivered page.
     let fx = scoped_fixture();
@@ -1556,7 +1759,10 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
         serde_json::json!([backlog_finding(BASE, "footer a")]),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("did not check /?fixture=home"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("did not check /?fixture=home"),
+        "{refusal:?}"
+    );
 
     // A base run against a deployed site.
     let fx = scoped_fixture();
@@ -1580,11 +1786,19 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
         serde_json::json!([backlog_finding(TIP, "footer a")]),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("before the delivered commit"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("before the delivered commit"),
+        "{refusal:?}"
+    );
 
     // Reports without a findings list cannot be compared.
     let fx = scoped_fixture();
-    write_visual_qa_report(&fx.bundle_dir(), "FAIL", chrono::Utc::now(), "http://127.0.0.1:4173/");
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "FAIL",
+        chrono::Utc::now(),
+        "http://127.0.0.1:4173/",
+    );
     std::fs::write(
         fx.bundle_dir().join("visual-qa/visual-qa.json"),
         serde_json::json!({
@@ -2238,10 +2452,15 @@ fn cas_5488_badge(origin: &str, index: usize, y: f64) -> serde_json::Value {
 #[test]
 fn scoped_visual_qa_pairs_translated_badges_cas_5488() {
     let fx = scoped_fixture();
-    let base: Vec<_> = (1..=20).map(|i| cas_5488_badge(BASE, i, 100.0 + i as f64 * 20.0)).collect();
-    let tip: Vec<_> = (1..=20).map(|i| cas_5488_badge(TIP, i, 639.0 + i as f64 * 20.0)).collect();
+    let base: Vec<_> = (1..=20)
+        .map(|i| cas_5488_badge(BASE, i, 100.0 + i as f64 * 20.0))
+        .collect();
+    let tip: Vec<_> = (1..=20)
+        .map(|i| cas_5488_badge(TIP, i, 639.0 + i as f64 * 20.0))
+        .collect();
     cas_f290_reports(&fx, serde_json::json!(tip), serde_json::json!(base));
-    fx.validate(&fx.notes()).expect("twenty identical badges translated by 539px are existing findings");
+    fx.validate(&fx.notes())
+        .expect("twenty identical badges translated by 539px are existing findings");
 }
 
 #[test]
@@ -2255,20 +2474,42 @@ fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
         ("/type", serde_json::json!("clipped-content")),
         ("/textBounds/width", serde_json::json!(32)),
         ("/ratio", serde_json::json!(1.5)),
-        ("/foreground", serde_json::json!([200,200,200])),
+        ("/foreground", serde_json::json!([200, 200, 200])),
     ] {
         let mut changed = tip.clone();
         *changed.pointer_mut(pointer).unwrap() = value;
-        cas_f290_reports(&fx, serde_json::json!([changed]), serde_json::json!([base.clone()]));
+        cas_f290_reports(
+            &fx,
+            serde_json::json!([changed]),
+            serde_json::json!([base.clone()]),
+        );
         let refusal = fx.validate(&fx.notes()).unwrap_err();
-        assert!(refusal.problem.contains("introduced 1"), "{pointer}: {refusal:?}");
+        assert!(
+            refusal.problem.contains("introduced 1"),
+            "{pointer}: {refusal:?}"
+        );
     }
-    cas_f290_reports(&fx, serde_json::json!([tip.clone(), tip]), serde_json::json!([base]));
-    assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
+    cas_f290_reports(
+        &fx,
+        serde_json::json!([tip.clone(), tip]),
+        serde_json::json!([base]),
+    );
+    assert!(
+        fx.validate(&fx.notes())
+            .unwrap_err()
+            .problem
+            .contains("introduced 1")
+    );
 }
 
 /// GH #1321: a contrast finding in the `section` sibling at `index` under main.
-fn gh_1321_finding(origin: &str, section: &str, index: usize, text: &str, y: f64) -> serde_json::Value {
+fn gh_1321_finding(
+    origin: &str,
+    section: &str,
+    index: usize,
+    text: &str,
+    y: f64,
+) -> serde_json::Value {
     serde_json::json!({
         "type": "contrast",
         "selector": format!("main > section.{section}:nth-of-type({index}) > p.total"),
@@ -2317,7 +2558,10 @@ fn scoped_visual_qa_reports_a_finding_inside_an_inserted_section_gh_1321() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("introduced 1"), "{refusal:?}");
-    assert!(refusal.problem.contains("section.observations"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("section.observations"),
+        "{refusal:?}"
+    );
 }
 
 fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
@@ -2342,8 +2586,21 @@ fn cas_38e7_close_needs_no_journey_receipt() {
     let ctx = journey_context(&fx, &notes);
     let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &["journeys:HUB-J7".into()], &[])
         .expect("a valid bundle closes without a journey receipt");
-    assert!(pass.notes.iter().any(|note| note.contains("QA evidence bundle accepted")), "{:?}", pass.notes);
-    assert!(!pass.notes.iter().any(|note| note.contains("JOURNEY_SELECTION")), "{:?}", pass.notes);
+    assert!(
+        pass.notes
+            .iter()
+            .any(|note| note.contains("QA evidence bundle accepted")),
+        "{:?}",
+        pass.notes
+    );
+    assert!(
+        !pass
+            .notes
+            .iter()
+            .any(|note| note.contains("JOURNEY_SELECTION")),
+        "{:?}",
+        pass.notes
+    );
 }
 
 #[test]
@@ -2376,13 +2633,7 @@ fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_input_changes() {
     }
     let notes = fx.notes();
     let ctx = journey_context(&fx, &notes);
-    run_close_gate(
-        &ctx,
-        EvidenceTier::Bundle,
-        &["journeys:HUB-J7".into()],
-        &[],
-    )
-    .unwrap();
+    run_close_gate(&ctx, EvidenceTier::Bundle, &["journeys:HUB-J7".into()], &[]).unwrap();
     let critique = fx.head.clone();
     for input in [
         "hub-web/src/inbox/presence.ts",
@@ -2411,7 +2662,9 @@ fn non_visual_bundle_omits_screencast_cas_7e91() {
         manifest["files"]["a11y"] = serde_json::json!([]);
     });
     std::fs::remove_file(fx.bundle_dir().join("receipt.webm")).unwrap();
-    let receipt = fx.validate(&fx.notes()).expect("non-visual evidence needs no screencast or media-mode captures");
+    let receipt = fx
+        .validate(&fx.notes())
+        .expect("non-visual evidence needs no screencast or media-mode captures");
     assert_eq!(receipt.passed_expects, 1);
     assert_eq!(receipt.head_sha, fx.head);
 }
@@ -2422,10 +2675,15 @@ fn visual_bundle_requires_screencast_cas_7e91() {
     fx.write_bundle(|manifest| {
         manifest["files"].as_object_mut().unwrap().remove("receipt");
     });
-    let refusal = fx.validate(&fx.notes()).expect_err("a visual bundle needs its screencast");
+    let refusal = fx
+        .validate(&fx.notes())
+        .expect_err("a visual bundle needs its screencast");
     assert!(refusal.problem.contains("files.receipt"), "{refusal:?}");
     assert!(refusal.command.contains("receipt"), "{refusal:?}");
-    assert!(refusal.problem.contains("visual_change is true"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("visual_change is true"),
+        "{refusal:?}"
+    );
 }
 
 #[test]
@@ -2433,6 +2691,11 @@ fn non_visual_listed_screencast_is_still_validated_cas_7e91() {
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["visual_change"] = serde_json::json!(false));
     std::fs::write(fx.bundle_dir().join("receipt.webm"), "").unwrap();
-    let refusal = fx.validate(&fx.notes()).expect_err("a listed optional capture must be valid");
-    assert!(refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"), "{refusal:?}");
+    let refusal = fx
+        .validate(&fx.notes())
+        .expect_err("a listed optional capture must be valid");
+    assert!(
+        refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"),
+        "{refusal:?}"
+    );
 }

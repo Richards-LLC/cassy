@@ -274,6 +274,110 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
     id
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for (old_status, reparented, released) in [
+        (TaskStatus::Closed, false, true),
+        (TaskStatus::Cancelled, false, true),
+        (TaskStatus::InProgress, true, true),
+        (TaskStatus::InProgress, false, false),
+    ] {
+        let cloud = FakeCloud::start();
+        let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
+        let prowl = side(&cloud, "machine-prowl", "pr", "prowl");
+        let root = &soundwave.machine.cas_dir;
+        let tasks = open_task_store(root).unwrap();
+        let mut old_epic = Task::new("cas-8a2e".into(), "shipped v47".into());
+        old_epic.task_type = TaskType::Epic;
+        old_epic.status = old_status;
+        tasks.add(&old_epic).unwrap();
+        let child = "cas-a1";
+        if !reparented {
+            tasks
+                .remove_dependency_of_type(child, EPIC, DependencyType::ParentChild)
+                .unwrap();
+            tasks
+                .add_dependency(&Dependency::new(
+                    child.into(),
+                    old_epic.id.clone(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+        let now = chrono::Utc::now();
+        let historical = cas_store::EpicSplit {
+            id: "split-687eb1ce".into(),
+            epic_id: old_epic.id.clone(),
+            local_agent_id: "gone-owner".into(),
+            peer_agent_id: "gone-peer".into(),
+            peer_name: "patient-gopher-67".into(),
+            peer_machine: "prowl".into(),
+            direction: cas_store::SplitDirection::Outgoing,
+            mine: vec![],
+            theirs: vec![child.into()],
+            state: cas_store::SplitState::Accepted,
+            reason: None,
+            message_id: None,
+            expires_at: now - chrono::Duration::days(4),
+            created_at: now - chrono::Duration::days(4),
+            decided_at: Some(now - chrono::Duration::days(4)),
+            decided_by: None,
+            cleanup_pending: false,
+            expiry_notice_pending: false,
+        };
+        cas_store::insert_epic_split(root, &historical).unwrap();
+        assert_eq!(
+            cas::cloud::epic_split::split_hold_for(root, child).is_none(),
+            released,
+            "closed/cancelled epics and changed parents must release read-side binding: {old_status:?}, reparented={reparented}"
+        );
+        if released && !reparented {
+            tasks
+                .remove_dependency_of_type(child, &old_epic.id, DependencyType::ParentChild)
+                .unwrap();
+            tasks
+                .add_dependency(&Dependency::new(
+                    child.into(),
+                    EPIC.into(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+        let outcome = soundwave
+            .factory(json!({"id": if released { EPIC } else { &old_epic.id },
+            "target": "prowl", "mine": child}))
+            .await;
+        if released {
+            let proposed = outcome.unwrap();
+            assert!(proposed.contains("Proposed epic split"), "{proposed}");
+            let id = split_id(&proposed);
+            assert_eq!(prowl.tick().await.delivered, 1);
+            let accepted = prowl
+                .factory(json!({"id": id, "decision": "accept"}))
+                .await
+                .unwrap();
+            assert!(accepted.contains("Accepted epic split"), "{accepted}");
+        } else {
+            let refusal = outcome.unwrap_err();
+            assert!(
+                refusal.contains(&historical.id)
+                    && refusal.contains(&old_epic.id)
+                    && refusal.contains("accepted")
+                    && refusal.contains("in_progress")
+                    && refusal
+                        .contains("factory action=epic_split id=split-687eb1ce decision=cancel"),
+                "{refusal}"
+            );
+        }
+        assert_eq!(
+            cas_store::get_epic_split(root, &historical.id).unwrap(),
+            Some(historical),
+            "the fix must not cancel or rewrite the historical split"
+        );
+    }
+}
+
 /// The demo: propose, accept, and each side refused on the other's children.
 #[tokio::test(flavor = "multi_thread")]
 async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_cas_0795() {

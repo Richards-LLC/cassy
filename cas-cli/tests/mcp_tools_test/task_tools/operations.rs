@@ -6538,8 +6538,11 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
 
     git(&worker_checkout, &["fetch", "-q", "origin"]);
     git(&worker_checkout, &["merge", "--ff-only", "origin/main"]);
-    for assignee in [&worker.name, &worker.id] {
-        let mut request = make_task_create_req("fresh assigned creation");
+    for (assignee, title) in [
+        (&worker.name, "Reconcile invoice payments"),
+        (&worker.id, "Calibrate satellite antenna"),
+    ] {
+        let mut request = make_task_create_req(title);
         request.assignee = Some(assignee.clone());
         let receipt = extract_text(service.cas_task_create(Parameters(request)).await.unwrap());
         let id = extract_task_id(&receipt).unwrap().to_string();

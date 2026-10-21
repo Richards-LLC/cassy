@@ -372,7 +372,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     if let Some(waiver) = waiver {
         let evidence = match tier {
             EvidenceTier::Bundle => "bundle",
-            EvidenceTier::Ledger => "ledger",
+            EvidenceTier::Ledger { .. } => "ledger",
             EvidenceTier::None => "pair coverage",
         };
         pass.notes.push(format!(

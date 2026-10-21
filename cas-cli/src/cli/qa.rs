@@ -134,6 +134,11 @@ pub enum QaCommand {
     Impact(super::qa_impact::ImpactArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
+    /// Tear down expired release fixture handles after a crash
+    Fixtures {
+        #[arg(long, required = true)]
+        sweep: bool,
+    },
     /// Seed, inspect or validate the journey registry
     #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status"])))]
     Journeys {
@@ -157,6 +162,32 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
+        QaCommand::Fixtures { sweep: _ } => {
+            let root = cas_root.context("No Cassy project; run cas init first")?;
+            let project =
+                PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
+            let config = crate::qa_release::configured(root)
+                .context("No qa.release.adapter configured; set qa.release.adapter first")?;
+            let report = crate::qa_release::fixtures::sweep(&project, root, &config)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.orphan_debt.is_empty() {
+                println!("[OK] cleaned: {} handles; orphan debt: 0", report.cleaned);
+            } else {
+                println!(
+                    "[WARN] cleaned: {} handles; orphan debt: {}",
+                    report.cleaned,
+                    report.orphan_debt.len()
+                );
+                println!("Retry: cas qa fixtures --sweep");
+                println!("Details: cas --json qa fixtures --sweep");
+            }
+            ensure!(
+                report.orphan_debt.is_empty(),
+                "fixture cleanup incomplete; retry cas qa fixtures --sweep"
+            );
+            Ok(())
+        }
         QaCommand::Journeys {
             check: _,
             seed,

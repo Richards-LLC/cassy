@@ -72,8 +72,8 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. This slice implements
-`served`; the others are reserved for later slices.
+`fixture-teardown`, `run`, `readback` and `migrations`. `served` and fixture
+setup/teardown are implemented; later slices implement the remaining verbs.
 
 ### `served`
 
@@ -96,3 +96,53 @@ pass. Each of the following refuses with `SERVED MISMATCH`:
 A failed `served` call refuses with `SERVED UNKNOWN` and keeps its error kind.
 A served backend can therefore lag the staging tip, as long as no commit since
 then touched its paths.
+
+## Fixtures and personas
+
+Registry fixtures share `description` and optional criterion `labels`. Each
+fixture declares exactly one source; existing `provider` entries remain valid:
+
+```yaml
+fixtures:
+  existing:
+    description: Existing account seed
+    provider: account-seed
+  stored-video:
+    description: Immutable golden-set video
+    frozen:
+      sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      storage_key: golden/videos/example.mp4
+  past-due:
+    description: Past-due staging persona
+    recipe:
+      name: past_due
+      envs: [staging]
+      provides: [account_id]
+      ttl_mins: 30
+```
+
+`frozen.sha256` is 64 hexadecimal characters, and `storage_key` is a nonempty
+opaque storage key. `cas qa journeys --check` reports HTTP(S) provider URLs as
+`live_url_fixture` debt: freeze their bytes to avoid deleted/private media and
+provider outages changing the golden set. Non-URL providers keep their current
+behavior. Recipes require a name, nonempty environment allow-list, unique
+nonempty output names and a positive TTL. Registry recipes never contain commands.
+
+`fixture-setup` receives `args: {name, provides, ttl_mins, cleanup_id}` and
+returns `data: {handle, outputs: {account_id: "opaque-id"}}`. Cassy refuses an
+environment outside `envs` before any adapter call. A setup failure or missing
+declared output is `NOT_EXERCISED{fixture_setup}`.
+
+The suite guard journals `{handle, env, expiry}` in `qa_fixture_cleanup` before
+returning the setup receipt. `finish` and early-return/unwind cleanup call
+`fixture-teardown` with `args: {name, handle, cleanup_id}` and the original
+environment and SHA. Teardown returns `data: {ok: true}` and must be idempotent:
+an already absent handle is successfully cleaned. Cleanup errors retain the
+row as orphan debt, separately from the suite verdict.
+
+After a crash, run `cas qa fixtures --sweep` in the project checkout. It tears
+down expired handles using the configured adapter, deletes successful rows and
+reports retained orphan debt (also available with `--json`). Unexpired handles
+stay available to their running suite. The TTL is a recovery deadline; set it
+longer than the expected suite duration. Migration 283 installs the journal in
+existing stores via `cas update --schema-only` and in newly initialized stores.

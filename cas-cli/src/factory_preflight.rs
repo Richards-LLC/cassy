@@ -2,7 +2,8 @@
 //!
 //! The collector deliberately consumes existing typed evidence. It never
 //! connects optional upstreams, launches a harness model turn, or spawns a
-//! factory worker.
+//! factory worker. Its only write is the credential-free Claude auth throttle
+//! record shared with doctor (`~/.cas/cache/claude-auth`, cas-43b3).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

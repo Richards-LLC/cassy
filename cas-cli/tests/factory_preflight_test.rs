@@ -251,9 +251,19 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
     assert!(!human.contains("(factory blocked)"), "{human}");
     assert!(human.contains("repository: ready"), "{human}");
     assert!(human.contains("cas mcp: ready configured=true"), "{human}");
+    // cas-43b3 shares one typed, credential-free Claude auth throttle record
+    // across doctor and preflight processes. Nothing else may change.
+    let mut after = file_snapshot(home.path());
+    after.retain(|(path, bytes)| {
+        let throttle = path.parent() == Some(std::path::Path::new(".cas/cache/claude-auth"));
+        if throttle {
+            let evidence: Value = serde_json::from_slice(bytes).expect("typed auth evidence");
+            assert!(evidence.get("availability").is_some(), "{evidence}");
+        }
+        !throttle
+    });
     assert_eq!(
-        file_snapshot(home.path()),
-        before,
+        after, before,
         "preflight must not mutate ambient HOME/CAS state"
     );
 }

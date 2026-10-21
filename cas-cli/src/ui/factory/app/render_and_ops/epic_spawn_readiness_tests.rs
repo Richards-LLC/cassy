@@ -978,8 +978,20 @@ fn cas_bfa1_round4_quarantined_epic_cannot_authorize_publication() {
                 .iter()
                 .all(|task| task.id != "cas-round2-epic")
         );
-        let prep = f.prepare().unwrap();
-        assert_eq!(prep.worktree_info.unwrap().parent_branch, "epic/round2");
+        // Hidden authority leaves an unmanaged base. Since cas-02ae an
+        // unmanaged base must be verified on origin, so spawn refuses with the
+        // cas-cd99 publication guidance instead of pushing it.
+        let error = f
+            .prepare()
+            .err()
+            .expect("an unpublished unmanaged base must refuse")
+            .to_string();
+        assert!(
+            error.contains("SPAWN BASE NOT PUBLISHED")
+                && error.contains("git push origin epic/round2"),
+            "{error}"
+        );
+        assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
         assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), f.old);
         assert!(
             git(

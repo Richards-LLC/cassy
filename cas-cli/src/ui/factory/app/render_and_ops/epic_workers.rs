@@ -1813,13 +1813,17 @@ pub(crate) fn settle_retired_worker_bindings_reporting(
 
 /// The brief a recycled worker receives so its fresh conversation resumes its
 /// assigned work (cas-a622). `None` when it holds no nonterminal task.
-pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
+pub(crate) fn recycle_resume_brief(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    factory_session: &str,
+) -> Option<String> {
     let task_store = open_task_store_cached(cas_dir).ok()?;
-    let mut held: Vec<cas_types::Task> = task_store
-        .list(None)
-        .ok()?
-        .into_iter()
+    let all_tasks = task_store.list(None).ok()?;
+    let mut held: Vec<cas_types::Task> = all_tasks
+        .iter()
         .filter(|task| task.assignee.as_deref() == Some(worker_name) && !task.is_terminal())
+        .cloned()
         .collect();
     if held.is_empty() {
         return None;
@@ -1829,7 +1833,10 @@ pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str)
         "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
             .to_string();
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
-    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+    for task in held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::InProgress)
+    {
         brief.push_str(&format!(
             "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
              `task action=notes id={}`, then continue from the last checkpoint.\n",
@@ -1865,7 +1872,113 @@ pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str)
             other.join("\n")
         ));
     }
+    append_recycle_received_messages(
+        cas_dir,
+        worker_name,
+        factory_session,
+        &held,
+        &all_tasks,
+        &mut brief,
+    );
     Some(brief)
+}
+
+/// Notes have minute precision. Include that whole minute to avoid losing an
+/// answer received after a note in the same minute. Lifecycle `updated_at` is
+/// not a checkpoint: a reclaim/start may have just advanced it.
+fn recycle_task_checkpoint(task: &cas_types::Task) -> chrono::DateTime<chrono::Utc> {
+    task.notes
+        .lines()
+        .filter_map(|line| {
+            let (timestamp, _) = line.strip_prefix('[')?.split_once(']')?;
+            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
+                .ok()
+                .map(|at| at.and_utc())
+        })
+        .max()
+        .unwrap_or(task.created_at)
+}
+
+fn append_recycle_received_messages(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    factory_session: &str,
+    held: &[cas_types::Task],
+    all_tasks: &[cas_types::Task],
+    brief: &mut String,
+) {
+    let since = held
+        .iter()
+        .map(recycle_task_checkpoint)
+        .min()
+        .expect("nonempty held tasks");
+    let history = cas_store::SqlitePromptQueueStore::open_read_only(cas_dir).and_then(|queue| {
+        queue.received_supervisor_messages_since(worker_name, factory_session, since, 64)
+    });
+    let history = match history {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(worker = worker_name, %error, "recycle message history unavailable");
+            brief.push_str("Recent supervisor message history could not be read; check `coordination action=inbox_poll` and task notes before asking again.\n");
+            return;
+        }
+    };
+    let mut included = 0;
+    let mut remaining = 12_000usize;
+    for (row, received_at) in history {
+        // Assignment envelopes bind even unknown tasks. Ordinary replies often
+        // omit an id ("yes, use that candidate"); keep them for this worker's
+        // checkpoint window. When known task ids are present, apply only the
+        // corresponding bound-task windows, never another task's checkpoint.
+        let assignment = crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt);
+        let tokens: std::collections::HashSet<_> = row
+            .prompt
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .collect();
+        let mentions_task = all_tasks
+            .iter()
+            .any(|task| tokens.contains(task.id.as_str()));
+        let cutoff = held
+            .iter()
+            .filter(|task| {
+                if let Some(id) = assignment.as_deref() {
+                    task.id == id
+                } else {
+                    !mentions_task || tokens.contains(task.id.as_str())
+                }
+            })
+            .map(recycle_task_checkpoint)
+            .min();
+        if cutoff.is_none_or(|cutoff| received_at < cutoff) {
+            continue;
+        }
+        if included == 0 {
+            brief.push_str("Recent received supervisor messages (newest first; up to 8). These answers survived the reset; read them before repeating a question.\n");
+        }
+        let header = format!(
+            "#{} from {} (received {}):\n",
+            row.id,
+            row.source,
+            received_at.to_rfc3339()
+        );
+        let body = if header.len() + row.prompt.len() + 1 <= remaining {
+            format!("{header}{}\n", row.prompt)
+        } else {
+            format!(
+                "#{}: message exceeds remaining brief budget; read the complete answer with `coordination action=inbox_poll notification_id={}`.\n",
+                row.id, row.id
+            )
+        };
+        if body.len() > remaining {
+            break;
+        }
+        remaining -= body.len();
+        brief.push_str(&body);
+        included += 1;
+        if included == 8 {
+            break;
+        }
+    }
 }
 
 /// Queue [`recycle_resume_brief`] to the recycled worker. Returns the prompt
@@ -1876,7 +1989,7 @@ pub(crate) fn enqueue_recycle_resume_brief(
     factory_session: &str,
     worker_name: &str,
 ) -> anyhow::Result<Option<i64>> {
-    let Some(brief) = recycle_resume_brief(cas_dir, worker_name) else {
+    let Some(brief) = recycle_resume_brief(cas_dir, worker_name, factory_session) else {
         return Ok(None);
     };
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
@@ -6667,53 +6780,187 @@ mod tests {
         // mutates that field without saving conversation context).
         let tasks = open_task_store_cached(&cas_dir).unwrap();
         for task_id in ["cas-e0be", "cas-7cb3", "cas-ed87", "cas-96c0"] {
-            tasks.append_note(task_id, "[2026-10-20 12:00] 📝 PROGRESS Saved checkpoint").unwrap();
+            tasks
+                .append_note(task_id, "[2026-10-20 12:00] 📝 PROGRESS Saved checkpoint")
+                .unwrap();
         }
+        tasks
+            .append_note(
+                "cas-96c0",
+                "[2026-10-20 12:20] 📝 PROGRESS Later checkpoint",
+            )
+            .unwrap();
         let agents = open_agent_store(&cas_dir).unwrap();
         let mut supervisor = cas_types::Agent::new_with_role(
-            "supervisor-a02a".into(), "zen-condor".into(), cas_types::AgentRole::Supervisor,
+            "supervisor-a02a".into(),
+            "zen-condor".into(),
+            cas_types::AgentRole::Supervisor,
         );
         supervisor.factory_session = Some("session-a622".into());
         agents.register(&supervisor).unwrap();
+        let mut peer = cas_types::Agent::new_with_role(
+            "peer-a02a".into(),
+            "peer".into(),
+            cas_types::AgentRole::Worker,
+        );
+        peer.factory_session = Some("session-a622".into());
+        agents.register(&peer).unwrap();
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         let mut received = Vec::new();
         for (body, target, session, origin, surfaced, at) in [
-            ("PRE_CHECKPOINT", "wise-raven", "session-a622", "supervisor-a02a", true, "2026-10-20T11:59:00Z"),
-            ("OTHER_WORKER", "peer", "session-a622", "supervisor-a02a", true, "2026-10-20T12:01:00Z"),
-            ("OTHER_SESSION", "wise-raven", "other-session", "supervisor-a02a", true, "2026-10-20T12:02:00Z"),
-            ("UNRECEIVED", "wise-raven", "session-a622", "supervisor-a02a", false, "2026-10-20T12:03:00Z"),
-            ("SPOOFED_SUPERVISOR", "wise-raven", "session-a622", "unknown-agent", true, "2026-10-20T12:04:00Z"),
-            ("<cas-assignment task_id=\"cas-peer\"/> UNBOUND_TASK", "wise-raven", "session-a622", "supervisor-a02a", true, "2026-10-20T12:05:00Z"),
-            ("OLDEST_OVER_LIMIT", "wise-raven", "session-a622", "supervisor-a02a", true, "2026-10-20T12:06:00Z"),
+            (
+                "PRE_CHECKPOINT",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T11:59:00Z",
+            ),
+            (
+                "OTHER_WORKER",
+                "peer",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:01:00Z",
+            ),
+            (
+                "OTHER_SESSION",
+                "wise-raven",
+                "other-session",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:02:00Z",
+            ),
+            (
+                "UNRECEIVED",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                false,
+                "2026-10-20T12:03:00Z",
+            ),
+            (
+                "SPOOFED_SUPERVISOR",
+                "wise-raven",
+                "session-a622",
+                "peer-a02a",
+                true,
+                "2026-10-20T12:04:00Z",
+            ),
+            (
+                "<cas-assignment task_id=\"cas-peer\"/> UNBOUND_TASK",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:05:00Z",
+            ),
+            (
+                "cas-96c0 STALE_FOR_BOUND_TASK",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:15:00Z",
+            ),
+            (
+                "TRANSPORT_ONLY",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:16:00Z",
+            ),
+            (
+                "OLDEST_OVER_LIMIT",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:06:00Z",
+            ),
         ] {
-            let id = queue.enqueue_urgent_with_outcome(
-                "zen-condor", target, body, Some(session), None, None, false,
-                Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: origin.into() }),
-            ).unwrap().id();
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    target,
+                    body,
+                    Some(session),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: origin.into(),
+                    }),
+                )
+                .unwrap()
+                .id();
             if surfaced {
-                queue.record_recipient_surfaced(id, target, cas_store::SurfacingSource::InboxPoll).unwrap();
+                if body == "TRANSPORT_ONLY" {
+                    queue
+                        .record_recipient_transport_delivered(id, target)
+                        .unwrap();
+                } else {
+                    queue
+                        .record_recipient_surfaced(id, target, cas_store::SurfacingSource::InboxPoll)
+                        .unwrap();
+                    queue.ack(id).unwrap();
+                }
                 queue.mark_processed(id).unwrap();
-                queue.ack(id).unwrap();
-                conn.execute("UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?", rusqlite::params![at, id]).unwrap();
+                conn.execute(
+                    "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                    rusqlite::params![at, id],
+                )
+                .unwrap();
             }
         }
         for index in 0..10 {
             let body = if index == 9 {
                 "Yes — use the supplied candidate; that answers your question.".to_string()
+            } else if index == 7 {
+                format!("OVERSIZED_ANSWER{}", "λ".repeat(9000))
             } else {
                 format!("Decision {index} for cas-e0be: continue with the agreed candidate.")
             };
-            let id = queue.enqueue_urgent_with_outcome(
-                "zen-condor", "wise-raven", &body, Some("session-a622"), None, None, false,
-                Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: supervisor.id.clone() }),
-            ).unwrap().id();
-            queue.record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll).unwrap();
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    "wise-raven",
+                    &body,
+                    Some("session-a622"),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll)
+                .unwrap();
             queue.mark_processed(id).unwrap();
             queue.ack(id).unwrap();
             // Enqueued before the checkpoint, actually received afterwards.
-            conn.execute("UPDATE prompt_queue SET created_at = '2026-10-20 11:00:00' WHERE id = ?", [id]).unwrap();
-            conn.execute("UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?", rusqlite::params![format!("2026-10-20T12:10:{index:02}Z"), id]).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = '2026-10-20 11:00:00' WHERE id = ?",
+                [id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                rusqlite::params![
+                    format!(
+                        "2026-10-20T12:10:{:02}Z",
+                        if index == 8 { 11 } else { index }
+                    ),
+                    id
+                ],
+            )
+            .unwrap();
             received.push((id, body));
         }
 
@@ -6740,20 +6987,57 @@ mod tests {
             assert!(brief.contains(id), "{id} is named: {brief}");
         }
         for id in ["cas-done", "cas-peer"] {
-            assert!(!brief.contains(id), "{id} is not this worker's open work: {brief}");
+            assert!(
+                !brief.contains(id),
+                "{id} is not this worker's open work: {brief}"
+            );
         }
-        let newest = &received[9];
-        let previous = &received[8];
-        assert!(brief.contains(&newest.1), "received answer survives recycle: {brief}");
-        assert!(brief.contains(&format!("#{}", newest.0)), "retain the original notification id");
-        assert!(brief.find(&newest.1).unwrap() < brief.find(&previous.1).unwrap(), "newest received decision first");
+        let newest = &received[8];
+        let previous = &received[9];
+        assert!(
+            brief.contains(&received[9].1),
+            "received answer survives recycle: {brief}"
+        );
+        assert!(
+            brief.contains(&format!("#{}", newest.0)),
+            "retain the original notification id"
+        );
+        assert!(
+            brief.find(&newest.1).unwrap() < brief.find(&previous.1).unwrap(),
+            "newest received decision first"
+        );
         assert!(!brief.contains(&received[0].1), "history is bounded");
-        for excluded in ["PRE_CHECKPOINT", "OTHER_WORKER", "OTHER_SESSION", "UNRECEIVED", "SPOOFED_SUPERVISOR", "UNBOUND_TASK", "OLDEST_OVER_LIMIT"] {
+        for excluded in [
+            "PRE_CHECKPOINT",
+            "OTHER_WORKER",
+            "OTHER_SESSION",
+            "UNRECEIVED",
+            "SPOOFED_SUPERVISOR",
+            "UNBOUND_TASK",
+            "STALE_FOR_BOUND_TASK",
+            "TRANSPORT_ONLY",
+            "OLDEST_OVER_LIMIT",
+        ] {
             assert!(!brief.contains(excluded), "exclude {excluded}: {brief}");
         }
-        assert!(brief.len() < 16_000, "the resume brief has a bounded history");
+        assert!(!brief.contains("OVERSIZED_ANSWER"));
+        assert!(
+            brief.contains(&format!("notification_id={}", received[7].0)),
+            "oversized answers retain an exact retrieval reference"
+        );
+        assert!(
+            brief.len() < 16_000,
+            "the resume brief has a bounded history"
+        );
         // pin: the original unread body must remain available to the ordinary inbox drain.
-        assert!(queue.peek_unseen_for_recipient("wise-raven", Some("session-a622"), 100).unwrap().iter().any(|row| row.prompt == "UNRECEIVED"), "building a brief never consumes pending mail");
+        assert!(
+            queue
+                .peek_unseen_for_recipient("wise-raven", Some("session-a622"), 100)
+                .unwrap()
+                .iter()
+                .any(|row| row.prompt == "UNRECEIVED"),
+            "building a brief never consumes pending mail"
+        );
     }
 
     #[test]

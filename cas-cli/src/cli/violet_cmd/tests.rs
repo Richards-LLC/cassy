@@ -875,7 +875,9 @@ fn the_publication_gate_refuses_a_file_post_before_connecting() {
     let seen = RefCell::new(Vec::new());
     let gate = |post: &Value| {
         seen.borrow_mut().push(post.clone());
-        Some("PUBLICATION BLOCKED (verification_pending)".to_string())
+        if post["kind"] == "file" { Some("PUBLICATION BLOCKED (verification_pending)".to_string()) }
+        else if post["release_notes"] == true { Some("RELEASE NOTES BLOCKED (post_release_pending)".into()) }
+        else { None }
     };
     let hub = ScriptedHub::default();
     let (_, result) = run_cli(
@@ -910,7 +912,12 @@ fn the_publication_gate_refuses_a_file_post_before_connecting() {
         out.starts_with("[OK] posted to #cas-internal (C1157) - message"),
         "{out}"
     );
-    assert_eq!(seen.borrow().len(), 1);
+    assert_eq!(seen.borrow().len(), 2);
+    let hub = ScriptedHub::default();
+    let (_, result) = run_cli(&["post","--channel","cas-internal","--text","Shipped","--release-notes","--epic","cas-epic"],&hub,false,&gate);
+    assert_eq!(result.unwrap_err().code,"publication_blocked");
+    assert_eq!(hub.connects(),0);
+    assert_eq!(seen.borrow()[2]["epic_id"],"cas-epic");
 }
 
 // ---------------------------------------------------------------------------

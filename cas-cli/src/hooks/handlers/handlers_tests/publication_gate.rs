@@ -193,6 +193,13 @@ fn publication_gate_post_release_pending_and_override() {
     let post = json!({"channel":"release-channel","kind":"message","release_notes":true,"epic_id":"cas-pub-epic","text":"Shipped"});
     let reason = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap()).expect("pending check must refuse release notes");
     assert!(reason.contains("post_release_pending"),"{reason}");
+    std::fs::create_dir_all(dir.path().join("docs/release-notes")).unwrap();
+    std::fs::write(dir.path().join("docs/release-notes/RUBRIC.md"),"- **Channel:** `#release-channel` (`C12345678`)\n").unwrap();
+    let mut unmarked = post.clone();
+    unmarked.as_object_mut().unwrap().remove("release_notes");
+    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked.clone(),dir.path()),Some(&cas)).unwrap()).unwrap().contains("post_release_pending"));
+    unmarked["channel"] = json!("ordinary-status");
+    assert!(denied(handle_pre_tool_use(&input("violet.violet_post",unmarked,dir.path()),Some(&cas)).unwrap()).is_none());
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
     for (note, allowed) in [
         (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: "),false),

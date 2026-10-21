@@ -168,7 +168,9 @@ mod tests {
         // Exercise the persisted start -> real bounded probe -> final receipt path.
         use cas_store::TaskStore;
         use std::os::unix::fs::PermissionsExt;
-        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("QA_READ_TOKEN", "read-only-test-token");
+        env.set("POST_RELEASE_PRIVATE", "must-not-inherit");
         let dir = tempfile::tempdir().unwrap();
         let cas = dir.path().join(".cas");
         fs::create_dir_all(&cas).unwrap();
@@ -199,7 +201,7 @@ mod tests {
             .unwrap();
         config.save(&cas).unwrap();
         let probe = dir.path().join("check");
-        fs::write(&probe,format!("#!/bin/sh\nprintf '%s' '{}'\n",serde_json::json!({"ok":true,"alarms":[],"checked_at":start,"readback":{"journey":"signup","subject":"opaque-1","invariants":["workspace"],"ok":true}}))).unwrap();
+        fs::write(&probe,format!("#!/bin/sh\n[ -z \"$POST_RELEASE_PRIVATE\" ] && [ \"$QA_READ_TOKEN\" = read-only-test-token ] || exit 1\nprintf '%s' '{}'\n",serde_json::json!({"ok":true,"alarms":[],"checked_at":start,"readback":{"journey":"signup","subject":"opaque-1","invariants":["workspace"],"ok":true}}))).unwrap();
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
         let sha = "b".repeat(40);
         let started = super::start(&cas, &epic.id, &sha).unwrap();
@@ -587,7 +589,7 @@ pub(crate) fn spawn_runner(cas_root: PathBuf) {
 fn format_ct(at: DateTime<Utc>) -> String {
     use chrono::{Datelike, TimeZone};
     let year = at.year();
-    let sunday = |month, ordinal| {
+    let sunday = |month: u32, ordinal: u32| {
         let first = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         1 + (7 - first.weekday().num_days_from_sunday()) % 7 + (ordinal - 1) * 7
     };

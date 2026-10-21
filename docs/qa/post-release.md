@@ -58,7 +58,9 @@ if the release skill omitted start. Empty `release_branches` uses the default br
 Pending and failed checks refuse release-note posts and epic close. Violet
 posts marked `release_notes: true` or addressed to the Channel in
 `docs/release-notes/RUBRIC.md` use this gate, including `cas violet post`.
-Specify `epic_id` or `task_id`, or use the session's focused epic. Merge, deploy,
+Specify `epic_id` or `task_id`, or use the session's focused epic.
+The CLI accepts `cas violet post --release-notes --epic <id> …` (and the
+same flags on `cas violet thread`). Merge, deploy,
 tag and publication remain available during the observation window.
 
 An operator can authorize proceeding by recording a decision note on the epic:

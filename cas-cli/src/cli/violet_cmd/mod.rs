@@ -53,6 +53,12 @@ pub struct PostArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Message text; with --file it is the files' shared comment
     #[arg(long)]
     pub text: Option<String>,
@@ -72,6 +78,12 @@ pub struct ThreadArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Top-level message text
     #[arg(long)]
     pub text: String,
@@ -139,7 +151,8 @@ pub fn execute(
         )
     };
     let mut connect = || -> Result<Box<dyn Hub>, VioletError> { connect_live(cas_root) };
-    let reply_claim = |reply_to: &str| cas_root.and_then(|root| current_reply_claim(root, reply_to));
+    let reply_claim =
+        |reply_to: &str| cas_root.and_then(|root| current_reply_claim(root, reply_to));
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut context = RunContext {
@@ -159,7 +172,10 @@ fn current_reply_claim(cas_root: &Path, reply_to: &str) -> Option<Value> {
         .ok()
         .filter(|id| !id.trim().is_empty())
         .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok())?;
-    let agent = crate::store::open_agent_store(cas_root).ok()?.get(&session).ok()?;
+    let agent = crate::store::open_agent_store(cas_root)
+        .ok()?
+        .get(&session)
+        .ok()?;
     crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
         .ok()?
         .current_reply_post(&agent.id, reply_to, chrono::Utc::now())
@@ -266,18 +282,18 @@ fn run_post(
         }])?;
     }
     let route = choose_route(&files);
-    if route != Route::Message {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": route_kind(route)}),
-        )?;
-    }
+    gate_check(
+        context,
+        &json!({"channel":channel,"kind":route_kind(route),"release_notes":args.release_notes,"epic_id":args.epic}),
+    )?;
     let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     // cas-8239 (GH #1300): a reply into a thread this session claimed and
     // registered a reply intent for carries that intent, so the hub posts it
     // as the managed reply. Without one the fields stay off and a managed
     // thread refuses the reply, exactly as before.
-    let managed = reply_to.as_deref().and_then(|reply_to| (context.reply_claim)(reply_to));
+    let managed = reply_to
+        .as_deref()
+        .and_then(|reply_to| (context.reply_claim)(reply_to));
     // cas-d626: the hub accepts a managed reply only inline, so files past
     // the inline limit fail here instead of as a bare hub refusal.
     if managed.is_some() && route == Route::External {
@@ -299,7 +315,14 @@ fn run_post(
         })
     });
     let mut hub = (context.connect)()?;
-    let receipt = post_files_claimed(hub.as_mut(), &channel, text, reply_to, claim.as_ref(), &files)?;
+    let receipt = post_files_claimed(
+        hub.as_mut(),
+        &channel,
+        text,
+        reply_to,
+        claim.as_ref(),
+        &files,
+    )?;
     if context.json {
         print_json(out, &receipt);
     } else {
@@ -607,17 +630,21 @@ fn run_thread(
             drafts.push(draft_check::DraftMessage {
                 label: Some(format!("reply {}", index + 1)),
                 text: reply_text,
-                attached: reply.files.iter().map(|file| file.filename.clone()).collect(),
+                attached: reply
+                    .files
+                    .iter()
+                    .map(|file| file.filename.clone())
+                    .collect(),
             });
         }
     }
     draft_check::check(&drafts)?;
-    if replies.iter().any(|reply| !reply.files.is_empty()) {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": "thread", "replies": [{"files": []}]}),
-        )?;
+    let shares_files = replies.iter().any(|reply| !reply.files.is_empty());
+    let mut post = json!({"channel":channel,"kind":"thread","release_notes":args.release_notes,"epic_id":args.epic});
+    if shares_files {
+        post["replies"] = json!([{"files":[]}]);
     }
+    gate_check(context, &post)?;
     let mut hub = (context.connect)()?;
     let receipt = post_thread(hub.as_mut(), &channel, &text, &key, &replies)?;
     if context.json {
@@ -706,7 +733,11 @@ pub fn post_thread(
 /// `state: attached`. Anything less fails the run with a named code. The
 /// error keeps the hub's receipt, so the posted message ids and any returned
 /// file ids are printed, and it never retries.
-fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> Result<Value, VioletError> {
+fn confirm_reply_files(
+    receipt: Value,
+    channel: &str,
+    replies: &[ReplyPlan],
+) -> Result<Value, VioletError> {
     let posted = |position: usize| {
         receipt["posted"]
             .as_array()
@@ -714,7 +745,11 @@ fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> 
             .flatten()
             .find(|item| item["index"].as_u64() == Some(position as u64))
     };
-    for (index, reply) in replies.iter().enumerate().filter(|(_, reply)| !reply.files.is_empty()) {
+    for (index, reply) in replies
+        .iter()
+        .enumerate()
+        .filter(|(_, reply)| !reply.files.is_empty())
+    {
         let position = index + 1;
         let item = posted(position);
         let files: Vec<&Value> = item
@@ -732,17 +767,31 @@ fn confirm_reply_files(receipt: Value, channel: &str, replies: &[ReplyPlan]) -> 
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
         };
-        let (sent, attached, uploaded) = (reply.files.len(), in_state("attached"), in_state("uploaded"));
+        let (sent, attached, uploaded) = (
+            reply.files.len(),
+            in_state("attached"),
+            in_state("uploaded"),
+        );
         if attached == sent {
             continue;
         }
         let (code, what) = if uploaded > 0 && attached + uploaded >= sent {
-            ("uploaded_not_attached", format!("the hub uploaded {uploaded} of them without attaching them to the reply"))
+            (
+                "uploaded_not_attached",
+                format!("the hub uploaded {uploaded} of them without attaching them to the reply"),
+            )
         } else {
-            ("thread_files_unconfirmed", format!("the hub's receipt confirms {attached} attached"))
+            (
+                "thread_files_unconfirmed",
+                format!("the hub's receipt confirms {attached} attached"),
+            )
         };
-        let root = posted(0).and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
-        let reply_id = item.and_then(|item| item["message_id"].as_str()).unwrap_or("unknown");
+        let root = posted(0)
+            .and_then(|item| item["message_id"].as_str())
+            .unwrap_or("unknown");
+        let reply_id = item
+            .and_then(|item| item["message_id"].as_str())
+            .unwrap_or("unknown");
         let plural = if sent == 1 { "" } else { "s" };
         // The receipt's error carries the whole cause and remedy for machines;
         // the terminal line stays short because the hint lines name the read
@@ -1015,7 +1064,10 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         Some("thread_files_unconfirmed" | "uploaded_not_attached")
     );
     if unconfirmed {
-        let _ = writeln!(out, "[FAILED] reply {failed} files not confirmed attached; the thread was posted");
+        let _ = writeln!(
+            out,
+            "[FAILED] reply {failed} files not confirmed attached; the thread was posted"
+        );
         posted_lines(out, envelope);
         // The channel id is bounded where a channel name is not, so the read
         // command stays within 80 columns on its own line.
@@ -1024,8 +1076,14 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
             .unwrap_or("<channel>");
         let root = str_at(envelope, "/posted/0/message_id").unwrap_or("<root>");
         let _ = writeln!(out, "  -> read the thread before posting again:");
-        let _ = writeln!(out, "     cas violet read --channel {channel} --thread {root}");
-        let _ = writeln!(out, "  -> rerun only with the same --idempotency-key, never a new key");
+        let _ = writeln!(
+            out,
+            "     cas violet read --channel {channel} --thread {root}"
+        );
+        let _ = writeln!(
+            out,
+            "  -> rerun only with the same --idempotency-key, never a new key"
+        );
         return;
     }
     let _ = writeln!(

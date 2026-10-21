@@ -2489,7 +2489,7 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     assert!(!home.path().join(".cas/hub").exists());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn hub_service_status_readiness_fits_80_columns_cas_0252() {
     let home = private_home();
@@ -2505,8 +2505,10 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
     );
 
     let path = bin.as_os_str();
-    let output = cas_command(home.path(), path)
-        .env("CAS_HUB_SYSTEMCTL", &systemctl)
+    let mut human_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    human_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let output = human_command
         .args(["hub", "service", "status"])
         .output()
         .unwrap();
@@ -2529,8 +2531,10 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
         "{human}"
     );
 
-    let json = cas_command(home.path(), path)
-        .env("CAS_HUB_SYSTEMCTL", &systemctl)
+    let mut json_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    json_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let json = json_command
         .args(["hub", "service", "status", "--json"])
         .output()
         .unwrap();

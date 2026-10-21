@@ -1409,6 +1409,11 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                 println!("  Start at login with: cas hub start --tailscale-serve");
             }
             manager => {
+                let manager = if manager == "systemd-user" {
+                    "systemd"
+                } else {
+                    manager
+                };
                 println!(
                     "Hub service ({manager}): {}; {}; {}; hub {}",
                     if report.installed {
@@ -1419,12 +1424,12 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                     match report.enabled {
                         Some(true) => "enabled",
                         Some(false) => "disabled",
-                        None => "enablement unknown",
+                        None => "enablement?",
                     },
                     match report.active {
                         Some(true) => "active",
                         Some(false) => "inactive",
-                        None => "activity unknown",
+                        None => "activity?",
                     },
                     report.hub_state.replace('_', " "),
                 );

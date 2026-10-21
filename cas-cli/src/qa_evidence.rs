@@ -213,10 +213,12 @@ fn validate_pairs(
     let path = resolve_bundle_file(bundle_dir, "pairs", relative)?;
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| refuse(format!("unreadable files.pairs: {e}")))?;
-    let pairs: EvidencePairs = serde_json::from_str(&raw)
-        .map_err(|e| refuse(format!("malformed files.pairs: {e}")))?;
+    let pairs: EvidencePairs =
+        serde_json::from_str(&raw).map_err(|e| refuse(format!("malformed files.pairs: {e}")))?;
     if pairs.schema != 1 || pairs.task_id != ctx.task_id || pairs.head_sha != head {
-        return Err(refuse("files.pairs must use schema 1 and match bundle task_id/head_sha".into()));
+        return Err(refuse(
+            "files.pairs must use schema 1 and match bundle task_id/head_sha".into(),
+        ));
     }
     let mut before = std::collections::BTreeMap::new();
     let mut after = std::collections::BTreeMap::new();
@@ -225,7 +227,10 @@ fn validate_pairs(
             return Err(refuse("files.pairs has a blank or padded cell id".into()));
         }
         if cell.before.is_none() && cell.after.is_none() {
-            return Err(refuse(format!("files.pairs cell {} has no capture", cell.id)));
+            return Err(refuse(format!(
+                "files.pairs cell {} has no capture",
+                cell.id
+            )));
         }
         for (phase, capture, cells) in [
             ("BEFORE", &cell.before, &mut before),
@@ -233,14 +238,24 @@ fn validate_pairs(
         ] {
             if let Some(capture) = capture {
                 if cells.insert(cell.id.as_str(), capture).is_some() {
-                    return Err(refuse(format!("files.pairs repeats {phase} cell {}", cell.id)));
+                    return Err(refuse(format!(
+                        "files.pairs repeats {phase} cell {}",
+                        cell.id
+                    )));
                 }
             }
         }
     }
-    let missing: Vec<_> = before.keys().filter(|id| !after.contains_key(*id)).copied().collect();
+    let missing: Vec<_> = before
+        .keys()
+        .filter(|id| !after.contains_key(*id))
+        .copied()
+        .collect();
     if !missing.is_empty() {
-        return Err(refuse(format!("AFTER evidence is missing BEFORE cell(s): {}", missing.join(", "))));
+        return Err(refuse(format!(
+            "AFTER evidence is missing BEFORE cell(s): {}",
+            missing.join(", ")
+        )));
     }
     let dir = path.parent().expect("resolved bundle file has a directory");
     let mut files = PairFiles::default();
@@ -263,20 +278,35 @@ fn validate_pairs(
 
 /// Even when full bundle proof is deferred, a declared comparison cannot drop
 /// baseline cells. The caller alone authenticates and records explicit waivers.
-pub(crate) fn validate_cited_pair_coverage(ctx: &EvidenceContext<'_>) -> Result<(), EvidenceRefusal> {
-    let Some(cited) = cited_bundle_path(ctx.notes) else { return Ok(()); };
+pub(crate) fn validate_cited_pair_coverage(
+    ctx: &EvidenceContext<'_>,
+) -> Result<(), EvidenceRefusal> {
+    let Some(cited) = cited_bundle_path(ctx.notes) else {
+        return Ok(());
+    };
     let path = resolve_inside_task_dir(ctx, &cited)?;
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| EvidenceRefusal::new(format!("unreadable bundle: {e}"), cite_command(ctx)))?;
     let manifest: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| EvidenceRefusal::new(format!("malformed bundle: {e}"), cite_command(ctx)))?;
-    let Some(relative) = manifest.pointer("/files/pairs").filter(|value| !value.is_null()) else {
+    let Some(relative) = manifest
+        .pointer("/files/pairs")
+        .filter(|value| !value.is_null())
+    else {
         return Ok(());
     };
     let relative = relative.as_str().ok_or_else(|| missing_key("pairs"))?;
-    let head = manifest.get("head_sha").and_then(|value| value.as_str())
+    let head = manifest
+        .get("head_sha")
+        .and_then(|value| value.as_str())
         .ok_or_else(|| EvidenceRefusal::new("bundle head_sha is missing", cite_command(ctx)))?;
-    validate_pairs(ctx, path.parent().expect("manifest directory"), relative, head).map(|_| ())
+    validate_pairs(
+        ctx,
+        path.parent().expect("manifest directory"),
+        relative,
+        head,
+    )
+    .map(|_| ())
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the

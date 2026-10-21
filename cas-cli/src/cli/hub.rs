@@ -4330,6 +4330,16 @@ mod tests {
     }
 
     #[test]
+    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
+        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
+            "launchd must retry Auto publication after bounded startup retries");
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
+            "interactive Auto may retain loopback with a visible warning");
+        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
+    }
+
+    #[test]
     fn host_hub_transport_mode_survives_config_round_trip_cas_3f03e() {
         let env = crate::test_support::TestEnvGuard::temp_home();
         let root = env.home().join(".cas");

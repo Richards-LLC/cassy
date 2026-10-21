@@ -32,8 +32,10 @@ bootstrap job before stopping any remaining process.
   the flag overrides policy for one launch.
 - F06: fixed. Invalid `hub.transport_mode` reports its key and accepted values
   without the generic parse suggestion.
-- F07: fixed by removal. The truth-table test repeated the predicate's four
-  branches; config round-trip and real launch tests continue to cover behavior.
+- F07: declined. The test covers behavior, not copy: `publication_failure_is_fatal`
+  still decides whether failed Tailscale publication is fatal during service
+  startup versus interactive startup. Keep the test so those policy branches
+  remain covered.
 
 ## Critique
 

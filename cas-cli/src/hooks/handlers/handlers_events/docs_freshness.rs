@@ -241,9 +241,17 @@ impl UpkeepReport {
                 "registry issue(s)",
             ),
         };
-        if sha.is_none() {
+        let Some(sha) = sha else {
             return report;
-        }
+        };
+        // Keep every read on the named commit even if another process fetches
+        // or advances the integration ref while this report is being built.
+        let snapshot = Measurement {
+            root: measurement.root.clone(),
+            store: measurement.store.clone(),
+            reference: sha.trim().into(),
+        };
+        let measurement = &snapshot;
         if let Some(evaluation) = super::codemap::evaluate_codemap_at(measurement) {
             report.codemap.observe(match evaluation.staleness {
                 None => Some(0),

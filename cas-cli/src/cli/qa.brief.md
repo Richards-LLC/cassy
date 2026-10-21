@@ -15,6 +15,19 @@ Malformed YAML, missing registry and Git errors fail with the underlying cause.
 
 ## Critique
 
-Real candidate binary and terminal captures are owned by epic assembly; worker
-proof exercises the shared check function against real Git fixtures. Terminal
-QA is NOT VERIFIED until the candidate is built.
+terminal-qa: PASS qa-journeys-check · 12 runs · 0 fail · 0 warn · 0 allowed
+
+Receipt: task `cas-cb2b`, `terminal-qa/qa-journeys-check/report.json`.
+The candidate comes from the capped CLI integration test, as authorized by the
+supervisor. Final delivery evidence binds the candidate version and receipt to
+the delivered commit.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | DEBT and counts lead; line two introduces the kind breakdown, then growth and one details command follow. |
+| Fit | 5 | Repeated instances collapse into kind counts; individual rows remain available with --verbose. |
+| Craft | 4 | Seven short lines, at most 43 cells, fit both widths without truncation. |
+| Theme safety | 5 | Four palettes pass; the 80-column dark/light HTML and plain captures are readable. |
+| Machine contract | 5 | One JSON document preserves both arrays and supplies typed counts and nullable comparisons. |
+
+Scored by true-otter-3 on 2026-10-21; all floors hold.

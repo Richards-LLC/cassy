@@ -1617,7 +1617,7 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
         None => "This red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.".to_string(),
     };
     let subject = if failure.merged_into.as_deref() == Some(failure.branch.as_str()) {
-        format!("Deploy {}", failure.workflow)
+        format!("Deploy workflow {}", failure.workflow)
     } else {
         "CI".to_string()
     };
@@ -2112,8 +2112,16 @@ mod tests {
             assert_eq!(rows.len(), 2);
             for row in rows {
                 assert_eq!(row.priority, NotificationPriority::Critical);
-                // pin: deploy alerts identify the workflow as a deployment failure.
-                assert!(row.prompt.contains("Deploy Deploy Backend failed") || row.prompt.contains("Deploy Deploy Frontend failed"));
+                let failure = failures
+                    .iter()
+                    .find(|failure| {
+                        row.source == format!("lifecycle-wake:{}", failure.dedupe_key())
+                    })
+                    .expect("each queued row belongs to one observed deploy workflow");
+                // pin: each deploy headline identifies its own workflow without stuttering.
+                assert!(row.prompt.contains(&format!(
+                    "Deploy workflow {} failed", failure.workflow
+                )));
                 assert!(row.summary.as_deref().unwrap().contains("BLOCKER"));
                 // pin: the supervisor must see GitHub's failed job and step.
                 assert!(row.prompt.contains("Deploy service"));

@@ -132,6 +132,13 @@ adds no GitHub calls; it cannot discover a deploy already outside the first
 current. The release gate's served-component check still detects stale deploys
 when a gate is attempted.
 
+
+If the project config cannot be loaded or saved deploy observations cannot be
+read, deploy monitoring pauses and the existing ordinary CI branch watches stay
+active. The watcher preserves corrupt state for repair and warns once per
+affected path per daemon process. A state-write failure also warns once, while
+current alerts continue to be relayed.
+
 ## Fixtures and personas
 
 Registry fixtures share `description` and optional criterion `labels`. Each

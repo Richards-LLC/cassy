@@ -1276,6 +1276,31 @@ struct DeployObservation {
     failure: Option<CiFailure>,
 }
 
+/// Deployment setup must never silence the ordinary branch watcher. Warn once
+/// per affected path per process, even though the poll itself remains healthy.
+fn warn_deploy_watch_once(path: &Path, error: impl std::fmt::Display) {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    let first = WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_path_buf());
+    if first {
+        tracing::warn!(path = %path.display(), %error,
+            "Deploy watcher setup/state unavailable; ordinary CI watching continues");
+    }
+}
+
+fn load_deploy_observations(path: &Path) -> Result<Vec<DeployObservation>, CiWatchError> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| CiWatchError::Malformed(format!("CI deploy watch state: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(CiWatchError::Unavailable(format!(
+            "CI deploy watch state: {error}"
+        ))),
+    }
+}
+
 /// Keep the latest verdict per (branch, workflow). Deploy observations survive
 /// the bounded 100-run window and daemon restarts in local runtime state. The
 /// same completed-runs request supplies CI and deploys; no extra forge probes.
@@ -1284,48 +1309,60 @@ pub(crate) fn collect_failures(
     watched_branches: &BTreeSet<String>,
     cas_dir: Option<&Path>,
 ) -> Result<Vec<CiFailure>, CiWatchError> {
-    let release = cas_dir
-        .map(crate::config::Config::load)
-        .transpose()
-        .map_err(|error| CiWatchError::Malformed(format!("CI watch config: {error}")))?
-        .and_then(|config| config.qa)
-        .and_then(|qa| qa.release)
-        .unwrap_or_default();
+    let (release, config_loaded) = match cas_dir {
+        Some(dir) => match crate::config::Config::load(dir) {
+            Ok(config) => (
+                config.qa.and_then(|qa| qa.release).unwrap_or_default(),
+                true,
+            ),
+            Err(error) => {
+                warn_deploy_watch_once(dir, error);
+                (crate::qa_release::ReleaseConfig::default(), false)
+            }
+        },
+        None => (crate::qa_release::ReleaseConfig::default(), false),
+    };
     let mut watched_branches = watched_branches.clone();
     if !release.integration_branch.trim().is_empty() {
         watched_branches.insert(release.integration_branch.clone());
     }
-    let is_deploy = |run: &CiRun| {
+    let is_configured_deploy = |run: &CiRun| {
         !release.integration_branch.trim().is_empty()
             && run.head_branch == release.integration_branch
             && release.deploy_workflows.contains(&run.name)
             && matches!(run.event.as_str(), "push" | "workflow_dispatch")
             && run.status == "completed"
     };
-    let state_path = cas_dir.map(|dir| dir.join("ci-deploy-watch.json"));
+    let mut state_path = cas_dir
+        .filter(|_| config_loaded)
+        .map(|dir| dir.join("ci-deploy-watch.json"));
     let mut deploys = BTreeMap::new();
+    let mut deploy_available = true;
     if let Some(path) = &state_path {
-        let saved: Vec<DeployObservation> = match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
-                CiWatchError::Malformed(format!("CI deploy watch state: {error}"))
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                return Err(CiWatchError::Unavailable(format!(
-                    "CI deploy watch state: {error}"
-                )));
+        match load_deploy_observations(path) {
+            Ok(saved) => {
+                for observation in saved.into_iter().filter(|o| is_configured_deploy(&o.run)) {
+                    deploys.insert(
+                        (
+                            observation.run.head_branch.clone(),
+                            observation.run.name.clone(),
+                        ),
+                        observation,
+                    );
+                }
             }
-        };
-        for observation in saved.into_iter().filter(|o| is_deploy(&o.run)) {
-            deploys.insert(
-                (
-                    observation.run.head_branch.clone(),
-                    observation.run.name.clone(),
-                ),
-                observation,
-            );
+            Err(error) => {
+                warn_deploy_watch_once(path, error);
+                deploy_available = false;
+            }
         }
     }
+    if !deploy_available {
+        // Preserve corrupt/unreadable observations for repair, rather than
+        // overwriting lost red or green watermarks with a fresh empty state.
+        state_path = None;
+    }
+    let is_deploy = |run: &CiRun| deploy_available && is_configured_deploy(run);
 
     let runs = transport.completed_runs()?;
     let mut latest = BTreeMap::<(String, String), &CiRun>::new();
@@ -1448,11 +1485,17 @@ pub(crate) fn collect_failures(
         && (!release.deploy_workflows.is_empty() || path.exists())
     {
         let saved: Vec<_> = deploys.into_values().collect();
-        let json = serde_json::to_string(&saved)
-            .map_err(|error| CiWatchError::Malformed(format!("CI deploy watch state: {error}")))?;
-        crate::cli::integrate::fs::atomic_write(&path, &json).map_err(|error| {
-            CiWatchError::Unavailable(format!("CI deploy watch state: {error}"))
-        })?;
+        let written = serde_json::to_string(&saved)
+            .map_err(|error| error.to_string())
+            .and_then(|json| {
+                crate::cli::integrate::fs::atomic_write(&path, &json)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = written {
+            // Current observations are still useful if their persistence fails.
+            // In particular, ordinary CI relays must remain available.
+            warn_deploy_watch_once(&path, error);
+        }
     }
     Ok(failures)
 }
@@ -2072,7 +2115,10 @@ mod tests {
                 assert_eq!(rows[0].priority, NotificationPriority::High);
             }
         }
-        assert!(errors.is_empty(), "deploy setup silenced ordinary CI: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "deploy setup silenced ordinary CI: {errors:?}"
+        );
     }
 
     #[test]

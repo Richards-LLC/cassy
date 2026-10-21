@@ -14609,6 +14609,7 @@ pub(crate) fn resolve_close_delivery_branch(
         }
     }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
          task close rejected: task {id} has no branch of its own. `{task_branch}` does not \
@@ -14617,7 +14618,7 @@ pub(crate) fn resolve_close_delivery_branch(
          another task's delivery as this one.\n\n\
          If the current lane tip is {id}'s delivery, publish that exact tip with \
          `git push origin {own_ref}:refs/heads/{task_branch}`, then retry \
-         `task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
+         `{caller}task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
          do not publish another task's work under its name.",
         id = task.id,
     ))

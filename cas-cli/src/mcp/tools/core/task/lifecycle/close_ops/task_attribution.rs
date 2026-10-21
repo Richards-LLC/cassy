@@ -78,6 +78,8 @@ pub(super) fn started_delivery(
         &start.work_target.target_branch,
         task.delivery_mode,
     );
+    // Rebasing onto the target puts integrated ordinary commits on the lane
+    // after the start base. They belong to the target, not this delivery.
     let lane_history = git_text(
         repo,
         &[
@@ -87,6 +89,7 @@ pub(super) fn started_delivery(
             "201",
             "--format=%H %P%x1f%B%x1e",
             &range,
+            &format!("^{target}"),
             "--",
         ],
     )

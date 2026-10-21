@@ -38,8 +38,8 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `surfaces` | Optional files requiring ownership; absent inherits `qa.user_facing_paths` plus `qa.api_paths`. An explicit empty list selects none. |
 | `kinds` | Optional allowed journey kinds; absent accepts free text. |
 | `owner_groups` | Optional `name: {description, globs: [...]}` shared ownership map. |
-| `invariants` | Optional `ID: {statement, check, bug?, pending_checker?, definition?, labeled?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
-| `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
+| `invariants` | Optional `ID: {statement, check, bug?, pending_checker?, definition?, labeled?, compare?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
+| `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?, compare?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
 | `fixtures` | Optional `name: {description, provider, labels?}` map. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `journeys` | Required non-empty list. |
@@ -173,13 +173,17 @@ Some criteria cannot be graded by one universal rule. "Every slide with text
 has an on-screen text block" stalls on a photo carousel whose jersey names and
 numbers read as text but are not authored overlays. Mark such a criterion
 `labeled: true`, give it a `definition` of what counts, and record the expected
-value on each fixture under `labels`. Gates and QA ledgers grade the observed
-value against the fixture's label.
+value on each fixture under `labels`. The planned release gate (cas-7789,
+golden-set matrix) is the consumer that will grade an observed value against
+the fixture's label; today `--check` validates the labels and reports what is
+missing.
 
-`--check` fails a labeled criterion with no `definition` (`missing_definition`)
-and a label keyed by an unknown criterion (`unknown_label`). Each fixture a
-journey pairs with a labeled criterion but which has no label for it is
-`unlabeled_fixture` debt. Unlabeled criteria are unaffected.
+`--check` fails a labeled criterion with no `definition` (`missing_definition`),
+a label keyed by an unknown criterion (`unknown_label`), and a label on a
+criterion that is not `labeled: true` (`label_without_labeled`). Each fixture a
+journey pairs with a labeled criterion but which has no label, or a `null`
+label, for it is one `unlabeled_fixture` debt line however many journeys share
+the pair. Unlabeled criteria are unaffected.
 
 ```yaml
 invariants:
@@ -195,6 +199,27 @@ fixtures:
     labels:
       INV-SLIDE-TEXT: {authored_text_slides: [2]}
 ```
+
+### Numeric comparison
+
+A numeric criterion declares how a measured value is graded against its
+baseline. `compare: exact` fails on any difference (coverage counts, presence).
+`compare: {banded: {min_ratio: 0.9}}` passes at or above 90% of the baseline;
+`compare: {banded: {max_delta: 20}}` passes within 20 either side. A band names
+exactly one bound; `min_ratio` must be in (0, 1] and `max_delta` non-negative,
+else `--check` fails with `compare`. Graders record the measured value and its
+percentage of the baseline, so wording noise (1,862 text characters against a
+1,871 baseline is 99.52%) passes a band visibly instead of failing a strict
+floor.
+
+### Criterion hygiene
+
+Invariant and manual-check ids share one namespace (`duplicate_criterion`).
+`human_judgment` with a `pending_checker` is a `contradiction`: an automatable
+check is `checker_unwritten`. An unknown key within two edits of a known
+criterion or fixture field (`lables`, `defintion`) fails as `unknown_field`
+rather than silently dropping the rule. Due dates are compared with today's
+UTC date.
 
 ## Example
 

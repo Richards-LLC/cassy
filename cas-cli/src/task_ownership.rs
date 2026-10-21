@@ -743,38 +743,59 @@ print(json.dumps(held))
     /// was, so the store is unproven rather than trusted.
     #[test]
     fn an_in_flight_checkpoint_makes_the_store_unproven_cas_69b5() {
-        let dir = tempfile::tempdir().unwrap();
-        let this = tempfile::tempdir().unwrap();
-        let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
-        let mut shm = vec![0u8; 136];
-        shm[96..100].copy_from_slice(&1u32.to_ne_bytes());
-        shm[128..132].copy_from_slice(&1u32.to_ne_bytes());
-        let path = root.join(".cas/cas.db-shm");
-        std::fs::write(&path, shm).unwrap();
-        // Hold the checkpointer lock in this process, as a local connection
-        // may do. An isolated observer must see it as a conflicting lock.
-        use std::os::fd::AsRawFd;
-        let held = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-        lock.l_type = libc::F_WRLCK as _;
-        lock.l_whence = libc::SEEK_SET as _;
-        lock.l_start = 121;
-        lock.l_len = 1;
-        assert_eq!(
-            unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETLK, &lock) },
-            0
-        );
-        let projects = KnownProjects::from_specs_with(
-            &this.path().join(".cas"),
-            vec![repo_spec(root)],
-            &|| {},
-        );
-        let result = projects.holders("cas-aaaa");
-        assert!(result.unwrap_err().contains("changed while it was read"));
+        for cross_process in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let this = tempfile::tempdir().unwrap();
+            let root = store_with_wal(dir.path(), &["cas-aaaa"], &["cas-bbbb"]);
+            let mut shm = vec![0u8; 136];
+            shm[96..100].copy_from_slice(&1u32.to_ne_bytes());
+            shm[128..132].copy_from_slice(&1u32.to_ne_bytes());
+            let path = root.join(".cas/cas.db-shm");
+            std::fs::write(&path, shm).unwrap();
+            // Exercise both a local SQLite connection and a separate checkpointer.
+            // The real probe child must see either owner as a conflicting lock.
+            use std::os::fd::AsRawFd;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let mut child = if cross_process {
+                let mut child = std::process::Command::new("python3")
+                    .args(["-I", "-S", "-c", r#"
+import fcntl, sys
+with open(sys.argv[1], 'r+b') as shm:
+    fcntl.lockf(shm, fcntl.LOCK_EX, 1, 121)
+    print('locked', flush=True)
+    sys.stdin.buffer.read(1)
+"#]).arg(&path)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped()).spawn().unwrap();
+                let mut ready = String::new();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut ready).unwrap();
+                assert_eq!(ready.trim(), "locked");
+                Some(child)
+            } else {
+                let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+                lock.l_type = libc::F_WRLCK as _;
+                lock.l_whence = libc::SEEK_SET as _;
+                lock.l_start = 121;
+                lock.l_len = 1;
+                assert_eq!(unsafe { libc::fcntl(held.as_raw_fd(), libc::F_SETLK, &lock) }, 0);
+                None
+            };
+            let projects = KnownProjects::from_specs_with(
+                &this.path().join(".cas"),
+                vec![repo_spec(root)],
+                &|| {},
+            );
+            let result = projects.holders("cas-aaaa");
+            if let Some(child) = &mut child {
+                drop(child.stdin.take());
+                assert!(child.wait().unwrap().success());
+            }
+            assert!(result.unwrap_err().contains("changed while it was read"), "cross_process={cross_process}");
+        }
     }
 
     /// cas-69b5: a global store that cannot be looked at (permission

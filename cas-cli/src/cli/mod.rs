@@ -1021,6 +1021,42 @@ mod tests {
     }
 
     #[test]
+    fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
+        let details = [
+            "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
+            "Render a PDF with Playwright after rendering the HTML",
+            "Re-fetch sources and replace the Markdown source, including a manual source",
+            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside ~/.cas/artifacts/release",
+        ];
+
+        for width in [80, 120] {
+            let mut command = Cli::command();
+            let mut report = command
+                .find_subcommand_mut("release")
+                .expect("release subcommand")
+                .find_subcommand_mut("report")
+                .expect("report subcommand")
+                .clone()
+                .term_width(width);
+            let mut help = Vec::new();
+            report.write_long_help(&mut help).expect("render report help");
+            let help = String::from_utf8(help).expect("help is UTF-8");
+
+            for line in help.lines() {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width}-column help line is {} cells wide: {line}",
+                    line.chars().count()
+                );
+            }
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for detail in details {
+                assert!(normalized.contains(detail), "help omitted `{detail}`: {help}");
+            }
+        }
+    }
+
+    #[test]
     fn cassy_wordmark_stays_compact_for_80_column_terminals() {
         let rows: Vec<_> = CASSY_WORDMARK
             .lines()

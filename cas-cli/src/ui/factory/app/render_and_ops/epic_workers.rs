@@ -4746,6 +4746,21 @@ mod spawn_base_tests {
                 target_branch: "main".into(),
             });
             open_task_store_cached(&f.root).unwrap().add(&task).unwrap();
+            // cas-cd99: reachable origin lacks this local-only branch; the
+            // operator needs publication guidance, not an access repair.
+            super::spawn_readiness_tests::git(&f.repo, &["branch", "feature/unpublished"]);
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "feature/unpublished".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("unpublished branch must name the publication requirement").to_string();
+            assert!(error.contains("origin/feature/unpublished") && error.contains("not published"), "{error}");
+            assert!(error.contains("git push origin feature/unpublished"), "{error}");
+            assert!(!error.contains("restore origin access"), "{error}");
+            assert_eq!(full_sha(&f.repo, "feature/unpublished").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "main".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
             f.offline();
             let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
                 .err().expect("cached equal refs cannot prove a configured origin is current").to_string();
@@ -4770,6 +4785,21 @@ mod spawn_base_tests {
         assert_eq!(prefer_fresher_base_ref(&repo, "main"), (None, None));
         let (_, notice, _) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
         assert!(notice.unwrap().contains("LOCAL-ONLY"));
+
+        // cas-cd99: an origin-less repo can retain a tracking ref from a
+        // previous fetch. The notice must name that actual checkout source.
+        let local = full_sha(&repo, "main").unwrap();
+        commit_file(&repo, "cached-only.txt", "cached origin content");
+        let cached = full_sha(&repo, "main").unwrap();
+        super::spawn_readiness_tests::git(&repo, &["update-ref", "refs/remotes/origin/main", &cached]);
+        super::spawn_readiness_tests::git(&repo, &["reset", "--hard", &local]);
+        let (base_ref, notice, checkout_ref) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
+        assert_eq!(base_ref.as_deref(), Some(cached.as_str()));
+        assert_eq!(checkout_ref, "origin/main");
+        let notice = notice.unwrap();
+        assert!(notice.contains("LOCAL-ONLY") && notice.contains("origin/main"), "{notice}");
+        assert!(notice.contains(&cached), "{notice}");
+        assert_eq!(full_sha(&repo, "main").as_deref(), Some(local.as_str()));
     }
 
     #[test]

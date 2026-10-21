@@ -9,6 +9,8 @@ use super::Cli;
 
 #[derive(Subcommand)]
 pub enum QaCommand {
+    /// Observe a release before announcing it or closing its epic
+    PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Validate the journey registry against tracked files
     Journeys {
         /// Check schema, references and globs without executing specs
@@ -19,6 +21,7 @@ pub enum QaCommand {
 
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
+        QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
         QaCommand::Journeys { check: _ } => {
             let git = std::process::Command::new("git")
                 .args(["rev-parse", "--show-toplevel"])

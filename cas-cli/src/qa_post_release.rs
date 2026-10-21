@@ -204,7 +204,20 @@ mod tests {
         fs::write(&probe,format!("#!/bin/sh\n[ -z \"$POST_RELEASE_PRIVATE\" ] && [ \"$QA_READ_TOKEN\" = read-only-test-token ] || exit 1\nprintf '%s' '{}'\n",serde_json::json!({"ok":true,"alarms":[],"checked_at":start,"readback":{"journey":"signup","subject":"opaque-1","invariants":["workspace"],"ok":true}}))).unwrap();
         fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
         let sha = "b".repeat(40);
-        let started = super::start(&cas, &epic.id, &sha).unwrap();
+        env.set("CAS_ROOT", &cas);
+        let cli = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "qa",
+            "post-release",
+            "start",
+            "--epic",
+            &epic.id,
+            "--sha",
+            &sha,
+        ])
+        .unwrap();
+        crate::cli::run(cli).unwrap();
+        let started = load(&cas, &epic.id).unwrap().unwrap();
         assert_eq!(
             super::start(&cas, &epic.id, &sha).unwrap().started_at,
             started.started_at,
@@ -220,6 +233,17 @@ mod tests {
         let receipt = load(&cas, &epic.id).unwrap().unwrap();
         assert_eq!(receipt.verdict(Utc::now()), Verdict::Clean, "{receipt:?}");
         assert!(gate(&cas, &tasks.get(&epic.id).unwrap(), false).is_none());
+        let cli = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "qa",
+            "post-release",
+            "status",
+            "--epic",
+            &epic.id,
+            "--json",
+        ])
+        .unwrap();
+        crate::cli::run(cli).unwrap();
         let artifact_base = crate::config::resolved_factory_artifacts_root(
             config.factory().artifacts_root.as_deref(),
         );

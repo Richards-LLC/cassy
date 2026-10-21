@@ -200,7 +200,7 @@ pub(crate) mod test_support {
             xdg_keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, machine.path()));
         let poisoned_config = machine.path().join("code-mode-mcp/config.toml");
         std::fs::create_dir_all(poisoned_config.parent().unwrap()).unwrap();
-        let poison = "[servers.machine]\ntype = \"stdio\"\ncommand = \"must-not-run\"\n";
+        let poison = "[servers.machine]\ntransport = \"stdio\"\ncommand = \"must-not-run\"\n";
         std::fs::write(&poisoned_config, poison).unwrap();
 
         let assert_private_home = |home: &Path| {
@@ -218,7 +218,7 @@ pub(crate) mod test_support {
                 std::fs::create_dir_all(private_config.parent().unwrap()).unwrap();
                 std::fs::write(
                     &private_config,
-                    "[servers.private]\ntype = \"stdio\"\ncommand = \"fixture-only\"\n",
+                    "[servers.private]\ntransport = \"stdio\"\ncommand = \"fixture-only\"\n",
                 )
                 .unwrap();
                 let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();

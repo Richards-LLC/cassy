@@ -72,8 +72,8 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. This slice implements
-`served`; the others are reserved for later slices.
+`fixture-teardown`, `run`, `readback` and `migrations`. `served` and
+`readback` are implemented; the others are reserved for later slices.
 
 ### `served`
 
@@ -96,3 +96,40 @@ pass. Each of the following refuses with `SERVED MISMATCH`:
 A failed `served` call refuses with `SERVED UNKNOWN` and keeps its error kind.
 A served backend can therefore lag the staging tip, as long as no commit since
 then touched its paths.
+
+## Read-back
+
+A journey declares what the gate may read back after it runs:
+
+```yaml
+journeys:
+  - id: signup
+    readback:
+      subjects: [account_uid, workspace_id]
+      invariants: [INV-ACCOUNT, INV-WORKSPACE]
+```
+
+Cassy forwards only allow-listed values to the adapter's `readback` verb: the
+declared subject kinds with their opaque ids, and the declared invariant IDs.
+It never forwards a query. The following are refused before any call:
+
+- An undeclared subject kind.
+- A subject id that is not an opaque token of at most 128 letters, digits and
+  `-_.:@`.
+- An invariant ID that is not a plain identifier.
+
+```json
+{"v":1,"verb":"readback","env":"staging","sha":"<candidate>","journey":"signup","args":{"subjects":{"account_uid":"uid-7f3a","workspace_id":"ws_42"},"invariants":["INV-ACCOUNT","INV-WORKSPACE"]}}
+{"v":1,"ok":true,"data":{"INV-ACCOUNT":{"ok":true,"observed":1},"INV-WORKSPACE":{"ok":true,"observed":"…"}}}
+```
+
+The result is post-release's read-back shape: `{journey, subject, invariants,
+ok}`, with the subject ids rendered as `kind=id`. Observed values are never
+kept. The adapter must run these checks with read-only credentials.
+
+| Answer | Outcome |
+|---|---|
+| Every declared invariant `ok: true` | PASS |
+| Any invariant `ok: false` | FAIL, naming the failed invariants |
+| An `external`, `rate_limited` or `insufficient` error | BLOCKED_EXTERNAL |
+| An invariant missing from the answer, any other error or a timeout | no PASS (missing) |

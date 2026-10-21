@@ -83,6 +83,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
+| `readback` | Optional `{subjects: [...], invariants: [...]}`: the subject kinds (for example `account_uid`) and invariant IDs the release gate may read back. See [release gate](release-gate.md#read-back). |
 | `seeded` | Optional boolean, default false. A live seed is exempt from steps, invariants and traffic requirements until curated. |
 
 A seeded journey remains responsible for a valid entry, ownership and references.

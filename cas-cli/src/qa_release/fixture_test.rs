@@ -20,6 +20,7 @@ fn fixture_cleanup() {
         envs: vec!["staging".into()],
         provides: vec!["account_id".into()],
         ttl_mins: 1,
+        ..Default::default()
     };
     if let Some(root) = std::env::var_os("CAS_QA_FIXTURE_CRASH_ROOT") {
         let root = std::path::PathBuf::from(root);

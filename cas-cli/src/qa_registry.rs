@@ -237,7 +237,7 @@ pub struct ManualCheck {
 pub struct Fixture {
     pub description: String,
     #[serde(flatten)]
-    pub source: FixtureSource,
+    pub source: Option<FixtureSource>,
     /// Expected value per labeled criterion ID for this fixture.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, Value>,
@@ -260,20 +260,24 @@ impl Default for FixtureSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FrozenFixture {
     pub sha256: String,
     pub storage_key: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FixtureRecipe {
     pub name: String,
     pub envs: Vec<String>,
     pub provides: Vec<String>,
     pub ttl_mins: u32,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl FixtureRecipe {
@@ -291,6 +295,7 @@ impl FixtureRecipe {
             && names(&self.envs)
             && names(&self.provides)
             && self.ttl_mins > 0
+            && self.extra.is_empty()
     }
 }
 
@@ -529,6 +534,10 @@ impl ValidationReport {
         known: &[&str],
     ) {
         for key in extra.keys() {
+            // A second source is an exclusivity error, not a misspelling.
+            if known.contains(&key.as_str()) {
+                continue;
+            }
             // At most two edits, and no more than a third of the field, so
             // short free-form keys (`tag` vs `bug`) stay free-form.
             if let Some(field) = known.iter().find(|field| {
@@ -818,8 +827,9 @@ impl Registry {
         if let Some(fixtures) = &self.fixtures {
             for (name, fixture) in fixtures {
                 let subject = format!("fixtures.{name}");
-                let valid = match &fixture.source {
-                    FixtureSource::Provider(provider) => {
+                let valid = match fixture.source.as_ref() {
+                    None => false,
+                    Some(FixtureSource::Provider(provider)) => {
                         let provider = provider.trim();
                         if provider.to_ascii_lowercase().starts_with("http://")
                             || provider.to_ascii_lowercase().starts_with("https://")
@@ -829,12 +839,25 @@ impl Registry {
                         }
                         !provider.is_empty()
                     }
-                    FixtureSource::Frozen(frozen) => {
+                    Some(FixtureSource::Frozen(frozen)) => {
+                        report.misspelled_fields(
+                            &format!("{subject}.frozen"),
+                            &frozen.extra,
+                            &["sha256", "storage_key"],
+                        );
                         frozen.sha256.len() == 64
                             && frozen.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                             && !frozen.storage_key.trim().is_empty()
+                            && frozen.extra.is_empty()
                     }
-                    FixtureSource::Recipe(recipe) => recipe.valid(),
+                    Some(FixtureSource::Recipe(recipe)) => {
+                        report.misspelled_fields(
+                            &format!("{subject}.recipe"),
+                            &recipe.extra,
+                            &["name", "envs", "provides", "ttl_mins"],
+                        );
+                        recipe.valid()
+                    }
                 };
                 let multiple = ["provider", "frozen", "recipe"]
                     .iter()
@@ -1217,15 +1240,89 @@ journeys:
             );
         }
         let mixed = yaml.replace("provider: account-seed}", "provider: account-seed, recipe: {name: seed, envs: [staging], provides: [id], ttl_mins: 1}}");
-        if let Ok(registry) = parse(&mixed) {
-            assert!(
-                registry
-                    .validate(&[])
-                    .problems
-                    .iter()
-                    .any(|p| p.code == "fixture")
-            );
+        let mut parse_failures = Vec::new();
+        let fresh = "{description: New account, provider: account-seed}";
+        let mut cases = vec![
+            ("empty fixture", GABBER.replace(fresh, "{}"), "fixture", ""),
+            (
+                "no source",
+                GABBER.replace(fresh, "{description: New account}"),
+                "fixture",
+                "",
+            ),
+            (
+                "source typo",
+                GABBER.replace("provider:", "provder:"),
+                "unknown_field",
+                "did you mean provider",
+            ),
+            (
+                "frozen typo",
+                yaml.replace("storage_key:", "storage_ke:"),
+                "unknown_field",
+                "did you mean storage_key",
+            ),
+            (
+                "recipe typo",
+                yaml.replace("ttl_mins:", "ttl_min:"),
+                "unknown_field",
+                "did you mean ttl_mins",
+            ),
+            (
+                "multiple sources",
+                yaml.replace(
+                    "provider: account-seed}",
+                    "provider: account-seed, frozen: {sha256: bad, storage_key: key}}",
+                ),
+                "fixture",
+                "",
+            ),
+        ];
+        for (name, value) in [
+            ("tagged readback extra", "!custom value"),
+            ("map readback extra", "{1: value}"),
+        ] {
+            cases.push((name, GABBER.replace("    fixtures: [fresh]\n", &format!(
+                "    fixtures: [fresh]\n    readback: {{subjects: [account_id], invariants: [INV-CLAIM], subjets: {value}}}\n"
+            )), "readback", "unknown field"));
         }
+        for (name, contents, code, hint) in cases {
+            match parse(&contents) {
+                Ok(registry) => {
+                    let report = registry.validate(&[]);
+                    if !report
+                        .problems
+                        .iter()
+                        .any(|p| p.code == code && p.message.contains(hint))
+                    {
+                        parse_failures.push(format!("{name}: missing {code}/{hint}: {report:?}"));
+                    }
+                    if report
+                        .problems
+                        .iter()
+                        .any(|p| p.message.contains("did you mean frozen"))
+                    {
+                        parse_failures.push(format!(
+                            "{name}: source collision mislabeled as typo: {report:?}"
+                        ));
+                    }
+                }
+                Err(error) => parse_failures.push(format!("{name}: {error:#}")),
+            }
+        }
+        assert!(
+            parse_failures.is_empty(),
+            "registry parse must survive validation errors:\n{}",
+            parse_failures.join("\n")
+        );
+        assert!(
+            parse(&mixed)
+                .unwrap()
+                .validate(&[])
+                .problems
+                .iter()
+                .any(|p| p.code == "fixture")
+        );
     }
 
     #[test]

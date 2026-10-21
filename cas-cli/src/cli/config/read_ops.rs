@@ -216,6 +216,7 @@ fn set_config_document_path(
     let Some((part, rest)) = parts.split_first() else {
         return Ok(());
     };
+    let parent_is_inline = item.as_value().is_some_and(toml_edit::Value::is_inline_table);
     let table = item
         .as_table_like_mut()
         .ok_or_else(|| anyhow::anyhow!("config key path parent for {part} is not a table"))?;
@@ -242,9 +243,16 @@ fn set_config_document_path(
         if replacement.is_none() {
             return Ok(());
         }
-        let mut child = toml_edit::Table::new();
-        child.set_implicit(true);
-        table.insert(part, toml_edit::Item::Table(child));
+        let child = if parent_is_inline {
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(
+                toml_edit::InlineTable::new(),
+            ))
+        } else {
+            let mut child = toml_edit::Table::new();
+            child.set_implicit(true);
+            toml_edit::Item::Table(child)
+        };
+        table.insert(part, child);
     }
     let child = table
         .get_mut(part)

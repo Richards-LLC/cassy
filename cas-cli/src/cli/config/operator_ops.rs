@@ -496,8 +496,9 @@ worker_build_jobs = \"4\"\n";
         let expected_toml = original.replace(
             "worker_build_jobs = \"4\"\n",
             &format!(
-                "worker_build_jobs = \"4\"\nwrite_roots = [\"{}\"]\n",
-                expected.join("\",\"")
+                "worker_build_jobs = \"4\"\nwrite_roots = [\"{}\", \"{}\"]\n",
+                expected[0],
+                expected[1],
             ),
         );
         let text = std::fs::read_to_string(&config_path).unwrap();
@@ -522,6 +523,19 @@ worker_build_jobs = \"4\"\n";
 
     #[test]
     fn config_registry_keys_round_trip_through_set_and_get() {
+        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &[
+            "hooks.stop.duplicate_detection_enabled",
+            "hooks.stop.duplicate_detection_threshold",
+            "hooks.stop.learning_review_enabled",
+            "hooks.stop.learning_review_threshold",
+            "hooks.stop.rule_review_enabled",
+            "hooks.stop.rule_review_threshold",
+            "notifications.on_auth_success",
+            "notifications.on_idle_prompt",
+            "notifications.on_permission_prompt",
+            "notifications.webhook_url",
+        ];
+
         let env = operator_in_agent_pane();
         let home = env.home().to_path_buf();
         let project = home.join("projects/roundtrip");
@@ -569,7 +583,12 @@ large_artifact_dir = \"before\"\n",
 
             let mut config = Config::load(&cas_root).unwrap();
             let mut expected = config.clone();
-            expected.set(key, value).unwrap();
+            let result = expected.set(key, value);
+            if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
+                assert!(result.is_err(), "{key} is no longer rejected by Config::set");
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("unexpected set rejection for {key}: {error}"));
             set_config_value(&mut config, key, value, &cas_root, operator).unwrap();
             let actual = Config::load(&cas_root).unwrap();
             assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");

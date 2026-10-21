@@ -2976,12 +2976,16 @@ fn finish_update_hub_verification(
             outcome.prior_state,
         );
         if let Some(warning) = outcome.transport_warning.as_deref() {
-            eprintln!("cas update: {warning}");
+            eprintln!("{}", format_update_transport_warning(warning));
             if let Some(remedy) = outcome.remedy.as_deref() {
                 eprintln!("cas update: {remedy}");
             }
         }
     }
+}
+
+fn format_update_transport_warning(warning: &str) -> String {
+    format!("cas update: {warning}")
 }
 
 fn capture_update_hub_evidence(paths: &HubRuntimePaths, reason: &str) {
@@ -4222,11 +4226,11 @@ mod tests {
     fn update_transport_failure_is_a_warning_with_working_recovery() {
         let verification = unavailable_update_transport("tailscale CLI is unavailable");
         assert_eq!(verification.transport_verified, Some(false));
-        assert!(
-            verification
-                .transport_warning
-                .unwrap()
-                .contains("Tailscale Serve inactive")
+        assert_eq!(
+            format_update_transport_warning(
+                verification.transport_warning.as_deref().unwrap()
+            ),
+            "cas update: Tailscale Serve inactive:\n  tailscale CLI is unavailable; hub remains loopback-only"
         );
         assert!(verification.remedy.unwrap().contains("cas hub restart"));
     }

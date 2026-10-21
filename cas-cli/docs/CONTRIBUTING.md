@@ -284,6 +284,8 @@ that session without creating a new log directory or running launch-only checks.
 Refused launches with `--name` append to that session's `launch.log`. Unnamed
 refusals append to one stable project file, `<CAS_ROOT>/<logging.log_dir>/factory-launch.log`
 (by default `.cas/logs/factory-launch.log`), without reserving a session name.
+Before a project store exists, unnamed refusals use `~/.cas/logs/factory-launch.log`
+and leave the project's `.cas` absent so `cas init` can initialize it normally.
 A refused launch prints its log path alongside its original reason. Repeated
 refusals append dated records at the same path.
 

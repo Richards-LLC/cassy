@@ -2111,7 +2111,21 @@ fn record_factory_launch_diagnostics(
     let log_dir = cas_root.join(&logging.log_dir);
     let path = match session_name {
         Some(name) => crate::ui::factory::session_log_dir(name).join("launch.log"),
-        None => log_dir.join("factory-launch.log"),
+        None if crate::store::detect::cas_store_present(cas_root) => {
+            log_dir.join("factory-launch.log")
+        }
+        // A refusal must not create a project's .cas: init treats its presence
+        // as initialization. Keep pre-init diagnostics in the host log directory.
+        None => dirs::home_dir()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "home directory unavailable for factory launch diagnostics",
+                )
+            })?
+            .join(".cas")
+            .join("logs")
+            .join("factory-launch.log"),
     };
     std::fs::create_dir_all(path.parent().expect("launch log directory"))?;
     let now = chrono::Local::now();

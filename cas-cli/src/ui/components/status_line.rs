@@ -102,8 +102,12 @@ impl Renderable for StatusLine {
     fn render(&self, fmt: &mut Formatter) -> io::Result<()> {
         if fmt.is_styled() {
             let color = self.status.color(fmt);
-            let icon = self.status.icon();
-            fmt.write_colored(&format!("{icon} {}", self.message), color)?;
+            let label = if fmt.glyphs() {
+                self.status.icon()
+            } else {
+                self.status.plain_tag()
+            };
+            fmt.write_colored(&format!("{label} {}", self.message), color)?;
         } else {
             let tag = self.status.plain_tag();
             fmt.write_raw(&format!("{tag} {}", self.message))?;

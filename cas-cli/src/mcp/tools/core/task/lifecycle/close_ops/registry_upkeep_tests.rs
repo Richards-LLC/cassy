@@ -69,7 +69,7 @@ impl Fixture {
             base,
         }
     }
-    fn run(&mut self, head: &str) -> Result<(), String> {
+    fn run(&mut self, head: &str) -> Result<Vec<String>, String> {
         let mut config = crate::config::Config::default();
         config.qa = Some(self.qa.clone());
         config.save(self._db.path()).unwrap();
@@ -101,6 +101,12 @@ fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
             && error.contains("Account entry paths"),
         "{error}"
     );
+    append_close_decision_note(
+        &f.store,
+        &mut f.task,
+        "📝 PROGRESS quoted [2026-10-21 00:00] ✅ DECISION no journey impact: example only",
+    );
+    assert!(f.run(&head).is_err(), "quoted progress cannot waive a gate");
     f.decision("no journey impact:");
     assert!(f.run(&head).is_err(), "empty escape reason must refuse");
     f.decision("no journey impact: generated redirect uses signup");
@@ -112,6 +118,21 @@ fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
             .notes
             .contains("UPKEEP ESCAPE G2")
     );
+    let mut epic = Task::new("cas-epic".into(), "Release".into());
+    epic.task_type = TaskType::Epic;
+    f.store.add(&epic).unwrap();
+    f.store
+        .add_dependency(&cas_types::Dependency::new(
+            f.task.id.clone(),
+            epic.id.clone(),
+            cas_types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    let summary = epic_escape_summary(&f.store, &epic);
+    assert!(
+        summary.contains("Upkeep escapes in this epic: 1") && summary.contains("cas-1234: G2"),
+        "{summary}"
+    );
     let mut f = Fixture::new(YAML);
     write(f.repo.path(), "src/pages/legacy.ts", "old");
     f.base = commit(f.repo.path());
@@ -120,6 +141,24 @@ fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
     f.run(&head).unwrap();
     f.qa.registry.enforce = RegistryEnforcement::Strict;
     assert!(f.run(&head).unwrap_err().contains("src/pages/legacy.ts"));
+    at_park(
+        &f.store,
+        &mut f.task,
+        f._db.path(),
+        f.repo.path(),
+        &f.base,
+        None,
+        Some(&head),
+        Some("reviewed legacy copy correction"),
+    )
+    .unwrap();
+    assert!(
+        f.store
+            .get(&f.task.id)
+            .unwrap()
+            .notes
+            .contains("supervisor override")
+    );
     for suffix in [
         "ignore: ['src/pages/new.ts']\n",
         "owner_groups:\n  extra: {description: New, globs: ['src/pages/new.ts']}\n",
@@ -167,7 +206,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
     let mut f = Fixture::new(&yaml);
     write(f.repo.path(), "README.md", "documentation");
     let head = commit(f.repo.path());
-    f.run(&head).unwrap();
+    assert!(f.run(&head).unwrap().join("\n").contains("not blocking"));
     assert!(
         f.store
             .get(&f.task.id)
@@ -271,7 +310,7 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
     let mut f = Fixture::new("invalid: [");
     write(f.repo.path(), "src/pages/new.ts", "entry");
     let head = commit(f.repo.path());
-    f.run(&head).unwrap();
+    assert!(f.run(&head).unwrap().join("\n").contains("not blocking"));
     assert!(
         f.store
             .get(&f.task.id)
@@ -285,6 +324,11 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
         f.run(&head)
             .unwrap_err()
             .contains("JOURNEY REGISTRY BROKEN")
+    );
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, YAML);
+    assert!(
+        f.run(&head).is_err(),
+        "uncommitted repair cannot change the delivery snapshot"
     );
     f.decision("registry unchanged: existing parse debt is being migrated");
     f.run(&head).unwrap();

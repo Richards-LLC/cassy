@@ -143,4 +143,6 @@ these gates and records the refusal waived.
 Accounting is durable and deduplicated across retries: notes start with
 `UPKEEP OBSERVE G1|G2|G3:` or `UPKEEP ESCAPE G1|G2|G3:`. The original typed
 `✅ DECISION` remains available to the verifier. Status, QA descriptions and epic
-summaries can count these rows without executing a check again.
+summaries can count these rows without executing a check again. Epic close appends
+`Upkeep escapes in this epic: <n> (<task: gate/token/reason>…)` across its descendants.
+Current warnings and observe summaries also appear in park and close receipts.

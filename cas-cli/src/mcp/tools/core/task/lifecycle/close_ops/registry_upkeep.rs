@@ -16,30 +16,28 @@ pub(super) fn at_park(
     window: Option<&TaskCommitReceiptWindow>,
     receipt: Option<&str>,
     override_reason: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let config = match crate::config::Config::load(cas_root) {
         Ok(config) => config,
         Err(error) => {
-            append_close_decision_note(
+            return warning(
                 store,
                 task,
-                &format!("UPKEEP WARNING: config unreadable (not blocking): {error}"),
+                format!("UPKEEP WARNING: config unreadable (not blocking): {error}"),
             );
-            return Ok(());
         }
     };
     let qa = config.qa();
     if qa.registry.enforce == RegistryEnforcement::Off {
-        return Ok(());
+        return Ok(vec![]);
     }
     let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
     else {
-        append_close_decision_note(
+        return warning(
             store,
             task,
-            "UPKEEP WARNING: delivery head unavailable (not blocking)",
+            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
         );
-        return Ok(());
     };
     let paths =
         window.and_then(|window| task_attribution::paths(repo, target, window, Some(&head)));
@@ -50,21 +48,19 @@ pub(super) fn at_park(
             .map(|(base, _)| base)
     };
     let Some(base) = base else {
-        append_close_decision_note(
+        return warning(
             store,
             task,
-            "UPKEEP WARNING: attributed delivery base unavailable (not blocking)",
+            "UPKEEP WARNING: attributed delivery base unavailable (not blocking)".into(),
         );
-        return Ok(());
     };
     // Do not substitute a broad diff when attribution could not be established.
     if window.is_some() && paths.is_none() {
-        append_close_decision_note(
+        return warning(
             store,
             task,
-            "UPKEEP WARNING: attributed delivery paths unavailable (not blocking)",
+            "UPKEEP WARNING: attributed delivery paths unavailable (not blocking)".into(),
         );
-        return Ok(());
     }
     check(
         store,
@@ -75,6 +71,52 @@ pub(super) fn at_park(
         &head,
         paths.as_deref(),
         override_reason,
+    )
+}
+
+fn warning(
+    store: &dyn cas_store::TaskStore,
+    task: &mut Task,
+    text: String,
+) -> Result<Vec<String>, String> {
+    append_close_decision_note(store, task, &text);
+    Ok(vec![text])
+}
+
+/// Counts recorded gate uses, including nested epics; notes/retries cannot inflate it.
+pub(super) fn epic_escape_summary(store: &dyn cas_store::TaskStore, epic: &Task) -> String {
+    let mut pending = vec![epic.id.clone()];
+    let mut visited = std::collections::BTreeSet::new();
+    let mut escapes = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let children = match store.get_subtasks(&id) {
+            Ok(children) => children,
+            Err(error) => return format!("Upkeep escapes in this epic: unavailable ({error})"),
+        };
+        for child in children {
+            pending.push(child.id.clone());
+            for line in child.notes.lines() {
+                let Some((_, body)) = line.split_once("] ") else {
+                    continue;
+                };
+                let body = body.strip_prefix("✅ DECISION ").unwrap_or(body);
+                if let Some(escape) = body.strip_prefix("UPKEEP ESCAPE ") {
+                    escapes.insert(format!(
+                        "{}: {}",
+                        child.id,
+                        escape.split(". Waived refusal:").next().unwrap_or(escape)
+                    ));
+                }
+            }
+        }
+    }
+    format!(
+        "Upkeep escapes in this epic: {} ({})",
+        escapes.len(),
+        escapes.into_iter().collect::<Vec<_>>().join("; ")
     )
 }
 
@@ -97,7 +139,8 @@ impl Finding {
 
 fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
     notes.lines().rev().find_map(|line| {
-        let (_, decision) = line.split_once("] ✅ DECISION ")?;
+        let (stamp, decision) = line.strip_prefix('[')?.split_once("] ✅ DECISION ")?;
+        chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
         let reason = decision.strip_prefix(token)?.trim();
         (!reason.is_empty()).then_some(reason)
     })
@@ -110,7 +153,8 @@ fn finish(
     findings: Vec<Finding>,
     warnings: &[String],
     override_reason: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
+    let mut notices = warnings.to_vec();
     for warning in warnings {
         append_close_decision_note(store, task, warning);
     }
@@ -137,6 +181,10 @@ fn finish(
                 ),
             );
         } else if qa.registry.enforce == RegistryEnforcement::Observe {
+            notices.push(format!(
+                "UPKEEP OBSERVE {}: {} (see task notes)",
+                finding.gate, finding.title
+            ));
             append_close_decision_note(
                 store,
                 task,
@@ -154,7 +202,7 @@ fn finish(
         }
     }
     if refusals.is_empty() {
-        Ok(())
+        Ok(notices)
     } else {
         Err(refusals.join("\n\n"))
     }
@@ -216,22 +264,19 @@ fn check(
     head: &str,
     paths: Option<&[String]>,
     override_reason: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if qa.registry.enforce == RegistryEnforcement::Off {
-        return Ok(());
+        return Ok(vec![]);
     }
     let result = inspect(task, repo, qa, base, head, paths);
     match result {
         Ok((findings, warnings)) => finish(store, task, qa, findings, &warnings, override_reason),
         // Git failures cannot establish causality. Never brick unrelated deliveries.
-        Err(error) => {
-            append_close_decision_note(
-                store,
-                task,
-                &format!("UPKEEP WARNING: registry inputs unavailable (not blocking): {error:#}"),
-            );
-            Ok(())
-        }
+        Err(error) => warning(
+            store,
+            task,
+            format!("UPKEEP WARNING: registry inputs unavailable (not blocking): {error:#}"),
+        ),
     }
 }
 

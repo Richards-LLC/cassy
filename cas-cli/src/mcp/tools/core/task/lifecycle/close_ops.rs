@@ -8174,6 +8174,7 @@ impl CasCore {
         // override (already validated above) waives it with a logged reason.
         // cas-38e7: epics no longer need a full-suite journey receipt; the
         // merge queue runs the journeys once.
+        let mut registry_upkeep_notices = Vec::new();
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
@@ -8227,12 +8228,13 @@ impl CasCore {
                     qa_receipt,
                 )
             });
-            if let Err(message) = registry_upkeep::at_park(
+            match registry_upkeep::at_park(
                 task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
-                return Ok(Self::tool_error(message));
+                Ok(notices) => registry_upkeep_notices = notices,
+                Err(message) => return Ok(Self::tool_error(message)),
             }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
@@ -8336,6 +8338,10 @@ impl CasCore {
                         &conflict_paths,
                         conflict_check_error.as_deref(),
                     );
+
+                    let msg = if registry_upkeep_notices.is_empty() { msg } else {
+                        format!("{msg}\n\n{}", registry_upkeep_notices.join("\n"))
+                    };
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -11093,6 +11099,14 @@ impl CasCore {
             receipt.push_str(
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
+        }
+        if !registry_upkeep_notices.is_empty() {
+            receipt.push_str(&format!("\n\n{}", registry_upkeep_notices.join("\n")));
+        }
+        if task.task_type == TaskType::Epic {
+            let summary = registry_upkeep::epic_escape_summary(task_store.as_ref(), &task);
+            append_close_decision_note(task_store.as_ref(), &mut task, &summary);
+            receipt.push_str(&format!("\n\n{summary}"));
         }
         receipt.push_str(&epic_issue_warning);
         if used_deprecated_override_alias {

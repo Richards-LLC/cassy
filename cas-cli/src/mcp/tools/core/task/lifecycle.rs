@@ -205,10 +205,10 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
 
-    // Tracked edits matter only when reconciliation would actually reset
-    // the branch. A task resuming on its own tip must keep its in-flight edits.
-    // Untracked CAS metadata survives resets and is deliberately ignored.
-    let require_clean_for_reset = || -> Result<(), String> {
+    // Fresh tasks must not inherit another task's edits; resets must not
+    // discard edits. Proven task continuations may retain their own dirty
+    // tree when no reset is needed. Untracked CAS metadata is ignored.
+    let require_clean_tracked_tree = || -> Result<(), String> {
         let status = std::process::Command::new("git")
             .args(["status", "--porcelain", "--untracked-files=no"])
             .current_dir(worktree_path)
@@ -224,7 +224,7 @@ fn reconcile_reused_factory_branch(
         }
         if !status.stdout.is_empty() {
             return Err(format!(
-                "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before resetting it to `{target_branch}`."
+                "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before starting."
             ));
         }
         Ok(())
@@ -240,12 +240,30 @@ fn reconcile_reused_factory_branch(
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
 
+    // cas-09cf: a matching target alone does not prove this is a resume.
+    // Recorded anchors, or named work already on the target before first
+    // park, distinguish this task's continuation from a fresh assignment.
+    let has_prior_task_work = || {
+        task_identity.is_some_and(|identity| {
+            !identity.known_commits.is_empty()
+                || close_ops::task_attribution::branch_task_claims(
+                    worktree_path,
+                    &factory_tip,
+                    identity,
+                )
+                .is_some_and(|(own, _)| own.is_some())
+        })
+    };
+
     if target_tip == factory_tip {
+        if !has_prior_task_work() {
+            require_clean_tracked_tree()?;
+        }
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
-        require_clean_for_reset()?;
+        require_clean_tracked_tree()?;
         git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
@@ -260,6 +278,7 @@ fn reconcile_reused_factory_branch(
     // foreign-task claims. Oldest-first diagnostics point to the obstruction
     // rather than a later own tip or the bookkeeping merge above it.
     let mut unattributed_commit = factory_tip.clone();
+    let mut has_task_commits = false;
     let carries_only_task_commits = task_identity
         .and_then(|identity| {
             let history = crate::git_evidence::git_text(
@@ -301,15 +320,20 @@ fn reconcile_reused_factory_branch(
                     && parents[1..]
                         .iter()
                         .all(|parent| git.is_ancestor(parent, &target_tip));
-                let owned = target_merge
-                    || (!close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                // Target-sync subjects often name the target epic. Parent
+                // provenance intentionally wins over that subject here; this
+                // also trusts manual merge resolutions as synchronization.
+                // Every off-target ancestor still faces the ownership check.
+                let task_owned =
+                    !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
                         && (identity
                             .task_id
                             .as_deref()
                             .is_some_and(|id| close_ops::message_references_task(message, id))
                             || close_ops::commit_is_task_attributable(worktree_path, sha, identity)
-                            || anchors.iter().any(|anchor| git.is_ancestor(sha, anchor))));
-                if !owned {
+                            || anchors.iter().any(|anchor| git.is_ancestor(sha, anchor)));
+                has_task_commits |= task_owned;
+                if !target_merge && !task_owned {
                     unattributed_commit = format!("{sha} ({subject})");
                     return Some(false);
                 }
@@ -318,6 +342,10 @@ fn reconcile_reused_factory_branch(
         })
         .unwrap_or(false);
     if carries_only_task_commits {
+        // A bare target-sync merge is not task-owned work by itself.
+        if !has_task_commits && !has_prior_task_work() {
+            require_clean_tracked_tree()?;
+        }
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
@@ -325,7 +353,7 @@ fn reconcile_reused_factory_branch(
     // it under a local name and start the new task from its own target.
     // Nothing is pushed, so origin keeps the parked tip for its reviewer.
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
-        require_clean_for_reset()?;
+        require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
             .args(["branch", "-f", &keep, &factory_tip])

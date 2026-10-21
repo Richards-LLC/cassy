@@ -1697,11 +1697,12 @@ mod tests {
     }
 
     /// One watcher interval plus one daemon refresh tick plus the bounded
-    /// origin and run-list `gh` calls stay inside the 60 s contract.
+    /// origin, run-list and (cas-e845) check-runs `gh` calls stay inside the
+    /// 60 s contract.
     #[test]
     fn ci_completed_wakes_within_a_minute() {
         let tick = super::super::lifecycle::DAEMON_REFRESH_INTERVAL;
-        let worst = CI_WAKE_INTERVAL + tick + 2 * GH_CALL_TIMEOUT;
+        let worst = CI_WAKE_INTERVAL + tick + 3 * GH_CALL_TIMEOUT;
         assert!(worst <= Duration::from_secs(60), "{worst:?}");
     }
 

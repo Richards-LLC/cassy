@@ -414,6 +414,44 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     assert!(task.notes.contains(PROOF), "{}", task.notes);
 }
 
+/// cas-c202: a supervisor proof_scope_fix that lands after this close loaded
+/// the task, but before its terminal write, must survive: the close refuses
+/// rather than writing its stale copy (status, proof_targets, notes) back.
+#[tokio::test]
+async fn close_refuses_terminal_write_over_a_concurrent_proof_scope_fix_cas_c202() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-c202-race";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let cas_dir = f.cas_dir();
+    close_race_hook::before_terminal_write(id, move || {
+        let store = open_task_store(&cas_dir).unwrap();
+        let loaded = store.get("cas-c202-race").unwrap();
+        let mut corrected = loaded.clone();
+        corrected.status = TaskStatus::Open;
+        corrected.proof_targets = vec!["pre_tool".into(), "pre_tool::shell_effects".into()];
+        corrected.notes.push_str("\n\n[2026-10-21 14:18] PROOF-SCOPE FIX widened");
+        store.update_if_current(&corrected, &loaded).unwrap();
+    });
+    let response = call(
+        &f.worker,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Deployed the monthly release",
+            "execution_note": "no-code", "external_ref": PROOF,
+        }),
+    )
+    .await;
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::Open, "the correction's status survives: {response}");
+    assert_eq!(task.proof_targets, ["pre_tool", "pre_tool::shell_effects"], "{response}");
+    assert!(task.notes.contains("PROOF-SCOPE FIX"), "{}", task.notes);
+    assert!(
+        response.contains("CLOSE REFUSED") && response.contains("Reload"),
+        "the refusal tells the worker to reload and retry: {response}"
+    );
+}
+
 /// GH #1147: a no-code spike created under a code epic inherits the epic's
 /// WorkTarget. The worker's close must not park it for the epic branch.
 #[tokio::test]

@@ -2671,7 +2671,60 @@ fn persist_close_flags(
         match task_store.update_if_current(&next, &current) {
             Ok(_) => return Ok(()),
             Err(cas_store::StoreError::Other(_)) if attempts < 3 => attempts += 1,
+            Err(cas_store::StoreError::Other(_)) => {
+                return Err(cas_store::StoreError::Other(format!(
+                    "task {} kept changing while close recorded its transition; reload the task and retry close",
+                    snapshot.id
+                )));
+            }
             Err(error) => return Err(error),
+        }
+    }
+}
+
+/// cas-c202: what another actor changed since the close loaded `start`, if
+/// anything that invalidates its gates: a reopen to Open, or a corrected proof
+/// scope. A field counts only when the stored row differs from both the load
+/// and this close's own in-memory copy, so the close's own edits never trip it.
+fn concurrent_close_change(start: &Task, closing: &Task, current: &Task) -> Option<&'static str> {
+    fn changed<T: PartialEq>(start: &T, closing: &T, current: &T) -> bool {
+        current != start && current != closing
+    }
+    if current.status == TaskStatus::Open && start.status != TaskStatus::Open {
+        return Some("it was reopened");
+    }
+    let scope_changed = changed(&start.proof_targets, &closing.proof_targets, &current.proof_targets)
+        || changed(&start.risk, &closing.risk, &current.risk)
+        || changed(&start.execution_note, &closing.execution_note, &current.execution_note)
+        || changed(
+            &start.deliverables.work_target,
+            &closing.deliverables.work_target,
+            &current.deliverables.work_target,
+        );
+    scope_changed.then_some("its proof scope was corrected")
+}
+
+/// cas-c202: a test-only point just before the terminal Closed write, so a
+/// regression can land a concurrent supervisor correction mid-close.
+#[cfg(test)]
+pub(crate) mod close_race_hook {
+    type Hook = Box<dyn FnOnce() + Send>;
+    static HOOKS: std::sync::Mutex<Vec<(String, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Box::new(hook)));
+    }
+
+    pub(super) fn fire(task_id: &str) {
+        let hook = {
+            let mut hooks = HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|(id, _)| id == task_id)
+                .map(|index| hooks.remove(index).1)
+        };
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }
@@ -6977,6 +7030,10 @@ impl CasCore {
             // An override use appends an audit note; do not overwrite it later.
             task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
         }
+        // cas-c202: the row every gate below is evaluated against. The terminal
+        // write refuses if another actor reopened the task or corrected its
+        // proof scope meanwhile, instead of writing this copy back over it.
+        let close_snapshot = task.clone();
 
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
@@ -7195,11 +7252,9 @@ impl CasCore {
                             ),
                             data: None,
                         })?;
-                        let mut timed_out_task = task.clone();
-                        timed_out_task.pending_verification = false;
-                        timed_out_task.updated_at = chrono::Utc::now();
-                        task_store
-                            .update(&timed_out_task)
+                        persist_close_flags(task_store.as_ref(), &task, |task| {
+                            task.pending_verification = false;
+                        })
                             .map_err(|error| McpError {
                                 code: ErrorCode::INTERNAL_ERROR,
                                 message: Cow::from(format!(
@@ -10547,19 +10602,46 @@ impl CasCore {
         // race. Serialize the terminal write per task across processes and
         // re-read under the lock: the loser reports the existing close and
         // writes, relays and notifies nothing.
+        #[cfg(test)]
+        close_race_hook::fire(&req.id);
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
-        if let Ok(current) = task_store.get(&req.id)
-            && current.status == TaskStatus::Closed
-        {
-            return Ok(Self::success(already_closed_message(&current)));
+        let close_refused = |change: &str| {
+            let caller = crate::mcp::tools::core::guidance::caller_prefix();
+            Self::tool_error(format!(
+                "CLOSE REFUSED: task {} changed while this close was running ({change}), for example a supervisor proof_scope_fix or request_changes. Nothing was closed and the newer state was kept. Reload it with `{caller}task action=show id={}`, then retry `{caller}task action=close id={}`.",
+                req.id, req.id, req.id
+            ))
+        };
+        let current = task_store.get(&req.id).ok();
+        if let Some(current) = current.as_ref() {
+            if current.status == TaskStatus::Closed {
+                return Ok(Self::success(already_closed_message(current)));
+            }
+            if let Some(change) = concurrent_close_change(&close_snapshot, &task, current) {
+                return Ok(close_refused(change));
+            }
         }
         // cas-ec74: adopt the store-owned stamp so the Closed occurrence below
         // matches the persisted row instead of a second clock read.
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update: {e}")),
-            data: None,
-        })?;
+        // cas-c202: the write is guarded by the row just re-read, so a
+        // correction committed after that read is never overwritten either.
+        let written = match current.as_ref() {
+            Some(current) => task_store.update_if_current(&task, current),
+            None => task_store.update(&task),
+        };
+        task.updated_at = match written {
+            Ok(stamp) => stamp,
+            Err(cas_store::StoreError::Other(_)) if current.is_some() => {
+                return Ok(close_refused("it was updated during the final write"));
+            }
+            Err(e) => {
+                return Err(McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to update: {e}")),
+                    data: None,
+                });
+            }
+        };
         drop(_terminal_close_lock);
         // cas-b1dd: the Closed write is this request's terminal mutation.
         // Everything below is post-commit work (indexing, reminders, the

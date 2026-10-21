@@ -2676,6 +2676,31 @@ fn persist_close_flags(
     }
 }
 
+/// cas-c202: a test-only point just before the terminal Closed write, so a
+/// regression can land a concurrent supervisor correction mid-close.
+#[cfg(test)]
+pub(crate) mod close_race_hook {
+    type Hook = Box<dyn FnOnce() + Send>;
+    static HOOKS: std::sync::Mutex<Vec<(String, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), Box::new(hook)));
+    }
+
+    pub(super) fn fire(task_id: &str) {
+        let hook = {
+            let mut hooks = HOOKS.lock().unwrap();
+            hooks
+                .iter()
+                .position(|(id, _)| id == task_id)
+                .map(|index| hooks.remove(index).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[cfg(test)]
 mod close_flag_race_tests {
     use super::*;
@@ -10543,6 +10568,8 @@ impl CasCore {
         // race. Serialize the terminal write per task across processes and
         // re-read under the lock: the loser reports the existing close and
         // writes, relays and notifies nothing.
+        #[cfg(test)]
+        close_race_hook::fire(&req.id);
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
         if let Ok(current) = task_store.get(&req.id)
             && current.status == TaskStatus::Closed

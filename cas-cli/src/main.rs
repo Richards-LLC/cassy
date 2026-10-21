@@ -217,7 +217,13 @@ fn main() -> ExitCode {
                     _ => ExitCode::FAILURE,
                 }
             } else {
-                ExitCode::FAILURE
+                if e.downcast_ref::<cas::qa_impact::ReadError>().is_some() {
+                    ExitCode::from(3)
+                } else if e.downcast_ref::<cas::qa_impact::UsageError>().is_some() {
+                    ExitCode::from(2)
+                } else {
+                    ExitCode::FAILURE
+                }
             }
         }
     }

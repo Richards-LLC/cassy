@@ -1,10 +1,12 @@
 use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
+mod registry_upkeep;
+mod docs_upkeep;
 mod proof_claims;
 #[cfg(test)]
 mod loaded_proof_tests;
-mod task_attribution;
+pub(crate) mod task_attribution;
 pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;
@@ -584,204 +586,6 @@ fn has_recorded_gate_decision(notes: &str) -> bool {
             .and_then(|line| line.split_once("] ✅ DECISION "))
             .is_some_and(|(_, decision)| !decision.trim().is_empty())
     })
-}
-
-fn feature_map_unchanged_decision(notes: &str) -> bool {
-    notes.lines().any(|line| {
-        line.strip_prefix('[')
-            .and_then(|line| line.split_once("] ✅ DECISION "))
-            .and_then(|(_, decision)| decision.split_once("map unchanged:"))
-            .is_some_and(|(_, reason)| !reason.trim().is_empty())
-    })
-}
-
-/// Inspect only the already measured delivery paths. The caller runs this
-/// after MERGE REQUIRED has cleared; this function starts no processes.
-fn feature_map_drift(
-    repo: &std::path::Path,
-    changed_paths: &[String],
-    task_notes: &str,
-) -> Vec<String> {
-    let features_dir = repo.join("docs/qa/features");
-    if !features_dir.is_dir()
-        || changed_paths.is_empty()
-        || feature_map_unchanged_decision(task_notes)
-    {
-        return Vec::new();
-    }
-    let mut stale = Vec::new();
-    let entries = match std::fs::read_dir(&features_dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(path = %features_dir.display(), %error, "feature-map close check skipped unreadable directory");
-            return Vec::new();
-        }
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(%error, "feature-map close check skipped unreadable entry");
-                continue;
-            }
-        };
-        let file = entry.path();
-        if file.extension().and_then(std::ffi::OsStr::to_str) != Some("md") || !file.is_file() {
-            continue;
-        }
-        let relative = format!("docs/qa/features/{}", entry.file_name().to_string_lossy());
-        if changed_paths.iter().any(|path| path == &relative) {
-            continue;
-        }
-        let source = match std::fs::read_to_string(&file) {
-            Ok(source) => source,
-            Err(error) => {
-                tracing::warn!(path = %file.display(), %error, "feature-map close check skipped unreadable feature file");
-                continue;
-            }
-        };
-        let mut in_touches = false;
-        let mut touched = false;
-        let mut valid = true;
-        for line in source.lines() {
-            let line = line.trim();
-            if line == "## Touches" {
-                in_touches = true;
-                continue;
-            }
-            if line.starts_with("## ") {
-                in_touches = false;
-            }
-            if !in_touches {
-                continue;
-            }
-            let Some(pattern) = line.strip_prefix("- `").and_then(|line| line.strip_suffix('`'))
-            else {
-                continue;
-            };
-            let glob = match glob::Pattern::new(pattern) {
-                Ok(glob) => glob,
-                Err(error) => {
-                    tracing::warn!(feature = %relative, %pattern, %error, "feature-map close check skipped malformed feature file");
-                    valid = false;
-                    break;
-                }
-            };
-            if changed_paths.iter().any(|path| {
-                glob.matches_with(
-                    path,
-                    glob::MatchOptions {
-                        case_sensitive: true,
-                        require_literal_separator: true,
-                        require_literal_leading_dot: false,
-                    },
-                )
-            }) {
-                touched = true;
-            }
-        }
-        if valid && touched {
-            stale.push(relative);
-        }
-    }
-    stale.sort();
-    stale
-}
-
-#[cfg(test)]
-mod feature_map_tests {
-    use super::feature_map_drift;
-
-    fn fixture() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let features = dir.path().join("docs/qa/features");
-        std::fs::create_dir_all(&features).unwrap();
-        std::fs::write(
-            features.join("profile.md"),
-            "# Profile\n\n## Touches\n\n- `src/profile/**`\n\n## Gotchas\n\n- None.\n",
-        )
-        .unwrap();
-        dir
-    }
-
-    #[test]
-    fn no_feature_folder_is_a_no_op() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], "").is_empty());
-    }
-
-    #[test]
-    fn touched_glob_with_untouched_feature_file_refuses() {
-        let dir = fixture();
-        assert_eq!(
-            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
-            vec!["docs/qa/features/profile.md".to_string()],
-        );
-    }
-
-    #[test]
-    fn updating_the_matching_feature_file_clears_drift() {
-        let dir = fixture();
-        assert_eq!(
-            feature_map_drift(
-                dir.path(),
-                &[
-                    "src/profile/edit.ts".into(),
-                    "docs/qa/features/profile.md".into(),
-                ],
-                "",
-            ),
-            Vec::<String>::new(),
-        );
-    }
-
-    #[test]
-    fn decision_note_with_reason_clears_drift() {
-        let dir = fixture();
-        let notes = "[2026-09-25 21:00] ✅ DECISION map unchanged: UI route still has the same steps";
-        assert_eq!(
-            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn empty_reason_does_not_clear_drift() {
-        let dir = fixture();
-        for notes in [
-            "[2026-09-25 21:00] ✅ DECISION map unchanged:  ",
-            "[2026-09-25 21:00] 📝 PROGRESS map unchanged: routine",
-        ] {
-            assert_eq!(
-                feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
-                vec!["docs/qa/features/profile.md".to_string()],
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_glob_in_one_file_does_not_hide_drift_in_another() {
-        let dir = fixture();
-        std::fs::write(
-            dir.path().join("docs/qa/features/invalid.md"),
-            "# Invalid\n\n## Touches\n\n- `[`\n",
-        )
-        .unwrap();
-        assert_eq!(
-            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
-            vec!["docs/qa/features/profile.md".to_string()],
-        );
-    }
-
-    #[test]
-    fn invalid_glob_alone_never_refuses_close() {
-        let dir = tempfile::tempdir().unwrap();
-        let features = dir.path().join("docs/qa/features");
-        std::fs::create_dir_all(&features).unwrap();
-        std::fs::write(features.join("invalid.md"), "# Invalid\n\n## Touches\n\n- `[`\n")
-            .unwrap();
-        assert!(feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], "").is_empty());
-    }
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
@@ -7094,6 +6898,19 @@ impl CasCore {
             data: None,
         })?;
 
+        if task.task_type == TaskType::Epic && !task.is_terminal() {
+            if let Ok(actor) = self.get_agent_id() {
+                if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {
+                    tracing::warn!(%error,epic=%task.id,"could not arm post-release fallback");
+                }
+            }
+            if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
+                return Ok(Self::tool_error(reason));
+            }
+            // An override use appends an audit note; do not overwrite it later.
+            task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
+        }
+
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
         // verification dispatch, or completion-receipt projection so every
@@ -8160,6 +7977,7 @@ impl CasCore {
         // override (already validated above) waives it with a logged reason.
         // cas-38e7: epics no longer need a full-suite journey receipt; the
         // merge queue runs the journeys once.
+        let mut registry_upkeep_notices = Vec::new();
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
@@ -8213,6 +8031,22 @@ impl CasCore {
                     qa_receipt,
                 )
             });
+            match registry_upkeep::at_park(
+                task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
+                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
+                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+            ) {
+                Ok(notices) => registry_upkeep_notices = notices,
+                Err(message) => return Ok(Self::tool_error(message)),
+            }
+            match docs_upkeep::at_park(
+                task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
+                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
+                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+            ) {
+                Ok(notices) => registry_upkeep_notices.extend(notices),
+                Err(message) => return Ok(Self::tool_error(message)),
+            }
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -8315,6 +8149,10 @@ impl CasCore {
                         &conflict_paths,
                         conflict_check_error.as_deref(),
                     );
+
+                    let msg = if registry_upkeep_notices.is_empty() { msg } else {
+                        format!("{msg}\n\n{}", registry_upkeep_notices.join("\n"))
+                    };
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -8431,6 +8269,14 @@ impl CasCore {
                         .ok()
                         .and_then(|stored| stored.deliverables.factory_branch_anchor)
                         .or(anchor);
+                    // G7 never refuses a park. Snapshot the attributed delivery
+                    // before QA dispatch, even if independent QA is disabled.
+                    let impact_warning = qa_anchor.as_deref().and_then(|head| {
+                        self.attach_delivery_qa_impact(&task, &close_project_root,
+                            &resolved_parent_branch, head).err()
+                    }).map(|error| format!("\nWARNING: authoritative QA impact unavailable (non-blocking): {error:#}"))
+                        .unwrap_or_default();
+                    let msg = format!("{msg}{impact_warning}");
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,
@@ -10021,18 +9867,6 @@ impl CasCore {
                 .as_ref()
                 .map(|context| context.repo_root.as_path())
                 .unwrap_or(close_project_root.as_path());
-            let stale_feature_maps = feature_map_drift(
-                target_repo,
-                delivered_paths.as_deref().unwrap_or(&[]),
-                &task.notes,
-            );
-            if !stale_feature_maps.is_empty() {
-                return Ok(Self::tool_error(gate_text::feature_map_drift_message(
-                    &task.id,
-                    &stale_feature_maps,
-                    crate::mcp::tools::core::guidance::caller_prefix(),
-                )));
-            }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
             if let Some(range) = snapshot_gate_range(
                 proof_repo,
@@ -11072,6 +10906,14 @@ impl CasCore {
             receipt.push_str(
                 "\n\nReceipt: epic close committed. The full stranded-branch override narrative is queued as a durable decision note.",
             );
+        }
+        if !registry_upkeep_notices.is_empty() {
+            receipt.push_str(&format!("\n\n{}", registry_upkeep_notices.join("\n")));
+        }
+        if task.task_type == TaskType::Epic {
+            let summary = registry_upkeep::epic_escape_summary(task_store.as_ref(), &task);
+            append_close_decision_note(task_store.as_ref(), &mut task, &summary);
+            receipt.push_str(&format!("\n\n{summary}"));
         }
         receipt.push_str(&epic_issue_warning);
         if used_deprecated_override_alias {
@@ -25694,6 +25536,23 @@ mod merge_state_gate_tests {
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
         assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty());
         assert!(cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_ops_post_release_pending_refuses_epic() {
+        use cas_store::TaskStore;
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let cas = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let (core, tasks, _, mut epic) = close_relay_fixture_cas_3a82(&cas);
+        epic.task_type = TaskType::Epic;
+        tasks.update(&epic).unwrap();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
+        let result = core.cas_task_close(Parameters(base_req(&epic.id))).await.unwrap();
+        assert_eq!(result.is_error,Some(true));
+        assert!(result.content.iter().any(|c| matches!(&c.raw,rmcp::model::RawContent::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
+        assert_eq!(tasks.get(&epic.id).unwrap().status,TaskStatus::InProgress);
     }
 
     fn git_command(dir: &std::path::Path, args: &[&str]) -> Command {

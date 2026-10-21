@@ -676,6 +676,30 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.post_release.command" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.command = value.trim().to_string();
+            }
+            "qa.post_release.window_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.window_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.interval_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.interval_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.timeout_secs" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.timeout_secs = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.release_branches" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.release_branches = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.post_release.env" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.env = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "qa.preflight_hook" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_hook = if value.trim().is_empty() {
@@ -703,6 +727,30 @@ impl Config {
                     .trim()
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "upkeep.codemap" | "upkeep.product_overview" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                let upkeep = self.upkeep.get_or_insert_with(UpkeepConfig::default);
+                let gate = key.strip_prefix("upkeep.").unwrap();
+                if gate == "codemap" { upkeep.codemap = Some(stage); }
+                else { upkeep.product_overview = Some(stage); }
+                upkeep.observe_since.remove(gate);
+            }
+            "qa.registry.enforce" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                self.qa.get_or_insert_with(QaConfig::default).registry.enforce = stage;
+                if let Some(upkeep) = self.upkeep.as_mut() {
+                    upkeep.observe_since.remove("registry");
+                }
+            }
+            "qa.registry.path" => {
+                let path = std::path::Path::new(value.trim());
+                if path.as_os_str().is_empty() || path.is_absolute()
+                    || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err(MemError::Parse("qa.registry.path must be a non-empty project-relative path without ..".into()));
+                }
+                self.qa.get_or_insert_with(QaConfig::default).registry.path = value.trim().to_owned();
             }
             "qa.mode" => {
                 let mode = match value.trim() {

@@ -3,8 +3,8 @@
 Run once per release, in the background, for projects that have
 `docs/qa/features/`. The sweep keeps `docs/qa/verify.md` and the feature map
 true for features nobody touched this release; touched features are kept
-current by the close-time drift check and by QA use. Nothing waits on the
-sweep.
+current by QA use. Task park no longer checks feature files: the journey
+registry's upkeep gates replace that check. Nothing waits on the sweep.
 
 **Hard cap: about 15 minutes.** When the cap expires, record what was not
 reached and stop.

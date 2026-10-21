@@ -3508,6 +3508,16 @@ impl CasCore {
             })?;
         }
 
+        // Arm only a released epic source, including System-A requests without task_id.
+        // This is a background observation request, never a merge gate.
+        if crate::qa_post_release::configured(&cas_root).is_some()
+            && let Ok(store) = self.open_task_store()
+            && let Ok(tasks) = store.list(None)
+            && let Some(epic) = tasks.iter().find(|t|t.task_type == cas_types::TaskType::Epic && t.branch.as_deref() == Some(worktree.branch.as_str()))
+            && let Ok(actor) = self.get_agent_id()
+            && let Err(error) = crate::qa_post_release::arm_on_merge(&cas_root,epic,&actor)
+        { tracing::warn!(%error,epic=%epic.id,"could not arm post-release fallback at merge request"); }
+
         // GH #1024: callers commonly omit task_id. Resolve the worktree first,
         // then bind its actual branch to any open QA round before Git can merge.
         if task_id.is_none()

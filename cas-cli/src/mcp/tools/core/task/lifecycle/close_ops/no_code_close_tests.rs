@@ -446,7 +446,10 @@ async fn close_refuses_terminal_write_over_a_concurrent_proof_scope_fix_cas_c202
     assert_eq!(task.status, TaskStatus::Open, "the correction's status survives: {response}");
     assert_eq!(task.proof_targets, ["pre_tool", "pre_tool::shell_effects"], "{response}");
     assert!(task.notes.contains("PROOF-SCOPE FIX"), "{}", task.notes);
-    assert!(response.contains("reload"), "the refusal tells the worker to reload: {response}");
+    assert!(
+        response.contains("CLOSE REFUSED") && response.contains("Reload"),
+        "the refusal tells the worker to reload and retry: {response}"
+    );
 }
 
 /// GH #1147: a no-code spike created under a code epic inherits the epic's

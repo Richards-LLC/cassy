@@ -10602,9 +10602,10 @@ impl CasCore {
         close_race_hook::fire(&req.id);
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
         let close_refused = |change: &str| {
+            let caller = crate::mcp::tools::core::guidance::caller_prefix();
             Self::tool_error(format!(
-                "CLOSE REFUSED: task {} changed while this close was running ({change}), for example a supervisor proof_scope_fix or request_changes. Nothing was closed and the newer state was kept. Reload it with task action=show id={}, then retry task action=close.",
-                req.id, req.id
+                "CLOSE REFUSED: task {} changed while this close was running ({change}), for example a supervisor proof_scope_fix or request_changes. Nothing was closed and the newer state was kept. Reload it with `{caller}task action=show id={}`, then retry `{caller}task action=close id={}`.",
+                req.id, req.id, req.id
             ))
         };
         let current = task_store.get(&req.id).ok();

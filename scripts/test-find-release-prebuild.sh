@@ -88,6 +88,17 @@ case "$2" in
     run_id="${run_id%%/artifacts*}"
     file="${FAKE_ARTIFACTS_DIR:?}/$run_id.json"
     if [[ ! -f "$file" ]]; then exit 1; fi
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" ]]; then
+      count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
+      count=0
+      [[ -f "$count_file" ]] && count="$(<"$count_file")"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$count_file"
+      if [[ "$count" == 1 ]]; then
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+        exit 1
+      fi
+    fi
     cat "$file"
     ;;
   *)
@@ -171,11 +182,12 @@ touch "$tmp/transient-sequence/2.fail"
 echo '{"workflow_runs":[{"id":555,"status":"completed","conclusion":"success"}]}' \
   >"$tmp/transient-sequence/3.json"
 printf '%s' "$both_live" >"$tmp/artifacts/555.json"
+touch "$tmp/artifacts/555.fail-once"
 rm -f "$tmp/transient-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/transient-sequence"
 out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
   "$lookup" transientcommit 2>"$tmp/transient.err")"
-expect_field "$out" found true 'a failed in-flight poll is retried and then adopted'
+expect_field "$out" found true 'a failed in-flight poll and artifacts query are retried before adoption'
 expect_field "$out" run-id 555 'retry adoption names the completed run'
 if grep -qF 'attempt 1 failed (HTTP 502)' "$tmp/transient.err" \
     && ! grep -qF 'fixture-secret' "$tmp/transient.err" \
@@ -188,6 +200,7 @@ else
   fail=$((fail + 1))
 fi
 unset FAKE_RUNS_SEQUENCE_DIR
+rm -f "$tmp/artifacts/555.fail-once" "$tmp/artifacts/555.artifact-attempts"
 
 # 9. A timed-out poll stays within the deadline and falls back with a sanitized
 # timeout diagnostic.

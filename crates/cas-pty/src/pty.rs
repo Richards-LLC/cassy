@@ -3954,7 +3954,7 @@ for tool in git gh node cargo; do
   command -v "$tool" >/dev/null || continue
   "$tool" --version >/dev/null 2>&1 || echo "BROKEN_$tool"
 done
-if command -v ssh >/dev/null; then ssh -G github.com >/dev/null 2>&1 || echo BROKEN_ssh; fi
+if command -v ssh >/dev/null; then out=$(ssh -G github.com 2>&1 >/dev/null) || echo "BROKEN_ssh: $out"; fi
 echo SMOKE_DONE
 "#;
 
@@ -3974,6 +3974,10 @@ echo SMOKE_DONE
             );
         }
         assert!(supervisor.contains("vercel=MOCK_VERCEL_CANARY"), "{supervisor}");
+        assert!(
+            supervisor.contains("SMOKE_DONE") && !supervisor.contains("BROKEN_"),
+            "host tooling is broken before masking:\n{supervisor}"
+        );
 
         let worker = probe_output("worker", script, &env).await.unwrap();
         assert!(!worker.contains("MOCK_"), "worker read a masked store:\n{worker}");

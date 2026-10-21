@@ -1565,7 +1565,9 @@ journeys:
                 "    fixtures: [fresh]\n    note: [value]",
             )
             + "\nnote: value\n";
-        assert!(parse(&plain).unwrap().validate(&[]).problems.is_empty());
+        let dir = repo(&plain);
+        let report = check(dir.path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
         for duplicate in [
             GABBER.replace("version: 1", "version: 1\nversion: 1"),
             GABBER.replace(

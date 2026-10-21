@@ -7,6 +7,50 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — the macOS hub keeps its settings and restarts cleanly
+
+- **Saved hub transport** — Was: restarting or updating the hub could drop the machine's chosen transport policy. → Now: `cas hub restart` and `cas update` honor the saved `auto`, `required` or `loopback` policy from `~/.cas/config.toml`; a command-line flag overrides one launch only.
+- **Tailscale Serve fallback** — Was: in `auto` mode a failed Tailscale Serve publication fell back to loopback without saying so. → Now: interactive start and restart warn that the hub is loopback-only and name `cas hub start --loopback`, and a macOS service start retries within a bound, then exits so launchd retries.
+- **Hub turnover on macOS update** — Was: updating from source on macOS left the old hub running beside the new install, and the onboarding docs asked for a manual restart. → Now: the update runs `cas hub restart` with the new binary, confirms `cas hub status` reports the new version, prints a "Hub turnover" line and fails when the restart fails.
+- **Live hub status** — Was: `cas hub status` could report an exited hub from a stale process record while a new hub held the machine lock. → Now: the live lock holder's PID and age lead the verdict; the stale record stays in `--json` as history.
+
+### Fixed — messages and reminders reach the right session
+
+- **Ended sessions in other projects** — Was: a message to an ended supervisor addressed by `project` or `project@machine` failed with "no supervisor or worker named …". → Now: ended sessions resolve with the same selectors as live peers, so the message reaches a live successor or says the session ended.
+- **Held reminders on shutdown** — Was: reminders held for a worker could stay stranded after a normal worker shutdown. → Now: shutdown re-arms them in order, so they fire for their owner.
+- **Confirmed prompt submits** — Was: transport logs said "Injecting prompt" whether or not the payload was written and submitted to the pane. → Now: logs distinguish an injection attempt from a confirmed payload write and submit for Codex reminders and peer replies.
+
+### Fixed — credential guards close more bypasses
+
+- **Credential guard round 5** — Was: `env -C`/`--chdir` and `sudo -D`/`--chdir` directory changes, a separate `tar -f` value and short-flag clusters such as `curl -sd@file` could carry a protected credential file past the guard. → Now: the guard applies those directory changes, reads the file operand of each form and refuses protected credential paths.
+- **Nested quotes in read-only commands** — Was: a read-only one-liner whose `$(…)` substitution contained its own double quotes could be refused as an unresolved shell payload. → Now: the substitution keeps its quoting context and its commands are judged on their actual effects.
+
+### Added — dedicated-account connectors for workers
+
+- **Explicit-account connectors** — Was: a worker launched with a dedicated account's config directory lost that account's claude.ai connectors (for example Gmail) under strict MCP. → Now: an operator-provisioned `cassy-worker-connectors.json` in that directory admits exactly the named connectors with their tool-permission ceilings; default workers stay Cassy-only and other accounts' connectors stay out.
+
+### Fixed — review and QA follow the delivery
+
+- **Stable visual-QA pairing** — Was: inserting a section shifted every later positional selector, so existing visual findings were recorded as introduced. → Now: findings pair on the element's own id or `data-testid`, else its DOM path without positional pseudo-classes.
+- **Merged-delivery reviews** — Was: a merged delivery refused by another close gate had no verification dispatch, a QA re-round did not reuse the idle reviewer, and a failed verdict on a parked task dead-ended. → Now: the review is prepared even when another gate refuses, idle QA reviewers are reused, the first supervisor verdict binds, and blocked parked reviews recover.
+- **Merged-content refusal** — Was: a pending verification dispatch could hide a dropped-content refusal on the next close. → Now: the refusal persists until the integration gate passes, independent of the review verdict.
+- **Already-contained merges** — Was: merging an old tip already in the target reported success and opened a verification dispatch. → Now: the merge reports the source as already contained before close or verification, rechecking after origin reconciliation.
+- **Split-side assignment** — Was: assignment could hand a worker a child on a peer supervisor's side of an accepted work split. → Now: it is refused unless a takeover grant from the current task snapshot authorizes exactly one assigned worker.
+- **Trusted proof markers** — Was: close, cancel, reopen and request_changes reasons were appended verbatim and could plant an `ARTIFACT_PROOF:` line. → Now: the task timeline is an untrusted sink; marker lines are reserved for Cassy's own artifact and proposal appends, need rendered provenance and survive note reordering.
+
+### Fixed — Slack and release tooling
+
+- **Managed reply size first** — Was: a managed Slack reply's 1 MiB file check ran after the publication gate. → Now: an oversized file is refused before the gate is consulted.
+- **Announcement body edges** — Was: validation and posting could trim blank edges of a fenced announcement body differently. → Now: both use the same normalization.
+
+### Changed — QA field-report rules in the built-in skills
+
+- **QA and test guidance** — Was: the QA, test, supervisor and worker skills lacked the field-report rules. → Now: they cover entry-path enumeration, read-back from the system of record, served-build mapping, combination tables, a red-first regression case per bug fix, a post-release check before downstream notes and a handoff file before respawn.
+
+### Fixed — macOS ownership probes
+
+- **Non-blocking simulator ownership** — Was: macOS simulator ownership waits ran on the async runtime. → Now: they run on the blocking pool, with cross-process checkpoint coverage restored.
+
 ## [3.67.0] - 2026-10-20
 
 ### Fixed — messages arrive with an acknowledgement

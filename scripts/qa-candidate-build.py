@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,16 @@ def sha256(path):
 def run(scope, command, **kwargs):
     print("candidate: " + " ".join(map(str, command)), file=sys.stderr, flush=True)
     scope.run(list(map(str, command)), check=True, **kwargs)
+
+
+def verify_candidate_version(output, declared, revision):
+    match = re.fullmatch(r"cas (\S+) \(([0-9a-f]{7}) (\d{4}-\d{2}-\d{2})\)", output)
+    if not match:
+        raise ValueError(f"candidate version has unexpected format: {output!r}")
+    if match.group(1) != declared or not revision.startswith(match.group(2)):
+        raise ValueError(
+            f"candidate version {output!r} differs from revision's cas {declared} ({revision[:7]})"
+        )
 
 
 def candidate_dir_for_task(repo, task):
@@ -78,8 +89,7 @@ def build(repo, revision, candidate_dir):
                     raise ValueError(f"candidate build produced no binary at {binary}")
                 version = subprocess.check_output([str(binary), "--version"], text=True).strip()
                 declared = tomllib.loads((checkout / "cas-cli/Cargo.toml").read_text())["package"]["version"]
-                if version != f"cas {declared}":
-                    raise ValueError(f"candidate version {version!r} differs from revision's cas {declared}")
+                verify_candidate_version(version, declared, revision)
                 task_dir = candidate_dir.parent
                 task_dir.mkdir(parents=True, exist_ok=True)
                 if task_dir.is_symlink() or candidate_dir.is_symlink():

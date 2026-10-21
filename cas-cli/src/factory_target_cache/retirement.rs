@@ -7,7 +7,7 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
     let Some(worktree) = agent.metadata.get("clone_path") else {
         return Ok(false);
     };
-    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let config = crate::config::Config::load(cas_root).map_err(io::Error::other)?;
     let artifacts = crate::config::project_factory_artifacts_root(
         cas_root,
         &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
@@ -151,11 +151,11 @@ fn retire(
     };
     // cas-3f93: follow a target relocated under `[factory] scratch_root`.
     let target = crate::factory_scratch::worker_target_dir(&worktree);
-    if !target.exists() {
-        return Ok(true); // Verified safe checkout has no target left to retire.
-    }
-    if fs::symlink_metadata(&target)?.file_type().is_symlink() {
-        return Ok(false);
+    match fs::symlink_metadata(&target) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+        Ok(metadata) if metadata.file_type().is_symlink() => return Ok(false),
+        Ok(_) => {}
     }
     #[cfg(unix)]
     let target_lease = match super::owner::for_retirement(cas_root, &worktree) {

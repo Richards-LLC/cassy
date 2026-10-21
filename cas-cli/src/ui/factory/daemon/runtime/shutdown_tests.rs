@@ -1020,7 +1020,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         let mut task = cas_types::Task::new("cas-retiring".into(), "Delivered task".into());
         task.assignee = Some(name.into());
         task.status = status;
-        open_task_store(&cas).unwrap().add(&task).unwrap();
+        crate::store::open_task_store(&cas).unwrap().add(&task).unwrap();
         if unpushed {
             git(&[
                 "-C",

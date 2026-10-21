@@ -67,7 +67,7 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
     assert!(f.run(&head).is_err());
     f.decision("codemap unchanged: payments belong to the documented account subsystem");
     assert!(f.run(&head).is_ok());
-    assert!(f.store.get(&f.task.id).unwrap().unwrap().notes.contains("UPKEEP ESCAPE G5"));
+    assert!(f.store.get(&f.task.id).unwrap().notes.contains("UPKEEP ESCAPE G5"));
     // Working-copy edits do not repair a committed delivery.
     let mut f = Fixture::new();
     write(f.repo.path(), "src/payments/start.ts", "new directory");

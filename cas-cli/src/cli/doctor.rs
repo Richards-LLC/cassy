@@ -9143,6 +9143,15 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_reachability_check_reports_real_missing_credential_detail() {
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = TempDir::new().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        fs::write(&user_proxy, "[servers.viktor]\ntransport = 'http'\nurl = 'https://viktor.invalid/mcp'\nauth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n").unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
         crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
             let temp = TempDir::new().unwrap();
             let cas_root = temp.path().join(".cas");
@@ -9165,7 +9174,8 @@ mod tests {
             assert!(
                 check
                     .message
-                    .contains("checked 1 configured upstream(s) once")
+                    .contains("checked 1 configured upstream(s) once"),
+                "{}", check.message
             );
             assert!(
                 check.message.contains(&format!(

@@ -196,6 +196,7 @@ impl Config {
             "qa.post_release.env" => Some(qa.post_release.clone().unwrap_or_default().env.join(",")),
             "qa.release.integration_branch" => Some(qa.release.clone().unwrap_or_default().integration_branch),
             "qa.release.branches" => Some(qa.release.clone().unwrap_or_default().branches.join(",")),
+            "qa.release.deploy_workflows" => Some(qa.release.clone().unwrap_or_default().deploy_workflows.join(",")),
             "qa.release.adapter" => Some(qa.release.clone().unwrap_or_default().adapter),
             "qa.release.env" => Some(qa.release.clone().unwrap_or_default().env.join(",")),
             "qa.release.timeout_secs" => Some(qa.release.clone().unwrap_or_default().timeout_secs.to_string()),

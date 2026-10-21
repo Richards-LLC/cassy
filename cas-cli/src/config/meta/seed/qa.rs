@@ -87,6 +87,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     for (key, name, description, value_type, default, constraint) in [
         ("qa.release.integration_branch", "Release integration branch", "Branch the release gate walks, for example staging.", ConfigType::String, "", Constraint::None),
         ("qa.release.branches", "Release promotion branches", "Promotion targets whose PRs need a clean release gate.", ConfigType::StringList, "", Constraint::None),
+        ("qa.release.deploy_workflows", "Release deploy workflows", "GitHub Actions workflow names watched for deployment failures on the release integration branch.", ConfigType::StringList, "", Constraint::None),
         ("qa.release.adapter", "Release adapter", "Project-relative QA adapter executable, called as `<adapter> <verb>` with protocol v1 JSON on stdin and stdout; no shell. Empty leaves the gate off.", ConfigType::String, "", Constraint::None),
         ("qa.release.env", "Release adapter env", "Environment variable names allowed into the adapter.", ConfigType::StringList, "", Constraint::None),
         ("qa.release.timeout_secs", "Release adapter timeout secs", "Per-call adapter timeout.", ConfigType::Int, "120", Constraint::Min(1)),

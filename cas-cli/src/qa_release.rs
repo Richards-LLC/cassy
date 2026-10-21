@@ -25,6 +25,8 @@ pub struct ReleaseConfig {
     pub integration_branch: String,
     /// Promotion targets whose PRs need a clean gate (for example `main`).
     pub branches: Vec<String>,
+    /// GitHub Actions deploy workflow names watched on the integration branch.
+    pub deploy_workflows: Vec<String>,
     /// Project-relative adapter executable; empty leaves the gate off.
     pub adapter: String,
     /// Environment variable names allowed into the adapter.
@@ -40,6 +42,7 @@ impl Default for ReleaseConfig {
         Self {
             integration_branch: String::new(),
             branches: Vec::new(),
+            deploy_workflows: Vec::new(),
             adapter: String::new(),
             env: Vec::new(),
             timeout_secs: 120,

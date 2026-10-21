@@ -1879,7 +1879,9 @@ mod tests {
             for row in rows {
                 assert_eq!(row.priority, NotificationPriority::Critical);
                 assert!(row.summary.as_deref().unwrap().contains("BLOCKER"));
+                // pin: the supervisor must see GitHub's failed job and step.
                 assert!(row.prompt.contains("Deploy service"));
+                // pin: the failed step is actionable deploy context.
                 assert!(row.prompt.contains("Apply migrations"));
                 assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(&row.prompt));
             }

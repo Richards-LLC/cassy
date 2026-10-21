@@ -708,6 +708,10 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.branches = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
             }
+            "qa.release.deploy_workflows" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.deploy_workflows = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "qa.release.adapter" => {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.adapter = value.trim().to_string();

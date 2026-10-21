@@ -684,6 +684,9 @@ fn wait_for_stop_or_satisfying_hub(
     force: bool,
     stop_deadline: Option<crate::bounded_process::Deadline>,
 ) -> Result<Option<HubProcessRecord>> {
+    #[cfg(debug_assertions)]
+    mark_restart_stop_waiter_for_test()?;
+
     let deadline = Instant::now() + timeout;
     loop {
         ensure_stop_budget(stop_deadline)?;
@@ -2088,6 +2091,19 @@ fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
         root.join("release").exists(),
         "test hub lock-release barrier timed out"
     );
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn mark_restart_stop_waiter_for_test() -> Result<()> {
+    let Some(root) = std::env::var_os("CAS_TEST_HUB_LOCK_RELEASE_BARRIER") else {
+        return Ok(());
+    };
+    let root = std::path::PathBuf::from(root);
+    std::fs::write(
+        root.join(format!("restart-stop-waiter-{}", std::process::id())),
+        b"waiting\n",
+    )?;
     Ok(())
 }
 

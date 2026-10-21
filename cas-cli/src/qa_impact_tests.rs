@@ -359,7 +359,14 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
 
 #[test]
 fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let source_root = crate::test_paths::workspace_root();
+    let root = source_root.as_path();
+    if !root.join(".git").exists() || !root.join("cas-cli/Cargo.toml").is_file() {
+        eprintln!(
+            "SKIP Commander registry parity: source checkout unavailable in this test archive"
+        );
+        return;
+    }
     let validation =
         crate::qa_registry::check(root, Path::new(crate::qa_registry::DEFAULT_PATH)).unwrap();
     assert!(validation.problems.is_empty(), "{:?}", validation.problems);

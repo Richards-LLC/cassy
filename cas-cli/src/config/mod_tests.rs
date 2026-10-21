@@ -331,6 +331,7 @@ fn test_config_save_load() {
     let original = "# operator context\n[project_overview]\ndomain_paths=['schema/model.sql']\n";
     std::fs::write(&path, original).unwrap();
     assert_eq!(refresh_upkeep(existing.path(), "3.68.0", false, true).unwrap().len(), 2);
+    // pin: dry-run adoption must leave the operator's TOML bytes untouched.
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "dry run must not write");
     assert_eq!(refresh_upkeep(existing.path(), "3.68.0", false, false).unwrap().len(), 2);
     let generated = std::fs::read_to_string(&path).unwrap();

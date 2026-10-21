@@ -1426,6 +1426,9 @@ mod grok_agent_selection_tests {
     fn default_wizard_config_grok_is_false() {
         let config = WizardConfig::default();
         assert!(!config.agents.grok);
+        let config_for_new_project = config.to_config();
+        assert_eq!(config_for_new_project.upkeep().codemap, Some(crate::config::UpkeepStage::Enforce));
+        assert_eq!(config_for_new_project.upkeep().product_overview, Some(crate::config::UpkeepStage::Enforce));
         // Regression guard: adding grok must not perturb the existing
         // claude/codex defaults.
         assert!(config.agents.claude);

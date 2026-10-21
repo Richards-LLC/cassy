@@ -1587,20 +1587,22 @@ fn refresh_all_projects_with_user_refresh(
 
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
+        let mut upkeep_notes = Vec::new();
         let (migration, output, docs) = capture_phase_documents(cli, || {
             let phase = run_project_phase("migration", args.dry_run, || {
                 run_schema_migrations(args, cli, Some(&cas_root))?;
-                let notes = crate::config::refresh_upkeep(&cas_root, env!("CARGO_PKG_VERSION"), false, false)?;
-                if !notes.is_empty() {
-                    if cli.json { println!("{}", serde_json::json!({"docs_upkeep": notes})); }
-                    else { for note in notes { println!("{note}"); } }
-                }
+                upkeep_notes = crate::config::refresh_upkeep(
+                    &cas_root, env!("CARGO_PKG_VERSION"), false, false,
+                )?;
                 Ok(())
             });
             name_store_lock_holders(phase, &cas_root)
         });
         details.push_str(&output);
         documents.push(("migration", docs));
+        if !upkeep_notes.is_empty() {
+            documents.push(("docs_upkeep", vec![serde_json::json!({"changes": upkeep_notes})]));
+        }
         let mut phase_details = vec![(migration.is_ok(), output)];
 
         // cas-91a3 / cas-3af4: every later phase reads this project's store

@@ -103,6 +103,50 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
         error.contains("CODEMAP DRIFT") && error.contains("src/payments"),
         "{error}"
     );
+    let mut config = crate::config::Config::default();
+    config.set("upkeep.codemap", "observe").unwrap();
+    config.save(f.db.path()).unwrap();
+    assert!(
+        f.run(&head)
+            .unwrap()
+            .iter()
+            .any(|n| n.contains("UPKEEP OBSERVE G5"))
+    );
+    assert!(
+        f.store
+            .get(&f.task.id)
+            .unwrap()
+            .notes
+            .contains("UPKEEP OBSERVE G5")
+    );
+    config.set("upkeep.codemap", "off").unwrap();
+    config.save(f.db.path()).unwrap();
+    assert!(f.run(&head).is_ok());
+    config.set("upkeep.codemap", "enforce").unwrap();
+    config.save(f.db.path()).unwrap();
+    append_close_decision_note(
+        &f.store,
+        &mut f.task,
+        "📝 PROGRESS codemap unchanged: quoted only",
+    );
+    assert!(f.run(&head).is_err());
+    assert!(
+        at_park(
+            &f.store,
+            &mut f.task,
+            f.db.path(),
+            f.repo.path(),
+            &f.base,
+            None,
+            Some(&head),
+            Some("reviewed by supervisor")
+        )
+        .is_ok()
+    );
+    assert!(
+        f.run(&head).is_err(),
+        "a previous override does not authorize a later call"
+    );
     f.decision("codemap unchanged:");
     assert!(f.run(&head).is_err());
     f.decision("codemap unchanged: payments belong to the documented account subsystem");
@@ -163,25 +207,40 @@ fn docs_upkeep_removed_named_path_requires_map_edit() {
 
 #[test]
 fn docs_upkeep_product_change_requires_overview_or_reason() {
-    for change in ["domain", "live", "dead", "watched"] {
+    for change in ["domain", "live", "dead", "revived", "watched", "malformed"] {
         let mut f = Fixture::new();
-        if change == "dead" {
+        if change == "dead" || change == "revived" {
             write(
                 f.repo.path(),
                 crate::qa_registry::DEFAULT_PATH,
-                "version: 1\njourneys:\n  - {id: signup, status: live}\n",
+                &format!(
+                    "version: 1\njourneys:\n  - {{id: signup, status: {}}}\n",
+                    if change == "dead" { "live" } else { "dead" }
+                ),
+            );
+            f.base = commit(f.repo.path());
+        }
+        if change == "malformed" {
+            write(
+                f.repo.path(),
+                crate::qa_registry::DEFAULT_PATH,
+                "invalid: [",
             );
             f.base = commit(f.repo.path());
         }
         match change {
-            "domain" => write(f.repo.path(), "schema/model.sql", "new domain model"),
+            "domain" | "malformed" => write(f.repo.path(), "schema/model.sql", "new domain model"),
             "watched" => write(f.repo.path(), "src/pages/start.ts", "new flow"),
             _ => write(
                 f.repo.path(),
                 crate::qa_registry::DEFAULT_PATH,
                 &format!(
                     "version: 1\njourneys:\n  - {{id: signup, status: {}}}\n",
-                    if change == "dead" { "dead" } else { "live" }
+                    if change == "dead" || change == "revived" {
+                        "dead"
+                    } else {
+                        "live"
+                    }
                 ),
             ),
         }

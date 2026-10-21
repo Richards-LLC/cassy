@@ -375,7 +375,8 @@ pub(crate) fn resolve_assignment_freshness_branch(
 /// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
 /// merge reads as far behind any other epic, but rebasing it would destroy
 /// the tip under review. Assignment proceeds with this note instead; `task
-/// start` keeps the parked tip and moves the branch onto the new target.
+/// start` can move the reusable base lane while preserving its old tip. An
+/// unmerged per-task delivery branch itself stays frozen.
 fn parked_assignment_note(
     task_store: &dyn cas_store::TaskStore,
     worker: &cas_types::Agent,
@@ -389,7 +390,7 @@ fn parked_assignment_note(
         })
     {
         return Some(format!(
-            "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge) on {branch}, so it is not checked for staleness. `task start` preserves that delivery branch and refuses starting another task there. Switch to the new task's own branch from its target before starting.",
+            "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge) on {branch}, so it is not checked for staleness. While its tip remains unmerged, `task start` preserves that delivery branch and refuses starting another task there. Switch to the new task's own branch from its target before starting.",
             name = worker.name,
             tip8 = &parked.tip[..parked.tip.len().min(8)],
             task = parked.task_id,

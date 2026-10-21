@@ -177,9 +177,35 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "receipt at {tested_tip} must not cover Rust source change: {stale}"
     );
     assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+
+    std::fs::write(
+        f.worker_path.join(source_path),
+        "pub fn turn() { let _ = 1; }\n",
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", source_path]);
+    git(
+        &f.worker_path,
+        &["commit", "-q", "-m", "revert(cas-br01): restore gear source"],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale_after_revert = call(&f.worker, close.clone()).await;
+    assert!(
+        stale_after_revert.contains("FOCUSED PROOF REQUIRED"),
+        "a proof input changed and was reverted after {tested_tip}: {stale_after_revert}"
+    );
+    assert_eq!(
+        f.task().status,
+        TaskStatus::InProgress,
+        "{stale_after_revert}"
+    );
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(gear)",
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
     );
 
     let test_path = "crates/widget/tests/gear.rs";
@@ -242,12 +268,19 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     git(&f.worker_path, &["push", "-q", "origin", LANE]);
     let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     assert_ne!(tested_tip, delivered_tip);
-    let parked = call(&f.worker, close).await;
+    let parked = call(&f.worker, close.clone()).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+
+    git(&f.dir.path(), &["merge", "--ff-only", LANE]);
+    git(&f.dir.path(), &["push", "-q", "origin", "main"]);
+    let closed = call(&f.supervisor, close).await;
+    assert!(closed.contains("Closed task"), "{closed}");
     let task = f.task();
-    assert_eq!(task.status, TaskStatus::AwaitingMerge);
+    assert_eq!(task.status, TaskStatus::Closed);
     assert!(
-        task.notes.contains(&format!("rebound from {tested_tip} to {delivered_tip}")),
+        task.notes
+            .contains(&format!("rebound from {tested_tip} to {delivered_tip}")),
         "the close must record the receipt rebind: {}",
         task.notes
     );

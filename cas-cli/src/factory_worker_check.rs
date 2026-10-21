@@ -1,8 +1,8 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
-use std::ffi::OsStr;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -566,8 +566,8 @@ pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) ->
     packages
 }
 
-/// Exact test receipts plus ancestor receipts whose full diff contains no
-/// Rust, test or build inputs. The latter saves an identical rerun after a
+/// Exact test receipts plus ancestor receipts whose full commit range contains
+/// no Rust, test or build inputs. The latter saves an identical rerun after a
 /// documentation-only delivery commit while keeping proof tied to its tested
 /// tree.
 fn passing_test_records(
@@ -663,22 +663,28 @@ fn read_passing_test_record(
         .then_some((record.head, package, test))
 }
 
-fn receipt_range_has_no_proof_inputs(repo: &Path, receipt_head: &str, delivered_head: &str) -> bool {
+fn receipt_range_has_no_proof_inputs(
+    repo: &Path,
+    receipt_head: &str,
+    delivered_head: &str,
+) -> bool {
     if !valid_git_oid(receipt_head)
         || !valid_git_oid(delivered_head)
         || !receipt_head_is_ancestor(repo, receipt_head, delivered_head)
     {
         return false;
     }
+    let range = format!("{receipt_head}..{delivered_head}");
     let Ok(changes) = Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args([
-            "diff",
-            "--no-renames",
+            "log",
+            "--format=",
             "--name-only",
+            "--no-renames",
+            "-m",
             "-z",
-            receipt_head,
-            delivered_head,
+            &range,
         ])
         .current_dir(repo)
         .output()

@@ -186,14 +186,43 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         invalid[field] = value;
         assert!(f.supervisor.factory(Parameters(request(&invalid))).await.is_err(), "invalid {field} must not supply a test receipt");
     }
-    std::fs::write(&log, "     Summary [ 0.01s] 0 tests run: 0 passed, 1 skipped\n").unwrap();
-    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "zero-test evidence must not count");
+    for failed_log in [
+        "     Summary [ 0.01s] 0 tests run: 0 passed, 1 skipped\n",
+        "     Summary [ 0.01s] 2 tests run: 1 passed, 1 failed\n",
+        "no harness summary\n",
+    ] {
+        std::fs::write(&log, failed_log).unwrap();
+        assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "failed or empty selection evidence must not count");
+    }
     std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
     std::fs::write(tested_repo.join("dirty.rs"), "// not tested\n").unwrap();
     assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty supervisor checkout must not count");
     std::fs::remove_file(tested_repo.join("dirty.rs")).unwrap();
+    git(&tested_repo, &["checkout", "-q", "HEAD^"]);
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "another tested commit cannot supply this tip's receipt");
+    git(&tested_repo, &["checkout", "-q", &tested_tip]);
+    let mut wrong_task = request(&proof);
+    wrong_task.task_id = Some("cas-no-task".into());
+    assert!(f.supervisor.factory(Parameters(wrong_task)).await.is_err(), "evidence must name an assigned task");
+    std::fs::write(f.worker_path.join("dirty.rs"), "// worker changed\n").unwrap();
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty worker checkout must not count");
+    std::fs::remove_file(f.worker_path.join("dirty.rs")).unwrap();
+    for caller in ["not-registered", "shutdown-supervisor"] {
+        if caller == "shutdown-supervisor" {
+            let mut agent = Agent::new_with_role(caller.into(), caller.into(), AgentRole::Supervisor);
+            agent.status = cas_types::AgentStatus::Shutdown;
+            open_agent_store(&f.cas_dir()).unwrap().register(&agent).unwrap();
+        }
+        let core = CasCore::with_daemon(f.cas_dir(), None, None);
+        core.set_agent_id_for_testing(caller.into());
+        let service = CasService::new(core, None);
+        assert!(service.factory(Parameters(request(&proof))).await.is_err(), "{caller} has no live supervisor authority");
+    }
     let recorded = f.supervisor.factory(Parameters(request(&proof))).await;
     assert!(recorded.is_ok(), "registered supervisor evidence must reach the worker receipt: {recorded:?}");
+    let receipt = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &tested_tip).join("\n");
+    // pin: supervisor-recorded distinguishes an attestation from a worker-executed run.
+    assert!(receipt.contains("supervisor-recorded") && receipt.contains("br-supervisor-session"), "the gate must preserve execution provenance: {receipt}");
     let parked = call(&f.worker, close.clone()).await;
     assert!(parked.contains("MERGE REQUIRED"), "supervisor receipt must pass focused proof at park: {parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
@@ -202,6 +231,8 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "action": "request_changes", "id": ID, "reason": "continue proof input regression",
     })).await;
     assert!(!reopened.contains("rejected"), "{reopened}");
+    let resumed = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{resumed}");
     let source_path = "crates/widget/src/gear.rs";
     std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
     git(&f.worker_path, &["add", source_path]);

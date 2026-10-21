@@ -28,13 +28,47 @@ struct TestReceipt {
     count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supervisor_recorded: Option<SupervisorRecordedProof>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SupervisorRecordedProof {
+    supervisor_id: String,
+    task_id: String,
+    tested_repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    log_sha256: String,
+    recorded_at: String,
+}
+
+/// An authenticated supervisor attests the exit code of an existing run;
+/// recording never starts Cargo or relaxes worker admission.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorTestEvidence {
+    head: String,
+    repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    exit_code: i32,
 }
 
 impl TestReceipt {
     fn path_note(&self) -> String {
-        self.host_path_opt_out.as_ref()
+        let mut note = self
+            .host_path_opt_out
+            .as_ref()
             .map(|reason| format!(" [host PATH opt-out: {reason}]"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(proof) = &self.supervisor_recorded {
+            note.push_str(&format!(
+                " [supervisor-recorded by {} for {}; log sha256={}]",
+                proof.supervisor_id, proof.task_id, proof.log_sha256
+            ));
+        }
+        note
     }
 }
 
@@ -129,17 +163,42 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
     let Some(harness) = &test.harness else {
         return Ok(());
     };
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml"))?)?;
-    let mut manifests = vec![repo.join("Cargo.toml")];
+    let (path, value) = package_manifest(repo, &test.package)?;
+    let found = value
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
+                    && target
+                        .get("path")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|source| {
+                            path.parent().is_some_and(|dir| dir.join(source).is_file())
+                        })
+            })
+        });
+    if !found {
+        bail!(
+            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
+            test.package
+        );
+    }
+    Ok(())
+}
+
+fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let root = repo.join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
+    let mut manifests = vec![root];
     if let Some(members) = manifest
         .get("workspace")
         .and_then(|w| w.get("members"))
         .and_then(toml::Value::as_array)
     {
         for member in members.iter().filter_map(toml::Value::as_str) {
-            let pattern = repo.join(member).join("Cargo.toml");
             manifests.extend(
-                glob::glob(&pattern.to_string_lossy())?
+                glob::glob(&repo.join(member).join("Cargo.toml").to_string_lossy())?
                     .collect::<std::result::Result<Vec<_>, _>>()?,
             );
         }
@@ -150,36 +209,174 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(toml::Value::as_str)
-            != Some(test.package.as_str())
+            == Some(package)
         {
-            continue;
+            return Ok((path, value));
         }
-        let found = value
-            .get("test")
-            .and_then(toml::Value::as_array)
-            .is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
-                        && target
-                            .get("path")
-                            .and_then(toml::Value::as_str)
-                            .is_some_and(|source| {
-                                path.parent().is_some_and(|dir| dir.join(source).is_file())
-                            })
-                })
-            });
-        if found {
-            return Ok(());
+    }
+    bail!("Worker test refused: package {package} not found in workspace")
+}
+
+/// Record an existing supervisor-run selection under the assigned worker's
+/// normal receipt key. The authority, task binding and provenance are checked
+/// here so MCP and CLI use exactly the same path.
+pub(crate) fn record_supervisor_test(
+    core: &crate::mcp::CasCore,
+    task_id: &str,
+    payload: &str,
+) -> Result<String> {
+    let supervisor = core.resolve_live_supervisor_authority().map_err(|_| {
+        anyhow::anyhow!("record_test_receipt requires a live registered supervisor")
+    })?;
+    if payload.len() > 512 * 1024 {
+        bail!("supervisor evidence payload exceeds 512 KiB");
+    }
+    let evidence: SupervisorTestEvidence = serde_json::from_str(payload)
+        .context("payload must contain head, repo, cargo_args, log_path and exit_code")?;
+    if !valid_git_oid(&evidence.head) {
+        bail!("head must be the full tested commit SHA");
+    }
+    if !evidence.repo.is_absolute() || !evidence.log_path.is_absolute() {
+        bail!("repo and log_path must be absolute paths");
+    }
+    let test = targeted_test(&evidence.cargo_args).context(
+        "cargo_args must be nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'",
+    )?;
+    let root = core.cas_root.canonicalize()?;
+    let tasks = crate::store::open_task_store(&root)?;
+    let task = tasks.get(task_id)?;
+    if task.status == cas_types::TaskStatus::Closed {
+        bail!("cannot record new test evidence for a closed task");
+    }
+    let agents = crate::store::open_agent_store(&root)?;
+    let worker = task
+        .assignee
+        .as_deref()
+        .and_then(|assignee| {
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+        })
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .context("task must be assigned to a registered worker")?;
+    // Same metadata/convention precedence as the factory worker roster.
+    let repo = worker
+        .metadata
+        .get("clone_path")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| root.join("worktrees").join(&worker.name))
+        .canonicalize()
+        .context("assigned worker checkout is unavailable")?;
+    let tested_repo = evidence
+        .repo
+        .canonicalize()
+        .context("tested checkout is unavailable")?;
+    for checkout in [&repo, &tested_repo] {
+        if PathBuf::from(git(checkout, &["rev-parse", "--show-toplevel"])?).canonicalize()?
+            != *checkout
+            || clean_head(checkout)? != evidence.head
+        {
+            bail!(
+                "task worker checkout and tested checkout must both be clean at {}",
+                evidence.head
+            );
         }
+    }
+    package_manifest(&repo, &test.package)?;
+    validate_harness(&repo, &test)?;
+    let _lane = try_lock_lane(&root, &repo)?
+        .context("worker has an active capped run; retry recording later")?;
+    let path = test_receipt_path(&root, &repo, &evidence.head, &test);
+    // Just like an executed retry, failed evidence invalidates only this
+    // exact command's earlier receipt, never another selection's proof.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if evidence.exit_code != 0 {
         bail!(
-            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
-            test.package
+            "supervisor test exited {}; no PASS receipt recorded",
+            evidence.exit_code
         );
     }
-    bail!(
-        "Worker test refused: package {} not found in workspace",
-        test.package
-    )
+    let log_path = evidence.log_path.canonicalize()?;
+    if !std::fs::metadata(&log_path)?.is_file() {
+        bail!("supervisor log must be a regular file");
+    }
+    let mut log_file = File::open(&log_path)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    (&mut log_file)
+        .take(25 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
+        bail!("supervisor log must be non-empty and at most 25 MiB");
+    }
+    let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "");
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("supervisor log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("supervisor log must show a nonzero selection with every executed test passed");
+    }
+    // A receipt is not transferable across ownership or source mutations
+    // while the log was read. The worker lane lock also fences capped writers.
+    if tasks.get(task_id)?.assignee != task.assignee
+        || clean_head(&repo)? != evidence.head
+        || clean_head(&tested_repo)? != evidence.head
+    {
+        bail!("task assignment or checkout changed while recording; no PASS receipt recorded");
+    }
+    let provenance = SupervisorRecordedProof {
+        supervisor_id: supervisor.id,
+        task_id: task_id.to_string(),
+        tested_repo,
+        cargo_args: evidence.cargo_args,
+        log_path,
+        log_sha256: hex::encode(Sha256::digest(&bytes)),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let record = CheckReceipt {
+        head: evidence.head,
+        repo,
+        packages: vec![test.package],
+        test: Some(TestReceipt {
+            filter: test.filter,
+            harness: test.harness,
+            count,
+            host_path_opt_out: None,
+            supervisor_recorded: Some(provenance),
+        }),
+    };
+    let proof = record.test.as_ref().expect("test receipt");
+    let receipt = format!(
+        "test: PASS {} {} {} {}{}",
+        record.head,
+        record.packages[0],
+        proof.filter,
+        proof.count,
+        proof.path_note()
+    );
+    tasks.append_note(
+        task_id,
+        &format!(
+            "[{}] SUPERVISOR-RECORDED TEST: {}; provenance={}",
+            chrono::Utc::now().to_rfc3339(),
+            receipt,
+            serde_json::to_string(&proof.supervisor_recorded)?
+        ),
+    )?;
+    std::fs::create_dir_all(path.parent().context("receipt directory")?)?;
+    std::fs::write(path, serde_json::to_vec(&record)?)?;
+    Ok(receipt)
 }
 
 fn lock_file(path: &Path) -> Result<File> {
@@ -798,6 +995,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             host_path_opt_out: None,
+            supervisor_recorded: None,
         }),
     };
     std::fs::write(
@@ -1214,6 +1412,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 harness: test.harness,
                 count,
                 host_path_opt_out,
+                supervisor_recorded: None,
             })
         }
         None => None,
@@ -1852,7 +2051,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         );
         let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None })));
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None })));
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
     }
 

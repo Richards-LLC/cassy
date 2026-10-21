@@ -308,6 +308,9 @@ fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
 #[test]
 fn signed_out_hub_start_requires_explicit_loopback() {
     let home = private_home();
+    // This refusal is the explicit required policy; auto may retain loopback.
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     install_tailscale_mock(

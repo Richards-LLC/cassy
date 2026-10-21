@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::ai_enrichment::HttpAiEnrichmentProvider;
 use crate::cli::Cli;
-use crate::config::Config;
+use crate::config::{Config, HubTransportMode};
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubLockHolder, HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus,
@@ -272,7 +272,7 @@ enum HubStartDecision {
 struct HubRestartSpec {
     bind: IpAddr,
     port: u16,
-    tailscale_serve: bool,
+    transport_mode: HubTransportMode,
     tailscale_port: u16,
 }
 
@@ -425,12 +425,18 @@ fn default_hub_command() -> HubCommands {
 
 /// The machine hub reads host configuration, independent of the invoking project.
 /// An old process record/receipt preserves ports, never the publication policy.
-fn host_tailscale_default() -> Result<bool> {
+fn host_transport_mode() -> Result<HubTransportMode> {
     let root = crate::store::known_repos::host_cas_dir();
-    Ok(Config::load(&root)?
-        .hub
-        .and_then(|hub| hub.tailscale_serve)
-        .unwrap_or(true))
+    Ok(Config::load(&root)?.hub.unwrap_or_default().transport_mode())
+}
+
+fn host_tailscale_default() -> Result<bool> {
+    Ok(host_transport_mode()?.publishes())
+}
+
+// A service must exit on failed publication so launchd KeepAlive retries boot startup.
+fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool) -> bool {
+    mode.publishes() && (service_startup || mode == HubTransportMode::Required)
 }
 
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
@@ -1055,6 +1061,22 @@ fn version_warning(
 }
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
+    let result = execute_command(args, cli);
+    // Warn on every interactive path, including an already-running hub and JSON
+    // output. Keep diagnostics on stderr so stdout remains one JSON document.
+    if matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
+        && let Ok(paths) = HubRuntimePaths::default_for_user()
+        && let Ok(record) = paths.read_process_record()
+        && let Some(warning) = &record.transport_warning
+        && record_is_ready(&paths, &record)
+    {
+        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
+        eprintln!("For local access, run `cas hub start --loopback`.");
+    }
+    result
+}
+
+fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
     let requested = match &args.command {
         Some(HubCommands::Start(_) | HubCommands::Restart(_) | HubCommands::Serve(_))
         | Some(HubCommands::Service(HubServiceArgs {
@@ -1071,9 +1093,11 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         ),
         _ => args.tailscale_serve,
     };
-    if requested && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
+    if requested && host_transport_mode()? == HubTransportMode::Required
+        && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
+        HubTransportMode::Required.require_publication(manager.cli_available())?;
         if manager.cli_available() {
             let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
             if let Some(issue) = issue {
@@ -1515,8 +1539,7 @@ fn start_with_output_resolved(
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
-                if launch_origin != HubLaunchOrigin::Update && tailscale_serve
-                    && TailscaleServeManager::new(paths.root()).cli_available()
+                if tailscale_serve && host_transport_mode()? == HubTransportMode::Required
                     && let Some(warning) = &record.transport_warning
                 {
                     let warning = warning.clone();
@@ -1532,12 +1555,6 @@ fn start_with_output_resolved(
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
-                    if launch_origin != HubLaunchOrigin::Update
-                        && let Some(warning) = &record.transport_warning
-                    {
-                        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
-                        eprintln!("Check `tailscale status`, then run `cas hub restart`.");
-                    }
                 }
                 return Ok(());
             }
@@ -1709,6 +1726,15 @@ fn serve_foreground_logged(
         tailscale_port,
         &paths,
     )?;
+    let transport_mode = if tailscale_serve {
+        match host_transport_mode()? {
+            // An explicit --tailscale-serve overrides the saved loopback choice.
+            HubTransportMode::Loopback => HubTransportMode::Auto,
+            configured => configured,
+        }
+    } else {
+        HubTransportMode::Loopback
+    };
     // AuthStore::open takes an exclusive auth.lock. Do this before claiming
     // hub.lock: a stale auth writer must never leave a launchd hub process
     // holding the machine lock while it waits indefinitely.
@@ -1785,8 +1811,13 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if service_startup => {
-                    return Err(error).context("Tailscale Serve service startup exhausted its bounded retries");
+                Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
+                    let context = if service_startup {
+                        "Tailscale Serve service startup exhausted its bounded retries"
+                    } else {
+                        "Hub transport required: Tailscale Serve startup failed"
+                    };
+                    return Err(error).context(context);
                 }
                 Err(error) => {
                     let warning = error.to_string();
@@ -2801,7 +2832,7 @@ fn update_prior_state(
 fn update_restart_spec(
     record: Option<&HubProcessRecord>,
     receipt: Option<&TailscaleServeReceipt>,
-    tailscale_serve: bool,
+    transport_mode: HubTransportMode,
 ) -> Result<HubRestartSpec> {
     let bind = record
         .map(|record| record.bind.parse())
@@ -2814,7 +2845,7 @@ fn update_restart_spec(
         // the kernel choose a free port rather than colliding with another
         // hub's well-known port on the same machine.
         port: record.map_or(0, |record| record.port),
-        tailscale_serve,
+        transport_mode,
         tailscale_port: receipt
             .map(|receipt| receipt.https_port)
             .or_else(|| record.and_then(|record| record.tailscale_serve_port))
@@ -2835,7 +2866,7 @@ fn verify_updated_hub(
     anyhow::ensure!(holder.pid == record.pid && holder.phase == "running",
         "new hub lock is not in running phase");
     anyhow::ensure!(record_is_live(&record), "new hub loopback /v1/health is not ready");
-    if !spec.tailscale_serve {
+    if !spec.transport_mode.publishes() {
         anyhow::ensure!(
             !tailscale_enabled(&record),
             "hub still requests Tailscale Serve despite opt-out"
@@ -2848,6 +2879,7 @@ fn verify_updated_hub(
         });
     }
     if let Some(warning) = record.transport_warning.as_deref() {
+        spec.transport_mode.require_publication(false).with_context(|| warning.to_owned())?;
         return Ok(unavailable_update_transport(warning));
     }
     let manager = TailscaleServeManager::new(paths.root());
@@ -2875,6 +2907,7 @@ fn verify_updated_hub(
         Ok(_) => Some("public Tailscale /v1/health did not report ready".to_owned()),
         Err(error) => Some(format!("{error:#}")),
     };
+    spec.transport_mode.require_publication(public_failure.is_none())?;
     let remedy = public_failure.as_ref().map(|_| {
         "Check MagicDNS and `tailscale status`, then retry the public URL; the hub and Serve route are healthy.".to_owned()
     });
@@ -2992,7 +3025,8 @@ pub(crate) fn restart_stale_hub(
     // cas-621ec: rewrite an installed unit to the current restart policy
     // before any early return below, so a hub that needs no restart, or is
     // not running at all, still gets the new policy on this update.
-    let tailscale_serve = host_tailscale_default()?;
+    let transport_mode = host_transport_mode()?;
+    let tailscale_serve = transport_mode.publishes();
     // Never restart through a definition we could not validate or refresh:
     // the manager would simply launch its old candidate again.
     let service_changed = super::hub_service::refresh_installed_service(tailscale_serve)
@@ -3006,7 +3040,7 @@ pub(crate) fn restart_stale_hub(
         .flatten();
     let prior_state =
         update_prior_state(&paths, record.as_ref(), holder.as_ref(), receipt.is_some());
-    let mut spec = update_restart_spec(record.as_ref(), receipt.as_ref(), tailscale_serve)?;
+    let mut spec = update_restart_spec(record.as_ref(), receipt.as_ref(), transport_mode)?;
     if record.is_none()
         && receipt.is_none()
         && let Some(port) = super::hub_service::installed_https_port()?
@@ -3053,7 +3087,7 @@ pub(crate) fn restart_stale_hub(
     let attempt = || -> Result<bool> {
         // The service manager owns its own stop/start sequence; a detached hub
         // must be stopped through the same force path as `cas hub restart`.
-        if super::hub_service::restart_supervised(cli, spec.tailscale_serve, spec.tailscale_port)? {
+        if super::hub_service::restart_supervised(cli, spec.transport_mode.publishes(), spec.tailscale_port)? {
             return Ok(true);
         }
         let stopped = stop_with_output(
@@ -3061,7 +3095,7 @@ pub(crate) fn restart_stale_hub(
             false,
             Some(RelaunchIntent {
                 args: &args,
-                tailscale_serve: spec.tailscale_serve,
+                tailscale_serve: spec.transport_mode.publishes(),
                 tailscale_port: spec.tailscale_port,
             }),
             true,
@@ -3070,7 +3104,7 @@ pub(crate) fn restart_stale_hub(
             start_with_output_from(
                 &args,
                 cli,
-                spec.tailscale_serve,
+                spec.transport_mode.publishes(),
                 spec.tailscale_port,
                 false,
                 HubLaunchOrigin::Update,
@@ -3122,14 +3156,15 @@ pub(crate) fn restart_stale_hub(
         outcome.loopback_verified = record_is_ready(&paths, &record);
         outcome.public_url = record.public_url;
     }
-    outcome.transport_verified = spec.tailscale_serve.then_some(false);
-    let remedy = if spec.tailscale_serve {
+    outcome.transport_verified = spec.transport_mode.publishes().then_some(false);
+    let remedy = if spec.transport_mode.publishes() {
         "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force --tailscale-serve`."
     } else {
         "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force`."
     };
     outcome.remedy = Some(remedy.to_owned());
-    if spec.tailscale_serve && prior_state != "none" {
+    if spec.transport_mode.publishes()
+        && (prior_state != "none" || transport_mode == HubTransportMode::Required) {
         outcome.transport_error = outcome.failure.as_ref().map(|failure| {
             format!("cas update: Tailscale Serve verification failed: {failure}; {remedy}")
         });
@@ -4112,9 +4147,9 @@ mod tests {
     fn update_publication_policy_ignores_old_record_flags_and_honors_opt_out() {
         let old = record("3.4.1", 4310, None);
         let spec =
-            update_restart_spec(Some(&old), None, tailscale_policy(false, false, true)).unwrap();
+            update_restart_spec(Some(&old), None, HubTransportMode::Auto).unwrap();
         assert!(
-            spec.tailscale_serve,
+            spec.transport_mode.publishes(),
             "old loopback record must adopt the default"
         );
         assert_eq!(spec.port, old.port);
@@ -4122,11 +4157,11 @@ mod tests {
         let disabled = update_restart_spec(
             Some(&published),
             None,
-            tailscale_policy(false, false, false),
+            HubTransportMode::Loopback,
         )
         .unwrap();
         assert!(
-            !disabled.tailscale_serve,
+            !disabled.transport_mode.publishes(),
             "config=false overrides old publication"
         );
         assert_eq!(disabled.tailscale_port, 8443);
@@ -4148,14 +4183,39 @@ mod tests {
     }
 
     #[test]
-    fn host_hub_opt_out_survives_config_round_trip() {
-        let temp = tempfile::tempdir().unwrap();
+    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
+        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
+            "launchd must retry Auto publication after bounded startup retries");
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
+            "interactive Auto may retain loopback with a visible warning");
+        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
+    }
+
+    #[test]
+    fn host_hub_transport_mode_survives_config_round_trip_cas_3f03e() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
         let mut config = Config::default();
-        assert_eq!(config.get("hub.tailscale_serve").as_deref(), Some("true"));
-        config.set("hub.tailscale_serve", "false").unwrap();
-        config.save(temp.path()).unwrap();
-        let loaded = Config::load(temp.path()).unwrap();
-        assert_eq!(loaded.hub.unwrap().tailscale_serve, Some(false));
+        assert_eq!(config.get("hub.transport_mode").as_deref(), Some("auto"));
+        for mode in ["required", "loopback", "auto"] {
+            config.set("hub.transport_mode", mode).unwrap();
+            config.save(&root).unwrap();
+            let loaded = Config::load(&root).unwrap();
+            assert_eq!(loaded.get("hub.transport_mode").as_deref(), Some(mode));
+            // Restart and update resolve the host file, not a stale process record.
+            let policy = host_transport_mode().unwrap();
+            assert_eq!(policy.as_str(), mode);
+            let spec = update_restart_spec(Some(&record("old", 4310, Some(8443))), None, policy).unwrap();
+            assert_eq!(spec.transport_mode, policy);
+            assert_eq!(spec.transport_mode.publishes(), mode != "loopback");
+            assert_eq!(policy.require_publication(false).is_err(), mode == "required");
+            assert!(policy.require_publication(true).is_ok());
+        }
+        assert!(config.set("hub.transport_mode", "invalid").is_err());
+        // Existing host opt-outs remain effective until a mode is explicitly set.
+        let legacy: Config = toml::from_str("[hub]\ntailscale_serve = false\n").unwrap();
+        assert_eq!(legacy.get("hub.transport_mode").as_deref(), Some("loopback"));
     }
 
     #[test]

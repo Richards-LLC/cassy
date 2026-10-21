@@ -19,6 +19,7 @@ impl Config {
         let factory = self.factory();
         vec![
             ("slack.stakeholder_contacts".into(), self.get("slack.stakeholder_contacts").unwrap()),
+            ("hub.transport_mode".into(), self.get("hub.transport_mode").unwrap()),
             (
                 "hub.tailscale_serve".to_string(),
                 self.get("hub.tailscale_serve").unwrap(),

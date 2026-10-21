@@ -7503,6 +7503,31 @@ impl CasCore {
                 .flatten()
                 .map(|(receipt, _)| receipt.commit_sha),
         );
+        // An approved proof can be followed by an administrative re-claim
+        // before the worker retries close. Keep the exact delivery commits
+        // bound to that still-valid dispatch in the identity set so a
+        // supervisor-created merge receipt is not mistaken for unrelated
+        // history solely because its epoch precedes the newest lease.
+        let approved_dispatch =
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                .ok()
+                .flatten();
+        let approved_verification = approved_dispatch
+            .as_ref()
+            .filter(|dispatch| {
+                dispatch.state == cas_types::VerificationDispatchState::Resolved
+            })
+            .and_then(|dispatch| {
+                cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    .ok()
+                    .flatten()
+            });
+        include_approved_verification_delivery_commits(
+            &mut task_commit_identity,
+            &task.id,
+            approved_dispatch.as_ref(),
+            approved_verification.as_ref(),
+        );
         // A supplied commit_receipt is not durable evidence until the close
         // gates accept it. It may still be needed to recognize a delivery
         // from an earlier continuation, though, because the latest lease
@@ -11778,9 +11803,10 @@ pub(crate) struct TaskCommitIdentity {
     /// The task id, matched as a whole token against commit messages.
     pub task_id: Option<String>,
     /// Commit ids Cassy durably recorded for this task (active and historical
-    /// parked factory anchors, worker delivery receipts), plus any
-    /// server-validated current delivery tip supplied by the close path.
-    /// Exact evidence that needs no convention.
+    /// parked factory anchors, worker delivery receipts, and exact approved
+    /// verification delivery anchors), plus any server-validated current
+    /// delivery tip supplied by the close path. Exact evidence that needs no
+    /// commit-message convention.
     pub known_commits: Vec<String>,
 }
 
@@ -11841,6 +11867,56 @@ pub(crate) fn task_commit_identity(
     TaskCommitIdentity {
         task_id: Some(task.id.clone()),
         known_commits,
+    }
+}
+
+/// Return only the exact commits a still-valid, approved task dispatch bound
+/// as delivery evidence. The head is accepted only when the dispatch also
+/// records a task delivery anchor; an unrelated task-only proof cannot widen
+/// the receipt identity set.
+fn include_approved_verification_delivery_commits(
+    identity: &mut TaskCommitIdentity,
+    task_id: &str,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    verification: Option<&Verification>,
+) {
+    let (Some(dispatch), Some(verification)) = (dispatch, verification) else {
+        return;
+    };
+    if dispatch.task_id != task_id
+        || dispatch.state != cas_types::VerificationDispatchState::Resolved
+        || verification.task_id != task_id
+        || verification.dispatch_id.as_deref() != Some(dispatch.id.as_str())
+        || verification.status != VerificationStatus::Approved
+    {
+        return;
+    }
+    let Some(repository) = dispatch.repository.as_ref() else {
+        return;
+    };
+    if repository.anchor_commits.is_empty()
+        || crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
+            repository,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let mut commits = repository.anchor_commits.clone();
+    commits.push(repository.head_commit.clone());
+    for commit in commits
+        .into_iter()
+        .map(|commit| commit.trim().to_string())
+        .filter(|commit| !commit.is_empty())
+    {
+        if !identity
+            .known_commits
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&commit))
+        {
+            identity.known_commits.push(commit);
+        }
     }
 }
 
@@ -40583,6 +40659,43 @@ mod zero_change_close_tests {
                 known_commits: Vec::new(),
             },
         };
+
+        let repository =
+            crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                repo,
+                "main",
+                vec![merged_receipt.clone()],
+            )
+            .expect("capture the verifier's exact merged-delivery proof");
+        let dispatch = cas_types::VerificationDispatch {
+            id: "vdispatch-cas-41cd".to_string(),
+            task_id: "cas-41cd".to_string(),
+            receipt_id: None,
+            delivery_transaction_id: None,
+            repository: Some(repository),
+            requester_agent_id: "worker-session".to_string(),
+            owner_agent_id: "supervisor-session".to_string(),
+            verifier_agent_id: Some("verifier-session".to_string()),
+            capability_id: Some("capability".to_string()),
+            state: cas_types::VerificationDispatchState::Resolved,
+            requested_at: chrono::Utc::now() - chrono::Duration::minutes(1),
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(9),
+            resolved_at: Some(chrono::Utc::now()),
+            recovery_action: cas_types::VerificationRecoveryAction::SupervisorRedispatchOrDirect,
+        };
+        let mut verification = Verification::approved(
+            "ver-cas-41cd".to_string(),
+            "cas-41cd".to_string(),
+            "delivery approved".to_string(),
+        );
+        verification.dispatch_id = Some(dispatch.id.clone());
+        let mut window = window;
+        include_approved_verification_delivery_commits(
+            &mut window.identity,
+            "cas-41cd",
+            Some(&dispatch),
+            Some(&verification),
+        );
 
         validate_task_commit_receipt(repo, &merged_receipt, "main", &window)
             .expect("an approved delivery's supervisor merge receipt must survive a re-claim");

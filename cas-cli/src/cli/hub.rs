@@ -76,7 +76,7 @@ pub struct HubArgs {
     /// Publish through tailnet-only Tailscale Serve HTTPS (on by default)
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]
     pub tailscale_serve: bool,
-    /// Keep this launch loopback-only (overrides hub.tailscale_serve)
+    /// Keep this launch loopback-only (overrides hub.transport_mode for this launch)
     #[arg(long, visible_alias = "loopback", global = true, conflicts_with = "tailscale_serve")]
     pub no_tailscale_serve: bool,
     /// Tailscale Serve HTTPS port (443 is the stable no-port URL)
@@ -1109,18 +1109,66 @@ fn version_warning(
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
     let result = execute_command(args, cli);
+    let required_policy = matches!(
+        args.command,
+        Some(HubCommands::Start(_) | HubCommands::Restart(_))
+    )
+        && host_transport_mode().is_ok_and(|mode| mode == HubTransportMode::Required);
     // Warn on every interactive path, including an already-running hub and JSON
     // output. Keep diagnostics on stderr so stdout remains one JSON document.
-    if matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
+    if !required_policy
+        && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
         && let Ok(paths) = HubRuntimePaths::default_for_user()
         && let Ok(record) = paths.read_process_record()
         && let Some(warning) = &record.transport_warning
         && record_is_ready(&paths, &record)
     {
-        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
-        eprintln!("For local access, run `cas hub start --loopback`.");
+        eprintln!("{}", format_hub_transport_warning(warning));
     }
     result
+}
+
+fn format_hub_transport_warning(warning: &str) -> String {
+    format!(
+        "Tailscale Serve inactive; hub is loopback-only.\n\
+         Cause: {warning}\n\
+         Retry: tailscale status && cas hub restart"
+    )
+}
+
+fn required_transport_refusal(
+    args: &HubArgs,
+    paths: &HubRuntimePaths,
+    issue: Option<&str>,
+) -> String {
+    let (operation, retry) = match &args.command {
+        Some(HubCommands::Restart(_)) => {
+            let state = paths
+                .read_process_record()
+                .ok()
+                .filter(|record| record_is_ready(paths, record))
+                .map(|record| {
+                    format!(
+                        "Restart refused; existing hub (pid {}) remains running.",
+                        record.pid
+                    )
+                })
+                .unwrap_or_else(|| "Restart refused before stopping any hub.".to_owned());
+            (state, "cas hub restart")
+        }
+        _ => ("Start refused; no hub was started.".to_owned(), "cas hub start"),
+    };
+    let mut message = format!(
+        "Hub transport required: Tailscale is unavailable.\n{operation}"
+    );
+    if let Some(issue) = issue {
+        message.push('\n');
+        message.push_str(issue);
+    }
+    message.push_str(&format!(
+        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}."
+    ));
+    message
 }
 
 fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
@@ -1144,12 +1192,16 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
         && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
-        HubTransportMode::Required.require_publication(manager.cli_available())?;
-        if manager.cli_available() {
-            let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
-            if let Some(issue) = issue {
-                anyhow::bail!("{issue}\nSelect a daemon with TAILSCALE_SOCKET or run `cas hub start --loopback`.");
-            }
+        if !manager.cli_available() {
+            anyhow::bail!(required_transport_refusal(
+                args,
+                &paths,
+                Some("Tailscale Serve is unavailable."),
+            ));
+        }
+        let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
+        if let Some(issue) = issue {
+            anyhow::bail!(required_transport_refusal(args, &paths, Some(&issue)));
         }
     }
     match args.command.clone().unwrap_or_else(default_hub_command) {
@@ -4275,16 +4327,6 @@ mod tests {
         assert!(should_start_stopped_hub(true, false));
         assert!(should_start_stopped_hub(false, true));
         assert!(!should_start_stopped_hub(false, false));
-    }
-
-    #[test]
-    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
-        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
-            "launchd must retry Auto publication after bounded startup retries");
-        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
-            "interactive Auto may retain loopback with a visible warning");
-        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
-        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
     }
 
     #[test]

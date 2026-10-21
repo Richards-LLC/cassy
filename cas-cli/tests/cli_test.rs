@@ -925,11 +925,20 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout("loopback\n");
-    cas_cmd(temp.path())
+    let legacy_set = cas_cmd(temp.path())
         .current_dir(&outside)
         .args(["config", "set", "hub.tailscale_serve", "true"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    assert!(legacy_set.status.success(), "{}", String::from_utf8_lossy(&legacy_set.stderr));
+    let legacy_output = String::from_utf8_lossy(&legacy_set.stdout);
+    for expected in [
+        "Legacy hub.tailscale_serve = true saved; ignored by hub.transport_mode.",
+        "Effective value: hub.tailscale_serve = false (transport_mode = loopback).",
+        "Use: cas config set hub.transport_mode auto",
+    ] {
+        assert!(legacy_output.contains(expected), "missing {expected}: {legacy_output}");
+    }
     assert_eq!(
         cas::config::Config::load(&host)
             .unwrap()
@@ -952,6 +961,21 @@ fn test_config_get_set() {
         .args(["config", "set", "hub.transport_mode", "required"])
         .assert()
         .success();
+    let invalid_mode = cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "set", "hub.transport_mode", "tailnet"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid_mode.status.code(), Some(4));
+    let invalid_error = String::from_utf8_lossy(&invalid_mode.stderr);
+    assert!(
+        invalid_error.contains("hub.transport_mode must be one of: auto, required, loopback"),
+        "key-specific validation should name the accepted modes: {invalid_error}"
+    );
+    assert!(
+        !invalid_error.contains("Suggestion:"),
+        "do not add the generic parse suggestion: {invalid_error}"
+    );
     assert_eq!(
         cas::config::Config::load(&host)
             .unwrap()

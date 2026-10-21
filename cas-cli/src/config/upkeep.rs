@@ -31,6 +31,15 @@ impl std::str::FromStr for UpkeepStage {
     }
 }
 
+/// Existing overview watch targets are retained when any config key is saved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectOverviewConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_dirs: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpkeepConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]

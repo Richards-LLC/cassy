@@ -85,13 +85,7 @@ impl WatchTargets {
 
 #[derive(Debug, serde::Deserialize, Default)]
 struct RawConfig {
-    project_overview: Option<RawProjectOverview>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RawProjectOverview {
-    domain_paths: Option<Vec<String>>,
-    watch_dirs: Option<Vec<String>>,
+    project_overview: Option<crate::config::ProjectOverviewConfig>,
 }
 
 /// Load watch targets from `<repo_root>/.cas/config.toml`, falling back to defaults.

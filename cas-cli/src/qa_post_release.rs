@@ -500,52 +500,14 @@ fn run_summary(run: &Run) -> String {
 }
 fn run_check(root: &Path, config: &PostReleaseConfig) -> Run {
     let at = Utc::now();
-    let result = (|| -> Result<CheckOutput> {
-        let mut words = config.command.split_whitespace();
-        let program = words.next().context("Empty check command")?;
-        ensure!(
-            !Path::new(program).is_absolute(),
-            "Check executable must be project-relative"
-        );
-        let path = root
-            .join(program)
-            .canonicalize()
-            .context("Check executable missing")?;
-        ensure!(
-            path.starts_with(root.canonicalize()?),
-            "Check executable must remain inside the project"
-        );
-        let mut command = std::process::Command::new(path);
-        command
-            .args(words)
-            .current_dir(root)
-            .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .env("LANG", "C.UTF-8");
-        for name in &config.env {
-            ensure!(
-                !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
-                "Invalid environment allow-list name"
-            );
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        let timeout = std::time::Duration::from_secs(u64::from(config.timeout_secs));
-        let output = crate::bounded_process::run_command(
-            &mut command,
-            crate::bounded_process::Deadline::after(timeout),
-            timeout,
-        )
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        ensure!(output.status.success(), "Command exited {}", output.status);
-        // Never persist raw stdout/stderr on errors: a broken probe may print credentials.
-        ensure!(
-            output.stdout.len() <= 1024 * 1024,
-            "Check JSON exceeds 1 MiB"
-        );
-        serde_json::from_slice(&output.stdout).context("Invalid check JSON")
-    })();
+    let sandbox = crate::qa_command::Sandbox {
+        root,
+        env: &config.env,
+        timeout: std::time::Duration::from_secs(u64::from(config.timeout_secs)),
+    };
+    let result = crate::qa_command::run(sandbox, &config.command, &[], None)
+        .map_err(anyhow::Error::from)
+        .and_then(|stdout| serde_json::from_slice::<CheckOutput>(&stdout).context("Invalid check JSON"));
     match result {
         Ok(output) => Run {
             at,

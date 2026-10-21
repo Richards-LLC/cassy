@@ -302,6 +302,57 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
 
 #[test]
 fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
+    // A delivery that breaks YAML retains the base policy's severity, including
+    // a tracked header that overrides a different local configuration.
+    for (header, local, expected) in [
+        (
+            None,
+            RegistryEnforcement::Observe,
+            RegistryEnforcement::Observe,
+        ),
+        (None, RegistryEnforcement::Off, RegistryEnforcement::Off),
+        (
+            Some("observe"),
+            RegistryEnforcement::Strict,
+            RegistryEnforcement::Observe,
+        ),
+        (
+            Some("enforce"),
+            RegistryEnforcement::Off,
+            RegistryEnforcement::Enforce,
+        ),
+    ] {
+        let yaml = header.map_or_else(
+            || YAML.to_owned(),
+            |stage| format!("enforce: {stage}\n{YAML}"),
+        );
+        let mut broken = Fixture::new(&yaml);
+        broken.qa.registry.enforce = local;
+        write(
+            broken.repo.path(),
+            crate::qa_registry::DEFAULT_PATH,
+            "invalid: [",
+        );
+        let head = commit(broken.repo.path());
+        let result = broken.run(&head);
+        match expected {
+            RegistryEnforcement::Off => {
+                assert!(result.unwrap().is_empty());
+                assert!(broken.store.get(&broken.task.id).unwrap().notes.is_empty());
+            }
+            RegistryEnforcement::Observe => {
+                result.unwrap();
+                let notes = broken.store.get(&broken.task.id).unwrap().notes;
+                assert!(
+                    notes.contains("UPKEEP OBSERVE G1")
+                        && notes.contains("JOURNEY REGISTRY BROKEN"),
+                    "{notes}"
+                );
+            }
+            _ => assert!(result.unwrap_err().contains("JOURNEY REGISTRY BROKEN")),
+        }
+    }
+
     let mut config = crate::config::Config::default();
     let key = "qa.registry.enforce";
     assert_eq!(config.get(key).as_deref(), Some("enforce"));

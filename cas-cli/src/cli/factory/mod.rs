@@ -1468,86 +1468,13 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     let args = &effective_args;
 
     let (session_name, preflight) =
-        preflight_factory_launch(args, &project_root, resolved_cas_root.as_deref())?;
-    if !preflight.notices.is_empty() {
-        let theme = crate::ui::theme::ActiveTheme::default();
-        let mut stdout = std::io::stdout();
-        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-        for note in &preflight.notices {
-            fmt.info(note)?;
-        }
-    }
-    let codex_home = codex_account_home_suffix(&args.supervisor_cli);
-    if !codex_home.is_empty() {
-        let theme = crate::ui::theme::ActiveTheme::default();
-        let mut stdout = std::io::stdout();
-        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-        fmt.info(&format!("Resolving factory session{codex_home}"))?;
-    }
-
-    // Auto-attach to existing session, or kill it if --new
-    if !args.legacy && args.name.is_none() {
-        let project_dir = project_root.to_string_lossy();
-        if let Ok(Some(session)) = find_session_for_project(&project_dir, None) {
-            if session.can_attach() {
-                if args.start_new {
-                    // --new: kill existing session before starting fresh
-                    let theme = crate::ui::theme::ActiveTheme::default();
-                    let mut stdout = std::io::stdout();
-                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-                    fmt.info(&format!(
-                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
-                        session.name,
-                        session.worker_count(),
-                        session.metadata.daemon_pid
-                    ))?;
-                    if crate::cli::interactive::confirm(
-                        "Kill existing session and start fresh?",
-                        true,
-                    )? {
-                        lifecycle::kill_session_if_running(&session.name)?;
-                        fmt.info(&format!("Killed. Starting new session...{codex_home}"))?;
-                        fmt.newline()?;
-                    } else {
-                        fmt.info("Attaching to existing session instead.")?;
-                        fmt.newline()?;
-                        return attach(Some(session.name));
-                    }
-                } else if args.attach {
-                    // --attach: skip prompt, attach directly
-                    let theme = crate::ui::theme::ActiveTheme::default();
-                    let mut stdout = std::io::stdout();
-                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-                    fmt.info(&format!(
-                        "Attaching to running session: {}{codex_home}",
-                        session.name
-                    ))?;
-                    fmt.newline()?;
-                    return attach(Some(session.name));
-                } else {
-                    // Default: prompt user
-                    let theme = crate::ui::theme::ActiveTheme::default();
-                    let mut stdout = std::io::stdout();
-                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
-                    fmt.info(&format!(
-                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
-                        session.name,
-                        session.worker_count(),
-                        session.metadata.daemon_pid
-                    ))?;
-                    if crate::cli::interactive::confirm("Attach to existing session?", true)? {
-                        fmt.newline()?;
-                        return attach(Some(session.name));
-                    } else {
-                        fmt.info(&format!(
-                            "Starting new session...{codex_home} (use --new to skip this prompt)"
-                        ))?;
-                        fmt.newline()?;
-                    }
-                }
-            }
-        }
-    }
+        match prepare_factory_session(args, &project_root, resolved_cas_root.as_deref())? {
+            FactorySessionAction::Attach(name) => return attach(Some(name)),
+            FactorySessionAction::Launch {
+                session_name,
+                preflight,
+            } => (session_name, preflight),
+        };
 
     // Determine theme variant early so we can use themed names
     let theme_variant = {
@@ -2036,46 +1963,140 @@ fn resolve_cli_choice(
     }
 }
 
+enum FactorySessionAction {
+    Attach(String),
+    Launch {
+        session_name: String,
+        preflight: FactoryPreflight,
+    },
+}
+
+fn prepare_factory_session(
+    args: &FactoryArgs,
+    project_root: &std::path::Path,
+    cas_root: Option<&std::path::Path>,
+) -> Result<FactorySessionAction> {
+    let mut replacement = None;
+    let codex_home = codex_account_home_suffix(&args.supervisor_cli);
+    if !codex_home.is_empty() {
+        let theme = crate::ui::theme::ActiveTheme::default();
+        let mut stdout = std::io::stdout();
+        let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+        fmt.info(&format!("Resolving factory session{codex_home}"))?;
+    }
+
+    // Choose attach before launch-only checks or diagnostics. Defer an accepted
+    // --new replacement until preflight succeeds so a refusal keeps the daemon.
+    if !args.legacy && args.name.is_none() {
+        let project_dir = project_root.to_string_lossy();
+        if let Ok(Some(session)) = find_session_for_project(&project_dir, None) {
+            if session.can_attach() {
+                if args.start_new {
+                    // --new: kill existing session before starting fresh
+                    let theme = crate::ui::theme::ActiveTheme::default();
+                    let mut stdout = std::io::stdout();
+                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+                    fmt.info(&format!(
+                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
+                        session.name,
+                        session.worker_count(),
+                        session.metadata.daemon_pid
+                    ))?;
+                    if crate::cli::interactive::confirm(
+                        "Kill existing session and start fresh?",
+                        true,
+                    )? {
+                        replacement = Some(session.name);
+                    } else {
+                        fmt.info("Attaching to existing session instead.")?;
+                        fmt.newline()?;
+                        return Ok(FactorySessionAction::Attach(session.name));
+                    }
+                } else if args.attach {
+                    // --attach: skip prompt, attach directly
+                    let theme = crate::ui::theme::ActiveTheme::default();
+                    let mut stdout = std::io::stdout();
+                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+                    fmt.info(&format!(
+                        "Attaching to running session: {}{codex_home}",
+                        session.name
+                    ))?;
+                    fmt.newline()?;
+                    return Ok(FactorySessionAction::Attach(session.name));
+                } else {
+                    // Default: prompt user
+                    let theme = crate::ui::theme::ActiveTheme::default();
+                    let mut stdout = std::io::stdout();
+                    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+                    fmt.info(&format!(
+                        "Found running session: {} (workers: {}, pid: {}){codex_home}",
+                        session.name,
+                        session.worker_count(),
+                        session.metadata.daemon_pid
+                    ))?;
+                    if crate::cli::interactive::confirm("Attach to existing session?", true)? {
+                        fmt.newline()?;
+                        return Ok(FactorySessionAction::Attach(session.name));
+                    } else {
+                        fmt.info(&format!(
+                            "Starting new session...{codex_home} (use --new to skip this prompt)"
+                        ))?;
+                        fmt.newline()?;
+                    }
+                }
+            }
+        }
+    }
+
+    let preflight = preflight_factory_launch(args, project_root, cas_root)?;
+    let theme = crate::ui::theme::ActiveTheme::default();
+    let mut stdout = std::io::stdout();
+    let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
+    for note in &preflight.notices {
+        fmt.info(note)?;
+    }
+    if let Some(name) = replacement {
+        lifecycle::kill_session_if_running(&name)?;
+        fmt.info(&format!("Killed. Starting new session...{codex_home}"))?;
+        fmt.newline()?;
+    }
+    let session_name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| generate_session_name(Some(&project_root.to_string_lossy())));
+    if let Err(error) =
+        record_factory_launch_diagnostics(Some(&session_name), &preflight.cas_root, None)
+    {
+        eprintln!("Warning: could not write factory launch diagnostics: {error}");
+    }
+    Ok(FactorySessionAction::Launch {
+        session_name,
+        preflight,
+    })
+}
+
 fn preflight_factory_launch(
     args: &FactoryArgs,
     cwd: &std::path::Path,
     cas_root: Option<&std::path::Path>,
-) -> Result<(String, FactoryPreflight)> {
-    // Resolve the session before preflight can refuse: no daemon exists yet
-    // to retain its error, and successful launches need the runtime-log pointer too.
-    let session_name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| generate_session_name(Some(&cwd.to_string_lossy())));
-    let result = check_factory_launch(args, cwd, cas_root);
-    let default_root = cwd.join(".cas");
-    let log_root = result
-        .as_ref()
-        .map(|preflight| preflight.cas_root.as_path())
-        .unwrap_or_else(|_| cas_root.unwrap_or(&default_root));
-    let diagnostics =
-        record_factory_launch_diagnostics(&session_name, log_root, result.as_ref().err());
-    match result {
-        Ok(preflight) => {
-            if let Err(error) = diagnostics {
-                eprintln!("Warning: could not write factory launch diagnostics: {error}");
-            }
-            Ok((session_name, preflight))
-        }
-        Err(error) => match diagnostics {
-            Ok(path) => Err(anyhow::anyhow!(
-                "{error:#}\n\nLaunch diagnostics: {}",
-                path.display()
-            )),
-            Err(log_error) => Err(anyhow::anyhow!(
+) -> Result<FactoryPreflight> {
+    check_factory_launch(args, cwd, cas_root).map_err(|error| {
+        let default_root = cwd.join(".cas");
+        match record_factory_launch_diagnostics(
+            args.name.as_deref(),
+            cas_root.unwrap_or(&default_root),
+            Some(&error),
+        ) {
+            Ok(path) => anyhow::anyhow!("{error:#}\n\nLaunch diagnostics: {}", path.display()),
+            Err(log_error) => anyhow::anyhow!(
                 "{error:#}\n\nCould not write factory launch diagnostics: {log_error}"
-            )),
-        },
-    }
+            ),
+        }
+    })
 }
 
 fn record_factory_launch_diagnostics(
-    session_name: &str,
+    session_name: Option<&str>,
     cas_root: &std::path::Path,
     refusal: Option<&anyhow::Error>,
 ) -> std::io::Result<std::path::PathBuf> {
@@ -2083,15 +2104,18 @@ fn record_factory_launch_diagnostics(
 
     // daemon.log must remain stderr-only: boot recovery treats nonempty stderr
     // as a daemon failure. Keep launch diagnostics independently discoverable.
-    let path = crate::ui::factory::session_log_dir(session_name).join("launch.log");
-    std::fs::create_dir_all(path.parent().expect("session log directory"))?;
     let logging = Config::load(cas_root)
         .ok()
         .and_then(|config| config.logging)
         .unwrap_or_default();
+    let log_dir = cas_root.join(&logging.log_dir);
+    let path = match session_name {
+        Some(name) => crate::ui::factory::session_log_dir(name).join("launch.log"),
+        None => log_dir.join("factory-launch.log"),
+    };
+    std::fs::create_dir_all(path.parent().expect("launch log directory"))?;
     let now = chrono::Local::now();
-    let runtime_log =
-        crate::logging::log_path_for_date(&cas_root.join(&logging.log_dir), now.date_naive());
+    let runtime_log = crate::logging::log_path_for_date(&log_dir, now.date_naive());
     let mut record = format!(
         "\n[{}] Factory launch preflight\n\
          daemon.log records daemon stderr and can be empty.\n\
@@ -2393,6 +2417,86 @@ fn check_factory_launch(
 mod tests {
     use super::*;
     use crate::ui::factory::FactoryConfig;
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_reuses_session_without_speculative_launch_logs_cas_2688() {
+        use crate::ui::factory::{SessionManager, create_metadata, socket_path};
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        let root = project.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[logging]\nlog_dir = 'runtime-traces'\n",
+        )
+        .unwrap();
+        let manager = SessionManager::new();
+        manager
+            .save_metadata(&create_metadata(
+                "running-session",
+                std::process::id(),
+                "supervisor",
+                &[],
+                None,
+                Some(&project.to_string_lossy()),
+                None,
+            ))
+            .unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(socket_path("running-session")).unwrap();
+        let session_dirs = || {
+            std::fs::read_dir(env.home().join(".cas/logs/factory"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = session_dirs();
+        let mut args = FactoryArgs {
+            attach: true,
+            // Attaching reuses a daemon; it must not probe a new launch's harness.
+            supervisor_cli: "invalid-harness".into(),
+            no_worktrees: true,
+            ..Default::default()
+        };
+        let action = prepare_factory_session(&args, &project, Some(&root));
+        assert_eq!(
+            session_dirs(),
+            before,
+            "attach created a speculative session log directory"
+        );
+        match action {
+            Ok(FactorySessionAction::Attach(name)) => assert_eq!(name, "running-session"),
+            Err(error) => panic!("attach ran launch preflight: {error:#}"),
+            _ => panic!("live session should be reused"),
+        }
+        assert!(
+            !crate::ui::factory::session_log_dir("running-session")
+                .join("launch.log")
+                .exists()
+        );
+
+        // An actual unnamed launch refusal gets one project-scoped log, not a new session.
+        args.legacy = true;
+        let refusal_path = root.join("runtime-traces/factory-launch.log");
+        for _ in 0..2 {
+            let error = prepare_factory_session(&args, &project, Some(&root))
+                .err()
+                .unwrap();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains(&refusal_path.display().to_string()),
+                "{error}"
+            );
+        }
+        let refusals = std::fs::read_to_string(refusal_path).unwrap();
+        assert_eq!(refusals.matches("Refused before daemon startup").count(), 2);
+        assert_eq!(
+            session_dirs(),
+            before,
+            "unnamed refusals created session log directories"
+        );
+    }
 
     #[test]
     fn preflight_session_diagnostics_retain_refusal_and_runtime_log_cas_c1881() {

@@ -105,6 +105,11 @@ fn violet_posts(tool: &str, input: Option<&Value>) -> Vec<Value> {
             .filter(|input| input.get("action").and_then(Value::as_str) == Some("post"))
             .map(|input| {
                 let mut post = serde_json::json!({ "kind": "file" });
+                for key in ["channel", "epic_id", "task_id", "release_notes"] {
+                    if let Some(value) = input.get(key) {
+                        post[key] = value.clone();
+                    }
+                }
                 if let Some(id) = input.get("id").and_then(Value::as_str) {
                     post["artifact_id"] = Value::from(id);
                 }
@@ -270,7 +275,7 @@ fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
         })
         .collect();
     let store = crate::store::open_task_store(root).ok()?;
-    for post in posts {
+    for post in with_artifact_tasks(posts.to_vec(), root) {
         let marked = post.get("release_notes").and_then(Value::as_bool) == Some(true);
         let rubric_channel = post
             .get("channel")
@@ -283,7 +288,7 @@ fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
         if !marked && !rubric_channel {
             continue;
         }
-        let epic = explicit_epic(post, store.as_ref())
+        let epic = explicit_epic(&post, store.as_ref())
             .or_else(crate::ui::factory::preferred_epic_id_from_session_metadata);
         let Some(epic) = epic.and_then(|id| store.get(&id).ok()) else {
             return Some("RELEASE NOTES BLOCKED (post_release_pending): name epic_id (or task_id) so Cassy can check its post-release receipt.".into());

@@ -554,7 +554,13 @@ pub(crate) fn tick(cas_root: &Path) -> Result<()> {
                 &config,
             ));
         }
-        let summary = run_summary(receipt.runs.last().unwrap());
+        let mut summary = run_summary(receipt.runs.last().unwrap());
+        if receipt.runs.len() == receipt.expected_runs()
+            && !receipt.has_failure()
+            && receipt.verdict(Utc::now()) == Verdict::Failed
+        {
+            summary.push_str("; ERROR no successful journey read-back in the completed window");
+        }
         save(cas_root, &receipt)?;
         crate::store::open_task_store(cas_root)?.append_note(
             &receipt.epic,

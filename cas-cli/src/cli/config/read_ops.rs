@@ -147,15 +147,152 @@ pub(crate) fn set_config_value(
     cas_root: &Path,
     context: impl FnOnce() -> InvocationContext,
 ) -> anyhow::Result<String> {
-    let before = config.clone();
-    let old_value = config.get(key).unwrap_or_default();
-    config.set(key, value)?;
-    guard_operator_config(&before, config, context)?;
-    config.save(cas_root)?;
+    let _lock = crate::config::lock_project_config(cas_root)?;
+    let path = cas_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = if raw.is_empty() {
+        config.clone()
+    } else {
+        toml::from_str(&raw)?
+    };
+    let old_value = before.get(key).unwrap_or_default();
+    let mut after = before.clone();
+    after.set(key, value)?;
+
+    let serialized_after = toml::to_string(&after)?;
+    let after_document = toml_edit::Document::parse(serialized_after)?;
+    let replacement = config_document_item(after_document.as_item(), key).cloned();
+    let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    set_config_document_item(&mut document, key, replacement)?;
+    if let Some(marker) = upkeep_observe_marker_for_set(key) {
+        set_config_document_item(&mut document, marker, None)?;
+    }
+    let contents = document.to_string();
+    let saved: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &saved, context)?;
+    if contents != raw {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    *config = saved;
     if key == "viktor.enabled" {
         crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
     }
     Ok(old_value)
+}
+
+fn config_document_item<'a>(item: &'a toml_edit::Item, path: &str) -> Option<&'a toml_edit::Item> {
+    path.split('.')
+        .try_fold(item, |item, part| item.as_table_like()?.get(part))
+}
+
+fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {
+    match key {
+        "upkeep.codemap" => Some("upkeep.observe_since.codemap"),
+        "upkeep.product_overview" => Some("upkeep.observe_since.product_overview"),
+        "qa.registry.enforce" => Some("upkeep.observe_since.registry"),
+        _ => None,
+    }
+}
+
+fn set_config_document_item(
+    document: &mut toml_edit::DocumentMut,
+    path: &str,
+    replacement: Option<toml_edit::Item>,
+) -> anyhow::Result<()> {
+    let parts: Vec<_> = path.split('.').collect();
+    anyhow::ensure!(!parts.is_empty(), "config key must not be empty");
+    set_config_document_path(document.as_item_mut(), &parts, replacement)
+}
+
+fn set_config_document_path(
+    item: &mut toml_edit::Item,
+    parts: &[&str],
+    replacement: Option<toml_edit::Item>,
+) -> anyhow::Result<()> {
+    let Some((part, rest)) = parts.split_first() else {
+        return Ok(());
+    };
+    let parent_is_inline = item.as_value().is_some_and(toml_edit::Value::is_inline_table);
+    let table = item
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("config key path parent for {part} is not a table"))?;
+
+    if rest.is_empty() {
+        if let Some(replacement) = replacement {
+            let mut replacement = replacement;
+            if let Some(existing) = table.get_mut(part) {
+                let old_decor = existing.as_value().map(|value| value.decor().clone());
+                if let (Some(decor), Some(new_value)) = (old_decor, replacement.as_value_mut()) {
+                    *new_value.decor_mut() = decor;
+                }
+                *existing = replacement;
+            } else {
+                table.insert(part, replacement);
+            }
+        } else {
+            table.remove(part);
+        }
+        return Ok(());
+    }
+
+    if table.get(part).is_none() {
+        if replacement.is_none() {
+            return Ok(());
+        }
+        let child = if parent_is_inline {
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(
+                toml_edit::InlineTable::new(),
+            ))
+        } else {
+            let mut child = toml_edit::Table::new();
+            child.set_implicit(true);
+            toml_edit::Item::Table(child)
+        };
+        table.insert(part, child);
+    }
+    let child = table
+        .get_mut(part)
+        .expect("just-created or previously present config table");
+    set_config_document_path(child, rest, replacement)
+}
+
+/// Remove the stored override without serializing defaults back into the file.
+/// Keep the same operator guard and atomic writer as other config mutations.
+fn reset_config_value(
+    key: &str,
+    cas_root: &Path,
+) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(key != "factory.write_roots",
+        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it");
+    let _lock = crate::config::lock_project_config(cas_root)?;
+    let path = cas_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = toml::from_str(&raw)?;
+    let mut document = toml_edit::Document::parse(&raw)?.into_mut();
+    let mut parts: Vec<_> = key.split('.').collect();
+    let leaf = parts.pop().expect("a config key has at least one part");
+    let parent = parts.into_iter().try_fold(document.as_item_mut(), |item, part| {
+        item.as_table_like_mut()?.get_mut(part)
+    });
+    let removed = parent.and_then(|item| item.as_table_like_mut()?.remove(leaf)).is_some();
+    let contents = document.to_string();
+    let after: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &after, InvocationContext::from_process)?;
+    if removed {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    if key == "viktor.enabled" {
+        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
+    }
+    Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
 }
 
 fn execute_set_internal(
@@ -575,25 +712,19 @@ pub(crate) fn execute_reset(
         } else {
             println!("Reset all {} options to defaults", reg.count());
         }
-    } else if let Some(meta) = reg.get(&args.key) {
-        let old_value = set_config_value(
-            &mut config,
-            &args.key,
-            meta.default,
-            &config_root,
-            InvocationContext::from_process,
-        )?;
+    } else if reg.get(&args.key).is_some() {
+        let (old_value, new_value) = reset_config_value(&args.key, &config_root)?;
 
         if cli.json {
             let json = serde_json::json!({
                 "key": args.key,
                 "old_value": old_value,
-                "new_value": meta.default
+                "new_value": new_value
             });
             println!("{}", serde_json::to_string(&json)?);
         } else {
-            println!("Reset {} to default: {}", args.key, meta.default);
-            if old_value != meta.default {
+            println!("Reset {} to default: {}", args.key, new_value);
+            if old_value != new_value {
                 println!("  (was: {old_value})");
             }
         }
@@ -670,6 +801,27 @@ pub(crate) fn execute_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_337b_config_reset_removes_key_and_restores_fallback() {
+        use clap::Parser;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = "# keep host policy\n[hub]\ntailscale_serve = false\n";
+        std::fs::write(root.join("config.toml"), format!("{original}transport_mode = \"required\"\n")).unwrap();
+        let cli = Cli::parse_from(["cas", "config", "reset", "hub.transport_mode"]);
+        execute_reset(&ConfigResetArgs {
+            key: "hub.transport_mode".into(),
+            force: false,
+            store: Default::default(),
+        }, &cli, &root).unwrap();
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["hub"].get("transport_mode").is_none(), "reset persisted an override: {saved}");
+        assert_eq!(Config::load(&root).unwrap().hub.unwrap().transport_mode(), crate::config::HubTransportMode::Loopback);
+        assert_eq!(saved, original, "reset must preserve unrelated settings and comments");
+    }
 
     #[test]
     fn config_get_explains_raw_blank_cassy_filing_fallback_cas_02a3() {

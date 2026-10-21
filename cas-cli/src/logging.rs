@@ -241,7 +241,7 @@ fn open_log_file(log_dir: &Path, date: chrono::NaiveDate) -> io::Result<File> {
     Ok(file)
 }
 
-fn log_path_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
+pub(crate) fn log_path_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
     log_dir.join(format!("cas-{}.log", date.format("%Y-%m-%d")))
 }
 

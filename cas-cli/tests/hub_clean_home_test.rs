@@ -2491,6 +2491,116 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
 
 #[cfg(unix)]
 #[test]
+fn hub_service_status_readiness_fits_80_columns_cas_0252() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for cli in ["claude", "codex"] {
+        cas::test_paths::warm_stub(&bin.join(cli), "#!/bin/sh\nexit 0\n");
+    }
+    let systemctl = bin.join("systemctl");
+    cas::test_paths::warm_stub(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = \"--version\" ] && exit 0\nexit 1\n",
+    );
+
+    let path = bin.as_os_str();
+    let mut human_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    human_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let output = human_command
+        .args(["hub", "service", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        human.lines().all(|line| line.chars().count() <= 80),
+        "service status exceeded 80 columns:\n{human}"
+    );
+    // pin: service status puts the first copyable repair command under its verdict.
+    assert_eq!(
+        human.lines().nth(1),
+        Some("  Fix: cas claude login main"),
+        "the first repair command should follow the service summary"
+    );
+    assert!(human.contains("path: ~/.claude"), "{human}");
+    assert!(human.contains("Fix: cas claude login main"), "{human}");
+    assert!(human.contains("path: ~/.codex"), "{human}");
+    assert!(human.contains("Fix: cas codex login main"), "{human}");
+    assert!(!human.contains("Fix: cas hub service install"), "{human}");
+    assert_eq!(
+        human.matches("Retry: cas hub status").count(),
+        usize::from(human.contains("service manager unknown")),
+        "{human}"
+    );
+
+    let mut json_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    json_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let json = json_command
+        .args(["hub", "service", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let readiness = report["launch_readiness"].as_array().unwrap();
+    for (cli, profile) in [("claude", ".claude"), ("codex", ".codex")] {
+        let detail = readiness
+            .iter()
+            .find(|row| row["cli"] == cli)
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap();
+        assert!(detail.contains(&home.path().join(profile).display().to_string()));
+    }
+    assert_eq!(
+        readiness
+            .iter()
+            .find(|row| row["cli"] == "grok")
+            .unwrap()["detail"],
+        "grok CLI is not installed or executable"
+    );
+
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub\n").unwrap();
+    let mut failed_probe = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    failed_probe.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let failed_probe = failed_probe.args(["hub", "service", "status"]).output().unwrap();
+    assert!(failed_probe.status.success());
+    let failed_probe = String::from_utf8(failed_probe.stdout).unwrap();
+    assert!(failed_probe.contains("launch issue"), "{failed_probe}");
+    assert!(!failed_probe.contains("Launch readiness: healthy"), "{failed_probe}");
+    assert!(failed_probe.contains("Cause:"), "{failed_probe}");
+    assert!(failed_probe.contains("--json"), "{failed_probe}");
+    assert!(failed_probe.lines().all(|line| line.chars().count() <= 80), "{failed_probe}");
+    #[cfg(target_os = "linux")]
+    {
+        let manual = cas_command(home.path(), path)
+            .env("CAS_HUB_SYSTEMCTL", home.path().join("missing-systemctl"))
+            .args(["hub", "service", "status"])
+            .output()
+            .unwrap();
+        assert!(manual.status.success());
+        let manual = String::from_utf8(manual.stdout).unwrap();
+        assert!(manual.contains("rc script after networking and Tailscale"), "{manual}");
+        assert!(manual.contains("cas hub start --tailscale-serve"), "{manual}");
+        assert!(manual.contains("cas hub status"), "{manual}");
+        assert!(manual.lines().all(|line| line.chars().count() <= 80), "{manual}");
+    }
+    assert!(
+        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
+        "{human}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn hub_status_prefers_live_lock_holder_over_dead_record_cas_ebbb() {
     let home = private_home();
     let paths = cas::hub::HubRuntimePaths::for_home(home.path());

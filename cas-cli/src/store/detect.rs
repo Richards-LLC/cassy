@@ -297,6 +297,13 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     let mut current = start.to_path_buf();
 
     loop {
+        // Internal state (including host artifacts) is not a project. Never
+        // climb out of an enclosing .cas and adopt its owner or an outer store;
+        // HOME may deliberately point elsewhere for an isolated command.
+        // Factory worktrees were resolved explicitly above.
+        if current.file_name().is_some_and(|name| name == ".cas") {
+            break;
+        }
         let cas_dir = current.join(".cas");
         if has_project_store_marker(&cas_dir) {
             return Ok(cas_dir);
@@ -1126,6 +1133,25 @@ mod tests {
         // Should find .cas from subdirectory
         let found = find_cas_root_from(&subdir).unwrap();
         assert_eq!(found, temp.path().join(".cas"));
+    }
+
+    #[test]
+    fn cas_337b_artifacts_do_not_inherit_foreign_home_store() {
+        let mut env = TestEnvGuard::temp_home();
+        env.remove("CAS_ROOT");
+        let operator = TempDir::new().unwrap();
+        let host_store = operator.path().join("operator-home/.cas");
+        let artifacts = host_store.join("artifacts/task/qa");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(host_store.join("config.toml"), "[sync]\nenabled = false\n").unwrap();
+        // Even a project above the host store must not capture artifact commands.
+        let outer = operator.path().join(".cas");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::write(outer.join("config.toml"), "").unwrap();
+        env.set_current_dir(&artifacts);
+        assert!(matches!(find_cas_root(), Err(CasError::NotInitialized)));
+        std::fs::remove_file(host_store.join("config.toml")).unwrap();
+        assert!(matches!(find_cas_root(), Err(CasError::NotInitialized)));
     }
 
     #[test]

@@ -311,7 +311,7 @@ pub(crate) fn lane_target(cas_root: &Path, worktree: &Path, cache: &Path) -> boo
     workers.canonicalize().ok().as_ref() == Some(&workers)
         && worktree.canonicalize().ok().as_deref() == Some(worktree)
         && worktree.parent() == Some(workers.as_path())
-        && cache == worktree.join("target")
+        && (cache == worktree.join("target") || relocated_target(worktree, cache))
         && cache.canonicalize().ok().as_deref() == Some(cache)
         && !lane::is_preview_path(cas_root, worktree)
 }
@@ -364,7 +364,7 @@ fn acquire_scanned(
     #[cfg(unix)]
     let lease = if cache.join(owner::MARKER).exists() {
         Some(
-            owner::for_retirement(cas_root, worktree)?
+            owner::for_gc(cas_root, worktree, cache)?
                 .ok_or_else(|| io::Error::other("missing target lease"))?,
         )
     } else {

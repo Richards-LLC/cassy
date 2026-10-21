@@ -67,6 +67,7 @@ macro_rules! task_verifier_agent {
             $prefix, "verification, ",
             $prefix, "rule, ",
             $prefix, "search, ",
+            $prefix, "artifact, ",
             $prefix, "coordination\nmetadata:\n  managed_by: cas\n---\n",
             include_str!("builtins/agents/task-verifier.body.md")
         )

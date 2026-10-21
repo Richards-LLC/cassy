@@ -1,0 +1,1746 @@
+# Commander registry: stable journey metadata and file ownership.
+# Keep docs/qa/journeys.md as the detailed narrative and semantic selector input.
+# Header policy is authoritative; local qa.registry.enforce is fallback only.
+# A delivery uses the stricter policy at base and head.
+version: 1
+updated: '2026-10-21'
+selection: legacy_catalog
+enforce: enforce
+seeded_from:
+- docs/qa/journeys.md (HUB-J1–HUB-J21, curated steps/goals/gaps)
+- scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
+- cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
+ignore:
+- hub-web/dist/**
+- hub-web/src/**/*.test.ts
+- hub-web/src/**/*.spec.ts
+surfaces:
+- hub-web/src/**
+- hub-web/index.html
+- hub-web/package.json
+- hub-web/vite.config.ts
+owner_groups:
+  commander_runtime:
+    description: Shared Commander shell, runtime/build inputs and protocol fixtures. Semantic selection narrows
+      CSS, composition and fixture hunks.
+    globs:
+    - hub-web/src/main.ts
+    - hub-web/src/styles.css
+    - hub-web/src/types.ts
+    - hub-web/src/terminal*
+    - hub-web/index.html
+    - hub-web/package-lock.json
+    - hub-web/vite.config.ts
+    - hub-web/e2e/journeys/hub-double.ts
+    - hub-web/e2e/journeys/journey.ts
+    - hub-web/e2e/journeys/clock.ts
+    - hub-web/e2e/journeys/world.ts
+    - hub-web/playwright.config.ts
+    - hub-web/package.json
+    - hub-web/tsconfig.json
+    - hub-web/e2e/tsconfig.json
+  commander_dependencies:
+    description: Static dependencies shared by every catalog journey at the curated revision.
+    globs:
+    - hub-web/e2e/journeys/receipt-directory.mjs
+    - hub-web/src/cloud-brand.ts
+    - hub-web/src/render-model.ts
+invariants:
+  HUB-J1-GOAL:
+    statement: my machine's supervisor appears and I can open its conversation
+    check: 'Walk HUB-J1 in hub-web/e2e/journeys/pair-code.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the relay and the machine-side
+      `cas hub authorize` are doubled; real pairing is proven by `docs/design/hub-web/pairing-verification.md`'
+  HUB-J2-GOAL:
+    statement: the link pairs this browser and I reach the supervisor
+    check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the exchange endpoint is doubled'
+  HUB-J3-GOAL:
+    statement: I can tell which conversation has something new and get to it quickly
+    check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
+      edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+  HUB-J4-GOAL:
+    statement: I can read what was said before, back to the start
+    check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: history pages come from
+      the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`'
+  HUB-J5-GOAL:
+    statement: my message reaches the supervisor and I see its answer
+    check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: delivery by a running
+      daemon and operator stamping are doubled'
+  HUB-J6-GOAL:
+    statement: I speak my reply, check it, and send it
+    check: 'Walk HUB-J6 in hub-web/e2e/journeys/reply-voice.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: speech recognition is
+      stubbed; a real microphone and recognizer are not exercised'
+  HUB-J7-GOAL:
+    statement: I answer with one tap and the supervisor acts on it
+    check: 'Walk HUB-J7 in hub-web/e2e/journeys/answer-ask.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+  HUB-J8-GOAL:
+    statement: I work on the other machine, and my draft on the first is still there when I return
+    check: 'Walk HUB-J8 in hub-web/e2e/journeys/switch-machines.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+  HUB-J9-GOAL:
+    statement: I reply to a supervisor from my phone and get back to the list
+    check: 'Walk HUB-J9 in hub-web/e2e/journeys/phone.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: a real on-screen keyboard
+      resize is not emulated'
+  HUB-J10-GOAL:
+    statement: I switch to dark and the choice sticks
+    check: 'Walk HUB-J10 in hub-web/e2e/journeys/dark-theme.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+  HUB-J11-GOAL:
+    statement: I see what is happening, and it recovers without me doing anything
+    check: 'Walk HUB-J11 in hub-web/e2e/journeys/reconnect.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the regular suite uses a protocol
+      double; the separate real-hub part proves Linux recovery with a real disposable hub and real operator queue
+      (see [local run instructions](real-hub-journey.md)); macOS remains follow-up'
+  HUB-J12-GOAL:
+    statement: the conversation reconnects by itself and every message I send is delivered exactly once
+    check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the protocol double
+      reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real
+      phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by
+      its visibility events'
+  HUB-J13-GOAL:
+    statement: I start a supervisor on a project from my phone, without SSH, and land in its conversation
+    check: 'Walk HUB-J13 in hub-web/e2e/journeys/launch-session.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub''s project catalog,
+      folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab
+      closing is proven at epic assembly on a real machine'
+  HUB-J14-GOAL:
+    statement: each session opens onto its own conversation, or an honest empty state with its live activity, never
+      another session's old thread; I can retire a stale one
+    check: 'Walk HUB-J14 in hub-web/e2e/journeys/session-identity.journey.ts; verify the expected experience and
+      edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the daemon''s session-bound
+      history page, the catalog''s last activity and the hub''s End session are doubled; that ending a session stops
+      its daemon is proven on a real machine at epic assembly'
+  HUB-J15-GOAL:
+    statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
+      away once resolved, and nothing claims I replied when I didn't
+    check: 'Walk HUB-J15 in hub-web/e2e/journeys/delivery-notice.journey.ts; verify the expected experience and
+      edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the daemon''s notice
+      state and resolution announcement are doubled; that the daemon announces a real relay reaching the supervisor
+      is proven by its Rust tests and at epic assembly'
+  HUB-J16-GOAL:
+    statement: see at least six of the sessions at once, and end one with a confirmation that appears immediately,
+      is focused and is fully visible
+    check: 'Walk HUB-J16 in hub-web/e2e/journeys/end-session.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double ends
+      the session; that the daemon stops its supervisor and workers is covered by the hub''s Rust tests'
+  HUB-J17-GOAL:
+    statement: pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming,
+      and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing
+      on a timer
+    check: 'Walk HUB-J17 in hub-web/e2e/journeys/fleet-ops.journey.ts; verify the expected experience and edge paths
+      in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
+      /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
+      endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J18-GOAL:
+    statement: I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation,
+      from the keyboard alone
+    check: 'Walk HUB-J18 in hub-web/e2e/journeys/interrupt-raw-output.journey.ts; verify the expected experience
+      and edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double
+      records the InterruptPane frame and models another device''s lease (refused unless forced by hub-admin, as
+      hub/auth.rs does); that the supervisor''s pane really stops is proven by the hub''s Rust tests'
+  HUB-J19-GOAL:
+    statement: I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a
+      reply that waits for soundwave until it is back and receives it
+    check: 'Walk HUB-J19 in hub-web/e2e/journeys/operator-inbox.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the cloud is a protocol
+      double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so the deployed-cloud two-profile journey
+      of cas-9b7d S5 is the acceptance gate; soundwave''s reservation and admission are modeled by the double, and
+      proven by the hub''s Rust tests (`operator_inbox::commands`)'
+  HUB-J20-GOAL:
+    statement: grant the agents on a task create and edit access to a folder outside their worktree until the task
+      closes, see the receipt, and revoke it; a pairing without factory:manage cannot
+    check: 'Walk HUB-J20 in hub-web/e2e/journeys/write-grant.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double answers
+      `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml` with
+      the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub tests
+      (cas-ab04)'
+  HUB-J21-GOAL:
+    statement: reach Cassy Cloud's Explorer from Commander, on its home or on the open conversation's project, in
+      its own tab, carrying nothing but the path and the project id
+    check: 'Walk HUB-J21 in hub-web/e2e/journeys/app-switcher.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
+      at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
+      that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+journeys:
+- id: HUB-J1
+  name: First open and pair a machine with a code
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` in a browser that has never paired a machine'
+  steps:
+  - Open Cassy Commander for the first time — the empty state explains what to do
+  - Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
+  - 'Approve on the machine — the dialog follows the machine: waiting, claimed, authorized'
+  - Confirm and pair this browser — enter the operator label, then press Pair
+  - See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer
+    or any heading, and its row opens a conversation that says, in plain words, "No messages from the cas-src supervisor
+    in this session yet — nothing is waiting on you"; the card offers no other view, and the header carries Raw
+    output and "Interrupt the cas-src supervisor"
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/pair*.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/first-connection.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/paired-machines.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/dpop.ts
+  - hub-web/e2e/journeys/pair-code.journey.ts
+  - hub-web/e2e/journeys/pairing-deadline.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-label.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fleet-permissions.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J1-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/pair-code.journey.ts
+  catalog_gaps: the relay and the machine-side `cas hub authorize` are doubled; real pairing is proven by `docs/design/hub-web/pairing-verification.md`
+- id: HUB-J2
+  name: Pair a machine from a cas hub pair link
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: the `#pair=…&hub=…&scopes=…` link printed by `cas hub pair`, opened in a browser
+  steps:
+  - Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
+  - Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left,
+    with the focus ring on it
+  - Check the technical details — the origin and the granted scope boxes, in sentence case
+  - Pair — the exchange goes to the link's machine
+  - Reach the supervisor — the machine's supervisor is listed and opens
+  - Paired machines names each pairing's fleet permissions — the missing permission and its related note are ordered
+    before the re-pair command, without a disabled Stop and restart button that looks like an available fleet action
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/fragment.ts
+  - hub-web/src/pair*.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/paired-machines.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/connection.ts
+  - hub-web/e2e/journeys/installation.journey.ts
+  - hub-web/e2e/journeys/pair-link.journey.ts
+  - hub-web/e2e/journeys/pairing-deadline.journey.ts
+  - hub-web/e2e/journeys/pairing-feedback.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-label.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fleet-permissions.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J2-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/pair-link.journey.ts
+  catalog_gaps: the exchange endpoint is doubled
+- id: HUB-J3
+  name: Find the conversation that needs me
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` with two paired machines, each running one supervisor'
+  steps:
+  - See every machine's supervisors in one list — every row is titled by its project, then its machine, with the
+    supervisor codename beneath
+  - Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago";
+    no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
+  - Notice a new reply while away — the row shows an unread count
+  - Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters
+    rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active
+    descendant; opening a result clears the search and brings the whole list back; the header names the project
+    once
+  - 'Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation
+    is open and the reply box has focus'
+  - An empty thread's card also leads with the project, with machine and codename beneath it
+  - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
+  - Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations
+    / Machines / Appearance / Advanced, the same groups with a conversation open, Advanced collapsed and holding
+    only the dormant-session switch; "Dismiss all info" only when something is outstanding) filters by supervisor
+    or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its
+    description (right of the title on a desktop, on the line beneath on a phone); a filter that matches nothing
+    says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant
+    ("light" marks "Jump to lighthouse")
+  - 'Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette
+    closes, the conversation is open and the reply box has focus'
+  - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays
+    closed afterwards; it never comes back over the next conversation opened
+  - 'Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…",
+    the attempt and relay stage only behind a closed Details; one loading look from the attach to the first history
+    page, centred in the reading area, still for its first second and then a quiet pulse, with the header and row
+    on Live and the composer''s width steady (cas-813a)'
+  - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry
+    of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details;
+    no unavailable notice, no retry timeline, and the footer never drops to "1 connected"; a second failure shows
+    as a real one
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/palette-commands.ts
+  - hub-web/src/worker-visibility.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/session-selection.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/attention*.ts
+  - hub-web/src/time.ts
+  - hub-web/src/session-connection.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/e2e/journeys/commander-journal-storage.ts
+  - hub-web/e2e/journeys/commander-journal.journey.ts
+  - hub-web/e2e/journeys/find-conversation.journey.ts
+  - hub-web/e2e/journeys/phone-host-line.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/context-rail.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  invariants:
+  - HUB-J3-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/find-conversation.journey.ts
+  catalog_gaps: none
+  additional_specs:
+  - hub-web/e2e/journeys/phone-host-line.journey.ts
+- id: HUB-J4
+  name: Read the conversation history
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: a conversation with earlier turns from past days
+  steps:
+  - Open the conversation and see the recent turns — the latest exchange is on screen at once
+  - Load earlier turns — "Load earlier" fetches the previous page
+  - Reach the start of the conversation — "No earlier history" appears, with day separators
+  - Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived
+    signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and
+    leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all;
+    Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing
+    says it is connected but didn't send the file, never that it is off; when the connection then drops, that card
+    says it in the banner's words ("Lost connection to <machine>. Reconnecting… Open the file again when it's back")
+    without another click and without a second announcement, never "is connected" beside Reconnecting
+  - 'The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the
+    reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader
+    tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild,
+    and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)'
+  - 'The reader tabs to Load earlier as the machine comes back, and sees it — four separate parts on a multiplex
+    machine with a tall history, at desktop 1280 and phone 390, with the reader resting in the composer (the thread
+    follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier"
+    stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the
+    start of the conversation (cas-c2cb)'
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/time.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/e2e/journeys/read-history.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/transcript.ts
+  invariants:
+  - HUB-J4-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/read-history.journey.ts
+  catalog_gaps: history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
+- id: HUB-J5
+  name: Reply by typing
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: an open conversation with a live supervisor
+  steps:
+  - Open the conversation — the composer names the supervisor
+  - Write and send — the message appears at once as "Sending…" and the composer clears
+  - See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
+  - See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
+  - A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer
+    only points at it); the list does not preview it as said
+  - A refused Take control keeps focus on the message — when another device holds the session the take is refused;
+    the message names the device in control, once, in plain words, and the composer only points at it; its Take
+    control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back
+    on its own; keyboard focus stays on it, never the page body
+  - Take control from the message, then retry — the refused message carries the Take control its refusal names (the
+    conversation header has none); once control is taken it drops Take control and says Retry will send it, its
+    actions are 44px targets on a phone, and Retry then sends it
+  - Dismiss a refused message and bring it back — Dismiss (the corner ×, by keyboard or mouse) or a sideways swipe
+    on a touch screen takes the refused message out of the thread; the composer stops pointing at it and the list
+    stops previewing it; a "1 unsent message" chip (a 44px target on a phone) brings it back with Edit and Retry,
+    focus landing on Retry; a short swipe settles back, and under reduced motion a swipe dismisses at once with
+    no slide
+  - Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
+  - A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and
+    the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed"
+    or Retry, and it is sent once
+  - A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15
+    seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>.
+    Retry sends it again."; the retry goes out and is delivered
+  - Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up
+    turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this."
+    with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
+  - Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details
+    while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card,
+    never the page body; focus elsewhere (the list search) stays where it is
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/composer-markup.ts
+  - hub-web/src/supervisor-message.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/live-regions.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/connection.ts
+  - hub-web/e2e/journeys/draft-diagnostic.ts
+  - hub-web/e2e/journeys/reply-typed.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J5-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/reply-typed.journey.ts
+  catalog_gaps: delivery by a running daemon and operator stamping are doubled
+- id: HUB-J6
+  name: Reply by voice
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: an open conversation in a browser with speech recognition
+  steps:
+  - Open the conversation — the mic control is ready
+  - Dictate the reply — "Start listening", speak, and the words land in the composer
+  - Review and send — edit the transcript, then send it like a typed reply
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/speech-input.ts
+  - hub-web/src/composer-markup.ts
+  - hub-web/src/supervisor-message.ts
+  - hub-web/e2e/journeys/reply-voice.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/storage.ts
+  invariants:
+  - HUB-J6-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/reply-voice.journey.ts
+  catalog_gaps: speech recognition is stubbed; a real microphone and recognizer are not exercised
+- id: HUB-J7
+  name: Answer a question in the thread
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: an open conversation where the supervisor asks a question with choices
+  steps:
+  - Open the conversation — the thread is live
+  - 'A question from an ended session does not wait — the previous session''s unanswered question is not in this
+    session''s thread: it sits in a collapsed "Earlier session patient-pelican-8" section with no choices, said
+    by patient-pelican-8 (its own supervisor); nothing is pinned and the context rail lists only the live blocker'
+  - 'The supervisor asks a question — the full question and its choices stay in the thread, and a compact bookmark
+    above the composer points to it without duplicating the question or its choices; the machine''s earlier blocker,
+    stamped by a clock that runs ahead and carrying no session, is this session''s own turn: it sits above the question
+    at its arrival time, labelled by this session''s supervisor, with no "session … started" line below it, and
+    is marked "machine clock ahead"'
+  - Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the
+    context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
+  - See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
+  - 'Jump to a long question and dismiss its bookmark — the supervisor posting an FYI and a status update leaves
+    the question waiting with its choices in the thread; its compact bookmark says "Waiting on you: open the PR
+    to main and cut a release?" and carries no choices; on a phone (390px, dark), focusing the composer keeps the
+    bookmark 44–48px tall, and with the keyboard up (about 440px of page) at least three lines of the conversation
+    stay readable; a tap jumps to and focuses the full question without expanding a duplicate card; a swipe dismisses
+    the bookmark, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices'
+  - 'Reply to a machine a day ahead — no future day header: the machine''s turn sits under Today at its arrival
+    time, marked "machine clock ahead", and the reply shows the time it was sent below it, with no session line
+    between them'
+  - Reopen the page — minutes later, the thread rebuilt from history keeps every turn where the visit showed it
+    and at the same time (not the reload's), in the machine's order, under Today, with times reading in order
+  - 'The supervisor answers live — a separate part on a machine whose clock runs five minutes ahead, which nothing
+    in the thread has shown yet: the answer shows its arrival, unmarked, and its row reads "now"'
+  - Reload three minutes later — the answer shows the same time and still no mark, exactly as the visit showed it
+    (cas-9e33), and its row reads "3m", not "now" (cas-24fe)
+  - Come back five minutes later — the row reads "8m"; the reload measured the machine's lead, so the next live
+    answer is marked "machine clock ahead" and its row reads "now"
+  - Read a question on a short phone screen — at 390px by 440px, the waiting bookmark remains visible
+  - A double tap jumps without sending — the full question in the thread gains focus, no reply is sent, and no duplicate
+    card opens above the composer
+  - Deliberately choose an option in the thread — the chosen answer is sent in reply to that question, and the bookmark
+    clears
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/attention-objects.ts
+  - hub-web/src/attention-view.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/context-rail.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/dismissed-asks.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/e2e/journeys/answer-ask.journey.ts
+  - hub-web/e2e/journeys/conversation-polish.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/attention.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/time.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  invariants:
+  - HUB-J7-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/answer-ask.journey.ts
+  catalog_gaps: none
+- id: HUB-J8
+  name: Switch between machines without losing my place
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: two paired machines, a conversation open on one of them
+  steps:
+  - Start a draft on the Linux machine — the header names the project and the machine
+  - Switch to the Mac and send there — the other thread starts with an empty composer; the message goes to that
+    machine
+  - Come back to the draft — the first thread's draft is intact
+  - Name the palette chord one way on every surface — on a Linux keyboard the list search reads "Search conversations
+    (Ctrl K)" and Appearance & commands "(Ctrl K twice)"; the tab title names the open conversation ("cas-src patient-pelican-9
+    — Cassy Cloud"); the conversation list and the open conversation are the whole screen; Ctrl K reaches the search,
+    again the palette, and Escape leaves the conversation and its draft as they were
+  - Keyboard focus lands somewhere real on every route — opening a conversation from the list by Enter or a click
+    lands in its reply box; focus the operator moves to Raw output just after a pick stays there through the attach
+    and a render round (cas-7eaf); a palette Jump by keyboard opens the conversation without leaving focus on the
+    page body
+  - Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so
+    a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent,
+    and the colours survive a reload; a draft survives the pair link and the reload, and once sent does not come
+    back
+  - Know each conversation and machine by name — the conversation header leads with the project, then "Atlas · Linux
+    · patient-pelican-9", its avatar the machine's own initial; every list row's name and every palette "Jump to"
+    row lead with the project, the codename first in the line beneath
+  - A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in
+    the conversation list and the palette's Jump rows, which count the same; a stale or supervisor-less session
+    is hidden from both
+  - Hear the open conversation as the page heading — the goal state's level-1 heading is the open conversation's
+    project, and the tab title names it with its codename
+  - Every tap opens the conversation it pressed, while the list is changing — fifty taps across two machines (two
+    projects on one, a group of two sessions on the other), each pressed while the group re-sorts and a session
+    starts or ends; every tap highlights its row within a frame and opens its conversation within about 100 ms,
+    at 1280 px with a mouse and at 390 px by touch, and the last tap wins (cas-4646)
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/session-selection.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/paired-machines.ts
+  - hub-web/src/composer-markup.ts
+  - hub-web/src/worker-visibility.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/e2e/journeys/switch-machines.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fleet-permissions.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/viewport.ts
+  invariants:
+  - HUB-J8-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/switch-machines.journey.ts
+  catalog_gaps: none
+- id: HUB-J9
+  name: 'On a phone: from the list to a reply and back'
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` on a 390 px wide phone with two paired machines, plus one that is switched off'
+  steps:
+  - Open the list on a phone — full-width list, no sideways scrolling, and the search offers no keyboard shortcut
+  - Tap a conversation — the thread replaces the list, with a back control
+  - Reply with the phone keyboard — send, then see the answer
+  - Go back to the list — the row shows the latest turn
+  - Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn,
+    and one tap returns to the newest turn
+  - Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard;
+    Enter opens the match with the keyboard gone, not in the reply box
+  - See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says
+    "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
+  - Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected"
+    toast sits below the thread header, never over the back link, project and host, and on the list below the brand
+    row
+  - Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row,
+    Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output
+    title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom
+    sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/viewport.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/composer-markup.ts
+  - hub-web/e2e/journeys/conversation-layout.journey.ts
+  - hub-web/e2e/journeys/phone.journey.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/machine-accent.ts
+  invariants:
+  - HUB-J9-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/phone.journey.ts
+  catalog_gaps: a real on-screen keyboard resize is not emulated
+  additional_specs:
+  - hub-web/e2e/journeys/conversation-layout.journey.ts
+- id: HUB-J10
+  name: Switch to dark and keep reading
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: an open conversation in the light theme
+  steps:
+  - Open the conversation in the light theme — a status reply is visible
+  - Choose the dark appearance — from "Appearance & commands" (Ctrl/Cmd+K)
+  - Keep reading in dark — the thread and composer stay readable
+  - The choice survives a reload — dark is still applied
+  - High contrast keeps the open conversation and Send marked — with forced colours on, in dark and light, the open
+    row is filled with Highlight (under the pointer and with focus too) and Send is a filled button with an edge
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/scheme.ts
+  - hub-web/src/appearanceFonts.ts
+  - hub-web/src/cloud-brand.ts
+  - hub-web/scripts/generate-tokens.mjs
+  - hub-web/e2e/journeys/dark-theme.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/viewport.ts
+  invariants:
+  - HUB-J10-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/dark-theme.journey.ts
+  catalog_gaps: none
+- id: HUB-J11
+  name: The connection drops mid-conversation and recovers
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: an open conversation when the network to the machine drops
+  steps:
+  - Open the conversation — the thread is live
+  - The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting,
+    and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection
+    — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts
+    agree; a screen reader hears the outage once, from the banner (the header's Reconnecting is not a second announcement)
+  - It reconnects on its own — the banner and the waiting line clear, everything says Live again (the header announces
+    the return), the held message goes out exactly once and is delivered, and no transport alarm is left
+  - Sending works again — a message goes through and is answered
+  - On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and
+    dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own
+    thread has no session line, and the held message stays above the ones sent after it)
+  - During an outage, Interrupt and Raw output say why they wait — the Attention rail names the outage instead of
+    "All clear"; the conversation header's Interrupt and Raw output stay on screen at 1280 and 390, marked unavailable
+    and described by "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.", so
+    the banner stays the one outage line announced; pressing either says why in a toast, sends no interrupt and
+    opens no drawer; once the session is back both are available again and the rail says "All clear"
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/connection*.ts
+  - hub-web/src/session-connection.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/deferred-render.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/reconnect.journey.ts
+  - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/viewport.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J11-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/reconnect.journey.ts
+  catalog_gaps: the regular suite uses a protocol double; the separate real-hub part proves Linux recovery with
+    a real disposable hub and real operator queue (see [local run instructions](real-hub-journey.md)); macOS remains
+    follow-up
+  additional_specs:
+  - hub-web/e2e/journeys/real-hub.journey.ts
+- id: HUB-J12
+  name: Switch networks without losing the conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: 'an open conversation on a phone or laptop that changes network: local network to Tailscale, Tailscale
+      off and on, Wi-Fi to cellular, sleep and wake'
+  steps:
+  - Open the conversation — the thread is live over the machine socket
+  - The route changes under the page — the sockets reset and are replaced within seconds; a message sent then goes
+    out once
+  - Tailscale goes off, then on again — no browser event says so; after two unanswered heartbeats the header, row,
+    footer and Tasks panel all say Unsteady ("Connection unsteady — checking…"), never "Degraded", and a message
+    written then waits in the thread instead of going into the dead socket; once the dead socket is noticed everything
+    says Reconnecting and the composer uses the banner's words; within 15 s of Tailscale returning it is Live again
+    without a reload, and the waiting messages go out once each, in order, and are delivered. If the heartbeats
+    answer again before that, a message held while unsteady goes out once without a reconnect
+  - Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming
+    online reconnects within 5 s and sends it once
+  - The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before
+    the heartbeat would notice; a message then goes out once
+  - The session's daemon link drops for a moment — the hub is reachable but cannot reach the session's daemon, so
+    it refuses the send as retryable (upstream_unavailable); the message waits in the thread instead of reading
+    "Not sent", and goes out once when the session is live again; while the link stays down the page retries with
+    a growing pause (about 1, 2, 4, then 8 s), and past the two-minute hold the message reads Not sent with Retry
+    ("The session didn't come back while it waited."), never "re-pair this device" or "will go out by itself"; meanwhile
+    the banner reads "Reconnecting to <project>… <machine> is still connected." and the footer stays Connected ("Lost
+    connection to <machine>" is kept for a real machine drop)
+  - A proof refused after a switch retries on its own — the hub refuses the first proofs after a switch as stale
+    (a 401 that names its reason); they are retried with a fresh proof, and a proof refused twice backs off like
+    a lost network; it is Live again by itself, a message goes out once, and nothing asks to re-pair. Only a definitive
+    refusal (revoked, unknown key) shows re-pair
+  - On a legacy socket, a second message sent before the refusal arrives waits too — a hub without the machine protocol
+    stops reading a session's socket once it refuses a send, so a message written before that refusal reached the
+    page is held with the first; both go out once, in order, when the session is back; and once the session has
+    stayed live for 10 s, the next drop retries after about 1 s again, receipt or not
+  - A revoked pairing says so and offers Re-pair, on a phone too — a definitive refusal shows "Needs pairing", the
+    banner says the machine needs pairing again instead of "Reconnecting…", the rail card is headed "Machine needs
+    pairing", and the banner carries a Re-pair control (44 px on a phone) that opens pairing; a message waiting
+    to send reads Not sent ("<machine> needs pairing again. Re-pair <machine>, then retry.") with Retry, and one
+    already sent without a receipt reads Not confirmed, never Sending…
+  - 'The whole machine drops, then returns — while it retries, the banner alone tells it ("Lost connection to <machine>.
+    Reconnecting…"): no Attention card in transport terms ("Reconnecting to hub", "Stuck dialing", heartbeat counts),
+    and no control toast over the conversation; a card appears only for a failure that will not retry, worded like
+    the banner. While it is down the header''s Interrupt says "Interrupt and raw output return when it reconnects";
+    once it is back, control this browser held is taken back by itself (unless another device took it), Interrupt
+    is available again, and no "Control released" notice is left on screen or to a screen reader. A refused pairing
+    leaves no "connection dropped" notice: Interrupt and Raw output say "Re-pair it to interrupt the supervisor
+    or read its raw output" through later heartbeats, and a press interrupts nothing'
+  - Reload while the whole machine is unreachable — within a second the list shows the conversations it last knew
+    and the last one reopens with its held message, never "0 conversations"; once the machine answers, the same
+    conversation attaches and the message goes out once (cas-9846)
+  - The machine stays down past its catalog's freshness — with both machines offline, the list keeps both supervisors
+    as last known and the footer says "2 conversations, last known" (cas-6c7a)
+  - Both machines reconnect — both rows and the full conversation count return to live
+  - The machine stays down past its catalog's freshness — with only Atlas offline and Studio live, both Atlas conversations
+    are last known and the footer says "2 conversations · 1 last known" (cas-c552)
+  - Atlas reconnects — both rows and the full conversation count return to live
+  - The machines answer with no live supervisors — the list is empty and the footer says "0 conversations"
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/connection*.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/main.ts
+  - hub-web/e2e/journeys/catalog-refresh.journey.ts
+  - hub-web/e2e/journeys/commander-journal-storage.ts
+  - hub-web/e2e/journeys/commander-journal.journey.ts
+  - hub-web/e2e/journeys/connection-diagnostics.journey.ts
+  - hub-web/e2e/journeys/network-switch.journey.ts
+  - hub-web/e2e/journeys/opaque-auth.journey.ts
+  - hub-web/e2e/journeys/protocol-clock.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J12-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/network-switch.journey.ts
+  catalog_gaps: the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline,
+    no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping
+    page is simulated by its visibility events
+  additional_specs:
+  - journeyPart
+  - journeys/HUB-J12/parts/<part>/
+  - scripts/journey-bundles.py
+- id: HUB-J13
+  name: Start a new session from Commander
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` on a 390 px phone paired with full control access but without `session:launch`'
+  steps:
+  - A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission
+    too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch
+    form without a new pairing
+  - The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
+  - Open New session and find the project — the most recently used project leads, a running project offers Attach,
+    Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as
+    the machine's default
+  - Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out
+    one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has
+    no account step; the summary names the chosen account
+  - Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>)
+    on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
+  - The session outlives the tab — after a reload the new session is still running and its conversation reopens
+  - A running project attaches instead of starting again — Attach opens the existing session's conversation
+  - A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain
+    heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
+  - Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and
+    Start lands in the new session
+  - A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close
+    stays visible and the page does not scroll sideways
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/launch-session.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/e2e/journeys/launch-session.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J13-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/launch-session.journey.ts
+  catalog_gaps: the hub's project catalog, folder browse and session start are doubled; that a hub-started session
+    survives a hub restart and the tab closing is proven at epic assembly on a real machine
+- id: HUB-J14
+  name: Tell a project's live sessions apart
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of
+      one project'
+  steps:
+  - See a project's live sessions together — the project's rows sit under one heading naming the conversation count
+    (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity,
+    and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85")
+    before any is opened; at 1280×720 every row is in view
+  - Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in
+    this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older
+    session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
+  - Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers
+    no actions
+  - Read the empty session's raw output — the header's Raw output opens the supervisor's terminal text ("The supervisor
+    is ready.") though it has not written to me; Escape returns to Raw output and the empty thread
+  - The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers
+    no action of its own; the header's Raw output and Interrupt stay, marked unavailable and saying why ("Lost connection
+    to Atlas · Linux. Interrupt and raw output return when it reconnects.") to the eye and to a screen reader, and
+    pressing one says why instead of opening; back on, the plain copy returns and both are available again
+  - On a phone, the header's Raw output and Interrupt are full-size targets — at 390 each is at least 44 px each
+    way, and Raw output opens and closes
+  - Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns,
+    even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation
+    with history never flashes a "no messages" card while its first page loads
+  - End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves
+    the group
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/connection.ts
+  - hub-web/e2e/journeys/session-identity.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J14-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/session-identity.journey.ts
+  catalog_gaps: the daemon's session-bound history page, the catalog's last activity and the hub's End session are
+    doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
+- id: HUB-J15
+  name: See a delivery problem as attention, not conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` on a desktop, one live session whose supervisor missed a relayed update'
+  steps:
+  - 'Open the session: only its conversation — the blocker and the operator''s later message are in the thread,
+    the watchdog notice is not, and yesterday''s turn shows "Sep 29, 17:20"'
+  - A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick,
+    never "you replied"
+  - 'The delivery problem is one attention item — the notice is a single warning dated "Sep 29, 17:49", headed "The
+    supervisor missed an update: a worker stopped", with the worker named in plain words and no baked age; the group
+    is "Accounting · happy-cheetah-1", has no redundant Dismiss group for one item, and a repeat adds nothing'
+  - On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1
+    sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the
+    notice and its date
+  - Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control
+    hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details
+    to Close; focus on Dismiss stays there across a 5 s heartbeat; with a notice's Details open, Copy occupies its
+    own row above the full raw diagnostic at390 and1280px; with Copy focused, a minute crossing keeps them, and
+    so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
+  - A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes
+    the palette, the sheet stays open and focus is back on the control it left
+  - Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the
+    badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
+  - 'A sheet left open on a phone is a plain rail on a desktop — reopened, then resized to 1280×800: the rail has
+    no dialog role, aria-modal or sheet label, the badge is not expanded, nothing is inert, and the notice is in
+    the side panel'
+  - It retires once the update gets through — the resolution removes it, and a reload does not bring it back
+  - An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended
+    session arrives in this thread with "Reply to “Did the bank feed reconcile?” · wise-lion-31", quoting the question's
+    first line; if its history is unavailable it explicitly says "Reply to your message in earlier session wise-lion-31";
+    no earlier-session section opens for it
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/operator-notices.ts
+  - hub-web/src/attention-objects.ts
+  - hub-web/src/attention.ts
+  - hub-web/src/attention-view.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/e2e/details-copy-row.ts
+  - hub-web/e2e/journeys/delivery-notice.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/context-rail.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/time.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J15-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/delivery-notice.journey.ts
+  catalog_gaps: the daemon's notice state and resolution announcement are doubled; that the daemon announces a real
+    relay reaching the supervisor is proven by its Rust tests and at epic assembly
+- id: HUB-J16
+  name: End a session from my phone
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` on a phone (390×844, touch), one project with seven live sessions on one machine, and
+      a device that may end sessions'
+  steps:
+  - See six sessions at once — under "gabber-studio · 7 conversations on Atlas", each row leads with its codename,
+    End session is a glyph button in its own column at the row's end, and at least six rows are fully in view
+  - Tap a session's time to open it, then come back — the time belongs to the row (End is a 44px column of its own
+    beside it), the session opens, and back on the list all seven are still there
+  - End session asks at once, focused on Cancel — on the last row the confirmation is present in the same task as
+    the tap, Cancel has focus, both buttons are fully in view, and no row leaves the list
+  - Cancel, then end it from the keyboard — Cancel returns focus to End session; Enter, Shift+Tab to the confirmation's
+    End session and Enter end it, the heading reads 6 sessions, and focus lands on the row before the ended last
+    row, never on the page
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/styles.css
+  - hub-web/src/main.ts
+  - hub-web/e2e/journeys/end-session.journey.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/spoken-names.ts
+  invariants:
+  - HUB-J16-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/end-session.journey.ts
+  catalog_gaps: the hub double ends the session; that the daemon stops its supervisor and workers is covered by
+    the hub's Rust tests
+- id: HUB-J17
+  name: Run the fleet from a conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge
+      task, on a device paired with factory:operate and factory:manage'
+  steps:
+  - Pause a worker and undo it — the agent row's ⋯ menu lists Pause, Restart… and Stop…, Pause runs at once, the
+    row and the live region say it, and Undo (8 s) resumes it
+  - Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns
+    it
+  - Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and
+    focused; confirming stops it, and a stale stop says what changed
+  - Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it
+    once and the row reads "Asked … ago"
+  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not
+    allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction
+    that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears
+    without a disabled Stop and restart button.
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/fleet-ops.ts
+  - hub-web/src/fleet-ops-view.ts
+  - hub-web/src/fleet-permissions.ts
+  - hub-web/src/paired-machines.ts
+  - hub-web/src/main.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/styles.css
+  - hub-web/e2e/journeys/fleet-ops.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fleet-ops-request.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/progress-model.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  - hub-web/src/write-grant-view.ts
+  - hub-web/src/write-grant.ts
+  invariants:
+  - HUB-J17-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/fleet-ops.journey.ts
+  catalog_gaps: the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe,
+    409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
+- id: HUB-J18
+  name: Interrupt or read the supervisor from its conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 1280 with two paired machines, a live cas-src conversation open, on a device whose
+      pairing may force a take (hub-admin); parts at 390 light, 390 dark and 1280 dark, the light phone without
+      hub-admin'
+  steps:
+  - Open a conversation; only the thread shows — the header carries Raw output and "Interrupt the cas-src supervisor"
+    (visible "Interrupt"), both available; no pane host, terminal or canvas stands beside the thread (cas-f285);
+    no control, palette command or text names a terminal view
+  - Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in
+    a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.",
+    and focus stays on Interrupt
+  - 'Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and
+    says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."'
+  - Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only,
+    with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text
+    and typing in it sends nothing; Escape closes it and returns focus to Raw output
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/early-thread.ts
+  - hub-web/e2e/journeys/interrupt-raw-output.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J18-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/interrupt-raw-output.journey.ts
+  catalog_gaps: the hub double records the InterruptPane frame and models another device's lease (refused unless
+    forced by hub-admin, as hub/auth.rs does); that the supervisor's pane really stops is proven by the hub's Rust
+    tests
+  additional_specs:
+  - journeyPart
+  - journeys/HUB-J18/parts/<part>/
+- id: HUB-J19
+  name: Read my inbox on a new phone while the machine is off
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 390×844 on a browser profile with no paired machine and no inbox sign-in, while soundwave
+      (enrolled in the account''s operator inbox) is off; a second desktop profile joins later'
+  steps:
+  - Sign in on a brand-new phone with no machine paired — "Operator inbox" under the Conversations heading opens
+    the inbox dialog, which says the cloud holds the keys and "this isn’t end-to-end encryption"; Sign in shows
+    a code of the form ABCD-EFGH and "Approve on Petra Stella Cloud" linking to the approval page with that code
+  - Approve it from the account; the weeks of messages are there — after the account approves the code, the dialog
+    lists "soundwave · amber-fox-29"; opening it shows all three supervisor messages (20, 9 and 1 days old), and
+    each was stored on the phone and acknowledged once
+  - 'Reply while soundwave is off: it waits for soundwave — "Reply — soundwave gets it when it’s back" queues "Go.
+    Cut the release." and shows "Waiting for soundwave"; the cloud holds one pending command for soundwave'
+  - A second browser profile sees the history and the queued reply — a desktop profile signs in with its own code
+    and reads the same history and the queued reply; approved for reading only, it says it "can read this conversation
+    but not leave replies"
+  - soundwave returns and accepts the reply; a reload keeps everything — the reply reads "soundwave received it";
+    after a reload the inbox is still signed in with the history and the status, and no new sign-in was asked
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/inbox/*
+  - hub-web/src/conversation-shell.ts
+  - hub-web/test/operator-cloud-double.ts
+  - hub-web/test/reply-grant-double.ts
+  - hub-web/e2e/journeys/operator-cloud-route.ts
+  - hub-web/e2e/journeys/operator-inbox.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/browser-label.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/time.ts
+  invariants:
+  - HUB-J19-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/operator-inbox.journey.ts
+  catalog_gaps: the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so
+    the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission
+    are modeled by the double, and proven by the hub's Rust tests (`operator_inbox::commands`)
+  additional_specs:
+  - hub-web/e2e/journeys/operator-cloud-route.ts
+- id: HUB-J20
+  name: Grant a task write access outside its worktree from my phone
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 390 (dark) and 1280 (light), an open conversation whose session has a task in progress,
+      on a device paired with factory:manage'
+  steps:
+  - Open Write access on the current task — "Write access…" opens a panel under a level-3 heading "Write access
+    outside the worktree" (announced once, by the group or the phone sheet), saying it lets the task's agents write
+    to a folder outside their worktree until the task closes, on the first task in progress, with create and edit
+    allowed and delete not; on a phone the sheet names the conversation and machine ("cas-src on Atlas") and its
+    close button is "Close write access"
+  - An incomplete grant says what is missing — Review grant with no folder says to enter one, and nothing is sent
+  - Review, confirm and see the receipt — the confirmation asks "Grant agents on cas-1234 create+edit in ~/soundwave-config/docs/requests
+    until the task closes?", Cancel first; Grant sends it once and the receipt, naming the resolved folder with
+    the task id unbroken, is shown and announced; Folder and Reason clear, so one more click cannot resend the grant;
+    at 1280×844 the receipt sits in view clear of the rail's bottom fade
+  - Revoke it after confirming — Revoke… asks to revoke every grant for the task; confirming says how many were
+    removed
+  - A pairing without factory:manage — Write access… is disabled and its accessible description names the shared
+    "Not allowed on this pairing" lead, its Stop and restart workers and sessions permission, and the Paired machines
+    re-pair command; Paired machines shows Needs before Also needed and has no disabled Stop and restart button.
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/write-grant.ts
+  - hub-web/src/write-grant-view.ts
+  - hub-web/src/fleet-ops-view.ts
+  - hub-web/src/fleet-permissions.ts
+  - hub-web/src/fleet-sheet.ts
+  - hub-web/src/paired-machines.ts
+  - hub-web/src/main.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/styles.css
+  - hub-web/e2e/journeys/write-grant.journey.ts
+  - hub-web/src/abort-signals.ts
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/artifact-open.ts
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/src/attention-sheet.ts
+  - hub-web/src/attention-view.ts
+  - hub-web/src/attention.ts
+  - hub-web/src/browser-support.ts
+  - hub-web/src/catalog-refresh.ts
+  - hub-web/src/commander-journal.ts
+  - hub-web/src/connection-diagnostics.ts
+  - hub-web/src/connection-state-view.ts
+  - hub-web/src/connection-state.ts
+  - hub-web/src/conversation-history.ts
+  - hub-web/src/conversation-list.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/conversation-store.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/dormant-visibility.ts
+  - hub-web/src/dpop.ts
+  - hub-web/src/event-recovery.ts
+  - hub-web/src/fleet-ops-request.ts
+  - hub-web/src/fleet-ops.ts
+  - hub-web/src/fragment.ts
+  - hub-web/src/held-send-flush.ts
+  - hub-web/src/installation-access.ts
+  - hub-web/src/installation-inventory.ts
+  - hub-web/src/launch-dropped.ts
+  - hub-web/src/launch-session.ts
+  - hub-web/src/local-network-access.ts
+  - hub-web/src/machine-accent.ts
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/pairing-exchange.ts
+  - hub-web/src/pairing-messages.ts
+  - hub-web/src/pairing-scopes.ts
+  - hub-web/src/pending-pairing.ts
+  - hub-web/src/progress-model.ts
+  - hub-web/src/raw-output.ts
+  - hub-web/src/refusal.ts
+  - hub-web/src/request-deadline.ts
+  - hub-web/src/spoken-names.ts
+  - hub-web/src/storage.ts
+  - hub-web/src/swipe-dismiss.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/time.ts
+  - hub-web/src/transcript-view.ts
+  - hub-web/src/transcript.ts
+  - hub-web/src/worker-visibility.ts
+  invariants:
+  - HUB-J20-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/write-grant.journey.ts
+  catalog_gaps: the hub double answers `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml`
+    with the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub
+    tests (cas-ab04)
+- id: HUB-J21
+  name: Switch from Commander to Explorer for my project
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 1280 (light) and 390 (dark), two paired machines, one session whose project has a
+      Cassy Cloud identity and one without'
+  steps:
+  - Commander is the current app — the list header's lockup ("Cassy Cloud apps") opens the switcher, with Commander
+    current and Explorer as a link
+  - Switch to Explorer from the list — Explorer opens at the cloud origin's /explorer in its own tab, with no referrer,
+    cookie or authorization sent, and Commander stays as it was; by click or Enter, the switcher closes in Commander's
+    tab and focus returns to the Cassy Cloud apps button
+  - Open this project's tasks in Explorer — from Tasks & progress, "All tasks in Explorer" opens /explorer/tasks?project_id=<the
+    project's cloud id>; on desktop the switcher points there too
+  - A project without a cloud identity opens Explorer's home — its conversation offers no project link, and the
+    switcher opens /explorer
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/app-switcher.ts
+  - hub-web/src/cloud-brand.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/main.ts
+  - hub-web/src/styles.css
+  - hub-web/index.html
+  - hub-web/e2e/journeys/app-switcher.journey.ts
+  - hub-web/src/machine-accent.ts
+  invariants:
+  - HUB-J21-GOAL
+  traffic:
+    share_pct: null
+    basis: Commander usage is not instrumented; no measured share is claimed.
+  spec: hub-web/e2e/journeys/app-switcher.journey.ts
+  catalog_gaps: Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token
+    adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the
+    project's canonical id is proven by the Rust hub test (cas-eaa3)

@@ -80,7 +80,14 @@ One or two sentences. What this project is, for whom, and why it exists. Uses th
 - Routes/pages: `<path>`
 - Product docs: `<path(s)>`
 - Planning: `<path>` (if active)
+
+<!-- cas:project-overview
+domain_paths = ["<domain model file>"]
+watch_dirs = ["<routes/pages/CLI/tool directory>"]
+-->
 ```
+
+End the doc with the `cas:project-overview` block: TOML naming the files whose any change (`domain_paths`) and the directories whose added, deleted or renamed files (`watch_dirs`) should refresh this overview. It is tracked with the doc, so G6 and the freshness hook read it on every checkout; a `[project_overview]` section in `.cas/config.toml` overrides it per key. Preserve an existing block on regeneration, and update it when the domain model or surfaces move. Without a block, Cassy derives only `schema.prisma` files and common pages/routes directories that exist, and warns when nothing derives.
 
 ## Quality bar — zero generic-SaaS sentences
 
@@ -143,7 +150,7 @@ This resets the pending-change counter that `SessionStart` uses to warn about dr
 
 - **First time:** no `docs/PRODUCT_OVERVIEW.md` exists → generate from scratch.
 - **Drift warning:** `SessionStart` reports the domain model changed → regenerate and keep-blocks survive.
-- **Drift at park (G6):** task close refuses `PRODUCT_OVERVIEW DRIFT` when the delivery changes a `project_overview.domain_paths` file, adds or deletes inside `watch_dirs`, or adds a `live` journey to (or moves one between `live` and `dead` in) `docs/qa/journeys.yaml`. Update the affected section in the same branch (a new or removed way in belongs under `## Primary Journeys`), commit, and retry close. When the product is unchanged (a refactor of a watched file), record `task action=notes note_type=decision notes="overview unchanged: <reason>"` instead.
+- **Drift at park (G6):** task close refuses `PRODUCT_OVERVIEW DRIFT` when the delivery changes a `domain_paths` file from the overview block, adds or deletes inside `watch_dirs`, or adds a `live` journey to (or moves one between `live` and `dead` in) `docs/qa/journeys.yaml`. Update the affected section in the same branch (a new or removed way in belongs under `## Primary Journeys`), commit, and retry close. When the product is unchanged (a refactor of a watched file), record `task action=notes note_type=decision notes="overview unchanged: <reason>"` instead.
 - **Manual:** user invokes `/project-overview` or asks for a product overview.
 - **Periodic:** if the doc is more than ~8 weeks old and the domain model has moved, refresh it.
 

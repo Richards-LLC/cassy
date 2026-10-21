@@ -2,7 +2,8 @@
 
 `cas qa impact` maps a change to journey ids, evidence requirements and unowned
 files. It reads local Git and project files without network access. Registry
-matching runs in-process; the legacy catalog adapter invokes the existing
+matching runs in-process; the legacy catalog adapter and an opted-in registry's
+`selection: legacy_catalog` invoke the existing
 read-only Python selector so import/CSS selection stays compatible.
 
 ```bash

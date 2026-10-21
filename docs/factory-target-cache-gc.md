@@ -28,13 +28,21 @@ and selected reclaim total. Cargo cache deletion requires both `force=true`
 and the explicit `dry_run=false`; omitting `dry_run` remains preview-only.
 
 Cleanup is oldest-first and stops selecting caches once their projected bytes
-would reach the low watermark. It excludes registered live worktrees, any
+would reach the low watermark. With `factory.scratch_root` set, it probes the
+same scratch filesystem as build admission and includes the configured builder
+cap's 10 GiB per lane reserve when deciding pressure. The report names that
+filesystem and reserve. Each device has its own selection and retention budget. It excludes registered live worktrees, any
 worktree observed in the OS process table (cwd, command line, or open target
 file), recent writes, and the configured newest-cache retention count. It
 rechecks liveness, recency, and containment immediately before each mutation.
 
-Only an exact, non-symlink `target/` child of the repository root or a known
-factory worktree is eligible. Known roots include the default and configured
+Eligible paths are exact, non-symlink `target/` children of the repository root
+or a known factory worktree, plus the configured project's exact
+`<scratch_root>/<project-key>/targets/<worker>` paths. Scratch cleanup holds
+lane, Cargo and durable lifetime locks, validates the owner generation/inodes,
+and quarantines beside the target on the same filesystem. The warmest configured
+N eligible scratch targets remain retained. Missing-checkout scratch targets and
+unmanaged scratch directories are review-only. Known roots include the default and configured
 worktree base directories, durable worktree-store paths, and registered worker
 clone paths, so external scratch layouts are covered without scanning arbitrary
 host directories. Cassy never traverses symlinks and never deletes source, `.git`,

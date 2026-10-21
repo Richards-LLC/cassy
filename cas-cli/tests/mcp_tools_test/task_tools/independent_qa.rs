@@ -156,6 +156,94 @@ fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
         .expect("its work item")
 }
 
+/// A committed registry at the delivery tip, while main has none.
+fn impact_registry(repo: &Path) -> String {
+    commit_file(repo, "docs/qa/journeys.yaml", r#"version: 1
+updated: "2026-10-21"
+invariants:
+  INV-COMPOSER:
+    statement: "The message remains visible"
+    check: "Read the persisted message after send"
+journeys:
+  - id: SEND
+    name: "Send a message"
+    status: live
+    entry: {url: /compose, trigger: Send}
+    steps: [compose, send]
+    owners: [web/composer.css]
+    invariants: [INV-COMPOSER]
+    traffic: {share_pct: 80, basis: messages}
+  - id: REPLY
+    status: live
+    entry: {url: /reply, trigger: Reply}
+    steps: [reply, send]
+    owners: [web/composer.css]
+    invariants: [INV-COMPOSER]
+    traffic: {share_pct: 20, basis: messages}
+"#, "feat: describe composer journeys")
+}
+
+#[tokio::test]
+async fn qa_dispatch_attaches_predicted_and_park_impact_cas_06fe() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, task_id) = fixture(&mut env);
+    let head = impact_registry(&repo);
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    let service = CasService::new(core.clone(), None);
+    let created = extract_text(service.task(Parameters(serde_json::from_value(
+        serde_json::json!({"action":"create", "title":"Polish `web/composer.css`",
+            "description":"Keep composing", "risk":"none"})
+    ).unwrap())).await.unwrap());
+    let predicted = tasks.get(extract_task_id(&created).unwrap()).unwrap();
+    assert!(predicted.notes.contains("Predicted QA impact"), "{}", predicted.notes);
+    assert!(predicted.notes.contains("SEND"), "{}", predicted.notes);
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let state = tasks.get_execution_state(&task_id).unwrap().expect("park impact state");
+    assert_eq!(state["qa_impact"]["head_sha"], head);
+    assert_eq!(state["qa_impact"]["journeys"][0]["id"], "SEND");
+    assert!(tasks.get(&task_id).unwrap().notes.contains("Authoritative QA impact"));
+    let qa = tasks.get(&qa_task_id(&repo.join(".cas"), &task_id)).unwrap();
+    for expected in ["SEND", "REPLY", "INV-COMPOSER", "The message remains visible",
+        "Read the persisted message after send", "NOT EXERCISED: <reason>"] {
+        assert!(qa.description.contains(expected), "missing {expected}: {}", qa.description);
+    }
+    // An unchanged retry must neither duplicate the impact note nor lose state.
+    close_text(&core, &task_id).await;
+    assert_eq!(tasks.get(&task_id).unwrap().notes.matches("Authoritative QA impact").count(), 1);
+}
+
+#[tokio::test]
+async fn qa_record_requires_each_live_journey_row_cas_06fe() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, task_id) = fixture(&mut env);
+    let head = impact_registry(&repo);
+    assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+    let cas_dir = repo.join(".cas");
+    let service = CasService::new(reviewer_core(&cas_dir, "qa-reviewer"), None);
+    let ledger = round_evidence(&repo.join("journey-round"), &task_id, &head);
+    let request = || Parameters(verification(serde_json::json!({
+        "action":"qa_record", "task_id":task_id, "status":"approved",
+        "summary":"Journey dispositions recorded", "ledger_path":ledger.display().to_string()
+    })));
+    for text in ["# No journeys\n", "SEND and REPLY need PASS or FAIL rows\n",
+        "| SEND-more | PASS |\n| REPLY | PASS |\n", "| SEND | PASS |\n",
+        "| SEND | NOT EXERCISED: |\n| REPLY | PASS |\n"] {
+        std::fs::write(&ledger, text).unwrap();
+        let error = service.verification(request()).await.expect_err("missing journey verdict");
+        assert!(error.message.contains("QA RECORD REJECTED"), "{}", error.message);
+        assert!(cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+            .unwrap().unwrap().state.is_active());
+    }
+    std::fs::write(&ledger,
+        "| Journey | Verdict |\n| --- | --- |\n| SEND | NOT EXERCISED: sandbox unavailable |\n| REPLY | NOT A ROUTE |\n").unwrap();
+    let result = extract_text(service.verification(request()).await.unwrap());
+    assert!(result.contains("APPROVAL"), "{result}");
+    assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task_id(&cas_dir, &task_id)).unwrap().status,
+        TaskStatus::Closed);
+}
+
 #[tokio::test]
 async fn qa_record_rejection_survives_visual_bounds_refusal_cas_5488() {
     let mut test_env = TestEnvGuard::temp_home();

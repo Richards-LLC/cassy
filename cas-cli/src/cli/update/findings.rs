@@ -393,7 +393,11 @@ pub(super) fn print(fmt: &mut Formatter<'_>, sweep: &SweepFindings) -> io::Resul
         }
         fmt.write_muted(&format!("{:<PHASE_CELLS$}", finding.phase))?;
         fmt.write_raw(" ")?;
-        let (lines, cut) = wrap(&finding.cause, width.saturating_sub(cause_at), unicode);
+        let (lines, cut) = wrap_finding_cause(
+            &finding.cause,
+            width.saturating_sub(cause_at),
+            unicode,
+        );
         shortened |= cut;
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
@@ -554,6 +558,16 @@ fn words(text: &str) -> Vec<String> {
         depth = (depth + word.matches('(').count()).saturating_sub(word.matches(')').count());
     }
     words
+}
+
+fn wrap_finding_cause(cause: &str, cells: usize, unicode: bool) -> (Vec<String>, bool) {
+    const INACTIVE_SERVE: &str = "Tailscale Serve inactive: ";
+    let Some(reason) = cause.strip_prefix(INACTIVE_SERVE) else {
+        return wrap(cause, cells, unicode);
+    };
+    let (mut lines, shortened) = wrap(reason, cells, unicode);
+    lines.insert(0, "Tailscale Serve inactive:".to_owned());
+    (lines, shortened)
 }
 
 /// Wrap prose at word boundaries; a single word wider than the column is

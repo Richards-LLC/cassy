@@ -124,6 +124,14 @@ fn text(result: rmcp::model::CallToolResult) -> String {
 }
 
 impl Side {
+    async fn task(&self, request: Value) -> Result<String, String> {
+        self.service
+            .task(Parameters(serde_json::from_value(request).unwrap()))
+            .await
+            .map(text)
+            .map_err(|error| error.message.to_string())
+    }
+
     async fn factory(&self, request: Value) -> Result<String, String> {
         let mut request = request;
         request["action"] = json!(request.get("action").cloned().unwrap_or(json!("epic_split")));
@@ -268,7 +276,7 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
 
 /// The demo: propose, accept, and each side refused on the other's children.
 #[tokio::test(flavor = "multi_thread")]
-async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
+async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_cas_0795() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();
     let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
@@ -290,8 +298,59 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
     let id = propose_and_accept(&cloud, &soundwave, &prowl).await;
     assert_split_decision(&soundwave, &id, "accept");
 
-    // Each side is refused on the other's children: start, claim and spawn.
-    for child in PROWL_TAKES {
+    let tasks = open_task_store(&soundwave.machine.cas_dir).unwrap();
+    let before = tasks.get("cas-d3").unwrap();
+    let refused = soundwave.task(json!({"action": "update", "id": "cas-d3",
+        "assignee": "soundwave-worker", "title": "must not apply", "force": true}))
+        .await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER") && refused.contains("prowl@")
+        && refused.contains(&id), "{refused}");
+    let after = tasks.get("cas-d3").unwrap();
+    assert_eq!(after.assignee, before.assignee);
+    assert_eq!(after.title, before.title);
+
+    let refused = soundwave.task(json!({"action": "update", "id": "cas-d3",
+        "assignee": "soundwave-worker", "supervisor_override": true, "reason": "  "}))
+        .await.unwrap_err();
+    assert!(refused.contains("reason"), "{refused}");
+
+    let worker_core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    worker_core.set_agent_id_for_testing("sw-w".into());
+    let worker_service = cas::mcp::CasService::new(worker_core, None);
+    for action in ["update", "start"] {
+        let refused = worker_service.task(Parameters(serde_json::from_value(json!({
+            "action": action, "id": "cas-d3", "assignee": "soundwave-worker",
+            "supervisor_override": true, "force": true, "reason": "worker cannot take over"
+        })).unwrap())).await.unwrap_err();
+        let expected = if action == "update" { "registered supervisor" } else { "SPLIT TO A PEER" };
+        assert!(refused.message.contains(expected), "{refused}");
+    }
+
+    let reason = "peer agreed to hand this child back";
+    let assigned = soundwave.task(json!({"action": "update", "id": "cas-d3",
+        "assignee": "soundwave-worker", "supervisor_override": true, "reason": reason}))
+        .await.unwrap();
+    let task = tasks.get("cas-d3").unwrap();
+    assert_eq!(task.assignee.as_deref(), Some("soundwave-worker"), "{assigned}");
+    assert!(task.notes.contains(&id) && task.notes.contains(reason)
+        && task.notes.contains("supervisor=sw"), "{}", task.notes);
+    let mut other = Agent::new_with_role("sw-other".into(), "other-worker".into(), AgentRole::Worker);
+    other.factory_session = Some("factory-sw".into());
+    register(&soundwave.machine, &other);
+    let other_core = cas::mcp::CasCore::with_daemon(soundwave.machine.cas_dir.clone(), None, None);
+    other_core.set_agent_id_for_testing(other.id);
+    let refused = other_core.cas_task_start_with_options(Parameters(TaskStartRequest {
+        id: "cas-d3".into(), brief: Some(true), force: Some(true),
+    })).await.unwrap_err();
+    assert!(refused.message.contains("SPLIT TO A PEER") && refused.message.contains(&id), "{refused}");
+    assert_eq!(tasks.get("cas-d3").unwrap().status, TaskStatus::Open);
+    let refused = soundwave.task(json!({"action": "transfer", "id": "cas-d3",
+        "to_agent": "other-worker", "supervisor_override": true, "reason": reason}))
+        .await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+
+    // Each side is refused on children without a takeover: start, claim and spawn.
+    for child in ["cas-d1", "cas-d2"] {
         let refused = soundwave.start(child, false).await.unwrap_err();
         assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
         assert!(refused.contains("prowl@"), "{refused}");
@@ -302,6 +361,12 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
     }
     let refused = soundwave.claim("cas-d2").await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    let refused = soundwave
+        .factory(json!({"action": "spawn_workers", "count": 1, "task_id": "cas-d1", "force": true}))
+        .await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
+    assert!(cas::store::open_spawn_queue_store(&soundwave.machine.cas_dir)
+        .unwrap().peek(10).unwrap().is_empty());
     let refused = prowl.claim("cas-a2").await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
     let refused = soundwave
@@ -326,9 +391,18 @@ async fn epic_split_each_supervisor_is_refused_on_the_others_children() {
     assert_eq!(cloud_holder(&cloud, "cas-a1").as_deref(), Some("sw-w"));
     assert_eq!(cloud_holder(&cloud, "cas-d1").as_deref(), Some("pr-w"));
 
-    // Force takes a child anyway, visibly.
-    let forced = soundwave.start("cas-d3", true).await.unwrap();
+    // Force alone cannot take a split child; only the bound worker consumes the decision.
+    let refused = soundwave.start("cas-d2", true).await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
+    let forced = soundwave.start("cas-d3", false).await.unwrap();
     assert!(forced.contains("SPLIT OVERRIDE"), "{forced}");
+    let task = tasks.get("cas-d3").unwrap();
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert!(task.notes.contains(reason) && task.notes.contains(&id), "{}", task.notes);
+    assert!(serde_json::to_value(&task).unwrap()["deliverables"].get("split_takeover").is_none());
+    assert_eq!(cloud_holder(&cloud, "cas-d3").as_deref(), Some("pr"));
+    let refused = soundwave.start("cas-d3", true).await.unwrap_err();
+    assert!(refused.contains("SPLIT TO A PEER"), "consumed grant cannot be replayed: {refused}");
 
     // The peers detail view shows the split on both sides.
     for supervisor in [&soundwave, &prowl] {

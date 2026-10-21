@@ -1,7 +1,9 @@
 # Evidence ledger
 
 Store the file at `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The header names the
-build revision, one-line scope, surface, 30-minute budget, headline counts for
+build revision (for a served app, the backend and frontend SHAs at walk start
+and end, and any mixed build: [map the build](../SKILL.md#walk-rules)),
+one-line scope, surface, 30-minute budget, headline counts for
 cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
 sweep state (`sweep: configured — <path>` or the exact line
 `sweep: not configured`).

@@ -13,6 +13,7 @@ case "$behavior:$signal" in
   reconnect:TERM)
     rm -f "$CAS_UPDATE_PROC_ROOT/$pid/exe"
     ln -s "$CAS_UPDATE_NEW_EXE" "$CAS_UPDATE_PROC_ROOT/$pid/exe"
-    sed -i 's/ [0-9][0-9]* 0$/ 999999 0/' "$CAS_UPDATE_PROC_ROOT/$pid/stat"
+    sed 's/ [0-9][0-9]* 0$/ 999999 0/' "$CAS_UPDATE_PROC_ROOT/$pid/stat" >"$CAS_UPDATE_PROC_ROOT/$pid/stat.new"
+    mv "$CAS_UPDATE_PROC_ROOT/$pid/stat.new" "$CAS_UPDATE_PROC_ROOT/$pid/stat"
     ;;
 esac

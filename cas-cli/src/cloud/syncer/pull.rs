@@ -975,6 +975,24 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
+/// Remove the renderer's marker block from ordinary task text. The caller
+/// persists the body through the untrusted sink, then appends this block with
+/// `TaskStore::append_trusted_note`. A note block alone is never attestation.
+pub(crate) fn take_rendered_provenance(
+    notes: &mut String,
+    rendered_from_provenance: bool,
+) -> Option<String> {
+    if !rendered_from_provenance {
+        return None;
+    }
+    let (start, end) = unique_complete_provenance_block(notes)?;
+    let rendered = notes[start..end].to_string();
+    *notes = format!("{}{}", &notes[..start], &notes[end..])
+        .trim()
+        .to_string();
+    Some(rendered)
+}
+
 /// cas-3556: whether text carries a proposal provenance marker. Only
 /// `render_task_proposal_provenance` writes the block; agent note writes that
 /// contain a marker are refused so a forged block never reaches the notes.
@@ -1022,14 +1040,15 @@ pub(crate) fn record_pulled_accepted_proposal(
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.
-pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
+/// Returns whether valid server provenance was available to render.
+pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) -> bool {
     let Some(raw_provenance) = raw.get("proposal_provenance").cloned() else {
-        return;
+        return false;
     };
     let Ok(provenance) =
         serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(raw_provenance)
     else {
-        return;
+        return false;
     };
     let server = &provenance.server_attested;
     let client = &provenance.client_asserted;
@@ -1098,6 +1117,7 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+    true
 }
 
 /// cas-a8e2: one section (server-attested or client-asserted) of a rendered
@@ -2284,9 +2304,9 @@ impl CloudSyncer {
             if let Some(cas_root) = self.push_cas_root.as_deref() {
                 record_pulled_accepted_proposal(cas_root, &raw_task, &current_project_id);
             }
-            render_task_proposal_provenance(&mut raw_task);
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let raw_task_for_parking = raw_task.clone();
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -2300,6 +2320,11 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -2337,6 +2362,12 @@ impl CloudSyncer {
             };
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                    if let Some(block) = trusted_provenance.as_deref() {
+                        task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
                         let _ =
@@ -3463,14 +3494,14 @@ impl CloudSyncer {
             if let Some(cas_root) = self.push_cas_root.as_deref() {
                 record_pulled_accepted_proposal(cas_root, &raw_task, current_project_id);
             }
-            render_task_proposal_provenance(&mut raw_task);
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task);
             let team_task_revision = crate::cloud::wire_revision(&raw_task);
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             let raw_task_for_parking = raw_task.clone();
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -3484,6 +3515,11 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -3512,6 +3548,12 @@ impl CloudSyncer {
                 "team_pull",
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                    if let Some(block) = trusted_provenance.as_deref() {
+                        task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {
                         let _ =
@@ -4363,15 +4405,18 @@ mod web_close_tests {
         );
 
         let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
-        local.notes = "[2026-08-09 10:30] 📝 PROGRESS local note".to_string();
+        local.notes = "[2026-08-09 09:00] 📝 PROGRESS local first".to_string();
         store.add(&local).unwrap();
+        store.append_trusted_note(&local.id, "[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted").unwrap();
+        store.append_note(&local.id, "[2026-08-09 11:00] 📝 PROGRESS local last").unwrap();
+        let local = store.get(&local.id).unwrap();
         queue
             .enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None)
             .unwrap();
 
         let mut remote = local.clone();
         remote.title = "remote title".to_string();
-        remote.notes = "[2026-08-09 09:30] 📝 PROGRESS remote note".to_string();
+        remote.notes = "[2026-08-09 10:30] 📝 PROGRESS remote note".to_string();
         remote.updated_at += chrono::Duration::minutes(1);
         assert!(matches!(
             syncer.upsert_task(&*store, remote, "sync-test", "personal_pull"),
@@ -4382,12 +4427,13 @@ mod web_close_tests {
         assert_eq!(merged.title, "remote title");
         assert_eq!(
             merged.notes,
-            "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note"
+            "[2026-08-09 09:00] 📝 PROGRESS local first\n\n[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted\n\n[2026-08-09 10:30] 📝 PROGRESS remote note\n\n[2026-08-09 11:00] 📝 PROGRESS local last"
         );
+        assert!(merged.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
         let conflicts = queue.list_conflicts(1).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");
-        assert!(conflicts[0].discarded_row_json.contains("local note"));
+        assert!(conflicts[0].discarded_row_json.contains("local first"));
     }
 
     #[test]

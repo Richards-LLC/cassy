@@ -150,7 +150,7 @@ pub(super) fn literal_cat_heredoc_end(word: &str) -> Option<usize> {
     None
 }
 
-fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usize> {
+pub(super) fn substitution_end(bytes: &[u8], mut index: usize, depth: usize) -> Option<usize> {
     if depth > 8 {
         return None;
     }

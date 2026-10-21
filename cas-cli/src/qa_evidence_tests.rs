@@ -2267,6 +2267,59 @@ fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
     assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
 }
 
+/// GH #1321: a contrast finding in the `section` sibling at `index` under main.
+fn gh_1321_finding(origin: &str, section: &str, index: usize, text: &str, y: f64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "contrast",
+        "selector": format!("main > section.{section}:nth-of-type({index}) > p.total"),
+        "textSample": text, "textBounds": {"x":24,"y":y,"width":120,"height":18},
+        "ratio": 3.2, "threshold": 4.5, "foreground": [130,130,130], "background": [255,255,255],
+        "url": format!("{origin}/commander/?conversation=1"), "scheme": "light",
+        "viewport": {"name":"desktop","width":1280,"height":800}
+    })
+}
+
+/// The delivery inserts `section.observations` above two existing sections,
+/// shifting their `nth-of-type` index and their position on the page.
+fn gh_1321_shifted_reports(fx: &Fixture, tip_extra: Option<serde_json::Value>) {
+    let named = |origin, index, y| {
+        let mut finding = gh_1321_finding(origin, "calculations", index, "Net 42", y);
+        finding["role"] = serde_json::json!("button");
+        finding["accessibleName"] = serde_json::json!("Recalculate");
+        finding
+    };
+    let base = serde_json::json!([
+        gh_1321_finding(BASE, "snapshots", 1, "Total 12", 100.0),
+        named(BASE, 2, 300.0)
+    ]);
+    let mut tip = vec![
+        gh_1321_finding(TIP, "snapshots", 2, "Total 12", 460.0),
+        named(TIP, 3, 660.0),
+    ];
+    tip.extend(tip_extra);
+    cas_f290_reports(fx, serde_json::json!(tip), base);
+}
+
+#[test]
+fn scoped_visual_qa_pairs_findings_below_an_inserted_section_gh_1321() {
+    let fx = scoped_fixture();
+    gh_1321_shifted_reports(&fx, None);
+    fx.validate(&fx.notes())
+        .expect("findings re-indexed by an inserted sibling section are pre-existing");
+}
+
+#[test]
+fn scoped_visual_qa_reports_a_finding_inside_an_inserted_section_gh_1321() {
+    let fx = scoped_fixture();
+    gh_1321_shifted_reports(
+        &fx,
+        Some(gh_1321_finding(TIP, "observations", 1, "Total 12", 120.0)),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("introduced 1"), "{refusal:?}");
+    assert!(refusal.problem.contains("section.observations"), "{refusal:?}");
+}
+
 fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
     EvidenceContext {
         task_id: TASK,

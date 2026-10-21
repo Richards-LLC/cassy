@@ -383,11 +383,14 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
         match outcome {
             "merged" => assert!(!deliver, "already-integrated tip must not borrow the next lane tip: {}", prompt.text),
             "superseded" => {
+                // pin: released director signals must name a declined tip as superseded.
                 assert!(prompt.text.to_lowercase().contains("superseded"), "{}", prompt.text);
+                // pin: this heading asks the supervisor to merge and must disappear on supersession.
                 assert!(!prompt.text.contains("MERGE REQUIRED"), "{}", prompt.text);
             }
             _ => {
                 assert!(deliver, "a genuinely outstanding merge still releases");
+                // pin: a live CI-completed signal retains its actionable merge heading.
                 assert!(prompt.text.contains("MERGE REQUIRED"));
             }
         }

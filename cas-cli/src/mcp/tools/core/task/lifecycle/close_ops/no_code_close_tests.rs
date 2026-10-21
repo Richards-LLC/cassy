@@ -1024,3 +1024,61 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
         assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
     }
 }
+
+/// Start, rather than commit subject conventions, establishes the new task's
+/// boundary on a reused lane. A foreign claim after that boundary still refuses.
+#[tokio::test]
+async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
+    let mut env = TestEnvGuard::temp_home();
+    for foreign_after_start in [false, true] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge previous delivery"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let base = git(repo, &["rev-parse", "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-ead0";
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        assert_eq!(git(&worker_path, &["rev-parse", "HEAD"]), base);
+        for (file, subject) in [("one.rs", "fix(hub): isolate worker cgroups"),
+                                ("two.rs", "fix(hub): preserve generation ownership")] {
+            std::fs::write(worker_path.join(file), "pub fn changed() {}\n").unwrap();
+            git(&worker_path, &["add", file]);
+            git(&worker_path, &["commit", "-q", "-m", subject]);
+        }
+        // No commit hook runs in this fixture: start must suffice on its own,
+        // and an administrative re-start must not move its graph boundary.
+        assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+        if foreign_after_start {
+            std::fs::write(worker_path.join("foreign.rs"), "pub fn foreign() {}\n").unwrap();
+            git(&worker_path, &["add", "foreign.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-a0b1): another delivery\n\nContext: cas-ead0"]);
+        }
+        let tip = git(&worker_path, &["rev-parse", "HEAD"]);
+        git(&worker_path, &["push", "-q", "origin", LANE]);
+        let response = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Delivery ready for review",
+        })).await;
+        let parked = f.task(id);
+        if foreign_after_start {
+            assert!(response.contains("DELIVERY BRANCH UNRESOLVED"), "{response}");
+            assert!(response.contains(&tip), "refusal must identify foreign commit: {response}");
+            assert!(parked.deliverables.factory_branch_anchor.is_none(), "{response}");
+            assert_ne!(parked.status, TaskStatus::Closed, "{response}");
+        } else {
+            assert!(response.contains("MERGE REQUIRED"), "{response}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+            assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(LANE));
+            assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{response}");
+        }
+    }
+}

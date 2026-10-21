@@ -77,7 +77,12 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
-    std::fs::write(repo.join("crates/widget/src/lib.rs"), "pub mod gear;\n").unwrap();
+    std::fs::write(
+        repo.join("crates/widget/src/lib.rs"),
+        "pub mod gear;\npub const EMBEDDED: &str = include_str!(\"embedded.md\");\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/widget/src/embedded.md"), "embedded prompt v1\n").unwrap();
     std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() {}\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "seed"]);
@@ -251,6 +256,29 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "receipt at {tested_tip} must not cover Cargo change: {stale}"
     );
     assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
+    );
+
+    let embedded_path = "crates/widget/src/embedded.md";
+    std::fs::write(f.worker_path.join(embedded_path), "embedded prompt v2\n").unwrap();
+    git(&f.worker_path, &["add", embedded_path]);
+    git(
+        &f.worker_path,
+        &["commit", "-q", "-m", "docs(cas-br01): change compiled-in prompt"],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale_embedded = call(&f.worker, close.clone()).await;
+    assert!(
+        stale_embedded.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover a compiled-in non-Rust file: {stale_embedded}"
+    );
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale_embedded}");
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(),

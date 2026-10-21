@@ -2993,6 +2993,10 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
         "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
         "[project]\ncanonical_id = 'retirement-fixture'\n",
+        // Explicit stages opt out of the upkeep adoption window (covered by
+        // the native sweep test), so only retirement changes this config.
+        "[upkeep]\ncodemap = 'enforce'\nproduct_overview = 'enforce'\n",
+        "[qa.registry]\nenforce = 'enforce'\n",
     );
     for dir in [&root, &host, &global] {
         std::fs::write(dir.join("config.toml"), legacy).unwrap();

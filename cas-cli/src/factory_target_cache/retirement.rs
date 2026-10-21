@@ -16,6 +16,10 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
     // have a separate inventory-only namespace, never closed-task artifact GC.
     let store = crate::store::open_task_store(cas_root).map_err(io::Error::other)?;
     let tasks = store.list(None).map_err(io::Error::other)?;
+    if !delivery_safe(agent, &tasks) {
+        tracing::warn!(worker = %agent.name, "retired target deferred: nonterminal or unpushed work");
+        return Ok(false);
+    }
     let label = tasks
         .iter()
         .filter(|task| {
@@ -35,8 +39,48 @@ pub(crate) fn retire_worker(cas_root: &Path, agent: &cas_types::Agent) -> io::Re
         &artifacts.join(label),
         None,
         retirement_process_uses,
-        registered_live_owner,
+        |root, worktree| {
+            let tasks = crate::store::open_task_store(root)
+                .map_err(io::Error::other)?
+                .list(None)
+                .map_err(io::Error::other)?;
+            Ok(registered_live_owner(root, worktree)? || !delivery_safe(agent, &tasks))
+        },
     )
+}
+
+fn delivery_safe(agent: &cas_types::Agent, tasks: &[cas_types::Task]) -> bool {
+    let owned: Vec<_> = tasks
+        .iter()
+        .filter(|task| {
+            task.assignee
+                .as_deref()
+                .is_some_and(|owner| owner == agent.id || owner == agent.name)
+        })
+        .collect();
+    if owned
+        .iter()
+        .any(|task| !task.is_terminal() && task.status != cas_types::TaskStatus::AwaitingMerge)
+    {
+        return false;
+    }
+    let Some(worktree) = agent.metadata.get("clone_path") else {
+        return false;
+    };
+    let targets = owned
+        .iter()
+        .filter_map(|task| task.deliverables.work_target.as_ref())
+        .map(|target| target.target_branch.clone())
+        .collect::<Vec<_>>();
+    let local = owned
+        .iter()
+        .any(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
+    !crate::mcp::tools::service::factory_ops::shutdown_worktree_safety(
+        Path::new(worktree),
+        local,
+        &targets,
+    )
+    .1
 }
 
 fn retirement_process_uses(worktree: &Path, cache: &Path, descriptors: &[i32]) -> bool {
@@ -107,7 +151,10 @@ fn retire(
     };
     // cas-3f93: follow a target relocated under `[factory] scratch_root`.
     let target = crate::factory_scratch::worker_target_dir(&worktree);
-    if !target.exists() || fs::symlink_metadata(&target)?.file_type().is_symlink() {
+    if !target.exists() {
+        return Ok(true); // Verified safe checkout has no target left to retire.
+    }
+    if fs::symlink_metadata(&target)?.file_type().is_symlink() {
         return Ok(false);
     }
     #[cfg(unix)]

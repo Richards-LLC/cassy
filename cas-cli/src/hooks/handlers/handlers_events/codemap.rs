@@ -999,8 +999,9 @@ mod tests {
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture = tempfile::tempdir().unwrap();
-        let repo = fixture.path().join("main");
-        let worker = fixture.path().join("worker");
+        let fixture_root = fixture.path().canonicalize().unwrap();
+        let repo = fixture_root.join("main");
+        let worker = fixture_root.join("worker");
         let cas_root = repo.join(".cas");
         std::fs::create_dir_all(repo.join(".claude")).unwrap();
         std::fs::create_dir_all(&cas_root).unwrap();

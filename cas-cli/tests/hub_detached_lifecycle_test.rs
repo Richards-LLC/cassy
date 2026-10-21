@@ -287,7 +287,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     assert!(help.status.success());
     let help_text = String::from_utf8_lossy(&help.stdout);
     assert!(
-        help_text.contains("detached"),
+        help_text.to_ascii_lowercase().contains("detached restart"),
         "restart JSON help must scope its response shape to detached hubs: {help_text}"
     );
     let restart_help_lines = help_text

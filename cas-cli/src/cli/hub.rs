@@ -99,11 +99,11 @@ pub enum HubCommands {
     Stop(HubStopArgs),
     /// Stop and start the hub while preserving machine identity
     ///
-    /// For detached hubs, `--json` emits one object whose `stop` value contains
-    /// `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`, and
-    /// `already_satisfied`, and whose `start` value is the resulting
-    /// `HubProcessRecord`. If replacement startup fails, the JSON error includes
-    /// that stop receipt. Service-supervised restarts report hub status instead.
+    /// Detached restart: one `{stop,start}` JSON; start errors include `stop`.
+    ///
+    /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
+    ///
+    /// Stop also has `already_satisfied`; supervised restart reports hub status.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),

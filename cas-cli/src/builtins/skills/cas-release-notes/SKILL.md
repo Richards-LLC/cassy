@@ -23,7 +23,8 @@ Use the project's release rubric as the contract. The procedure is:
    `failed`. A failed check is an incident: report it to the supervisor and
    post nothing until a fix-forward release's check is clean or the operator
    records a `POST-RELEASE OVERRIDE:` note on the epic. Without that config,
-   follow the supervisor's manual check if one is running.
+   a production release still waits for the supervisor's manual
+   post-release check.
 3. **Gather the merge.** Read the merged change set, for example
    `gh pr view <n> --json title,body,commits,files`. Describe what changed for
    the person on the other side of the screen, not an inventory of touched

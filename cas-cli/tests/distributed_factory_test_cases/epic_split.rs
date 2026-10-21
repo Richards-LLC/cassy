@@ -240,7 +240,7 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
     for child in SOUNDWAVE_TAKES {
         assert_eq!(cloud_holder(cloud, child).as_deref(), Some("sw"), "{child}");
     }
-    for child in ["cas-d1", "cas-d2"] {
+    for child in PROWL_TAKES {
         assert_eq!(cloud_holder(cloud, child), None, "the proposer never claims {child} for prowl");
     }
 
@@ -349,8 +349,8 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
         .await.unwrap_err();
     assert!(refused.contains("SPLIT TO A PEER"), "{refused}");
 
-    // Each side is refused on the other's children: start, claim and spawn.
-    for child in PROWL_TAKES {
+    // Each side is refused on children without a takeover: start, claim and spawn.
+    for child in ["cas-d1", "cas-d2"] {
         let refused = soundwave.start(child, false).await.unwrap_err();
         assert!(refused.contains("SPLIT TO A PEER") && refused.contains(&id), "{refused}");
         assert!(refused.contains("prowl@"), "{refused}");

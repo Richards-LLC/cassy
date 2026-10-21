@@ -734,7 +734,17 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
         "skills/cas-worker/references/close-gate.md",
         "journey",
-        "Names a catalog journey as a user-facing QA evidence trigger.",
+        "Names the journey registry and impact as QA evidence triggers and upkeep gates.",
+    ),
+    (
+        "skills/cas-supervisor/references/reporting-and-routing.md",
+        "journey",
+        "Names the journey registry checked by the upkeep gates and the read-back flow.",
+    ),
+    (
+        "skills/cas-qa-craft/references/maintain.md",
+        "journey",
+        "Names the journey registry whose upkeep gates replace the feature-map check.",
     ),
     (
         "skills/codemap/SKILL.md",

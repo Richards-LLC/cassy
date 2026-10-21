@@ -32,6 +32,7 @@ mod known_repos;
 mod peers;
 mod project_overview_cmd;
 mod qa;
+mod qa_impact;
 mod provider_default;
 mod release_report;
 mod sweep;

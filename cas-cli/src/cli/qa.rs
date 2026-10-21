@@ -9,6 +9,8 @@ use super::Cli;
 
 #[derive(Subcommand)]
 pub enum QaCommand {
+    /// Map a diff to journeys and unowned CODEMAP areas
+    Impact(super::qa_impact::ImpactArgs),
     /// Validate the journey registry against tracked files
     Journeys {
         /// Check schema, references and globs without executing specs
@@ -19,6 +21,7 @@ pub enum QaCommand {
 
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
+        QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::Journeys { check: _ } => {
             let git = std::process::Command::new("git")
                 .args(["rev-parse", "--show-toplevel"])

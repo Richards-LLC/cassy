@@ -4,7 +4,7 @@ mod loaded_proof;
 mod proof_claims;
 #[cfg(test)]
 mod loaded_proof_tests;
-mod task_attribution;
+pub(crate) mod task_attribution;
 pub(crate) use task_attribution::squash_receipt_qa_anchor;
 mod evidence_only;
 mod delivery_evolution;

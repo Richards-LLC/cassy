@@ -545,7 +545,7 @@ fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<Stri
 
 /// Reviewable paths from selected task ranges. An empty result is meaningful
 /// when the task only merged history or changed whitespace/deletions.
-pub(super) fn qa_paths(
+pub(crate) fn qa_paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -589,7 +589,7 @@ pub(super) fn qa_paths(
 /// task window and the receipt, so it does not move when the worktree is
 /// rebased, when the branch is merged, or when the gate happens to inspect a
 /// checkout parked on another branch.
-pub(super) fn delivery_base(
+pub(crate) fn delivery_base(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,

@@ -99,6 +99,17 @@ pub fn handle_pre_tool_use(
     handle_pre_tool_use_inner(input, cas_root, None)
 }
 
+/// cas-d95c: the verifier's supported capped command for a task's named tests.
+fn verifier_rust_build_denial(what: &str, cas_root: Option<&Path>) -> String {
+    let root = cas_root.map_or_else(|| "<cas root>".to_string(), |root| root.display().to_string());
+    format!(
+        "🚫 VERIFIER RUST BUILD: `{what}` would build outside the host builder cap and PSI admission. \
+         Run the task's named tests at the verification's bound head through the counted verifier lane: \
+         `cas factory verifier-test --cas-root {root} --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. \
+         A \"Waiting for build admission\" refusal means retry later; it is not a test failure."
+    )
+}
+
 /// Pure admission selection; safe before logging, DB discovery or telemetry.
 pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
     crate::harness_policy::is_worker(input)
@@ -245,6 +256,21 @@ fn handle_pre_tool_use_inner(
                 ),
             ));
         }
+    }
+
+    // cas-d95c: a task-verifier subagent's Rust build runs on the shared host
+    // like a worker's. Plain Cargo there bypassed the builder cap and PSI
+    // admission; send it to the counted verifier lane at the bound head.
+    if tool_name == "Bash"
+        && input.agent_type.as_deref() == Some("task-verifier")
+        && let Some(what) = input
+            .tool_input
+            .as_ref()
+            .and_then(|tool_input| tool_input.get("command"))
+            .and_then(|command| command.as_str())
+            .and_then(|command| worker_command_rust_build(command, Path::new(&input.cwd)))
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &verifier_rust_build_denial(&what, cas_root)));
     }
 
     // ========================================================================
@@ -6313,6 +6339,28 @@ mod workspace_contract_tests {
             tool_input: Some(serde_json::json!({ "command": command })),
             ..Default::default()
         }
+    }
+
+    /// cas-d95c: plain Cargo from the task-verifier subagent goes to the
+    /// counted verifier lane; other Bash from the verifier is untouched.
+    #[test]
+    fn verifier_rust_builds_are_sent_to_the_capped_lane_cas_d95c() {
+        let root = tempfile::tempdir().unwrap();
+        let verifier = |command: &str| HookInput {
+            agent_type: Some("task-verifier".to_string()),
+            ..bash_input(command, root.path())
+        };
+        let output = handle_pre_tool_use_inner(
+            &verifier("cargo nextest run -p cas --lib -E 'test(x)'"),
+            Some(root.path()),
+            None,
+        )
+        .unwrap();
+        let rendered = serde_json::to_string(&output).unwrap();
+        assert!(rendered.contains("deny") && rendered.contains("cas factory verifier-test"), "{rendered}");
+        let output =
+            handle_pre_tool_use_inner(&verifier("git log --oneline -3"), Some(root.path()), None).unwrap();
+        assert!(!serde_json::to_string(&output).unwrap().contains("VERIFIER RUST BUILD"));
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {

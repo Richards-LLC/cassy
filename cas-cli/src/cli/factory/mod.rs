@@ -740,6 +740,18 @@ pub enum FactoryCommands {
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
+    /// Run a task's named tests at a verification's bound head under the
+    /// worker builder cap (task-verifier capped lane, cas-d95c)
+    VerifierTest {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        /// Full commit SHA of the verification's bound head
+        #[arg(long)]
+        head: String,
+        /// `nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`
+        #[arg(last = true, required = true)]
+        cargo_args: Vec<String>,
+    },
     /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
     Doctor,
 
@@ -1159,6 +1171,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 detach: false,
                 cargo_args,
             } => crate::factory_worker_check::execute(cas_root, cargo_args),
+            FactoryCommands::VerifierTest {
+                cas_root,
+                head,
+                cargo_args,
+            } => crate::factory_worker_check::execute_verifier(cas_root, head, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,

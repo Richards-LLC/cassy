@@ -3375,6 +3375,8 @@ mod spawn_base_tests {
         assert_eq!(notices, 1, "one stale tip must not produce eight identical refresh notices");
     }
 
+    fn without_spawn_disk_floor(_repo: &std::path::Path) {}
+
     fn init_repo(dir: &std::path::Path) {
         Command::new("git")
             .args(["init", "-b", "main"])
@@ -3614,6 +3616,7 @@ mod spawn_base_tests {
             assert_eq!(target_root, target_repo);
 
             let worker_path = target_root.join(".cas/worktrees/cross-repo-worker");
+            without_spawn_disk_floor(&target_repo);
             WorkerSpawnPrep {
                 worker_name: "cross-repo-worker".into(),
                 worktree_info: Some(WorktreePrep {
@@ -3836,6 +3839,7 @@ mod spawn_base_tests {
         // And the worktree really lands on epic B's history.
         let worktree_root = repo.join(".cas").join("worktrees");
         let worker_path = worktree_root.join("bravo-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "bravo-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -4306,6 +4310,12 @@ mod spawn_base_tests {
 
         // And the worktree really lands on trunk's history, not the stale focus.
         let worker_path = repo.join(".cas").join("worktrees").join("loner-worker");
+        // Force the fixture to start with a refusing floor regardless of host disk.
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!("[factory]\nspawn_min_free_gib = {}\n", u32::MAX),
+        ).unwrap();
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "loner-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -4470,6 +4480,7 @@ mod spawn_base_tests {
         // End to end: the worker's files come from origin's tip while the
         // recorded parent branch stays the local, mergeable branch name.
         let worker_path = repo.join(".cas").join("worktrees").join("fresh-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "fresh-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -4550,6 +4561,7 @@ mod spawn_base_tests {
         );
 
         let worker_path = repo.join(".cas/worktrees/targeted-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "targeted-worker".into(),
             worktree_info: Some(WorktreePrep {
@@ -4808,6 +4820,7 @@ mod spawn_base_tests {
         assert!(worker_base_mismatch_notice(manager.repo_root(), &worker_base, "epic/stacked").is_none());
 
         let worker_path = worktree_root.join("stacked-worker");
+        without_spawn_disk_floor(&repo);
         let result = WorkerSpawnPrep {
             worker_name: "stacked-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -5173,6 +5186,7 @@ mod spawn_base_tests {
         );
 
         let worker_path = repo.join(".cas/worktrees/refreshed-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "refreshed-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -5282,6 +5296,7 @@ mod spawn_base_tests {
         assert_eq!(head_sha(&repo, "epic/behind"), parent_tip);
 
         let worker_path = repo.join(".cas/worktrees/local-only-refreshed-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "local-only-refreshed-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -5427,6 +5442,7 @@ mod spawn_base_tests {
         );
 
         let worker_path = repo.join(".cas/worktrees/push-rejected-refreshed-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "push-rejected-refreshed-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -5534,6 +5550,7 @@ mod spawn_base_tests {
         );
 
         let worker_path = repo.join(".cas/worktrees/refreshed-outer-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "refreshed-outer-worker".to_string(),
             worktree_info: Some(WorktreePrep {
@@ -5804,6 +5821,7 @@ mod spawn_base_tests {
 
         let worktree_root = repo.join(".cas").join("worktrees");
         let worker_path = worktree_root.join("late-worker");
+        without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "late-worker".to_string(),
             worktree_info: Some(WorktreePrep {

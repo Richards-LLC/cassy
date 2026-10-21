@@ -165,9 +165,10 @@ fn publish_parked_delivery_branch(
     )
 }
 
-/// The declared target eligible for a first-start branch reset. Assignment
-/// passes its proposed final status; start passes the persisted status, so a
-/// batched ownership/status update cannot promise a reset that start will skip.
+/// The declared target eligible for a first-start branch reset at assignment.
+/// Assignment passes its proposed final status, so a batched ownership/status
+/// update cannot promise a reset that start will skip. Resumes with anchors
+/// instead require task attribution in the start-time reconciliation.
 pub(crate) fn initial_factory_branch_reset_target(
     task: &Task,
     status: TaskStatus,
@@ -183,11 +184,13 @@ pub(crate) fn initial_factory_branch_reset_target(
 
 /// Keep a reused worker branch from silently carrying a prior task into a new
 /// target. A branch whose old tip is already reachable from the target is safe
-/// to reset; an unrelated tip is refused with the exact repair command.
+/// to reset; this task's own unmerged work is retained on resume. An unrelated
+/// tip is refused with the first commit whose ownership could not be established.
 fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
     expected_branch: &str,
     target_branch: &str,
+    task_identity: Option<&close_ops::TaskCommitIdentity>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
@@ -202,30 +205,33 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
 
-    // Factory repos commonly carry untracked CAS metadata (for example the
-    // test harness's `.cas/config.toml`). It survives a hard reset, so only
-    // tracked changes make this reconciliation unsafe.
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|error| {
-            format!("Cannot inspect reused factory branch {expected_branch}: {error}")
-        })?;
-    if !status.status.success() {
-        return Err(format!(
-            "Cannot inspect reused factory branch {expected_branch}: git status failed: {}",
-            String::from_utf8_lossy(&status.stderr).trim()
-        ));
-    }
-    if !status.stdout.is_empty() {
-        return Err(format!(
-            "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before rebasing with `git rebase {target_branch}`."
-        ));
-    }
+    // Fresh tasks must not inherit another task's edits; resets must not
+    // discard edits. Proven task continuations may retain their own dirty
+    // tree when no reset is needed. Untracked CAS metadata is ignored.
+    let require_clean_tracked_tree = || -> Result<(), String> {
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|error| {
+                format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+            })?;
+        if !status.status.success() {
+            return Err(format!(
+                "Cannot inspect reused factory branch {expected_branch}: git status failed: {}",
+                String::from_utf8_lossy(&status.stderr).trim()
+            ));
+        }
+        if !status.stdout.is_empty() {
+            return Err(format!(
+                "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before starting."
+            ));
+        }
+        Ok(())
+    };
 
     // cas-21db: another merge can land after assignment or the worker's
-    // manual sync. Resolve the current target here, after the dirty check,
+    // manual sync. Resolve the current target before deciding to reset,
     // using the existing bounded fetch and local-only/offline fallback.
     let target = git.resolve_fresh_base(target_branch).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
@@ -234,11 +240,30 @@ fn reconcile_reused_factory_branch(
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
 
+    // cas-09cf: a matching target alone does not prove this is a resume.
+    // Recorded anchors, or named work already on the target before first
+    // park, distinguish this task's continuation from a fresh assignment.
+    let has_prior_task_work = || {
+        task_identity.is_some_and(|identity| {
+            !identity.known_commits.is_empty()
+                || close_ops::task_attribution::branch_task_claims(
+                    worktree_path,
+                    &factory_tip,
+                    identity,
+                )
+                .is_some_and(|(own, _)| own.is_some())
+        })
+    };
+
     if target_tip == factory_tip {
+        if !has_prior_task_work() {
+            require_clean_tracked_tree()?;
+        }
         return Ok(ReusedFactoryBranchStart::Unchanged);
     }
 
     if git.is_ancestor(&factory_tip, &target_tip) {
+        require_clean_tracked_tree()?;
         git.reset_hard_in_dir(worktree_path, &target_tip)
             .map_err(|error| {
                 format!(
@@ -248,10 +273,87 @@ fn reconcile_reused_factory_branch(
         return Ok(ReusedFactoryBranchStart::Reset);
     }
 
+    // Every off-target commit needs identity, anchor ancestry, or a merge
+    // from the target. Anchor ancestry admits unnamed WIP, but never explicit
+    // foreign-task claims. Oldest-first diagnostics point to the obstruction
+    // rather than a later own tip or the bookkeeping merge above it.
+    let mut unattributed_commit = factory_tip.clone();
+    let mut has_task_commits = false;
+    let carries_only_task_commits = task_identity
+        .and_then(|identity| {
+            let history = crate::git_evidence::git_text(
+                worktree_path,
+                &[
+                    "log",
+                    "--reverse",
+                    "--topo-order",
+                    "--max-count=201",
+                    "--format=%H %P%x1f%B%x1e",
+                    &factory_tip,
+                    &format!("^{target_tip}"),
+                    "--",
+                ],
+            )?;
+            let records: Vec<_> = history
+                .split('\u{1e}')
+                .map(str::trim)
+                .filter(|record| !record.is_empty())
+                .collect();
+            if records.is_empty() || records.len() > 200 {
+                unattributed_commit = format!(
+                    "{factory_tip} (task history is empty or exceeds the 200-commit attribution limit)"
+                );
+                return Some(false);
+            }
+            let anchors: Vec<_> = identity
+                .known_commits
+                .iter()
+                .filter(|anchor| git.is_ancestor(anchor, &factory_tip))
+                .collect();
+            for record in records {
+                let (metadata, message) = record.split_once('\u{1f}')?;
+                let mut metadata = metadata.split_whitespace();
+                let sha = metadata.next()?;
+                let parents: Vec<_> = metadata.collect();
+                let subject = message.trim().lines().next().unwrap_or("");
+                let target_merge = parents.len() > 1
+                    && parents[1..]
+                        .iter()
+                        .all(|parent| git.is_ancestor(parent, &target_tip));
+                // Target-sync subjects often name the target epic. Parent
+                // provenance intentionally wins over that subject here; this
+                // also trusts manual merge resolutions as synchronization.
+                // Every off-target ancestor still faces the ownership check.
+                let task_owned =
+                    !close_ops::message_claims_other_task(subject, identity.task_id.as_deref())
+                        && (identity
+                            .task_id
+                            .as_deref()
+                            .is_some_and(|id| close_ops::message_references_task(message, id))
+                            || close_ops::commit_is_task_attributable(worktree_path, sha, identity)
+                            || anchors.iter().any(|anchor| git.is_ancestor(sha, anchor)));
+                has_task_commits |= task_owned;
+                if !target_merge && !task_owned {
+                    unattributed_commit = format!("{sha} ({subject})");
+                    return Some(false);
+                }
+            }
+            Some(true)
+        })
+        .unwrap_or(false);
+    if carries_only_task_commits {
+        // A bare target-sync merge is not task-owned work by itself.
+        if !has_task_commits && !has_prior_task_work() {
+            require_clean_tracked_tree()?;
+        }
+        return Ok(ReusedFactoryBranchStart::Unchanged);
+    }
+
     // A tip parked for merge is someone else's review, not stray work: keep
     // it under a local name and start the new task from its own target.
     // Nothing is pushed, so origin keeps the parked tip for its reviewer.
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
             .args(["branch", "-f", &keep, &factory_tip])
@@ -280,7 +382,7 @@ fn reconcile_reused_factory_branch(
     }
 
     Err(format!(
-        "Cannot start task: {expected_branch} carries commits not on target base `{target_branch}`. Rebase it before starting with `git rebase {target_branch}`."
+        "Cannot start task: {expected_branch} carries unattributed commit {unattributed_commit} outside target base `{target_branch}`. Confirm its ownership with the supervisor; restore this task's delivery attribution or preserve foreign work on its own branch before resuming."
     ))
 }
 
@@ -326,7 +428,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -337,7 +439,7 @@ mod reused_factory_branch_tests {
     }
 
     #[test]
-    fn unrelated_prior_delivery_is_refused_with_exact_rebase_command() {
+    fn unrelated_prior_delivery_is_refused_with_commit_identity() {
         let repo = repo();
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
@@ -350,10 +452,11 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
-        assert!(error.contains("git rebase main"), "{error}");
+        assert!(error.contains(&worker_tip), "{error}");
+        assert!(!error.contains("git rebase"), "{error}");
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
     }
 
@@ -363,7 +466,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -382,7 +485,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
@@ -404,7 +507,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -441,7 +544,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -1948,8 +2051,11 @@ impl CasCore {
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
 
+        // Anchors identify prior work; they must not bypass the foreign-commit
+        // check when an Open task resumes after review.
         let reused_factory_branch_reset = if is_worker
-            && initial_factory_branch_reset_target(&task, task.status).is_some()
+            && task.status == TaskStatus::Open
+            && task.deliverables.work_target.is_some()
         {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
@@ -1986,6 +2092,7 @@ impl CasCore {
                         worker_checkout,
                         &worker_branch,
                         &target_branch,
+                        Some(&close_ops::task_commit_identity(&task, None)),
                         |tip| {
                             crate::mcp::tools::parked_delivery_at_tip(
                                 task_store.as_ref(),

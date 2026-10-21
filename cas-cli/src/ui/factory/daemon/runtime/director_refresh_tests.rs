@@ -23,7 +23,14 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     let mut shutdown_delivered = false;
     let mut stale_fallback_suppressed = false;
-    for scenario in ["merged", "positive", "missing", "shutdown", "merged_fallback"] {
+    for scenario in [
+        "merged",
+        "positive",
+        "superseded",
+        "missing",
+        "shutdown",
+        "merged_fallback",
+    ] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         // A dropped incident must count as zero rows, not an uninitialized schema.
@@ -31,7 +38,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         fixture
             .app
             .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
-        let (_, prompts, _) = fixture
+        let (_, mut prompts, _) = fixture
             .app
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
         assert_eq!(prompts.len(), 1);
@@ -42,7 +49,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 .contains("CI completed successfully for delivery")
         );
         assert!(prompts[0].retract_task.is_some());
-        let verdicts = fixture.app.deliverability_request().read(None, &prompts);
+        let verdicts = fixture.app.deliverability_request().read(None, &mut prompts);
         assert_eq!(
             verdicts,
             vec![true],
@@ -58,6 +65,37 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let inbox = teams.teams_dir().join("inboxes/supervisor.json");
         daemon.teams = Some(teams);
 
+        if scenario == "superseded" {
+            let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = store.get("cas-9efb-test").unwrap();
+            task.deliverables.decline_factory_branch_anchor();
+            task.status = cas_types::TaskStatus::Open;
+            store.update(&task).unwrap();
+        }
+        // Exercise the real batch job: relabelled prompts must survive its handoff.
+        let mut refresh = DirectorRefresh::new();
+        refresh
+            .start_deliverability_check(
+                &daemon.app,
+                &mut daemon.queue_jobs,
+                prompts.clone(),
+                vec![fixture.event.clone()],
+                Instant::now(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let batch = loop {
+            let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
+            if let Some(batch) = batches.pop() {
+                break batch;
+            }
+            assert!(Instant::now() < deadline, "batch recheck did not complete");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        if scenario == "superseded" {
+            // pin: this failure identifies the missing superseded-body batch handoff.
+            assert!(batch.prompts[0].1, "superseded prompt must survive the batch handoff");
+        }
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.join("fallback.txt");
@@ -104,15 +142,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             fixture.advance_target(true);
         }
         daemon
-            .inject_rechecked_batch(
-                super::super::factory_jobs::DeliverabilityBatch {
-                    prompts: prompts.into_iter().zip(verdicts).collect(),
-                    assignments: vec![crate::ui::factory::app::AssignmentRead::NotAssignment],
-                    events: vec![fixture.event.clone()],
-                    refresh_started: Instant::now(),
-                },
-                super::super::store_worker::global(),
-            )
+            .inject_rechecked_batch(batch, super::super::store_worker::global())
             .await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while daemon.queue_jobs.external_completions_ready() == 0 {
@@ -122,21 +152,31 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let mut refresh = DirectorRefresh::new();
         if scenario == "merged_fallback" {
             // The failed native write already finished, but the PTY fallback has not run.
             fixture.advance_target(true);
         }
         if scenario != "shutdown" {
-            daemon.director_refresh_pass(
-                &mut refresh, false, super::super::store_worker::global(),
-                &super::super::loop_watchdog::LoopProgress::new(),
-            ).await;
+            daemon
+                .director_refresh_pass(
+                    &mut refresh,
+                    false,
+                    super::super::store_worker::global(),
+                    &super::super::loop_watchdog::LoopProgress::new(),
+                )
+                .await;
         }
-        daemon.drain_director_deliveries_for_shutdown(
-            &mut refresh, super::super::store_worker::global(), Duration::from_secs(10),
-        ).await;
-        assert!(daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10)));
+        daemon
+            .drain_director_deliveries_for_shutdown(
+                &mut refresh,
+                super::super::store_worker::global(),
+                Duration::from_secs(10),
+            )
+            .await;
+        assert!(daemon.finish_shutdown_writes(
+            super::super::store_worker::global(),
+            Duration::from_secs(10)
+        ));
         let rows: Vec<super::super::teams::InboxMessage> =
             serde_json::from_str(&std::fs::read_to_string(inbox).unwrap_or_else(|_| "[]".into()))
                 .unwrap();
@@ -145,6 +185,17 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 rows.is_empty(),
                 "a completed merge must suppress the stale director teammate message: {rows:?}"
             );
+        } else if scenario == "superseded" {
+            assert_eq!(
+                rows.len(),
+                1,
+                "a superseded delivery must reach the teammate inbox"
+            );
+            assert_eq!(rows[0].retract_task, expected_task);
+            // pin: request_changes must reach the supervisor as superseded, without a merge instruction.
+            assert!(rows[0].text.contains("Superseded delivery"));
+            // pin: this heading asks the supervisor to merge a superseded tip.
+            assert!(!rows[0].text.contains("MERGE REQUIRED"));
         } else if scenario == "positive" {
             assert_eq!(
                 rows.len(),
@@ -162,11 +213,16 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             }
             let marker = "fallback-check-finished";
             daemon.app.mux.inject(&name, marker).await.unwrap();
-            while !std::fs::read_to_string(&capture).unwrap_or_default().contains(marker) && Instant::now() < deadline {
+            while !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains(marker)
+                && Instant::now() < deadline
+            {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             let written = std::fs::read_to_string(&capture).unwrap_or_default();
-            stale_fallback_suppressed = written.contains(marker) && !written.contains(&expected_text);
+            stale_fallback_suppressed =
+                written.contains(marker) && !written.contains(&expected_text);
         } else {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !std::fs::read_to_string(&capture)
@@ -176,23 +232,37 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            let delivered = std::fs::read_to_string(capture).unwrap_or_default().contains(&expected_text);
+            let delivered = std::fs::read_to_string(capture)
+                .unwrap_or_default()
+                .contains(&expected_text);
             if scenario == "shutdown" {
                 shutdown_delivered = delivered;
             } else {
-                assert!(delivered, "the genuine alert must fall back to the actual supervisor PTY");
+                assert!(
+                    delivered,
+                    "the genuine alert must fall back to the actual supervisor PTY"
+                );
             }
             let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
             let incidents: i64 = db.query_row("SELECT COUNT(*) FROM prompt_queue WHERE source = 'teams-recovery' AND target = 'operator'", [], |row| row.get(0)).unwrap();
             if scenario == "shutdown" {
                 shutdown_delivered &= incidents == 1;
             } else {
-                assert_eq!(incidents, 1, "missing team files must publish one durable incident");
+                assert_eq!(
+                    incidents, 1,
+                    "missing team files must publish one durable incident"
+                );
             }
         }
     }
-    assert!(shutdown_delivered, "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})");
-    assert!(stale_fallback_suppressed, "a merge after the native error must suppress the PTY fallback");
+    assert!(
+        shutdown_delivered,
+        "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})"
+    );
+    assert!(
+        stale_fallback_suppressed,
+        "a merge after the native error must suppress the PTY fallback"
+    );
 }
 
 #[tokio::test]
@@ -383,6 +453,7 @@ async fn flv2_retraction_reads_fresh() {
     store.update(&task_b).unwrap();
 
     let idle_alert = |worker: &str| crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: format!("{worker} is idle"),
         stall_nudge_task: None,
@@ -495,6 +566,7 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let alert = crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -726,6 +798,7 @@ async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
         .with_read_gate(Arc::clone(&gate))
         .with_timeout(Duration::ZERO);
     let alert = crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -950,6 +1023,7 @@ async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let prompt = |text: &str, drop_if_worker_assigned: Option<&str>| crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: text.into(),
         stall_nudge_task: None,

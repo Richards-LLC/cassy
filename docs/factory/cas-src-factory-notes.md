@@ -125,24 +125,29 @@ checkout from this repository.
 
 ## For `cas-qa-craft` and `cas-supervisor/references/reporting-and-routing.md` — upkeep stages in cas-src
 
-cas-src runs every upkeep gate at `enforce`. The first `cas update` on the
-release that ships these keys gives existing projects, cas-src included, a
-one-release `observe` window. After that update, pin cas-src from the main
-checkout:
+cas-src runs every upkeep gate at `enforce`. Its tracked `docs/qa/journeys.yaml`
+declares `enforce: enforce`, authoritative over local `qa.registry.enforce`.
+Each delivery uses the stricter policy at base and head, so it cannot relax its
+own gate; a relaxed header takes effect for subsequent deliveries.
+The local registry setting applies only when the header has no policy. The first
+`cas update` that ships upkeep keys gives existing projects a one-release
+`observe` window; the tracked registry policy takes precedence. Pin the remaining
+local stages from the main checkout:
 
 ```bash
-cas config set qa.registry.enforce enforce
 cas config set upkeep.codemap enforce
 cas config set upkeep.product_overview enforce
-cas config get qa.registry.enforce   # enforce
+cas qa journeys --check
 ```
 
 Explicit values survive later updates and clear the adoption markers. Pin
 only with a binary that knows these keys: an older `cas config set` rewrites
 the config without them.
 
-cas-src keeps its Markdown catalog (`docs/qa/journeys.md` plus
+cas-src keeps its Markdown narrative (`docs/qa/journeys.md` plus
 `scripts/journeys-for-diff.py`): its selector also matches static imports and
-CSS selectors, which globs cannot. Impact reads it through the legacy-catalog
-adapter. With no `docs/qa/journeys.yaml`, G1–G3 and G8 stay off here while G5
-and G6 enforce. Converting the catalog to YAML is a separate task.
+CSS selectors, which globs cannot. The paired YAML registry supplies curated
+owners, goals, steps, specs and invariants for HUB-J1–HUB-J21. Its opt-in
+`selection: legacy_catalog` preserves semantic selection while G1–G3 and G8
+enforce using registry metadata. The unmeasured traffic shares remain explicit
+debt. Keep both descriptions aligned when adding or changing a journey.

@@ -855,7 +855,7 @@ impl DirectorRefresh {
         &mut self,
         app: &FactoryApp,
         jobs: &mut QueueJobs,
-        prompts: Vec<Prompt>,
+        mut prompts: Vec<Prompt>,
         events: Vec<DirectorEvent>,
         refresh_started: Instant,
     ) -> Result<(), Vec<Prompt>> {
@@ -876,7 +876,7 @@ impl DirectorRefresh {
             factory_jobs::deliverability_spec(generation),
             move |stores: Option<&DirectorStores>| {
                 hook.run("prompt re-check");
-                let verdicts = request.read(stores, &prompts);
+                let verdicts = request.read(stores, &mut prompts);
                 // cas-4491f: assignment wakes read their task here too.
                 let assignments = request.read_assignments(stores, &prompts);
                 Box::new(FactoryJobOutput::Deliverability(DeliverabilityBatch {

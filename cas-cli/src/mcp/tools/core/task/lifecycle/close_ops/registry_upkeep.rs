@@ -29,7 +29,19 @@ pub(super) fn at_park(
     };
     let qa = config.qa();
     if qa.registry.enforce == RegistryEnforcement::Off {
-        return Ok(vec![]);
+        // No input at the delivery base means no gate to run. Avoid path
+        // attribution and its warnings for projects with local QA disabled.
+        let base = snapshot_range(task, repo, target, window, receipt)
+            .map(|(base, _)| base)
+            .unwrap_or_else(|_| freshest_target_ref(repo, target));
+        if git(
+            repo,
+            &["cat-file", "-e", &format!("{base}:{}", qa.registry.path)],
+        )
+        .is_err()
+        {
+            return Ok(vec![]);
+        }
     }
     let (base, head, paths) = match delivery_snapshot(task, repo, target, window, receipt) {
         Ok(snapshot) => snapshot,
@@ -54,9 +66,23 @@ pub(super) fn delivery_snapshot(
     window: Option<&TaskCommitReceiptWindow>,
     receipt: Option<&str>,
 ) -> Result<(String, String, Option<Vec<String>>), String> {
+    let (base, head) = snapshot_range(task, repo, target, window, receipt)?;
+    let paths = window.and_then(|w| task_attribution::paths(repo, target, w, Some(&head)));
+    if window.is_some() && paths.is_none() {
+        return Err("UPKEEP WARNING: attributed delivery paths unavailable (not blocking)".into());
+    }
+    Ok((base, head, paths))
+}
+
+fn snapshot_range(
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+    receipt: Option<&str>,
+) -> Result<(String, String), String> {
     let head = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
         .ok_or("UPKEEP WARNING: delivery head unavailable (not blocking)")?;
-    let paths = window.and_then(|w| task_attribution::paths(repo, target, w, Some(&head)));
     let base = if let Some(w) = window {
         task_attribution::delivery_base(repo, target, w, Some(&head))
     } else {
@@ -64,10 +90,7 @@ pub(super) fn delivery_snapshot(
             .map(|(base, _)| base)
     }
     .ok_or("UPKEEP WARNING: attributed delivery base unavailable (not blocking)")?;
-    if window.is_some() && paths.is_none() {
-        return Err("UPKEEP WARNING: attributed delivery paths unavailable (not blocking)".into());
-    }
-    Ok((base, head, paths))
+    Ok((base, head))
 }
 
 pub(super) fn warning(
@@ -262,10 +285,29 @@ fn check(
     paths: Option<&[String]>,
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    let mut qa = qa.clone();
+    // A delivery cannot relax its own gate. At each revision the tracked
+    // header wins, with local configuration as fallback only when absent.
+    if let Some(stage) = [base, head]
+        .into_iter()
+        .filter_map(|revision| {
+            git(repo, &["show", &format!("{revision}:{}", qa.registry.path)]).ok()
+        })
+        .filter_map(|text| crate::qa_registry::parse(&text).ok())
+        .map(|registry| registry.enforce.unwrap_or(qa.registry.enforce))
+        .max_by_key(|stage| match stage {
+            RegistryEnforcement::Off => 0,
+            RegistryEnforcement::Observe => 1,
+            RegistryEnforcement::Enforce => 2,
+            RegistryEnforcement::Strict => 3,
+        })
+    {
+        qa.registry.enforce = stage;
+    }
     if qa.registry.enforce == RegistryEnforcement::Off {
         return Ok(vec![]);
     }
-    let result = inspect(task, repo, qa, base, head, paths);
+    let result = inspect(task, repo, &qa, base, head, paths);
     match result {
         Ok((findings, warnings)) => finish(
             store,
@@ -388,11 +430,7 @@ fn inspect(
             problem_lines(&caused)
         )));
     }
-    let codemap = read(repo, head, ".claude/CODEMAP.md", &after_paths)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let impact = crate::qa_impact::impact_for_changes(Some(&registry), qa, &changes, &codemap);
+    let impact = crate::qa_impact::analyze(repo, qa, &changes, Some(base), Some(head))?;
     let unowned: Vec<_> = impact
         .unowned
         .iter()

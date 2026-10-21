@@ -211,6 +211,8 @@ impl CasError {
                 "The embedding model dimension has changed.\n\
                  Delete vectors.hnsw and vectors.meta.json files to reset.",
             ),
+            CasError::Parse(message)
+                if message.starts_with("hub.transport_mode must be one of:") => None,
             CasError::Parse(_) => Some(
                 "Could not parse the input. Check the format and try again.\n\
                  Use '--help' to see valid options for the command.",

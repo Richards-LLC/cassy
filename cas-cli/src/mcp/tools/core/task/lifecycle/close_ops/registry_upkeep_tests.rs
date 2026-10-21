@@ -303,6 +303,55 @@ fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
     f.qa.registry.enforce = RegistryEnforcement::Off;
     f.run(&head).unwrap();
     assert_eq!(f.store.get(&f.task.id).unwrap().notes, notes);
+
+    // A tracked policy is authoritative, including over a local off shortcut.
+    write(
+        f.repo.path(),
+        crate::qa_registry::DEFAULT_PATH,
+        &format!("enforce: enforce\n{YAML}"),
+    );
+    let enforced = commit(f.repo.path());
+    assert!(
+        f.run(&enforced)
+            .unwrap_err()
+            .contains("UNOWNED USER-FACING FILE")
+    );
+    // Resolve at the delivered head; a different checkout policy cannot relax it.
+    write(
+        f.repo.path(),
+        crate::qa_registry::DEFAULT_PATH,
+        &format!("enforce: off\n{YAML}"),
+    );
+    assert!(
+        f.run(&enforced)
+            .unwrap_err()
+            .contains("UNOWNED USER-FACING FILE")
+    );
+    f.base = enforced;
+    write(f.repo.path(), "src/pages/relaxed.ts", "new entry");
+    let disabled = commit(f.repo.path());
+    // A delivery cannot relax its own gate: base enforce beats head off.
+    assert!(
+        f.run(&disabled)
+            .unwrap_err()
+            .contains("UNOWNED USER-FACING FILE")
+    );
+    // The relaxed header takes effect only for a later delivery.
+    f.base = disabled;
+    write(f.repo.path(), "src/pages/later.ts", "later entry");
+    let later = commit(f.repo.path());
+    f.qa.registry.enforce = RegistryEnforcement::Strict;
+    f.run(&later).unwrap();
+
+    let mut absent = Fixture::new(YAML);
+    git(
+        absent.repo.path(),
+        &["rm", crate::qa_registry::DEFAULT_PATH],
+    );
+    absent.base = commit(absent.repo.path());
+    absent.qa.registry.enforce = RegistryEnforcement::Off;
+    let same_tip = absent.base.clone();
+    assert!(absent.run(&same_tip).unwrap().is_empty());
 }
 
 #[test]

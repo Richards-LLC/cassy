@@ -11,7 +11,8 @@ mod hub_fixture;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -171,6 +172,294 @@ fn hub_record_proves_its_own_session_and_cli_launcher() {
         stop.status.success(),
         "hub stop failed: {}",
         String::from_utf8_lossy(&stop.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
+    let home = private_home();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let occupied_listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port for failed replacement");
+    let occupied_port = occupied_listener
+        .local_addr()
+        .expect("occupied listener address")
+        .port();
+    let initial = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "start",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("start hub before restart");
+    assert!(
+        initial.status.success(),
+        "hub start failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).expect("initial hub JSON");
+
+    let restart = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "restart",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("restart detached hub");
+    assert!(
+        restart.status.success(),
+        "hub restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+
+    // serde_json::from_slice rejects trailing JSON, so this also proves that
+    // restart writes exactly one document to stdout.
+    let receipt: Value =
+        serde_json::from_slice(&restart.stdout).expect("one hub restart JSON value");
+    assert_eq!(receipt["stop"]["stopped"], true, "{receipt}");
+    assert_eq!(receipt["stop"]["pid"], initial["pid"], "{receipt}");
+    assert_eq!(receipt["start"]["version"], initial["version"], "{receipt}");
+    assert_ne!(receipt["start"]["pid"], initial["pid"], "{receipt}");
+
+    let failed_restart = cas_command(home.path(), &path)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "restart",
+            "--port",
+            &occupied_port.to_string(),
+        ])
+        .output()
+        .expect("restart into an occupied port");
+    assert!(
+        !failed_restart.status.success(),
+        "restart unexpectedly succeeded on occupied port {}",
+        occupied_port
+    );
+    let failure: Value = serde_json::from_slice(&failed_restart.stdout)
+        .expect("one JSON error value when replacement start fails");
+    assert_eq!(failure["status"], "error", "{failure}");
+    assert_eq!(failure["stop"]["stopped"], true, "{failure}");
+    assert_eq!(failure["stop"]["pid"], receipt["start"]["pid"], "{failure}");
+    assert_eq!(failure["stop"]["already_satisfied"], false, "{failure}");
+    let message = failure["message"].as_str().expect("failure message");
+    assert!(
+        String::from_utf8_lossy(&failed_restart.stderr).contains(message),
+        "human diagnostic must remain on stderr: stdout={} stderr={}",
+        String::from_utf8_lossy(&failed_restart.stdout),
+        String::from_utf8_lossy(&failed_restart.stderr),
+    );
+
+    let expected_stop_keys = [
+        "already_satisfied",
+        "pid",
+        "stopped",
+        "tailscale_serve_removed",
+        "tailscale_warning",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    for stop in [&receipt["stop"], &failure["stop"]] {
+        let keys = stop
+            .as_object()
+            .expect("restart stop object")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(keys, expected_stop_keys, "{stop}");
+    }
+
+    let help = cas_command(home.path(), &path)
+        .args(["hub", "restart", "--help"])
+        .output()
+        .expect("restart help");
+    assert!(help.status.success());
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    let normalized_help = help_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized_help.contains("Keep this launch loopback-only (overrides hub.transport_mode for this launch)"),
+        "loopback flag help should describe its transport policy override: {help_text}"
+    );
+    assert!(
+        help_text.to_ascii_lowercase().contains("detached restart"),
+        "restart JSON help must scope its response shape to detached hubs: {help_text}"
+    );
+    let restart_help_lines = help_text
+        .lines()
+        .filter(|line| {
+            line.starts_with("Detached restart:")
+                || line.starts_with("Stop keys:")
+                || line.starts_with("Stop also has")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restart_help_lines.len(),
+        3,
+        "restart help should render its three concise contract lines: {help_text}"
+    );
+    for line in restart_help_lines {
+        assert!(
+            line.chars().count() <= 80,
+            "restart help line exceeds 80 cells: {} ({})",
+            line.chars().count(),
+            line
+        );
+    }
+
+    drop(occupied_listener);
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop restarted hub");
+    assert!(
+        stop.status.success(),
+        "hub stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+
+    // The existing debug-only lock-release barrier keeps the old hub's lock
+    // held after its record disappears. Race two actual restart commands in
+    // that widened window until one observes the concurrent winner.
+    let max_race_attempts = 12;
+    let mut satisfied_attempt = None;
+    for attempt in 1..=max_race_attempts {
+        let race_home = private_home();
+        let barrier = race_home.path().join("restart-race-barrier");
+        std::fs::create_dir_all(&barrier).expect("create restart race barrier");
+        let initial = cas_command(race_home.path(), &path)
+            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+            .args([
+                "--json",
+                "hub",
+                "--no-tailscale-serve",
+                "start",
+                "--port",
+                "0",
+            ])
+            .output()
+            .expect("start hub for concurrent restart race");
+        assert!(
+            initial.status.success(),
+            "race attempt {attempt} hub start failed: {}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
+
+        let mut first_restart = cas_command(race_home.path(), &path);
+        first_restart
+            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+            .args([
+                "--json",
+                "hub",
+                "--no-tailscale-serve",
+                "restart",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let first = first_restart.spawn().expect("spawn first restart racer");
+
+        let marker = barrier.join("record-removed-lock-held");
+        let marker_deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < marker_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !marker.exists() {
+            let _ = std::fs::write(barrier.join("release"), b"release\n");
+            let _ = first.wait_with_output();
+            panic!("race attempt {attempt} old hub did not reach the release barrier");
+        }
+
+        let mut second_restart = cas_command(race_home.path(), &path);
+        second_restart
+            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+            .args([
+                "--json",
+                "hub",
+                "--no-tailscale-serve",
+                "restart",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let second = second_restart.spawn().expect("spawn second restart racer");
+        std::thread::sleep(Duration::from_millis(250));
+        std::fs::write(barrier.join("release"), b"release\n")
+            .expect("release old hub lock barrier");
+        let outputs = [
+            first
+                .wait_with_output()
+                .expect("wait for first restart racer"),
+            second
+                .wait_with_output()
+                .expect("wait for second restart racer"),
+        ];
+        let mut observed = false;
+        for output in &outputs {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "race attempt {attempt} did not emit one JSON value: {error}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+            let stop = value["stop"].as_object().expect("restart stop receipt");
+            let keys = stop
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(keys, expected_stop_keys, "race attempt {attempt}: {value}");
+            if output.status.success() {
+                assert!(
+                    value["start"].is_object(),
+                    "race attempt {attempt}: {value}"
+                );
+            } else {
+                assert_eq!(value["status"], "error", "race attempt {attempt}: {value}");
+            }
+            if stop["already_satisfied"] == true {
+                assert_eq!(stop["stopped"], false, "race attempt {attempt}: {value}");
+                assert!(stop["pid"].is_null(), "race attempt {attempt}: {value}");
+                assert!(
+                    stop["tailscale_serve_removed"].is_null(),
+                    "race attempt {attempt}: {value}"
+                );
+                assert!(
+                    stop["tailscale_warning"].is_null(),
+                    "race attempt {attempt}: {value}"
+                );
+                observed = true;
+            }
+        }
+        let cleanup = cas_command(race_home.path(), &path)
+            .args(["--json", "hub", "stop"])
+            .output()
+            .expect("stop concurrent restart fixture");
+        assert!(
+            cleanup.status.success(),
+            "race attempt {attempt} cleanup failed: {}",
+            String::from_utf8_lossy(&cleanup.stderr)
+        );
+        if observed {
+            satisfied_attempt = Some(attempt);
+            break;
+        }
+    }
+    assert!(
+        satisfied_attempt.is_some(),
+        "two concurrent restarts did not exercise already_satisfied in {max_race_attempts} attempts"
     );
 }
 

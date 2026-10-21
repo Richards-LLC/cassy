@@ -3,10 +3,11 @@ use std::path::Path;
 use clap::Subcommand;
 
 use crate::hooks::handlers::handlers_events::project_overview::{
-    check_freshness, clear_pending, ProjectOverviewPending, ProjectOverviewStaleness, DOC_PATH,
+    check_freshness_at, clear_pending, ProjectOverviewPending, ProjectOverviewStaleness, DOC_PATH,
 };
 
 use super::Cli;
+use crate::hooks::handlers::handlers_events::docs_freshness::Measurement;
 
 #[derive(Subcommand)]
 pub enum ProjectOverviewCommands {
@@ -26,7 +27,7 @@ pub fn execute(
     cas_root: &Path,
 ) -> anyhow::Result<()> {
     match cmd {
-        ProjectOverviewCommands::Status => execute_status(cas_root),
+        ProjectOverviewCommands::Status => execute_status(&Measurement::at(&std::env::current_dir()?, cas_root)),
         ProjectOverviewCommands::Pending => execute_pending(cas_root),
         ProjectOverviewCommands::Clear => execute_clear(cas_root),
     }
@@ -38,27 +39,19 @@ fn project_root_from(cas_root: &Path) -> anyhow::Result<&Path> {
         .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from Cassy directory"))
 }
 
-fn execute_status(cas_root: &Path) -> anyhow::Result<()> {
-    let project_root = project_root_from(cas_root)?;
+fn execute_status(measurement: &Measurement) -> anyhow::Result<()> {
+    let project_root = &measurement.root;
     let doc_path = project_root.join(DOC_PATH);
-
-    if !doc_path.exists() {
-        println!("PRODUCT_OVERVIEW.md: not found");
-        println!("  Run the /project-overview skill to generate one.");
-        return Ok(());
-    }
-
-    let last_updated = get_doc_last_updated(project_root, &doc_path);
     println!("PRODUCT_OVERVIEW.md: {}", doc_path.display());
+    println!("  Evaluated ref: {}", measurement.reference);
+    let last_updated = measurement.last_updated(DOC_PATH)
+        .unwrap_or_else(|| get_doc_last_updated(project_root, &doc_path));
     println!("  Last updated: {last_updated}");
-
-    match check_freshness(project_root, None)? {
-        None | Some(ProjectOverviewStaleness::Missing) => {
-            // Missing is unreachable here — we already returned above for the
-            // !doc_path.exists() case, and check_freshness only produces
-            // Missing via the same predicate. Treat as up-to-date if we get
-            // here (doc existed between both probes).
-            println!("  Status: up to date");
+    match check_freshness_at(measurement)? {
+        None => println!("  Status: up to date"),
+        Some(ProjectOverviewStaleness::Missing) => {
+            println!("  Status: not found");
+            println!("  Run the /project-overview skill to generate one.");
         }
         Some(ref s @ ProjectOverviewStaleness::Stale { total_changes, .. })
         | Some(ref s @ ProjectOverviewStaleness::SignificantlyStale { total_changes, .. }) => {
@@ -206,7 +199,7 @@ mod tests {
         let cas_root = make_cas_root(&project);
 
         // Must not error when doc is absent.
-        execute_status(&cas_root).unwrap();
+        execute_status(&Measurement::at(&project, &cas_root)).unwrap();
 
         let _ = std::fs::remove_dir_all(&project);
     }
@@ -286,7 +279,7 @@ mod tests {
         std::fs::write(project.join(".cas").join(PENDING_FILE), jsonl).unwrap();
 
         // Must not error and must flow through the stale branch.
-        execute_status(&cas_root).unwrap();
+        execute_status(&Measurement::at(&project, &cas_root)).unwrap();
 
         let _ = std::fs::remove_dir_all(&project);
     }

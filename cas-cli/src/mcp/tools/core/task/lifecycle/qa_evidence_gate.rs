@@ -319,10 +319,17 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     }
     // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
     let batch_defer = batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
+    // Optional citations alone do not upgrade None/Ledger proof requirements.
+    // A declared comparison still applies when batch approval replaces a bundle.
+    let pair_coverage = if tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some() {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx)
+    } else {
+        Ok(false)
+    };
     // A supervisor waiver covers implementer evidence at this exact delivered
     // commit, including bundles (GH #1199). Independent QA PASS and ancestor
     // waivers do not do so; skip/focus markers still run below.
-    let waiver = if !matches!(tier, EvidenceTier::None) {
+    let waiver = if tier != EvidenceTier::None || !matches!(&pair_coverage, Ok(false)) {
         cas_store::satisfying_qa_passes(cas_root, &task.id)
             .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
             .into_iter()
@@ -330,6 +337,14 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    // Batch deferral/approval can replace full proof, but cannot silently drop
+    // cells from a declared comparison. Only the authenticated exact-tip waiver
+    // above (or the close handler's recorded supervisor override) waives it.
+    if waiver.is_none() {
+        pair_coverage.map_err(|refusal| {
+            format!("QA EVIDENCE REJECTED: {}. Next: {}", refusal.problem, refusal.command)
+        })?;
+    }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
         if waiver.is_some() || batch_receipt.is_some() || batch_defer || covering_pass.is_some() {
@@ -355,7 +370,11 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")));
     }
     if let Some(waiver) = waiver {
-        let evidence = if matches!(tier, EvidenceTier::Bundle) { "bundle" } else { "ledger" };
+        let evidence = match tier {
+            EvidenceTier::Bundle => "bundle",
+            EvidenceTier::Ledger { .. } => "ledger",
+            EvidenceTier::None => "pair coverage",
+        };
         pass.notes.push(format!(
             "QA evidence {evidence} waived: head={} waiver={} supervisor={} reason={}",
             head,

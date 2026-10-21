@@ -349,80 +349,27 @@ pub fn check_codemap_freshness(cas_root: &Path) -> Option<CodemapStaleness> {
     evaluate_codemap_freshness(cas_root)?.staleness
 }
 
-/// Evaluate CODEMAP freshness against the canonical remote default branch and
-/// the current checkout. A fresh result on either ref wins; otherwise the
-/// least-stale result is returned.
-///
-/// The hook-facing [`check_codemap_freshness`] wrapper preserves the historical
-/// `Option<CodemapStaleness>` API, while CLI status uses this richer result to
-/// name the ref that was evaluated.
+/// Evaluate the caller's worktree against its task/project integration ref.
 pub fn evaluate_codemap_freshness(cas_root: &Path) -> Option<CodemapFreshnessEvaluation> {
-    let project_root = cas_root.parent()?;
-    let codemap_path = project_root.join(".claude/CODEMAP.md");
+    if cas_root.parent().is_none() { return None; }
+    evaluate_codemap_at(&super::docs_freshness::Measurement::for_store(cas_root))
+}
 
-    let default_branch = crate::worktree::git::GitOperations::new(project_root.to_path_buf())
-        .detect_default_branch();
-    let remote_default = format!("origin/{default_branch}");
-    let mut refs = Vec::new();
-    if git_ref_exists(project_root, &remote_default) {
-        refs.push(remote_default);
-    } else if git_ref_exists(project_root, &default_branch) {
-        refs.push(default_branch);
-    }
-    refs.push("HEAD".to_string());
-    refs.dedup();
-
-    let mut best_stale: Option<(usize, CodemapFreshnessEvaluation)> = None;
-    let mut any_codemap = codemap_path.exists();
-    for evaluation_ref in refs {
-        let Some(codemap_commit) = get_codemap_last_commit(project_root, &evaluation_ref) else {
-            continue;
+pub(crate) fn evaluate_codemap_at(
+    measurement: &super::docs_freshness::Measurement,
+) -> Option<CodemapFreshnessEvaluation> {
+    let root = &measurement.root;
+    let reference = &measurement.reference;
+    let staleness = if measurement.read(".claude/CODEMAP.md").is_none() {
+        Some(CodemapStaleness::Missing)
+    } else {
+        let changes = match get_codemap_last_commit(root, reference) {
+            Some(commit) => get_structural_changes_after(root, &commit, reference)?,
+            None => get_structural_changes_after_codemap(root)?,
         };
-        any_codemap = true;
-        let Some(changes) =
-            get_structural_changes_after(project_root, &codemap_commit, &evaluation_ref)
-        else {
-            continue;
-        };
-        if changes.is_empty() {
-            return Some(CodemapFreshnessEvaluation {
-                staleness: None,
-                evaluated_ref: evaluation_ref,
-            });
-        }
-
-        let staleness = staleness_from_changes(changes);
-        let count = staleness_change_count(&staleness);
-        let evaluation = CodemapFreshnessEvaluation {
-            staleness: Some(staleness),
-            evaluated_ref: evaluation_ref,
-        };
-        if best_stale
-            .as_ref()
-            .map(|(best_count, _)| count < *best_count)
-            .unwrap_or(true)
-        {
-            best_stale = Some((count, evaluation));
-        }
-    }
-
-    if let Some((_, evaluation)) = best_stale {
-        return Some(evaluation);
-    }
-    if !any_codemap {
-        return Some(CodemapFreshnessEvaluation {
-            staleness: Some(CodemapStaleness::Missing),
-            evaluated_ref: "working tree".to_string(),
-        });
-    }
-
-    // Preserve the uncommitted-map mtime fallback when no ref contains a
-    // committed CODEMAP.
-    let changes = get_structural_changes_after_codemap(project_root)?;
-    Some(CodemapFreshnessEvaluation {
-        staleness: (!changes.is_empty()).then(|| staleness_from_changes(changes)),
-        evaluated_ref: "HEAD (uncommitted CODEMAP)".to_string(),
-    })
+        (!changes.is_empty()).then(|| staleness_from_changes(changes))
+    };
+    Some(CodemapFreshnessEvaluation { staleness, evaluated_ref: reference.clone() })
 }
 
 fn staleness_from_changes(changes: Vec<CodemapChange>) -> CodemapStaleness {
@@ -442,23 +389,6 @@ fn staleness_from_changes(changes: Vec<CodemapChange>) -> CodemapStaleness {
         .collect();
 
     make_staleness(total_changes, file_list, String::new())
-}
-
-fn staleness_change_count(staleness: &CodemapStaleness) -> usize {
-    match staleness {
-        CodemapStaleness::Missing => usize::MAX,
-        CodemapStaleness::Stale { total_changes, .. }
-        | CodemapStaleness::SignificantlyStale { total_changes, .. } => *total_changes,
-    }
-}
-
-fn git_ref_exists(project_root: &Path, git_ref: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", git_ref])
-        .current_dir(project_root)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 /// Get the object ID of the last commit that modified .claude/CODEMAP.md.
@@ -1059,6 +989,78 @@ mod tests {
         let reminder = codemap_stop_reminder(&cas_root)
             .expect("the stop reminder must share the positive freshness path");
         assert!(reminder.contains("1 pending structural change(s)"));
+    }
+
+    #[test]
+    fn cas_2aab_freshness_uses_worktree_task_target_instead_of_stale_store() {
+        use crate::store::{SqliteTaskStore, TaskStore};
+        use crate::types::{Task, TaskStatus, WorkTarget};
+        use std::process::Command;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_root = fixture.path().canonicalize().unwrap();
+        let repo = fixture_root.join("main");
+        let worker = fixture_root.join("worker");
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"upkeep-fixture\"\n[factory]\nepic_base_branch = \"main\"\n").unwrap();
+        std::fs::write(repo.join(".claude/CODEMAP.md"), "# Initial map\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["add", ".claude"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-qb", "staging"]);
+        std::fs::create_dir(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"), "# Product\n<!-- cas:project-overview\ndomain_paths = []\nwatch_dirs = [\"src\"]\n-->\n").unwrap();
+        std::fs::write(repo.join(".claude/CODEMAP.md"), "# Current map\n").unwrap();
+        git(&["add", "docs", ".claude"]);
+        git(&["commit", "-qm", "document product"]);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-qm", "one relevant change"]);
+        git(&["update-ref", "refs/remotes/origin/staging", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+        git(&["worktree", "add", "-qb", "factory/upkeep-worker", worker.to_str().unwrap(), "main"]);
+        let store = SqliteTaskStore::open(&cas_root).unwrap();
+        store.init().unwrap();
+        let mut task = Task::new("cas-fixture".into(), "Upkeep fixture".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("upkeep-worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:upkeep-fixture".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&task).unwrap();
+        // Another assignment can be queued without changing the active task.
+        let mut queued = Task::new("cas-next".into(), "Queued task".into());
+        queued.assignee = task.assignee.clone();
+        queued.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:upkeep-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&queued).unwrap();
+        env.set("CAS_ROOT", &cas_root);
+        env.set("CAS_AGENT_NAME", "upkeep-worker");
+        env.set_current_dir(&worker);
+
+        let measurement = super::super::docs_freshness::Measurement::for_store(&cas_root);
+        assert_eq!(measurement.root, worker);
+        let message = measurement.annotate("<codemap-freshness>\nDrift\n</codemap-freshness>".into());
+        assert!(message.contains("Measured ref: origin/staging"));
+        let evaluation = evaluate_codemap_freshness(&cas_root).unwrap();
+        assert_eq!(evaluation.evaluated_ref, "origin/staging");
+        assert!(matches!(evaluation.staleness, Some(CodemapStaleness::Stale { total_changes: 1, .. })));
+        let overview = super::super::project_overview::check_freshness(&worker, None).unwrap();
+        assert!(matches!(overview, Some(super::super::project_overview::ProjectOverviewStaleness::Stale { total_changes: 1, .. })), "{overview:?}");
     }
 
     #[test]

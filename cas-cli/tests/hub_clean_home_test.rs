@@ -374,6 +374,7 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     for explicit in [None, Some(home.path().join("override.socket")), Some(home.path().join("missing.socket"))] {
         let selected = explicit.as_ref().unwrap_or(&socket);
         for args in [vec!["hub", "status"], vec!["hub", "restart", "--port", "0"]] {
+            let is_restart = args.contains(&"restart");
             let mut command = cas_command(home.path(), bin.as_os_str());
             if let Some(explicit) = &explicit { command.env("TAILSCALE_SOCKET", explicit); }
             let output = command.args(args).output().unwrap();
@@ -384,8 +385,67 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
             for expected in [cause, "TAILSCALE_SOCKET", tailscale.to_str().unwrap(), selected.to_str().unwrap()] {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
+            if is_restart {
+                for expected in [
+                    "Hub transport required: Tailscale is unavailable.",
+                    "Restart refused; existing hub (pid ",
+                    ") remains running.",
+                    "Retry: TAILSCALE_SOCKET=<signed-in-socket> cas hub restart.",
+                ] {
+                    assert!(text.contains(expected), "missing {expected}: {text}");
+                }
+            }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(home.path(), &bin.join("tailscale"), "#!/bin/sh\nexit 1\n");
+    let mut path_entries = vec![bin.clone()];
+    path_entries.extend(std::env::split_paths(&system_path()));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let start = cas_command(home.path(), &path)
+        .args(["hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let mut cleanup = LegacyHubCleanup(vec![paths.read_process_record().unwrap().pid]);
+
+    let restart = cas_command(home.path(), &path)
+        .args(["hub", "restart", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
+    let record = paths.read_process_record().unwrap();
+    cleanup.0.clear();
+    cleanup.0.push(record.pid);
+
+    let warning = String::from_utf8_lossy(&restart.stderr);
+    for expected in [
+        "Tailscale Serve inactive; hub is loopback-only.",
+        "Cause:",
+        "Retry: tailscale status && cas hub restart",
+    ] {
+        assert!(warning.contains(expected), "missing {expected}: {warning}");
+    }
+    assert!(
+        warning.lines().all(|line| line.chars().count() <= 80),
+        "warning exceeds 80 columns: {warning}"
+    );
+
+    let stop = cas_command(home.path(), &path)
+        .args(["hub", "stop", "--force"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    cleanup.0.clear();
 }
 
 #[cfg(unix)]
@@ -2487,6 +2547,116 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     );
     assert_eq!(status["runtime_receipt"]["hub"]["state"], "unknown");
     assert!(!home.path().join(".cas/hub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_service_status_readiness_fits_80_columns_cas_0252() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for cli in ["claude", "codex"] {
+        cas::test_paths::warm_stub(&bin.join(cli), "#!/bin/sh\nexit 0\n");
+    }
+    let systemctl = bin.join("systemctl");
+    cas::test_paths::warm_stub(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = \"--version\" ] && exit 0\nexit 1\n",
+    );
+
+    let path = bin.as_os_str();
+    let mut human_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    human_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let output = human_command
+        .args(["hub", "service", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        human.lines().all(|line| line.chars().count() <= 80),
+        "service status exceeded 80 columns:\n{human}"
+    );
+    // pin: service status puts the first copyable repair command under its verdict.
+    assert_eq!(
+        human.lines().nth(1),
+        Some("  Fix: cas claude login main"),
+        "the first repair command should follow the service summary"
+    );
+    assert!(human.contains("path: ~/.claude"), "{human}");
+    assert!(human.contains("Fix: cas claude login main"), "{human}");
+    assert!(human.contains("path: ~/.codex"), "{human}");
+    assert!(human.contains("Fix: cas codex login main"), "{human}");
+    assert!(!human.contains("Fix: cas hub service install"), "{human}");
+    assert_eq!(
+        human.matches("Retry: cas hub status").count(),
+        usize::from(human.contains("service manager unknown")),
+        "{human}"
+    );
+
+    let mut json_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    json_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let json = json_command
+        .args(["hub", "service", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let readiness = report["launch_readiness"].as_array().unwrap();
+    for (cli, profile) in [("claude", ".claude"), ("codex", ".codex")] {
+        let detail = readiness
+            .iter()
+            .find(|row| row["cli"] == cli)
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap();
+        assert!(detail.contains(&home.path().join(profile).display().to_string()));
+    }
+    assert_eq!(
+        readiness
+            .iter()
+            .find(|row| row["cli"] == "grok")
+            .unwrap()["detail"],
+        "grok CLI is not installed or executable"
+    );
+
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub\n").unwrap();
+    let mut failed_probe = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    failed_probe.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let failed_probe = failed_probe.args(["hub", "service", "status"]).output().unwrap();
+    assert!(failed_probe.status.success());
+    let failed_probe = String::from_utf8(failed_probe.stdout).unwrap();
+    assert!(failed_probe.contains("launch issue"), "{failed_probe}");
+    assert!(!failed_probe.contains("Launch readiness: healthy"), "{failed_probe}");
+    assert!(failed_probe.contains("Cause:"), "{failed_probe}");
+    assert!(failed_probe.contains("--json"), "{failed_probe}");
+    assert!(failed_probe.lines().all(|line| line.chars().count() <= 80), "{failed_probe}");
+    #[cfg(target_os = "linux")]
+    {
+        let manual = cas_command(home.path(), path)
+            .env("CAS_HUB_SYSTEMCTL", home.path().join("missing-systemctl"))
+            .args(["hub", "service", "status"])
+            .output()
+            .unwrap();
+        assert!(manual.status.success());
+        let manual = String::from_utf8(manual.stdout).unwrap();
+        assert!(manual.contains("rc script after networking and Tailscale"), "{manual}");
+        assert!(manual.contains("cas hub start --tailscale-serve"), "{manual}");
+        assert!(manual.contains("cas hub status"), "{manual}");
+        assert!(manual.lines().all(|line| line.chars().count() <= 80), "{manual}");
+    }
+    assert!(
+        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
+        "{human}"
+    );
 }
 
 #[cfg(unix)]

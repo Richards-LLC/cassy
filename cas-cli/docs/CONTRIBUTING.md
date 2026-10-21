@@ -275,6 +275,29 @@ Dynamic system-prompt exclusion remains deferred pending a controlled cache,
 cost and context-correctness comparison. This change claims no startup-time,
 token or cost improvement.
 
+## Factory launch diagnostics
+
+Starting a new factory writes `~/.cas/logs/factory/<session>/launch.log` after
+the attach decision and launch preflight. Attaching to a running factory reuses
+that session without creating a new log directory or running launch-only checks.
+
+Refused launches with `--name` append to that session's `launch.log`. Unnamed
+refusals append to one stable project file, `<CAS_ROOT>/<logging.log_dir>/factory-launch.log`
+(by default `.cas/logs/factory-launch.log`), without reserving a session name.
+Before a project store exists, unnamed refusals use `~/.cas/logs/factory-launch.log`
+and leave the project's `.cas` absent so `cas init` can initialize it normally.
+A refused launch prints its log path alongside its original reason. Repeated
+refusals append dated records at the same path.
+
+`launch.log` also identifies the project's runtime tracing file, using the
+resolved CAS root and `logging.log_dir` from its configuration. These files use
+the local date (`cas-YYYY-MM-DD.log`) and rotate daily. If file logging is
+disabled, the launch record says so.
+
+The session's `daemon.log` captures daemon stderr and can be empty or sparse
+while runtime tracing is active. Preflight diagnostics live in `launch.log`;
+an empty `daemon.log` does not indicate that preflight passed or tracing stopped.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client
@@ -2103,8 +2126,16 @@ boundary rule lives in one resolver. The legacy in-tree
 
 `gc_report` lists the relocated caches with their sizes under "Scratch root
 caches": the build-cache, each worker target and the release scratch base. Its
-release-scratch section scans the relocated base. `gc_cleanup` still reclaims
-only in-tree worker targets.
+release-scratch section scans the relocated base. `gc_cleanup` also inventories
+and reclaims stale worker targets in the exact project scratch namespace. It
+holds the worker lane, Cargo locks and any durable lifetime lease through a
+sibling quarantine and deletion; live owners and recent writes remain protected.
+The newest `factory.target_cache_retention_count` eligible scratch targets stay
+warm. Missing-checkout targets and unmanaged scratch directories stay review-only.
+GC reports the same filesystem path as build admission and reserves the configured
+builder cap's 10 GiB per lane when deciding pressure, even below the high
+watermark. Selection and warm retention are computed separately per device, so
+reclaim on the checkout device cannot count against scratch pressure.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

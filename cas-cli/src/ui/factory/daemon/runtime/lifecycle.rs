@@ -4973,6 +4973,7 @@ mod stall_nudge_routing_rework_tests {
         let root = tempfile::tempdir().unwrap();
         let cas_dir = crate::store::init_cas_dir(root.path()).unwrap();
         let mut prompt = crate::ui::factory::director::Prompt {
+            merge_alert: None,
             target: "worker".into(), text: "quiet".into(), stall_nudge_task: Some("cas-unknown".into()),
             retract_worker: None, retract_task: None, retract_epic: None,
             drop_if_worker_assigned: None, durable_retry: true,

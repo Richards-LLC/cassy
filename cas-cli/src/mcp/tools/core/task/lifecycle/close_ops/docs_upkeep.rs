@@ -1,6 +1,7 @@
 //! Delivery-scoped documentation upkeep (G5/G6). Inputs are immutable snapshots.
 use super::*;
 use crate::config::{RegistryEnforcement, UpkeepStage};
+use crate::hooks::handlers::handlers_events::project_overview;
 use registry_upkeep::{Finding, delivery_snapshot, finish, read, tracked, warning};
 use std::path::Path;
 
@@ -44,13 +45,24 @@ pub(super) fn at_park(
         let before_paths = tracked(repo, &base)?;
         let after_paths = tracked(repo, &head)?;
         let codemap = read(repo, &head, ".claude/CODEMAP.md", &after_paths)?;
-        let overview = after_paths.iter().any(|p| p == "docs/PRODUCT_OVERVIEW.md");
-        let config_text = read(repo, &head, ".cas/config.toml", &after_paths)?;
-        let watch =
-            crate::hooks::handlers::handlers_events::project_overview::watch_targets_from_content(
-                config_text.as_deref(),
-            );
+        let overview_text = read(repo, &head, "docs/PRODUCT_OVERVIEW.md", &after_paths)?;
+        let overview = overview_text.is_some();
+        // A tracked .cas/config.toml is the project's config for this delivery;
+        // when .cas/ is ignored, the local project config is the override.
+        let config_section = match read(repo, &head, ".cas/config.toml", &after_paths)? {
+            Some(text) => project_overview::config_section(&text),
+            None => config.project_overview.clone(),
+        };
+        let watch = project_overview::resolve_watch_targets(
+            config_section,
+            overview_text.as_deref(),
+            || after_paths.clone(),
+        );
         let mut warnings = Vec::new();
+        let g6_on = upkeep.product_overview() != UpkeepStage::Off;
+        if let Some(warning) = watch.warning.as_ref().filter(|_| overview && g6_on) {
+            warnings.push(format!("UPKEEP WARNING G6: {warning}"));
+        }
         let mut registry = |revision: &str, files: &[String]| -> anyhow::Result<_> {
             let text = read(repo, revision, &qa.registry.path, files)?;
             match text

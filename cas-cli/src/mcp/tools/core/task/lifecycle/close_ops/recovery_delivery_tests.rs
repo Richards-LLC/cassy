@@ -388,10 +388,10 @@ async fn recovery_close_rejects_foreign_checkout_before_rebinding_cas_c6e1() {
     );
 }
 
-/// The supported audited recovery also exists in installed 520cd74: retire
-/// both stale active fields, keep their audit trail, then start a new cycle.
+/// A fresh review cycle must park the actual delivery after conflict resolution
+/// rewrites the commit-time anchor, without requiring an explicit receipt.
 #[tokio::test]
-async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
+async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt_cas_4fcb() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let cas_dir = f.dir.path().join(".cas");
@@ -405,7 +405,7 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
     let verdict = text(supervisor.cas_task_request_changes(Parameters(
         crate::mcp::tools::TaskRequestChangesRequest {
             id: TASK.into(),
-            reason: "Preserve prior source work; correct stale branch/QA binding by re-delivering the reviewed final tip, with no source amendment".into(),
+            reason: "Rebase the reviewed correction onto the current target and deliver the resolved content".into(),
         }
     )).await.unwrap());
     let reopened = tasks.get(TASK).unwrap();
@@ -436,18 +436,149 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
         TaskStatus::InProgress,
         "{started}"
     );
-    let recovered = close(&f).await;
+    // A new review cycle records its commit through the real PostToolUse hook.
+    // Rebase conflict resolution then rewrites that patch without a git commit
+    // hook, leaving the recorded anchor at the pre-rebase object.
+    std::fs::write(f.worker_path.join("review.txt"), "worker correction\n").unwrap();
+    git(&f.worker_path, &["add", "review.txt"]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix(cas-c6e1-fixture): review correction",
+        ],
+    );
+    let before_rebase = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::hooks::handlers::handlers_events::detect_and_link_git_commit(
+        &cas_dir,
+        &crate::hooks::HookInput {
+            session_id: "recovery-session".into(),
+            cwd: f.worker_path.display().to_string(),
+            hook_event_name: "PostToolUse".into(),
+            tool_name: Some("Bash".into()),
+            tool_input: Some(
+                serde_json::json!({"command": "git commit -q -m 'fix(cas-c6e1-fixture): review correction'"}),
+            ),
+            tool_response: Some(serde_json::json!({"exitCode": 0, "stdout": ""})),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        tasks
+            .get(TASK)
+            .unwrap()
+            .deliverables
+            .factory_branch_anchor
+            .as_deref(),
+        Some(before_rebase.as_str())
+    );
+    std::fs::write(f.dir.path().join("review.txt"), "target update\n").unwrap();
+    git(f.dir.path(), &["add", "review.txt"]);
+    git(
+        f.dir.path(),
+        &["commit", "-q", "-m", "chore(cas-abcd): target update"],
+    );
+    git(
+        f.dir.path(),
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    let conflict = std::process::Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(&f.worker_path)
+        .env("GIT_COMMITTER_NAME", "CAS Test")
+        .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success(), "fixture must conflict");
+    assert!(
+        String::from_utf8_lossy(&conflict.stdout)
+            .contains("CONFLICT (add/add): Merge conflict in review.txt"),
+        "unexpected rebase stop: {conflict:?}"
+    );
+    std::fs::write(
+        f.worker_path.join("review.txt"),
+        "target update plus reviewed correction\n",
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", "review.txt"]);
+    git(
+        &f.worker_path,
+        &["-c", "core.editor=true", "rebase", "--continue"],
+    );
+    let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    assert_ne!(rebased, before_rebase);
+    // Context in the body cannot turn a sibling's subject into our delivery.
+    // Keep the task-owned row last so the real close below delivers that tip.
+    let active = tasks.get(TASK).unwrap();
+    for (message, advances) in [
+        (
+            format!("fix(cas-abcd): sibling change\n\nContext: {TASK} (cas-4fcb regression)"),
+            false,
+        ),
+        (format!("fix({TASK}): reviewed correction"), true),
+    ] {
+        git(&f.worker_path, &["commit", "-q", "--amend", "-m", &message]);
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &active,
+            f.dir.path(),
+            "main",
+            Some(BRANCH),
+            Some(&tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(if advances {
+                tip.as_str()
+            } else {
+                before_rebase.as_str()
+            }),
+            "delivery ownership for {message:?}",
+        );
+    }
+    let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(
+        f.dir.path(),
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{BRANCH}"),
+            &rebased,
+        ],
+    );
+    let output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some(format!("PASS {rebased}: reviewed rebased correction")),
+                commit_receipt: None,
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(output.contains("MERGE REQUIRED"), "{output}");
+    let recovered = tasks.get(TASK).unwrap();
+    assert_eq!(recovered.status, TaskStatus::AwaitingMerge, "{output}");
     assert_eq!(
         recovered.deliverables.parked_branch.as_deref(),
         Some(BRANCH)
     );
     assert_eq!(
         recovered.deliverables.factory_branch_anchor.as_deref(),
-        Some(f.final_tip.as_str())
+        Some(rebased.as_str())
     );
     let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
     assert_eq!(rounds.len(), 1);
-    assert_eq!(rounds[0].bound_head, f.final_tip);
+    assert_eq!(rounds[0].bound_head, rebased);
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
@@ -785,31 +916,101 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
 
 #[tokio::test]
 async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
-    let mut env = TestEnvGuard::temp_home();
-    let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
-    let cas_dir = f.dir.path().join(".cas");
-    cas_store::waive_qa_pass(
-        &cas_dir,
-        TASK,
-        "supervisor-session",
-        WORKER,
-        BRANCH,
-        &f.final_tip,
-        "fixture exact-head terminal evidence waiver",
-        chrono::Utc::now(),
-    )
-    .unwrap();
-    let parked = close(&f).await;
-    assert_eq!(
-        parked.deliverables.factory_branch_anchor.as_deref(),
-        Some(f.final_tip.as_str())
-    );
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert!(parked.notes.contains("QA evidence ledger waived"));
-    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
-    assert_eq!(passes.len(), 1);
-    assert_eq!(passes[0].bound_head, f.final_tip);
-    assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    for (surface, has_demo) in [("src/cli/status.rs", true), ("note.txt", false)] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture_with_surface(&mut env, surface, true);
+        let cas_dir = f.dir.path().join(".cas");
+        let task_dir = fresh_ledger(&f);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        if !has_demo {
+            task.demo_statement.clear();
+            tasks.update(&task).unwrap();
+        }
+        let original_notes = task.notes.clone();
+        let terminal = task_dir.join("terminal-qa/report.md");
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(&terminal, "terminal-qa: PASS fixture\n").unwrap();
+        let unrelated = task_dir.join("unrelated.json");
+        std::fs::write(&unrelated, r#"{"files":{"cells":["M01.png"]}}"#).unwrap();
+        let prose = task_dir.join("prose.txt");
+        std::fs::write(&prose, "old bundle instructions, not a manifest").unwrap();
+        for cited in [
+            "not-a-path".to_string(),
+            task_dir.join("missing.json").display().to_string(),
+            unrelated.display().to_string(),
+            prose.display().to_string(),
+        ] {
+            task.notes = format!("qa-bundle: {cited}");
+            let result = super::super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+                &cas_dir,
+                &task,
+                f.dir.path(),
+                "main",
+                Some(&f.final_tip),
+                Some(&[surface.into()]),
+            );
+            assert!(
+                result.is_ok(),
+                "{surface} without declared pairs must ignore {cited}: {result:?}"
+            );
+        }
+        task.notes = original_notes;
+        tasks.update(&task).unwrap();
+        std::fs::remove_file(terminal).unwrap();
+        std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
+        std::fs::write(
+            task_dir.join("pairs.json"),
+            serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
+                "pairs": [], "unpaired": [{"id": "G3", "before": {"png": "before.png"}}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manifest = task_dir.join("bundle.json");
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.notes
+            .push_str(&format!("\nqa-bundle: {}", manifest.display()));
+        tasks.update(&task).unwrap();
+        let refusal = close_output(&f).await;
+        assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
+        cas_store::waive_qa_pass(
+            &cas_dir,
+            TASK,
+            "supervisor-session",
+            WORKER,
+            BRANCH,
+            &f.final_tip,
+            "fixture exact-head terminal evidence waiver",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let parked = close(&f).await;
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.final_tip.as_str())
+        );
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        let waiver_label = if has_demo { "ledger" } else { "pair coverage" };
+        assert!(
+            parked
+                .notes
+                .contains(&format!("QA evidence {waiver_label} waived"))
+        );
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].bound_head, f.final_tip);
+        assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    }
 }
 
 #[tokio::test]
@@ -940,8 +1141,7 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
         // pin: assigned-reviewer handoffs must not instruct a duplicate reviewer spawn.
         let instructs_spawn = handoff.prompt.contains("Spawn a reviewer");
         assert_eq!(
-            instructs_spawn,
-            busy,
+            instructs_spawn, busy,
             "handoff must match actual reviewer assignment"
         );
     }

@@ -185,6 +185,20 @@ that produces it:
    `cells` and `polish_screenshots` each have ≥1 entry, and
    `polish_screenshots` has exactly the four
    `{light,dark}-{desktop,phone}` renders.
+   Declared `files.pairs` is also validated. Its schema-1 `pairs.json` must
+   match the bundle's task/head and use stable cell ids in `pairs[]` and
+   `unpaired[]`. Each present side names a contained, nonempty PNG. Across
+   both arrays, AFTER ids must contain every BEFORE id; extra AFTER cells
+   pass, and an empty AFTER refuses when BEFORE exists. One refusal names
+   all missing ids in sorted order. Blank/padded or duplicate per-side ids
+   refuse. Baseline captures may predate the delivery; current captures and
+   the pairs manifest retain freshness checks. Existing after-only bundles
+   without `files.pairs` keep their contract. Filenames alone do not declare
+   a BEFORE/AFTER identity.
+
+   Batch deferral, batch receipts and passed independent QA do not waive
+   declared pair coverage. Only an exact-tip recorded `qa_waive` or a live
+   supervisor's recorded `supervisor_override` bypasses that comparison.
 3. **Staleness.** `created_at` and every file's mtime are later than the
    delivered head's committer time. `head_sha` is 40 hex characters,
    resolves in the repo, and is the delivered head or a descendant of it.

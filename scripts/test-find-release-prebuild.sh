@@ -72,6 +72,11 @@ case "$2" in
       count=$((count + 1))
       printf '%s\n' "$count" >"$count_file"
       sequence_file="$FAKE_RUNS_SEQUENCE_DIR/$count.json"
+      if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.fail" ]]; then
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then sleep 5; fi
+        exit 1
+      fi
       [[ -f "$sequence_file" ]] || sequence_file="$FAKE_RUNS_SEQUENCE_DIR/last.json"
       cat "$sequence_file"
     else
@@ -83,6 +88,17 @@ case "$2" in
     run_id="${run_id%%/artifacts*}"
     file="${FAKE_ARTIFACTS_DIR:?}/$run_id.json"
     if [[ ! -f "$file" ]]; then exit 1; fi
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" ]]; then
+      count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
+      count=0
+      [[ -f "$count_file" ]] && count="$(<"$count_file")"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$count_file"
+      if [[ "$count" == 1 ]]; then
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+        exit 1
+      fi
+    fi
     cat "$file"
     ;;
   *)
@@ -157,10 +173,45 @@ expect_field "$out" found true 'an in-flight prebuild is awaited and adopted'
 expect_field "$out" run-id 333 'the completed racing prebuild run is adopted'
 unset FAKE_RUNS_SEQUENCE_DIR
 
-# 8. A prebuild that remains in flight past the bound falls back with a warning.
+# 8. A transient failure polling an in-flight exact-SHA run is retried, then
+# the completed run is adopted; diagnostics must not echo API error contents.
+mkdir -p "$tmp/transient-sequence"
+echo '{"workflow_runs":[{"id":555,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/transient-sequence/1.json"
+touch "$tmp/transient-sequence/2.fail"
+echo '{"workflow_runs":[{"id":555,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/transient-sequence/3.json"
+printf '%s' "$both_live" >"$tmp/artifacts/555.json"
+touch "$tmp/artifacts/555.fail-once"
+rm -f "$tmp/transient-sequence/count"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/transient-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  "$lookup" transientcommit 2>"$tmp/transient.err")"
+expect_field "$out" found true 'a failed in-flight poll and artifacts query are retried before adoption'
+expect_field "$out" run-id 555 'retry adoption names the completed run'
+if grep -qF 'attempt 1 failed (HTTP 502)' "$tmp/transient.err" \
+    && ! grep -qF 'fixture-secret' "$tmp/transient.err" \
+    && ! grep -qF 'request failed' "$tmp/transient.err"; then
+  printf 'ok   a failed poll logs its HTTP status without leaking API error contents\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL retry diagnostic missing HTTP status or leaked API error: %s\n' \
+    "$(<"$tmp/transient.err")"
+  fail=$((fail + 1))
+fi
+unset FAKE_RUNS_SEQUENCE_DIR
+rm -f "$tmp/artifacts/555.fail-once" "$tmp/artifacts/555.artifact-attempts"
+
+# 9. A timed-out poll stays within the deadline and falls back with a sanitized
+# timeout diagnostic.
+mkdir -p "$tmp/timeout-sequence"
 echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
-  >"$tmp/runs.json"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=0 "$lookup" timeoutcommit 2>&1)"
+  >"$tmp/timeout-sequence/1.json"
+touch "$tmp/timeout-sequence/2.fail" "$tmp/timeout-sequence/2.timeout"
+rm -f "$tmp/timeout-sequence/count"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 "$lookup" timeoutcommit 2>&1)"
 expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
 if grep -qF 'falling back to the cold release build' <<<"$out"; then
   printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
@@ -169,12 +220,21 @@ else
   printf 'FAIL in-flight timeout omitted its cold-build warning\n'
   fail=$((fail + 1))
 fi
+if grep -qF 'attempt 1 failed (timeout (exit 124))' <<<"$out" \
+    && ! grep -qF 'fixture-secret' <<<"$out"; then
+  printf 'ok   a timed-out poll reports exit 124 without leaking API error contents\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL timeout diagnostic missing exit 124 or leaked API error: %s\n' "$out"
+  fail=$((fail + 1))
+fi
+unset FAKE_RUNS_SEQUENCE_DIR
 
-# 9. A missing commit declines rather than crash the workflow step.
+# 10. A missing commit declines rather than crash the workflow step.
 out="$(GITHUB_SHA= "$lookup")"
 expect_field "$out" found false 'an unset commit declines'
 
-# 10. A hand run without GITHUB_REPOSITORY resolves the repository and makes
+# 11. A hand run without GITHUB_REPOSITORY resolves the repository and makes
 # the real lookup (cas-0906): the gh default repository first, then origin.
 echo '{"workflow_runs":[{"id":111,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
@@ -226,7 +286,7 @@ for url in git@github.com:Example/scp-form.git ssh://git@github.com/Example/ssh-
     looked_up "$expected" "origin $url is looked up as $expected"
 done
 
-# 11. Unresolvable -> exit 2 with an error, no found= line and no API call:
+# 12. Unresolvable -> exit 2 with an error, no found= line and no API call:
 # a non-GitHub origin (even beside a GitHub upstream), no origin, no checkout.
 unresolvable() {
     local dir="$1" label="$2" status=0
@@ -252,7 +312,7 @@ make_repo origin https://github.com/Example/x.git
 FAKE_REPO_VIEW='not a slug' unresolvable "$tmp/not-a-checkout" 'a malformed gh answer is not used'
 unset FAKE_GH_LOG GIT_CEILING_DIRECTORIES
 
-# 12. cas-28eb: a merge_group run built the landing tree before the queue
+# 13. cas-28eb: a merge_group run built the landing tree before the queue
 # landed it (tree 2a8b2a34 shared by two commits). It is adopted by tree id.
 tree=2a8b2a348aa3b0291dbfeaded555e6a7178f6485
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
@@ -263,7 +323,7 @@ out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" "$lookup" 5fe5
 expect_field "$out" found true 'a merge-queue prebuild of the identical tree is adopted at land'
 expect_field "$out" run-id 222 'adoption names the merge-queue run'
 
-# 13. A complete run of a different tree is never adopted: the tag rebuilds.
+# 14. A complete run of a different tree is never adopted: the tag rebuilds.
 out="$(FAKE_TREE=1111111111111111111111111111111111111111 FAKE_RECENT_RUNS_JSON="$tmp/recent.json" \
     "$lookup" 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found false 'a prebuild of a different tree is not adopted'

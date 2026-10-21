@@ -139,11 +139,39 @@ pub(super) fn analyze(
         .and_then(|text| crate::qa_registry::parse(&text).ok());
     let codemap = tree.read(".claude/CODEMAP.md")?;
     let overview_present = tree.read("docs/PRODUCT_OVERVIEW.md")?.is_some();
-    let mut report = impact_for_changes(
+    let selected = if let Some(registry) = registry
+        .as_ref()
+        .filter(|r| r.selection == crate::qa_registry::Selection::LegacyCatalog)
+    {
+        ensure!(
+            tree.read("docs/qa/journeys.md")?.is_some(),
+            "legacy_catalog selection requires docs/qa/journeys.md"
+        );
+        let paths = changes
+            .iter()
+            .flat_map(|c| std::iter::once(c.file.clone()).chain(c.old_file.clone()))
+            .filter(|path| {
+                !crate::qa_registry::matches_path(registry.ignore.iter().map(String::as_str), path)
+            })
+            .collect::<Vec<_>>();
+        let ids = catalog_ids(&tree, &paths, base)?;
+        for id in &ids {
+            ensure!(
+                registry.journeys.iter().any(|j| j.id == *id),
+                "legacy selector returned journey {id} missing from {}; align the catalog and registry",
+                qa.registry.path
+            );
+        }
+        Some(ids.into_iter().collect::<std::collections::BTreeSet<_>>())
+    } else {
+        None
+    };
+    let mut report = impact_for_selected_changes(
         registry.as_ref(),
         qa,
         changes,
         codemap.as_deref().unwrap_or(""),
+        selected.as_ref(),
     );
     if let Some(registry) = &registry {
         let validation = registry.validate(&tree.paths);
@@ -204,8 +232,11 @@ pub(super) fn analyze(
         sort_journeys(&mut report.journeys);
     }
     let mut warnings = Vec::new();
+    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
     if !overview_present {
         warnings.push("PRODUCT_OVERVIEW.md is missing: journeys have no product context. Run the project-overview skill.".into());
+    } else if let Some(warning) = &watch.warning {
+        warnings.push(format!("PRODUCT_OVERVIEW watch targets: {warning}."));
     }
     if codemap.is_none() {
         warnings.push(
@@ -243,7 +274,7 @@ pub(super) fn analyze(
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
     report.upkeep = upkeep(
-        repo,
+        &watch,
         changes,
         &report,
         codemap.as_deref(),
@@ -267,23 +298,32 @@ fn legacy_ids(tree: &Snapshot<'_>, paths: &[String]) -> Result<Vec<String>> {
         .filter(|p| !crate::qa_pass::is_non_surface_path(p))
         .cloned()
         .collect();
-    if surface.is_empty() {
+    catalog_ids(tree, &surface, None)
+}
+
+fn catalog_ids(tree: &Snapshot<'_>, paths: &[String], base: Option<&str>) -> Result<Vec<String>> {
+    if paths.is_empty() {
         return Ok(Vec::new());
     }
     if let Some(head) = &tree.head {
-        return crate::qa_evidence::journeys::journeys_for_paths_at(tree.root, head, &surface)
-            .map_err(|e| anyhow!(e));
+        return crate::qa_evidence::journeys::journeys_for_paths_at_with_base(
+            tree.root, head, paths, base,
+        )
+        .map_err(|e| anyhow!(e));
     }
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(tree.root.join("scripts/journeys-for-diff.py"))
         .arg("--paths")
-        .args(&surface)
+        .args(paths)
         .env("CAS_JOURNEYS_ROOT", tree.root)
         .env_remove("CAS_JOURNEYS_HEAD")
         .env_remove("CAS_JOURNEYS_BASE")
-        .current_dir(tree.root)
-        .output()
-        .context("start legacy journey selector")?;
+        .current_dir(tree.root);
+    if let Some(base) = base {
+        command.env("CAS_JOURNEYS_BASE", base);
+    }
+    let output = command.output().context("start legacy journey selector")?;
     ensure!(
         output.status.success(),
         "legacy journey selector failed: {}",
@@ -332,7 +372,7 @@ fn legacy_metadata(text: &str) -> Vec<crate::qa_registry::Journey> {
 }
 
 fn upkeep(
-    repo: &Path,
+    watch: &crate::hooks::handlers::handlers_events::project_overview::WatchTargets,
     changes: &[Change],
     report: &Impact,
     codemap: Option<&str>,
@@ -342,7 +382,6 @@ fn upkeep(
     base_paths: &[String],
     head_paths: &[String],
 ) -> Upkeep {
-    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
     let mut upkeep = docs_upkeep(
         changes,
         &report.registry.path,
@@ -350,7 +389,7 @@ fn upkeep(
         overview,
         registry,
         previous,
-        &watch,
+        watch,
         base_paths,
         head_paths,
     );

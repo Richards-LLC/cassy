@@ -416,6 +416,51 @@ fn every_catalog_names_tools_by_bare_name() {
     );
 }
 
+#[test]
+fn verifier_artifact_fetch_is_available_for_every_harness() {
+    for (harness, prefix) in [
+        (SupervisorCli::Claude, "mcp__cas__"),
+        (SupervisorCli::Grok, "cas__"),
+        (SupervisorCli::OpenCode, "cas_"),
+    ] {
+        let verifier = agent_catalog_for_harness(harness)
+            .iter()
+            .find(|agent| agent.path == "agents/task-verifier.md")
+            .unwrap();
+        assert!(verifier.content.contains("artifact action=fetch"));
+        let tools = verifier
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix("tools: "))
+            .unwrap();
+        assert!(
+            tools
+                .split(',')
+                .map(str::trim)
+                .any(|tool| tool == format!("{prefix}artifact")),
+            "{harness:?} requires artifact fetch but excludes it from tools: {tools}"
+        );
+    }
+    // Native Codex roles inherit parent MCP tools instead of declaring an allowlist.
+    let native = agent_catalog_for_harness(SupervisorCli::Codex)
+        .iter()
+        .find(|agent| agent.path == "agents/task-verifier.toml")
+        .unwrap();
+    let role: toml::Value = toml::from_str(native.content).unwrap();
+    assert!(
+        role["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .contains("artifact action=fetch")
+    );
+    for filter in ["tools", "allowed_tools", "disabled_tools", "mcp_servers"] {
+        assert!(
+            role.get(filter).is_none(),
+            "Codex verifier must inherit artifact access; found {filter}"
+        );
+    }
+}
+
 /// Guard 5: the OpenCode projection is the canonical catalog with only agent
 /// `tools:` allowlists respelled.
 #[test]

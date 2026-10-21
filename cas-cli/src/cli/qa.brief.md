@@ -2,17 +2,67 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | State PASS or FAIL and the problem/debt counts, then identify the registry file. |
-| Scannable | Print one ASCII row per problem or debt item, with the journey/group and stable problem code. |
-| Readable | Each row explains the missing field, reference or tracked file; the final retry command is `cas qa journeys --check`. |
-| Machine output | Global `--json` emits one object with `problems` and `debt` arrays of `{code, subject, message}`, without banners or colour. |
-| Omitted | Successful journeys and traffic snapshots stay in YAML; checking does not execute specs. |
+| First two lines | State FAIL, DEBT or PASS with problem/debt counts, then list debt by kind when present. Debt keeps exit zero when there are no problems. |
+| Scannable | Group debt by stable problem code; show growth against the previous recorded check before registry details. |
+| Readable | Print one `cas qa journeys --check --verbose` command for individual debt rows; errors still name the subject and remedy. |
+| Machine output | Global `--json` preserves `problems` and `debt` arrays and adds `debt_summary` with total, by_kind, previous_total, delta, grew and history_status; absent comparisons are null. |
+| Omitted | Individual debt rows need `--verbose`; successful journeys and traffic snapshots stay in YAML. Checks do not execute specs. |
 
-Rows retain complete paths and identifiers for copying; JSON is the escape for long rows.
-Malformed YAML, missing registry and Git errors fail with the underlying cause.
+Verbose rows retain complete paths and identifiers; JSON is the escape for long rows.
+The existing cas.db metadata table stores one check receipt per checkout and registry.
+No database is created by checking. Unavailable history is explicit and never means zero.
+
+## Integration upkeep status and enforcement
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Registry coverage verdict, then the measured integration ref as origin/target@sha. |
+| Scannable | Three artifact rows show CODEMAP structural changes, overview relevant changes, and registry validation/ownership issues; curation debt stays separate. |
+| Readable | Config saves warn only when a gate changes into enforce with positive measured drift; they name the artifact, count and status command. |
+| Machine output | --status preserves coverage fields and adds upkeep; config set preserves key/old_value/new_value and adds warnings in the same JSON document. Unknown drift is null, never zero. |
+| Omitted | No new qa status command, remote fetch, or persistent drift counter; individual freshness commands remain available. |
+
+Journey checks fail on malformed YAML, missing registries and Git errors,
+naming the underlying cause.
 
 ## Critique
 
-Real candidate binary and terminal captures are owned by epic assembly; worker
-proof exercises the shared check function against real Git fixtures. Terminal
-QA is NOT VERIFIED until the candidate is built.
+terminal-qa: PASS qa-journeys-check · 12 runs · 0 fail · 0 warn · 0 allowed
+
+Receipt: task `cas-cb2b`, `terminal-qa/qa-journeys-check/report.json`.
+The candidate comes from the capped CLI integration test, as authorized by the
+supervisor. Final delivery evidence binds the candidate version and receipt to
+the delivered commit.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | DEBT and counts lead; line two introduces the kind breakdown, then growth and one details command follow. |
+| Fit | 5 | Repeated instances collapse into kind counts; individual rows remain available with --verbose. |
+| Craft | 4 | Seven short lines, at most 43 cells, fit both widths without truncation. |
+| Theme safety | 5 | Four palettes pass; the 80-column dark/light HTML and plain captures are readable. |
+| Machine contract | 5 | One JSON document preserves both arrays and supplies typed counts and nullable comparisons. |
+
+Scored by true-otter-3 on 2026-10-21; all floors hold.
+
+## Upkeep critique (cas-a77e)
+
+terminal-qa: PASS qa-upkeep-status · 12 runs · 0 fail · 0 warn · 0 allowed
+
+terminal-qa: PASS qa-enforce-warning · 12 runs · 0 fail · 0 warn · 0 allowed
+
+Receipts: task `cas-a77e`, `terminal-qa/status/report.json` and
+`terminal-qa/enforce/report.json`. The actual CLI inherits each test's terminal;
+Git fixture setup is captured separately. Long integration refs exercise the
+80-column truncation and full-ref JSON escape. Both 80-column four-palette
+renders were inspected. Final delivery evidence records the candidate version,
+mtime and commit; the candidate comes from the capped CLI integration test.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | DRIFT leads status, followed by the measured ref and three artifact counts. A saved config leads its advisory warning. |
+| Fit | 5 | Three aggregate rows expose drift while curation debt stays separate; JSON carries full refs and diagnostic detail. |
+| Craft | 4 | Long refs truncate visibly at 80 columns and name the JSON escape; both command surfaces remain readable. |
+| Theme safety | 5 | Both surfaces pass all four palettes and plain-output checks; inspected renders retain clear labels and counts. |
+| Machine contract | 5 | One JSON document preserves existing fields; unknown counts are null and config warnings are an explicit array. |
+
+Scored by true-otter-3 on 2026-10-21; all floors hold.

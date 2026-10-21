@@ -41,7 +41,7 @@ impl AssignmentRequest {
     /// ownership evidence remains pending rather than inventing assignments.
     pub(super) fn read(&self) -> AssignmentEvidence {
         let (Ok(splits), Ok(agents)) = (
-            cas_store::open_epic_splits(&self.cas_dir),
+            crate::cloud::epic_split::current_epic_splits(&self.cas_dir),
             crate::store::open_agent_store(&self.cas_dir),
         ) else {
             return AssignmentEvidence::default();

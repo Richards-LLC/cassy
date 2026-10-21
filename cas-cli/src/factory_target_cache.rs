@@ -251,7 +251,11 @@ fn inspect_with_probe(
         } else if cache.ownership == CacheOwnership::Unknown {
             (
                 CacheDisposition::OwnershipUncertain,
-                "unknown owner; review-only. Remediation: manual review, then gc_cleanup reclaim_unknown_target=<exact absolute cache path> force=true dry_run=false; positive quiet window and native/build guards remain mandatory; no ownership adoption".into(),
+                if relocated_target(&cache.worktree, &cache.path) {
+                    "scratch target has no verifiable checkout owner; review-only, no automatic adoption or named reclaim".into()
+                } else {
+                    "unknown owner; review-only. Remediation: manual review, then gc_cleanup reclaim_unknown_target=<exact absolute cache path> force=true dry_run=false; positive quiet window and native/build guards remain mandatory; no ownership adoption".into()
+                },
             )
         } else if let Err((disposition, reason)) = cache_admission(
             cas_root,
@@ -1752,7 +1756,12 @@ mod tests {
             }
             targets.push((worker, target));
         }
-        let live = vec![targets[2].0.clone()];
+        // A held lifetime lease protects output even without a registry row.
+        let _live_lease = owner::acquire(&cas, &targets[2].0).unwrap().unwrap();
+        let live = Vec::new();
+        let orphan = targets[0].1.parent().unwrap().join("missing-checkout");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("output"), vec![0u8; 32]).unwrap();
         let unmanaged = scratch.join("verify-leftover");
         fs::create_dir_all(&unmanaged).unwrap();
         fs::write(unmanaged.join("evidence"), "review only").unwrap();
@@ -1800,6 +1809,8 @@ mod tests {
             ]
         );
         assert!(report.caches.iter().all(|record| record.bytes >= 32));
+        assert_eq!(report.caches.iter().find(|record| record.path == orphan).unwrap().disposition,
+            CacheDisposition::OwnershipUncertain);
         let cargo = OpenOptions::new().read(true).write(true).open(targets[0].1.join("debug/.cargo-lock")).unwrap();
         cargo.lock_exclusive().unwrap();
         cleanup_selected(&cas, &mut report, policy, &live).unwrap();
@@ -1813,6 +1824,15 @@ mod tests {
         assert!(targets[2].1.exists(), "live cache retained");
         assert_eq!(fs::read_to_string(targets[0].0.join("source.txt")).unwrap(), "keep source");
         assert_eq!(fs::read_to_string(unmanaged.join("evidence")).unwrap(), "review only");
+        assert!(orphan.exists(), "unknown checkout must remain review-only");
+        // Resume an interrupted scratch quarantine without crossing devices.
+        let quarantine = targets[1].1.with_file_name(format!("{QUARANTINE_PREFIX}warm--{}", uuid::Uuid::new_v4()));
+        fs::rename(&targets[1].1, &quarantine).unwrap();
+        report = inspect_with_probe(&cas, policy, &[], &live, false, probe).unwrap();
+        assert_eq!(report.caches.iter().find(|record| record.path == quarantine).unwrap().disposition,
+            CacheDisposition::Selected);
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(!quarantine.exists(), "interrupted scratch quarantine must be reclaimed");
         let rendered = crate::factory_scratch::render_relocated(&cas);
         assert!(rendered.contains(&unmanaged.display().to_string()), "unmanaged scratch review item absent: {rendered}");
     }

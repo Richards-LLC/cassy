@@ -189,10 +189,20 @@ pub(crate) fn set_project_write_roots(
     }
 
     let mut config = crate::config::Config::load(cas_root)?;
-    let previous = config.factory().write_roots;
     let stored: Vec<String> = roots.iter().map(|root| root.display().to_string()).collect();
-    config.set_factory_write_roots(stored.clone());
-    config.save(cas_root)?;
+    let previous = crate::cli::config::read_ops::update_config_in_place(
+        &mut config,
+        "factory.write_roots",
+        cas_root,
+        |before, after| {
+            let previous = before.factory().write_roots;
+            after.set_factory_write_roots(stored.clone());
+            Ok(previous)
+        },
+        // The worker-cgroup refusal above is this key's operator-only guard:
+        // operator commands from an agent pane are intentionally supported.
+        |_, _| Ok(()),
+    )?;
 
     if !legacy.roots.is_empty() {
         legacy.roots.clear();

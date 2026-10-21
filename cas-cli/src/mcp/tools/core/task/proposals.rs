@@ -349,8 +349,10 @@ impl CasCore {
         proposal: &TaskProposal,
         target_project: &str,
     ) -> Result<cas_types::Task, McpError> {
-        let task = materialize_accepted_proposal(proposal, target_project)
+        let mut task = materialize_accepted_proposal(proposal, target_project)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        let trusted_provenance =
+            crate::cloud::syncer::take_rendered_provenance(&mut task.notes, true);
         let task_store = open_task_store_local(&self.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match task_store.get(&task.id) {
@@ -375,9 +377,15 @@ impl CasCore {
                     ));
                 }
             }
-            Err(cas_store::StoreError::TaskNotFound(_)) => task_store
-                .add(&task)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?,
+            Err(cas_store::StoreError::TaskNotFound(_)) => {
+                task_store
+                    .add(&task)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if let Some(block) = trusted_provenance.as_deref() {
+                    task_store.append_trusted_note(&task.id, block)
+                        .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                }
+            }
             Err(error) => {
                 return Err(Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()));
             }
@@ -389,7 +397,8 @@ impl CasCore {
             target_project,
         )
         .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-        Ok(task)
+        task_store.get(&task.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))
     }
 
     pub(crate) async fn cas_task_proposal_reject(

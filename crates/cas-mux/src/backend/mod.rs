@@ -238,7 +238,18 @@ pub(super) fn finish_worker_config(
         if let Some(root) = cas_root {
             let scope = if claude { crate::worker_resources::McpScope::CasOnly }
                 else { crate::worker_resources::McpScope::AllowedProject };
-            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy, scope) {
+            // A resolved requester/host account is identity inheritance, not a
+            // connector grant. Read only the explicit account's opt-in file.
+            let explicit = claude && config.env.iter().rev().find_map(|(key, value)|
+                (key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE").then_some(value.as_str())) == Some("explicit");
+            let connectors = explicit.then(|| config.env.iter().rev().find_map(|(key, value)|
+                (key == "CLAUDE_CONFIG_DIR").then_some(value.as_str())))
+                .flatten().map(|account| crate::worker_resources::claude_account_connectors(Path::new(account), &policy));
+            if let Some(notice) = connectors.as_ref().and_then(|connectors| connectors.notice.as_deref()) {
+                config.env.push((crate::worker_resources::CLAUDE_CONNECTOR_NOTICE_ENV.into(), notice.into()));
+                tracing::warn!(worker, "{notice}");
+            }
+            match crate::worker_resources::prepare_worker_mcp(root, &worker, &policy, scope, connectors.as_ref()) {
                 Ok(path) => {
                     let cli = config.effective_command();
                     if cli == "claude" {

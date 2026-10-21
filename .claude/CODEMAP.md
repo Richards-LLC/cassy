@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural navigation at the v52 release freeze (`cbbe2eda1`). Regenerate with `/codemap` when modules move.
+> Structural navigation at the v53 release freeze (`c9e2fda28`). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -98,6 +98,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifact, search, rule, and workflow handlers.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - task start/close, evidence validation, epic lanes, and merged-delivery closure.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - task-owned diff attribution and shared hunk parsing.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merged_verification.rs` - verification dispatch for merged deliveries another close gate refuses.
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded candidate-repository discovery for task lifecycle calls.
 - `cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs` - guarded parked-branch transfer into a receiver's worktree.
 - `cas-cli/src/mcp/tools/service/` - factory/reminder actions, liveness, servers, and external verification.
@@ -108,7 +109,8 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 ## Storage, retrieval, and clients
 
 - `crates/cas-store/src/prompt_queue_store.rs` - durable prompt queue and delivery lifecycle.
-- `crates/cas-store/src/accepted_proposal_store.rs`, `crates/cas-store/src/task_note_markers.rs` - accepted task ownership records and trusted note-marker boundary.
+- `crates/cas-store/src/accepted_proposal_store.rs` - accepted cross-project task ownership records.
+- `crates/cas-store/src/task_note_markers.rs` - untrusted timeline sink; marker lines reserved for trusted artifact and proposal appends.
 - `crates/cas-store/src/rule_candidate_store.rs` - durable rule-candidate review state.
 - `crates/cas-store/src/communication_slo/` - communication metrics and fixture-backed SQL queries.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/` - hook schemas/dispatch and memory maintenance.
@@ -124,9 +126,9 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`, `hub-web/src/` Vitest, and `hub-web/e2e/` Playwright.
 - **Contributor policy:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`.
 - **QA contracts:** `docs/qa/`, `scripts/journey-eval.sh`, `scripts/terminal-qa.mjs`.
-- **Release records:** `docs/release-notes/`, `docs/release-reports/`.
+- **Release records:** `docs/release-notes/` (per-version Slack drafts, `RUBRIC.md`), `docs/release-reports/` (per-version Markdown/HTML/PDF and `assets/`).
 - **Release report assembly/rendering:** `cas-cli/src/cli/release_report.rs`, `cas-cli/src/builtins/skills/cas-release-report/`.
-- **Release tooling:** `scripts/release-gate.sh`, `scripts/release_env.py`, `scripts/proof_target.py`.
+- **Release tooling:** `scripts/release.sh` (epic PR bump), `scripts/release-train-announce.py` (draft lint/post), `scripts/release-published-receipt.sh`, `scripts/release-gate.sh`, `scripts/proof_target.py`.
 - **Worker hooks/cache:** `.githooks/`, `scripts/fast-rows-pre-push.sh`, `scripts/refresh-worker-build-cache.sh`.
 - **Markdown tooling:** `scripts/markdownlint.py`, `.markdownlint-cli2.jsonc`.
 - **Deploy/runbooks:** `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`.

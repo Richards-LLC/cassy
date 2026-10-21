@@ -38,7 +38,14 @@ impl Respond for Send {
         };
         let project = body["project_id"].as_str().unwrap();
         let recipient_repo = recipient["metadata"]["canonical_id"].as_str().unwrap_or("");
-        if !cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[]) {
+        let addressable = if body["scope"] == "user" {
+            sender["user_id"].as_str().is_some()
+                && sender["user_id"] == recipient["user_id"]
+                && recipient["metadata"]["role"] == "supervisor"
+        } else {
+            cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[])
+        };
+        if !addressable {
             return ResponseTemplate::new(403)
                 .set_body_json(json!({"error": "recipient is not in this project"}));
         }
@@ -54,6 +61,7 @@ impl Respond for Send {
         mailbox.push(json!({
             "id": id,
             "project_id": project,
+            "scope": body.get("scope").cloned().unwrap_or_else(|| json!("project")),
             "recipient_agent_id": body["recipient_agent_id"],
             "sender_agent_id": body["sender_agent_id"],
             "sender_name": sender["name"],
@@ -1882,6 +1890,77 @@ async fn gh1319_mail_nobody_can_read_is_refused_with_its_reason() {
         "{error}"
     );
     assert!(mailbox.lock().unwrap().is_empty());
+}
+
+/// The account-wide path must preserve the same successor receipt across
+/// project boundaries, and admit the message to that successor's real inbox.
+#[tokio::test]
+async fn cas_56c4_cross_project_ended_supervisor_reaches_successor() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let sender = TestMachine::new("prowl");
+    let receiver = TestMachine::new("soundwave");
+    seed_project(&sender, &server.uri(), "github.com/acme/gabber");
+    seed_project(&receiver, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (sender.cas_dir.clone(), receiver.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "prowl", "a");
+        supervisor_at(&b, "soundwave", "old");
+        supervisor_at(&b, "soundwave", "new");
+    }).await.unwrap();
+    for row in registry.lock().unwrap().values_mut() {
+        row["user_id"] = json!("fixture-owner");
+    }
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let service = service_for(&sender.cas_dir, "a");
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        let sent = coordinate(&service, json!({"action":"message", "target":target,
+            "summary":"cross-project ask", "message":target})).await.unwrap();
+        if target == "sup-old@soundwave" {
+            assert!(sent.contains("sup-old@soundwave ended")
+                && sent.contains("delivered to its successor sup-new@soundwave"), "{sent}");
+        }
+    }
+    let messages = mailbox.lock().unwrap().clone();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m["recipient_agent_id"] == "new" && m["scope"] == "user"));
+    let b = receiver.cas_dir.clone();
+    let rows = tokio::task::spawn_blocking(move || { tick(&b, "new"); inbox(&b) }).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        assert!(rows.iter().any(|row| row.target == "sup-new" && row.prompt.ends_with(target)), "{rows:?}");
+    }
+}
+
+/// A project selector also identifies its ended session when no supervisor
+/// is live; the sender must learn why nothing was sent.
+#[tokio::test]
+async fn cas_56c4_cross_project_without_successor_names_ended_session_and_project() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let sender = TestMachine::new("prowl");
+    let receiver = TestMachine::new("soundwave");
+    seed_project(&sender, &server.uri(), "github.com/acme/gabber");
+    seed_project(&receiver, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (sender.cas_dir.clone(), receiver.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "prowl", "a");
+        supervisor_at(&b, "soundwave", "old");
+    }).await.unwrap();
+    for row in registry.lock().unwrap().values_mut() {
+        row["user_id"] = json!("fixture-owner");
+    }
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let service = service_for(&sender.cas_dir, "a");
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        let error = coordinate(&service, json!({"action":"message", "target":target,
+            "summary":"cross-project ask", "message":"hold staging"})).await.unwrap_err();
+        assert!(error.contains("sup-old@soundwave ended") && error.contains("ago")
+            && error.contains("no live supervisor") && error.contains("widgets")
+            && !error.contains("no supervisor or worker named"), "{target}: {error}");
+    }
+    assert!(mailbox.lock().unwrap().is_empty());
+    assert!(inbox(&sender.cas_dir).is_empty());
 }
 
 /// GH #1319: a supervisor whose Claude login expired heartbeats like a live

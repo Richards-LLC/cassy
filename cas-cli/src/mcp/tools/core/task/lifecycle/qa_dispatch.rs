@@ -1447,6 +1447,54 @@ impl CasCore {
         ))
     }
 
+    /// Reuse a prior independent reviewer only while its current registration
+    /// is live, in this factory, and has neither assigned work nor a lease.
+    fn reusable_qa_reviewer(&self, task: &Task, pass: &QaPass) -> Option<String> {
+        let previous = cas_store::list_qa_passes(&self.cas_root, &task.id)
+            .ok()?
+            .into_iter()
+            .filter(|prior| prior.round < pass.round)
+            .find_map(|prior| prior.reviewer_agent_id)?;
+        let agents = self.open_agent_store().ok()?;
+        let reviewer = agents
+            .list(None)
+            .ok()?
+            .into_iter()
+            .filter(|agent| agent.id == previous || agent.name == previous)
+            .max_by_key(|agent| agent.registered_at)?;
+        let session = std::env::var("CAS_FACTORY_SESSION").ok();
+        if reviewer.role != cas_types::AgentRole::Worker
+            || !reviewer.is_alive()
+            || reviewer.is_heartbeat_expired(cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS)
+            || reviewer.active_tasks != 0
+            || reviewer.factory_session != session
+            || [reviewer.id.as_str(), reviewer.name.as_str()]
+                .iter()
+                .any(|identity| {
+                    task.assignee.as_deref() == Some(*identity)
+                        || pass.implementer_agent_id == *identity
+                })
+            || !agents.list_agent_leases(&reviewer.id).ok()?.is_empty()
+        {
+            return None;
+        }
+        let tasks = self.open_task_store().ok()?;
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            if tasks.list(Some(status)).ok()?.iter().any(|task| {
+                task.assignee
+                    .as_deref()
+                    .is_some_and(|id| id == reviewer.id || id == reviewer.name)
+            }) {
+                return None;
+            }
+        }
+        Some(reviewer.name)
+    }
+
     fn materialize_qa_round(
         &self,
         task: &Task,
@@ -1456,10 +1504,22 @@ impl CasCore {
         config: &crate::config::Config,
         location: QaDeliveryLocation<'_>,
     ) -> String {
-        let artifacts_root =
-            crate::config::project_factory_artifacts_root(&self.cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
+        let artifacts_root = crate::config::project_factory_artifacts_root(
+            &self.cas_root,
+            &crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            ),
+        );
         let ledger_dir = round_dir(&artifacts_root, &pass);
-        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch) {
+        let reviewer = self.reusable_qa_reviewer(task, &pass);
+        let qa_task_id = match self.create_qa_task(
+            task,
+            &pass,
+            reasons,
+            &ledger_dir,
+            parent_branch,
+            reviewer.as_deref(),
+        ) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not created");
@@ -1474,6 +1534,27 @@ impl CasCore {
         if let Err(error) = cas_store::set_qa_task(&self.cas_root, &pass.id, &qa_task_id) {
             tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not linked to its pass");
         }
+        let assignment = if let Some(reviewer) = reviewer.as_deref() {
+            let queued = self
+                .open_task_store()
+                .ok()
+                .and_then(|store| store.get(&qa_task_id).ok())
+                .and_then(|task| {
+                    crate::task_assignment::enqueue(&self.cas_root, &task)
+                        .ok()
+                        .flatten()
+                });
+            Some(format!(
+                "Reviewer {reviewer} reused; {}",
+                if queued.is_some() {
+                    "assignment queued"
+                } else {
+                    "assignment not queued; notify the reviewer"
+                }
+            ))
+        } else {
+            None
+        };
         let mut handoff = "queued for the supervisor".to_string();
         match crate::store::open_prompt_queue_store(&self.cas_root) {
             Ok(queue) => {
@@ -1488,6 +1569,7 @@ impl CasCore {
                     &pass.implementer_agent_id,
                     reasons,
                     location,
+                    reviewer.as_deref(),
                 ) {
                     tracing::warn!(task_id = %task.id, error = %error, "cas-619f: QA handoff not queued");
                     handoff = "NOT queued — message the supervisor".to_string();
@@ -1499,12 +1581,13 @@ impl CasCore {
             }
         }
         format!(
-            "\n\nINDEPENDENT QA DISPATCHED ({reasons}): pass {} round {} for {}; QA task {qa_task_id} ({handoff}). \
+            "\n\nINDEPENDENT QA DISPATCHED ({reasons}): pass {} round {} for {}; QA task {qa_task_id} ({handoff}). {} \
              A different agent reviews the running build; the {} waits for its verdict, and a rejection \
              returns this task to you with the ledger at {}/LEDGER.md.",
             pass.id,
             pass.round,
             pass.head8(),
+            assignment.as_deref().unwrap_or(""),
             location.gate(),
             ledger_dir.display(),
         )
@@ -1517,6 +1600,7 @@ impl CasCore {
         reasons: &str,
         ledger_dir: &Path,
         parent_branch: &str,
+        reviewer: Option<&str>,
     ) -> Result<String, String> {
         let task_store = self
             .open_task_store()
@@ -1531,6 +1615,7 @@ impl CasCore {
         let reasons_list: Vec<String> = reasons.split(", ").map(ToOwned::to_owned).collect();
         let mut qa_task = Task::new(id.clone(), qa_task_title(delivery, pass));
         qa_task.scope = crate::types::Scope::Project;
+        qa_task.assignee = reviewer.map(str::to_owned);
         qa_task.origin_project = delivery.origin_project.clone();
         qa_task.description =
             qa_task_description(delivery, pass, &reasons_list, ledger_dir, parent_branch);

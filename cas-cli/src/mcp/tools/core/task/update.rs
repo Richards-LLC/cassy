@@ -497,6 +497,7 @@ impl CasCore {
             state_patch,
             None,
             None,
+            false,
         )
         .await
     }
@@ -511,6 +512,7 @@ impl CasCore {
         state_patch: Option<serde_json::Value>,
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
+        split_supervisor_override: bool,
     ) -> Result<CallToolResult, McpError> {
         if let Some(message) = [req.notes.as_deref(), proof_scope_fix_reason]
             .into_iter()
@@ -533,6 +535,51 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        // Check before any ordinary fields or side effects: a rejected batch
+        // must not change a peer's child. Only this authenticated assignment
+        // path can mint the one-start, worker-bound takeover receipt.
+        let split_takeover = if let Some(assignee) = req.assignee.as_deref()
+            .and_then(normalize_assignee_update_value)
+        {
+            if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
+                if !split_supervisor_override {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
+                    ));
+                }
+                let supervisor = self.resolve_live_supervisor_authority().map_err(|_| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: requires a live registered supervisor",
+                    )
+                })?;
+                let reason = proof_scope_fix_reason
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                    .ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason",
+                    ))?;
+                let agents = self.open_agent_store()?;
+                let worker = super::resolve_agent_identity(agents.as_ref(), &assignee)
+                    .filter(|agent| agent.role == cas_types::AgentRole::Worker && agent.is_alive())
+                    .ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: assignee must resolve to a live registered worker",
+                    ))?;
+                Some(cas_types::SplitTakeoverAuthorization {
+                    split_id: hold.split_id,
+                    worker_id: worker.id,
+                    supervisor_id: supervisor.id,
+                    reason: reason.to_string(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let explicit_block_status = req
             .status
             .as_deref()
@@ -1426,6 +1473,7 @@ impl CasCore {
             match normalize_assignee_update_value(assignee_raw) {
                 None => {
                     task.assignee = None;
+                    task.deliverables.split_takeover = None;
                     changes.push("assignee");
                 }
                 Some(assignee) => {
@@ -1626,6 +1674,15 @@ impl CasCore {
                             .record_handoff_branch(&format!("factory/{prior}"));
                     }
                     task.assignee = Some(canonical_assignee);
+                    task.deliverables.split_takeover = split_takeover.clone();
+                    if let Some(authorization) = &split_takeover {
+                        task.notes.push_str(&format!(
+                            "\n[{}] DECISION: SPLIT OVERRIDE split={} worker={} supervisor={} reason={}",
+                            chrono::Utc::now().format("%Y-%m-%d %H:%M"), authorization.split_id,
+                            authorization.worker_id, authorization.supervisor_id,
+                            authorization.reason.replace(['\n', '\r'], " "),
+                        ));
+                    }
                     changes.push("assignee");
 
                     // Gates are supervisor-owned decisions. Keep assignment

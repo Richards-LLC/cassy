@@ -96,8 +96,10 @@ Walk the demo statement end to end, then the obvious adjacent paths:
 - keyboard only
 - reduced motion
 
-Cap this at **8 cells**. Write each expected result in the user's words
-before you run the cell. Capture a trace and a screenshot per cell.
+Cap this at **8 cells**. The [walk rules](../SKILL.md#walk-rules) apply to
+every cell: a change to a shared step starts with its entry paths. Write each
+expected result in the user's words before you run the cell. Capture a trace
+and a screenshot per cell.
 
 When a cell fails, check the base build before you blame the delivery: serve
 `git merge-base <base> <bound_head>` the same way and repeat the cell. If the

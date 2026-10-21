@@ -15,7 +15,8 @@
 //!    leaves that side's claims alone.
 //!
 //! While a split binds a side, a start, claim or pre-assigned spawn of a
-//! child the other side took is refused unless forced. The gate reads only
+//! child the other side took is refused unless a supervisor authorizes an
+//! assignment to a specific worker with a reason. The gate reads only
 //! this database, so it holds even when the cloud is unreachable.
 //!
 //! Authority (cas-604d): a split line is honoured only in a message the cloud
@@ -194,7 +195,9 @@ impl SplitHold {
              Starting it here would duplicate their work. Ask them first: \
              {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"...\"\n\
              To end the split: {prefix}factory action=epic_split id={} decision=cancel. \
-             To take this child anyway: {prefix}task action=start id={task_id} force=true",
+             To redirect it, cancel the split above. To authorize one worker's start: \
+             {prefix}task action=update id={task_id} assignee=<worker> supervisor_override=true reason=\"<agreed takeover reason>\". \
+             Only a live registered supervisor may authorize this; force=true does not bypass a split.",
             self.describe(),
             self.split_id,
             self.epic_id,
@@ -204,13 +207,15 @@ impl SplitHold {
         )
     }
 
-    /// Note for a forced start of the peer's child.
-    pub fn override_note(&self, task_id: &str, prefix: &str) -> String {
+    /// Receipt for the worker consuming a supervisor-authorized takeover.
+    pub fn override_note(&self, task_id: &str, authorization: &cas_types::SplitTakeoverAuthorization) -> String {
         format!(
-            "\n\n⚠️  SPLIT OVERRIDE — {task_id} belongs to {} under epic split {}; started anyway (force=true). Tell them: {prefix}coordination action=message target={} summary=\"took {task_id}\" message=\"...\"",
+            "\n\nSPLIT OVERRIDE — {task_id} belongs to {} under epic split {}; worker {} consumed supervisor {}'s authorization. Reason: {}",
             self.describe(),
             self.split_id,
-            self.describe(),
+            authorization.worker_id,
+            authorization.supervisor_id,
+            authorization.reason.replace(['\n', '\r'], " "),
         )
     }
 }

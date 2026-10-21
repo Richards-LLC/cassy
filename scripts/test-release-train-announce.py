@@ -183,6 +183,7 @@ class Announce(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_post_sends_validated_bodies_and_preserves_threads_and_receipts(self):
+        self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
         self.assertEqual(self.validate().returncode, 0)
         adapter, writes = self.adapter()
         self.post(adapter)

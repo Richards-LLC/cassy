@@ -71,6 +71,52 @@ Seeded journeys are reported as debt. Live journeys with explicit
 `traffic.share_pct: null` produce traffic debt, never a validation error. Curate
 a seed by adding steps, invariant checks and traffic, then removing `seeded`.
 
+### Shared pipelines and multiple consumers
+
+Ownership is nonexclusive. With `selection: globs` (the default), a changed file
+selects **every** journey whose owners match it. Matching one journey does not
+consume the file or stop matching. Repeating the same glob in several journeys'
+`owners` works, including under `owners.backend`; those map keys organize globs,
+not journey IDs.
+
+For a shared pipeline, prefer one header group and reference it from every
+consuming journey. For example, define:
+
+```yaml
+owner_groups:
+  audit_v2:
+    description: Shared audit prompts consumed by every post shape
+    globs: ["apps/backend/src/tools/audit-v2/*.prompt.ts"]
+```
+
+Add `owner_groups: [audit_v2]` to **each** of `spoken_video`, `text_led_video`,
+`carousel_sequence`, `single_image`, `montage`, `screen_tutorial`, and
+`general_hybrid`, retaining their shape-specific `owners` and `invariants`.
+Defining the group alone selects nothing; referencing it from only one journey
+selects only that consumer. The registry does not infer pipeline dependencies
+from imports. Keep consumer membership current when the pipeline gains a caller.
+
+The [complete seven-shape example](examples/gabber-shared-pipeline.yaml) uses
+illustrative routes and output checks. Copy its group and memberships into the
+project's registry, adapting routes and checks to the real application. For a
+diff changing only `apps/backend/src/tools/audit-v2/shared.prompt.ts`, run:
+
+```bash
+cas qa journeys --check
+cas qa impact <before-prompt-edit>..<after-prompt-edit> --json
+```
+
+The report lists all seven IDs, each with a match whose `via` is
+`owner_groups.audit_v2`, and each journey's own invariant statements and read-back
+checks. For example, the carousel journey can require comparing its
+slides-with-text ratio against the prior prompt on the same fixture. Shared
+ownership does not merge or replace those checks, and impact reports do not run
+them. Ratios, thresholds and fixture expectations remain application contracts.
+
+This needs no new fan-out schema. Explicit `selection: legacy_catalog` instead
+delegates journey selection to the catalog selector described below; owner
+membership still establishes file ownership but does not override that selection.
+
 ### Preserving a semantic catalog
 
 cas-src uses `selection: legacy_catalog` to keep HUB-J1–HUB-J21 selection through

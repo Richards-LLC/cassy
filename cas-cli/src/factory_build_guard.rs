@@ -16,11 +16,63 @@ use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 // per live/requested lane; the configurable target-cache watermark stays free.
 const ESTIMATED_LANE_GROWTH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-/// cas-f8a6 (red): cooldown constants only; behaviour unchanged.
-#[cfg(test)]
+/// cas-f8a6: a scratch GC that reclaimed nothing is not repeated by every
+/// spawn and capped check (each a separate process) until this cooldown
+/// expires or free space moves materially. Capacity is always re-measured.
 const ADMISSION_GC_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
-#[cfg(test)]
 const ADMISSION_GC_STATE: &str = "build-guard-admission-gc.json";
+const MATERIAL_CHANGE_MIN_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// The last admission GC for one Cassy root, keyed by its location under `cas_root`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AdmissionGcAttempt {
+    at_unix_secs: u64,
+    reclaimed_bytes: u64,
+    total_bytes: u64,
+    available_bytes: u64,
+}
+
+fn unix_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// True when the last attempt reclaimed nothing, is inside the cooldown, and
+/// the disk has not changed materially since; any doubt runs the GC.
+fn admission_gc_cooling_down(cas_root: &Path, disk: &FilesystemCapacity) -> bool {
+    let Some(attempt) = std::fs::read_to_string(cas_root.join(ADMISSION_GC_STATE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<AdmissionGcAttempt>(&text).ok())
+    else {
+        return false;
+    };
+    let now = unix_secs(std::time::SystemTime::now());
+    let material = MATERIAL_CHANGE_MIN_BYTES.max(disk.total_bytes / 100);
+    attempt.reclaimed_bytes == 0
+        && attempt.at_unix_secs <= now
+        && now - attempt.at_unix_secs < ADMISSION_GC_COOLDOWN.as_secs()
+        && attempt.total_bytes == disk.total_bytes
+        && attempt.available_bytes.abs_diff(disk.available_bytes) < material
+}
+
+/// Best effort and atomic: a lost record only costs one extra scan.
+fn record_admission_gc(cas_root: &Path, reclaimed_bytes: u64, disk: &FilesystemCapacity) {
+    let attempt = AdmissionGcAttempt {
+        at_unix_secs: unix_secs(std::time::SystemTime::now()),
+        reclaimed_bytes,
+        total_bytes: disk.total_bytes,
+        available_bytes: disk.available_bytes,
+    };
+    let Ok(text) = serde_json::to_string(&attempt) else {
+        return;
+    };
+    let temporary = cas_root.join(format!(".{ADMISSION_GC_STATE}.{}.tmp", std::process::id()));
+    if std::fs::write(&temporary, text).is_ok()
+        && std::fs::rename(&temporary, cas_root.join(ADMISSION_GC_STATE)).is_err()
+    {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
 
 /// Shared projected disk admission. GC reserves the configured builder cap so
 /// it can restore headroom before the next capped build is refused.
@@ -127,15 +179,23 @@ impl BuildGuardSnapshot {
         let lanes = self
             .live_cargo_workers
             .saturating_add(self.requested_builders);
-        if self.requested_builders > 0
-            && self
-                .disk
-                .as_ref()
-                .is_some_and(|disk| disk.as_ref().is_ok_and(|disk| disk_pressure(disk, lanes)))
+        let pressured = match &self.disk {
+            Some(Ok(disk)) if self.requested_builders > 0 && disk_pressure(disk, lanes) => {
+                Some(disk.clone())
+            }
+            _ => None,
+        };
+        if let Some(disk) = &pressured
+            && admission_gc_cooling_down(cas_root, disk)
         {
+            eprintln!(
+                "Build guard scratch GC skipped: the last attempt reclaimed nothing within {}s and free space is unchanged",
+                ADMISSION_GC_COOLDOWN.as_secs()
+            );
+        } else if pressured.is_some() {
             // One attempt per admission, with the same provenance, quiet-window,
             // warm retention and nonblocking destructive locks as manual GC.
-            match crate::factory_target_cache::reclaim_scratch_for_admission(
+            let reclaimed = match crate::factory_target_cache::reclaim_scratch_for_admission(
                 cas_root,
                 policy,
                 |path, policy| {
@@ -149,21 +209,31 @@ impl BuildGuardSnapshot {
                     probe(path, policy)
                 },
             ) {
-                Ok(report) => eprintln!(
-                    "Build guard scratch GC: reclaimed {} bytes from {} target(s); warm, live and unverifiable targets retained",
-                    report.reclaimed_bytes,
-                    report
-                        .caches
-                        .iter()
-                        .filter(|cache| cache.disposition
-                            == crate::factory_target_cache::CacheDisposition::Reclaimed)
-                        .count(),
-                ),
-                Err(error) => eprintln!("Build guard scratch GC deferred: {error}"),
-            }
+                Ok(report) => {
+                    eprintln!(
+                        "Build guard scratch GC: reclaimed {} bytes from {} target(s); warm, live and unverifiable targets retained",
+                        report.reclaimed_bytes,
+                        report
+                            .caches
+                            .iter()
+                            .filter(|cache| cache.disposition
+                                == crate::factory_target_cache::CacheDisposition::Reclaimed)
+                            .count(),
+                    );
+                    Some(report.reclaimed_bytes)
+                }
+                Err(error) => {
+                    eprintln!("Build guard scratch GC deferred: {error}");
+                    None
+                }
+            };
             // Even a partial cleanup or competing GC may have freed capacity.
             // Never credit planned/logical bytes as actual filesystem headroom.
             self.disk = Some(measure());
+            // A deferred GC is retried; only a completed attempt starts the cooldown.
+            if let (Some(reclaimed), Some(Ok(disk))) = (reclaimed, &self.disk) {
+                record_admission_gc(cas_root, reclaimed, disk);
+            }
         }
         self
     }

@@ -27,8 +27,13 @@ pub struct ImpactArgs {
 }
 
 pub fn execute(args: &ImpactArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
-    let report =
-        report(args, cas_root).map_err(|error| qa_impact::ReadError(format!("{error:#}")))?;
+    let report = report(args, cas_root).map_err(|error| {
+        if error.is::<qa_impact::UsageError>() {
+            error
+        } else {
+            anyhow!(qa_impact::ReadError(format!("{error:#}")))
+        }
+    })?;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

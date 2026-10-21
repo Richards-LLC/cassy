@@ -42,6 +42,17 @@ fn commit(repo: &Path) -> String {
 
 #[test]
 fn qa_impact_orders_status_share_id_and_ignores_paths() {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from([
+        "cas",
+        "qa",
+        "impact",
+        "--files",
+        "src/flow.ts",
+        "--json",
+    ])
+    .unwrap();
+    assert!(cli.json && matches!(cli.command, Some(crate::cli::Commands::Qa(_))));
     let temp = repo();
     let repo = temp.path();
     write(repo, "src/flow.ts", "flow");

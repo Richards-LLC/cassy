@@ -547,6 +547,11 @@ pub(crate) struct DeliverabilityRequest {
 }
 
 impl DeliverabilityRequest {
+    /// Final merge-signal builder check, executed on the external release lane.
+    pub(crate) fn refresh_merge_prompt(&self, prompt: &mut Prompt) -> bool {
+        self.read(None, std::slice::from_ref(prompt)) == [true]
+    }
+
     /// Whether each prompt is still deliverable. Runs on any thread. Always a
     /// fresh read: a failed read is uncertainty, and an uncertain prompt is
     /// delivered. Never retract a legitimate notification from cached data

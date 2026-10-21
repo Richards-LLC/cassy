@@ -1129,9 +1129,9 @@ impl FactoryDaemon {
             generation: self.queue_jobs.generation(),
             budget: Duration::from_secs(10),
         };
-        let prompt = prompt.clone();
+        let mut prompt = prompt.clone();
         let submitted = self.queue_jobs.submit_external(spec, move || {
-            let completed = if request.read(None, std::slice::from_ref(&prompt)) == [true] {
+            let completed = if request.refresh_merge_prompt(&mut prompt) {
                 let missing = teams.team_tree_missing();
                 let inject_started = Instant::now();
                 let result = teams.write_to_inbox_for_merge_alert(
@@ -1183,7 +1183,7 @@ impl FactoryDaemon {
                 budget: Duration::from_secs(10),
             };
             let submitted = self.queue_jobs.submit_external(spec, move || {
-                let ready = if request.read(None, std::slice::from_ref(&completed.prompt)) == [true] {
+                let ready = if request.refresh_merge_prompt(&mut completed.prompt) {
                     completed.phase = MergeAlertPhase::PtyFallback;
                     Some(completed)
                 } else {

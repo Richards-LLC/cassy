@@ -2167,13 +2167,17 @@ pub fn request_changes_for_parked_delivery(
             rusqlite::Error::QueryReturnedNoRows => StoreError::TaskNotFound(task_id.to_string()),
             other => StoreError::Database(other),
         })?;
-    if status != TaskStatus::AwaitingMerge.to_string() {
-        return Err(StoreError::Parse(format!(
-            "request_changes requires task status awaiting_merge, found {status}"
-        )));
-    }
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    let blocked_parked = status == TaskStatus::Blocked.to_string()
+        && (deliverables.parked_branch.is_some()
+            || deliverables.factory_branch_anchor.is_some()
+            || delivery.is_some());
+    if status != TaskStatus::AwaitingMerge.to_string() && !blocked_parked {
+        return Err(StoreError::Parse(format!(
+            "request_changes requires awaiting_merge or blocked with a recorded parked delivery, found {status}"
+        )));
+    }
     let rejected_branch = deliverables
         .parked_branch
         .as_deref()
@@ -2286,7 +2290,7 @@ pub fn request_changes_for_parked_delivery(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
              pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
-         WHERE id = ?1 AND status = 'awaiting_merge'",
+         WHERE id = ?1 AND status = ?5",
         params![
             task_id,
             safe_notes.as_ref(),
@@ -2294,6 +2298,7 @@ pub fn request_changes_for_parked_delivery(
                 StoreError::Parse(format!("failed to serialize task deliverables: {error}"))
             })?,
             now.to_rfc3339(),
+            status,
         ],
     )?;
     if task_changed != 1 {

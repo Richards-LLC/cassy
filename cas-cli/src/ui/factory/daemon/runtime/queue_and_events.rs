@@ -14795,6 +14795,7 @@ mod tests {
             "swift-fox",
             "demo_statement",
             crate::prompt_revalidation::QaDeliveryLocation::ParkedForMerge,
+            None,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(

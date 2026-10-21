@@ -373,6 +373,8 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 .stderr(Stdio::piped());
             if hold_startup {
                 command.env("CAS_TEST_HUB_STARTUP_BARRIER", &barrier);
+            } else {
+                command.env("CAS_TEST_HUB_READY_BARRIER", &barrier);
             }
             command
                 .spawn()
@@ -550,6 +552,17 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             running_pid.unwrap()
         };
         std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+        if !hold_startup {
+            let ready_observers = wait_for_markers("ready-observer-", 2);
+            std::fs::write(barrier.join("release-ready-observers"), b"release\n").unwrap();
+            if ready_observers.len() < 2 {
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!(
+                    "both restarts must observe the peer's ready record: {ready_observers:?}"
+                );
+            }
+        }
         let mut first_output = None;
         let mut second_output = None;
         if hold_startup {

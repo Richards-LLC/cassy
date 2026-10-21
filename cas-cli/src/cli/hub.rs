@@ -1666,6 +1666,15 @@ fn start_with_output_resolved(
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
+                if let Err(error) = hold_hub_test_barrier(
+                    "CAS_TEST_HUB_READY_BARRIER",
+                    "ready-observer",
+                    "release-ready-observers",
+                    launcher_pid,
+                ) {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                    return Err(error);
+                }
                 if tailscale_serve && host_transport_mode()? == HubTransportMode::Required
                     && let Some(warning) = &record.transport_warning
                 {

@@ -151,8 +151,9 @@ Produce pairs for every `visual_change: true` bundle; omit them otherwise.
 
    Use each stable `id` as the cell identity on both sides. Entries in `unpaired[]`
    use the same row shape, with just `before` or `after`; each present side must
-   name its task-contained, nonempty `png`. Keep every baseline cell, including
-   cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
+   name a nonempty `png` resolved relative to, and confined inside, the directory
+   containing `pairs.json`. Keep every baseline cell, including cells with no
+   AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
    AFTER must contain every BEFORE id, and may add ids. A partial comparison that
    drops BEFORE cells refuses and names all missing ids, even with no AFTER cells.
    Capture the missing cells, or obtain an existing recorded exact-tip `qa_waive`

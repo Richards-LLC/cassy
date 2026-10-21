@@ -2150,24 +2150,23 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 /// from `head` to `target` that brings `head` in through a merged parent
 /// (`M^1..M`), skipping the lane's own target syncs. A merge on the target's first-parent
 /// chain is the integration receipt itself and contributes `head^1..head`;
-/// later target merges cannot replace its diff.
-/// `None` when neither can be computed
-/// (for example a fast-forward merge, which leaves no merge commit).
+/// the same holds for non-merge squash/FF receipts (cas-a173). Later target
+/// merges cannot replace their diff. `None` when Git cannot resolve a boundary.
 pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
-        // GH #1181: a merge on the target's first-parent chain is already
-        // the integration receipt. A worker-tip sync merge is not: its
-        // first-parent diff contains the incoming epic, so retain the
-        // ancestry-path search for that tip's later integration merge.
-        if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_some() {
-            let full_head = git(repo, &["rev-parse", "--verify", head])?;
-            if git(repo, &["rev-list", "--first-parent", target])?
-                .lines()
-                .any(|commit| commit == full_head)
-            {
-                return Some((format!("{head}^1"), head.to_string()));
-            }
+        // GH #1181 / cas-a173: any receipt on the target's first-parent
+        // chain is already integrated, whether merged or squash/FF. A
+        // worker-tip sync merge is not on that chain: retain the ancestry
+        // search for its later integration merge to exclude incoming code.
+        let full_head = git(repo, &["rev-parse", "--verify", head])?;
+        if git(repo, &["rev-list", "--first-parent", target])?
+            .lines()
+            .any(|commit| commit == full_head)
+        {
+            // A root commit has no parent-relative delivery to measure.
+            git(repo, &["rev-parse", "--verify", &format!("{head}^1")])?;
+            return Some((format!("{head}^1"), head.to_string()));
         }
         let merges = git(
             repo,

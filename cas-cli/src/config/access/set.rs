@@ -726,6 +726,15 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.components = components;
             }
+            "qa.release.migrations.paths" => {
+                let paths = crate::qa_release::ReleaseConfig::parse_migration_paths(value).map_err(MemError::Parse)?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.migrations.get_or_insert_with(Default::default).paths = paths;
+            }
+            "qa.release.migrations.env" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.migrations.get_or_insert_with(Default::default).env = value.trim().to_string();
+            }
             "qa.preflight_hook" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_hook = if value.trim().is_empty() {

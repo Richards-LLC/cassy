@@ -200,6 +200,8 @@ impl Config {
             "qa.release.env" => Some(qa.release.clone().unwrap_or_default().env.join(",")),
             "qa.release.timeout_secs" => Some(qa.release.clone().unwrap_or_default().timeout_secs.to_string()),
             "qa.release.components" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().components).expect("serializable components")),
+            "qa.release.migrations.paths" => Some(qa.release.clone().unwrap_or_default().migrations.unwrap_or_default().paths.join(",")),
+            "qa.release.migrations.env" => Some(qa.release.clone().unwrap_or_default().migrations.unwrap_or_default().env),
             "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
             "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),
             // Dev section

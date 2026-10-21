@@ -78,6 +78,8 @@ const CI_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
 const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: docs-only code CI was explicitly overridden by a registered supervisor.\n\n";
+const MIGRATION_OVERRIDE_POLICY_NOTICE: &str =
+    "Merge policy: an unapplied migration was explicitly overridden by a registered supervisor.\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
@@ -119,6 +121,46 @@ fn admit_branch_ci(
         ));
     }
     Ok(false)
+}
+
+/// cas-87e0: a merge into `qa.release.integration_branch` that adds a
+/// migration needs the adapter to report it applied there. Other targets, and
+/// ranges adding no migration, make no adapter call. Fails closed; returns
+/// the refusal a supervisor override accepted, for its decision note.
+fn admit_release_migrations(
+    root: &Path,
+    release: Option<&crate::qa_release::ReleaseConfig>,
+    target: &str,
+    tip: &str,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(release) = release.filter(|release| release.integration_branch == target) else {
+        return Ok(None);
+    };
+    match crate::qa_release::check_migrations(root, release, target, tip) {
+        Ok(_) => Ok(None),
+        Err(refusal) if override_requested && reason.is_some_and(|r| !r.trim().is_empty()) => {
+            Ok(Some(refusal.to_string()))
+        }
+        Err(refusal) => Err(format!(
+            "{refusal}. Refusing worktree_merge of {tip} into {target}: apply the migration there first. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
+        )),
+    }
+}
+
+fn migration_override_note(
+    supervisor_id: &str,
+    branch: &str,
+    target: &str,
+    refusal: &str,
+    reason: &str,
+) -> String {
+    format!(
+        "[{}] ✅ DECISION Supervisor {supervisor_id} overrode {refusal} for {branch} before worktree_merge into {target}: {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        reason.trim(),
+    )
 }
 
 fn ci_override_note(
@@ -3799,11 +3841,28 @@ impl CasCore {
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
         // integration gate (cas-6f48) is retired with the rolling sweep.
-        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason);
-        let ci_override = match admission {
+        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason)
+            .map_err(|message| ("ci_refused", message))
+            .and_then(|ci_override| {
+                // An already-merged reconciliation runs no merge to gate.
+                let migration_override = if reconciled_delivery {
+                    None
+                } else {
+                    admit_release_migrations(
+                        &cwd,
+                        config.qa.as_ref().and_then(|qa| qa.release.as_ref()),
+                        &worktree.parent_branch,
+                        ci_source,
+                        supervisor_override,
+                        reason,
+                    )
+                    .map_err(|message| ("migration_refused", message))?
+                };
+                Ok((ci_override, migration_override))
+            });
+        let (ci_override, migration_override) = match admission {
             Ok(accepted) => accepted,
-            Err(message) => {
-                let refusal_kind = "ci_refused";
+            Err((refusal_kind, message)) => {
                 // cas-d1eb: CI refuses before Git runs. Withdraw the durable
                 // intent, including one stranded by an earlier attempt, while
                 // retaining the approved receipt for a supervisor retry.
@@ -3847,14 +3906,11 @@ impl CasCore {
         } else {
             None
         };
-        let ci_policy_notice = if ci_override {
-            let supervisor = override_authority
-                .as_ref()
-                .expect("CI override has authority");
+        let log_override_decision = |note: String| -> Result<(), McpError> {
             let task_id = task_id.ok_or_else(|| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(
-                    "SUPERVISOR OVERRIDE REJECTED: task_id is required to log the CI decision.",
+                    "SUPERVISOR OVERRIDE REJECTED: task_id is required to log the override decision.",
                 ),
                 data: None,
             })?;
@@ -3866,17 +3922,38 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            let note = ci_override_note(
-                &supervisor.id,
-                &worktree.branch,
-                &branch_ci_state,
-                reason.unwrap_or_default(),
-            );
             task_store.append_note(task_id, &note).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}")),
                 data: None,
-            })?;
+            })
+        };
+        let migration_policy_notice = match &migration_override {
+            Some(refusal) => {
+                let supervisor = override_authority
+                    .as_ref()
+                    .expect("migration override has authority");
+                log_override_decision(migration_override_note(
+                    &supervisor.id,
+                    &worktree.branch,
+                    &worktree.parent_branch,
+                    refusal,
+                    reason.unwrap_or_default(),
+                ))?;
+                MIGRATION_OVERRIDE_POLICY_NOTICE
+            }
+            None => "",
+        };
+        let ci_policy_notice = if ci_override {
+            let supervisor = override_authority
+                .as_ref()
+                .expect("CI override has authority");
+            log_override_decision(ci_override_note(
+                &supervisor.id,
+                &worktree.branch,
+                &branch_ci_state,
+                reason.unwrap_or_default(),
+            ))?;
             if matches!(branch_ci_state, BranchCiState::Red { .. }) {
                 CI_OVERRIDE_POLICY_NOTICE
             } else {
@@ -4554,7 +4631,7 @@ impl CasCore {
             close_result.content.insert(
                 0,
                 Content::text(format!(
-                    "{ci_prefix}{trunk_notice}{ci_policy_notice}"
+                    "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}"
                 )),
             );
             if !pushed_source_note.is_empty() {
@@ -4571,7 +4648,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -4586,7 +4663,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
+            "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
@@ -4711,7 +4788,8 @@ impl CasCore {
 mod tests {
     use super::{
         BranchCiState, CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput,
-        admit_branch_ci, require_code_validation,
+        admit_branch_ci, admit_release_migrations, migration_override_note,
+        require_code_validation,
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
@@ -5419,6 +5497,50 @@ mod tests {
             let refusal = admit_branch_ci(&red, true, reason).unwrap_err();
             assert!(refusal.contains("non-empty reason"), "{refusal}");
         }
+    }
+
+    /// cas-87e0: a merge into the integration branch that adds an unapplied
+    /// migration is refused before Git runs; other targets skip the check.
+    #[test]
+    fn pending_migration_refuses_integration_merge() {
+        use crate::qa_release::fixture::{Project, release_config};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = Project::new();
+        let release = release_config(&[
+            ("adapter", "./scripts/qa/fake-adapter"),
+            ("env", "FAKE_MIGRATIONS"),
+            ("integration_branch", "staging"),
+            ("migrations.paths", "db/migrations/*/migration.sql"),
+            ("migrations.env", "staging"),
+        ]);
+        let root = project.root();
+        project.commit("README.md", "base");
+        project.git(&["branch", "staging"]);
+        project.git(&["checkout", "-qb", "factory/fox"]);
+        project.commit("db/migrations/20261021_add/migration.sql", "add");
+        let admit = |target, override_requested, reason| {
+            admit_release_migrations(root, Some(&release), target, "factory/fox", override_requested, reason)
+        };
+        env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"pending"}"#);
+
+        let refusal = admit("staging", false, None).unwrap_err();
+        assert!(
+            refusal.starts_with("MIGRATION PENDING: 20261021_add on staging.")
+                && refusal.ends_with("No merge was attempted."),
+            "{refusal}"
+        );
+        assert!(admit("staging", true, Some(" ")).is_err());
+        assert_eq!(admit("main", false, None), Ok(None));
+        let accepted = admit("staging", true, Some("applied by hand")).unwrap().unwrap();
+        let note = migration_override_note("supervisor-1", "factory/fox", "staging", &accepted, " applied by hand ");
+        assert!(
+            note.contains("✅ DECISION Supervisor supervisor-1 overrode MIGRATION PENDING: 20261021_add")
+                && note.ends_with("into staging: applied by hand"),
+            "{note}"
+        );
+
+        env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
+        assert_eq!(admit("staging", false, None), Ok(None));
     }
 
     #[test]

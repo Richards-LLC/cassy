@@ -2532,8 +2532,10 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
     assert!(human.contains("Fix: cas claude login main"), "{human}");
     assert!(human.contains("path: ~/.codex"), "{human}");
     assert!(human.contains("Fix: cas codex login main"), "{human}");
-    assert!(
-        human.contains("Fix: npm install -g @xai-official/grok"),
+    assert!(!human.contains("Fix: cas hub service install"), "{human}");
+    assert_eq!(
+        human.matches("Retry: cas hub status").count(),
+        usize::from(human.contains("service manager unknown")),
         "{human}"
     );
 
@@ -2562,6 +2564,38 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
             .find(|row| row["cli"] == "grok")
             .unwrap()["detail"],
         "grok CLI is not installed or executable"
+    );
+
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub\n").unwrap();
+    let mut failed_probe = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    failed_probe.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let failed_probe = failed_probe.args(["hub", "service", "status"]).output().unwrap();
+    assert!(failed_probe.status.success());
+    let failed_probe = String::from_utf8(failed_probe.stdout).unwrap();
+    assert!(failed_probe.contains("launch issue"), "{failed_probe}");
+    assert!(!failed_probe.contains("Launch readiness: healthy"), "{failed_probe}");
+    assert!(failed_probe.contains("Cause:"), "{failed_probe}");
+    assert!(failed_probe.contains("--json"), "{failed_probe}");
+    assert!(failed_probe.lines().all(|line| line.chars().count() <= 80), "{failed_probe}");
+    #[cfg(target_os = "linux")]
+    {
+        let manual = cas_command(home.path(), path)
+            .env("CAS_HUB_SYSTEMCTL", home.path().join("missing-systemctl"))
+            .args(["hub", "service", "status"])
+            .output()
+            .unwrap();
+        assert!(manual.status.success());
+        let manual = String::from_utf8(manual.stdout).unwrap();
+        assert!(manual.contains("rc script after networking and Tailscale"), "{manual}");
+        assert!(manual.contains("cas hub start --tailscale-serve"), "{manual}");
+        assert!(manual.contains("cas hub status"), "{manual}");
+        assert!(manual.lines().all(|line| line.chars().count() <= 80), "{manual}");
+    }
+    assert!(
+        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
+        "{human}"
     );
 }
 

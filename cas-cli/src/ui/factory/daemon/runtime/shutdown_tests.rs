@@ -975,6 +975,7 @@ async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
         assert!(!target.exists(), "scratch target survived replacement={replacement}: {}", target.display());
         assert_eq!(std::fs::read_to_string(worker.join("source")).unwrap(), "keep source");
         assert!(walkdir::WalkDir::new(env.home().join("artifacts")).into_iter().flatten().any(|entry| {
+            // pin: retirement must preserve the capped runner proof log by its artifact basename.
             entry.file_name() == "worker-check.log"
                 && std::fs::read_to_string(entry.path()).unwrap() == "proof survives"
         }), "proof must be durable before scratch is removed");

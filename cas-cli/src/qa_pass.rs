@@ -769,7 +769,9 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
 
 /// Reviewable paths a delivery brought into `target`: its own content commits
 /// before the first merge on the ancestry path, or its unmerged content
-/// commits. `None` when that merge boundary cannot be found.
+/// commits. A non-merge receipt on the target's first-parent chain is itself
+/// the delivery, measured against its own parent (cas-a173). `None` when the
+/// delivery boundary cannot be found.
 pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
@@ -783,6 +785,16 @@ pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<Str
         .status()
         .is_ok_and(|status| status.success());
     let (from, to) = if merged {
+        // A squash/FF receipt is already an integration commit. Looking for
+        // a later merge instead collapses merge-base(M^1, head) onto head.
+        // Keep merge receipts on their existing content-selection path.
+        let full_head = git(&["rev-parse", "--verify", head])?;
+        if git(&["rev-parse", "--verify", &format!("{head}^2")]).is_none()
+            && git(&["rev-list", "--first-parent", target])?
+                .lines().any(|commit| commit == full_head)
+        {
+            return delivery_content_paths(repo, &format!("{head}^1"), head).ok();
+        }
         let merges = git(&[
             "rev-list",
             "--ancestry-path",

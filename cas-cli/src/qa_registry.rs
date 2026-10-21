@@ -89,7 +89,7 @@ const MANUAL_CHECK_FIELDS: [&str; 7] = [
     "labeled",
     "compare",
 ];
-const FIXTURE_FIELDS: [&str; 3] = ["description", "provider", "labels"];
+const FIXTURE_FIELDS: [&str; 5] = ["description", "provider", "frozen", "recipe", "labels"];
 
 /// Numeric grading mode: `exact`, or `{banded: {min_ratio | max_delta}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -236,12 +236,62 @@ pub struct ManualCheck {
 #[serde(default)]
 pub struct Fixture {
     pub description: String,
-    pub provider: String,
+    #[serde(flatten)]
+    pub source: FixtureSource,
     /// Expected value per labeled criterion ID for this fixture.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, Value>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Exactly one source, flattened to preserve the original `provider` form.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureSource {
+    Provider(String),
+    Frozen(FrozenFixture),
+    Recipe(FixtureRecipe),
+}
+
+impl Default for FixtureSource {
+    fn default() -> Self {
+        Self::Provider(String::new())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenFixture {
+    pub sha256: String,
+    pub storage_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureRecipe {
+    pub name: String,
+    pub envs: Vec<String>,
+    pub provides: Vec<String>,
+    pub ttl_mins: u32,
+}
+
+impl FixtureRecipe {
+    pub fn valid(&self) -> bool {
+        let names = |values: &[String]| {
+            !values.is_empty()
+                && values.iter().all(|s| !s.trim().is_empty())
+                && values
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == values.len()
+        };
+        !self.name.trim().is_empty()
+            && names(&self.envs)
+            && names(&self.provides)
+            && self.ttl_mins > 0
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -768,8 +818,30 @@ impl Registry {
         if let Some(fixtures) = &self.fixtures {
             for (name, fixture) in fixtures {
                 let subject = format!("fixtures.{name}");
-                if fixture.description.trim().is_empty() || fixture.provider.trim().is_empty() {
-                    report.problem("fixture", &subject, "description and provider are required");
+                let valid = match &fixture.source {
+                    FixtureSource::Provider(provider) => {
+                        let provider = provider.trim();
+                        if provider.to_ascii_lowercase().starts_with("http://")
+                            || provider.to_ascii_lowercase().starts_with("https://")
+                        {
+                            report.debt("live_url_fixture", &subject,
+                                "live URL can change or disappear; use frozen {sha256, storage_key}");
+                        }
+                        !provider.is_empty()
+                    }
+                    FixtureSource::Frozen(frozen) => {
+                        frozen.sha256.len() == 64
+                            && frozen.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                            && !frozen.storage_key.trim().is_empty()
+                    }
+                    FixtureSource::Recipe(recipe) => recipe.valid(),
+                };
+                let multiple = ["provider", "frozen", "recipe"]
+                    .iter()
+                    .any(|key| fixture.extra.contains_key(*key));
+                if fixture.description.trim().is_empty() || !valid || multiple {
+                    report.problem("fixture", &subject,
+                        "description and exactly one valid provider, frozen {sha256, storage_key}, or recipe {name, envs, provides, ttl_mins} are required");
                 }
                 report.misspelled_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
             }
@@ -1096,6 +1168,59 @@ journeys:
         }
         git(&["add", "."]);
         dir
+    }
+
+    #[test]
+    fn qa_registry_fixture_union() {
+        let yaml = GABBER.replace(
+            "  fresh: {description: New account, provider: account-seed}",
+            &format!(r#"  fresh: {{description: New account, provider: account-seed}}
+  media: {{description: Frozen media, frozen: {{sha256: "{}", storage_key: golden/video.mp4}}}}
+  persona: {{description: Past due account, recipe: {{name: past_due, envs: [staging], provides: [account_id], ttl_mins: 30}}}}
+  live: {{description: Live media, provider: "https://example.test/media/1"}}"#, "a".repeat(64)),
+        );
+        let dir = repo(&yaml);
+        let report = check(dir.path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(
+            report
+                .debt
+                .iter()
+                .any(|d| d.code == "live_url_fixture" && d.subject == "fixtures.live")
+        );
+        let registry = load(&dir.path().join(DEFAULT_PATH)).unwrap();
+        let roundtrip = serde_yaml::to_string(&registry).unwrap();
+        assert!(
+            parse(&roundtrip)
+                .unwrap()
+                .validate(&[])
+                .problems
+                .iter()
+                .all(|p| p.code != "fixture")
+        );
+        for (from, to) in [
+            ("golden/video.mp4", "''"),
+            ("ttl_mins: 30", "ttl_mins: 0"),
+            ("envs: [staging]", "envs: []"),
+            ("provides: [account_id]", "provides: []"),
+            ("sha256: \"", "sha256: \"z"),
+        ] {
+            let invalid = parse(&yaml.replace(from, to)).unwrap().validate(&[]);
+            assert!(
+                invalid.problems.iter().any(|p| p.code == "fixture"),
+                "{invalid:?}"
+            );
+        }
+        let mixed = yaml.replace("provider: account-seed}", "provider: account-seed, recipe: {name: seed, envs: [staging], provides: [id], ttl_mins: 1}}");
+        if let Ok(registry) = parse(&mixed) {
+            assert!(
+                registry
+                    .validate(&[])
+                    .problems
+                    .iter()
+                    .any(|p| p.code == "fixture")
+            );
+        }
     }
 
     #[test]

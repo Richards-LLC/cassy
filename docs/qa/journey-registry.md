@@ -57,7 +57,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `owner_groups` | Optional `name: {description, globs: [...]}` shared ownership map. |
 | `invariants` | Optional `ID: {statement, check, bug?, pending_checker?, definition?, labeled?, compare?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
 | `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?, compare?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
-| `fixtures` | Optional `name: {description, provider, labels?}` map. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
+| `fixtures` | Optional named fixtures with `description`, one of `provider`, `frozen`, or `recipe`, and optional `labels`. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `journeys` | Required non-empty list. |
 

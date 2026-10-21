@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod fixtures;
+
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -433,6 +435,8 @@ fn trees_equal(root: &Path, served: &str, candidate: &str, paths: &[String]) -> 
 mod tests {
     use super::*;
     use std::process::Command;
+
+    include!("qa_release/fixture_test.rs");
 
     /// Copies the tracked fake adapter into `root` and configures it.
     fn fake_adapter(root: &Path, env: &str) -> ReleaseConfig {

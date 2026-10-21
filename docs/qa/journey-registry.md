@@ -242,6 +242,10 @@ criterion or fixture field (`lables`, `defintion`) fails as `unknown_field`
 rather than silently dropping the rule. Due dates are compared with today's
 UTC date.
 
+Unknown extension fields containing YAML tags (including tags nested in maps
+or lists) load and roundtrip intact, then report `unknown_field` on the affected
+registry, criterion, fixture source or journey. Other entries remain checkable.
+
 ## Example
 
 This shape preserves gabber-style owner maps, groups and bug families. Adapt its

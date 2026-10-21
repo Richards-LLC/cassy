@@ -8,6 +8,47 @@ use serde_yaml::{Mapping, Value};
 
 pub const DEFAULT_PATH: &str = "docs/qa/journeys.yaml";
 
+// Serde's derived flatten buffers extras as Content, which cannot represent
+// YAML tags. Read known fields with their normal types and extras directly as
+// YAML Values, as qa_readback::Declaration does. Keep defaults and duplicate
+// known-field errors without repeating the visitor for every registry record.
+macro_rules! deserialize_with_extra {
+    ($record:ident { $($field:ident),* $(,)? }) => {
+        impl<'de> Deserialize<'de> for $record {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct RecordVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for RecordVisitor {
+                    type Value = $record;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str(concat!(stringify!($record), " mapping"))
+                    }
+
+                    fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                        let mut record = $record::default();
+                        let mut seen = std::collections::BTreeSet::new();
+                        while let Some(key) = map.next_key::<String>()? {
+                            match key.as_str() {
+                                $(stringify!($field) => {
+                                    if !seen.insert(stringify!($field)) {
+                                        return Err(serde::de::Error::duplicate_field(stringify!($field)));
+                                    }
+                                    record.$field = map.next_value()?;
+                                },)*
+                                _ => { record.extra.insert(key, map.next_value()?); }
+                            }
+                        }
+                        Ok(record)
+                    }
+                }
+
+                deserializer.deserialize_map(RecordVisitor)
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Selection {
@@ -16,8 +57,7 @@ pub enum Selection {
     LegacyCatalog,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Registry {
     pub version: Option<u32>,
     pub updated: Option<String>,
@@ -42,6 +82,24 @@ pub struct Registry {
     pub extra: BTreeMap<String, Value>,
 }
 
+deserialize_with_extra!(Registry {
+    version,
+    updated,
+    selection,
+    enforce,
+    seeded_from,
+    traffic_snapshot,
+    ignore,
+    surfaces,
+    kinds,
+    owner_groups,
+    invariants,
+    manual_checks,
+    fixtures,
+    bug_families,
+    journeys,
+});
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OwnerGroup {
@@ -49,8 +107,7 @@ pub struct OwnerGroup {
     pub globs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Invariant {
     pub statement: String,
     pub check: String,
@@ -70,6 +127,16 @@ pub struct Invariant {
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+
+deserialize_with_extra!(Invariant {
+    statement,
+    check,
+    bug,
+    pending_checker,
+    definition,
+    labeled,
+    compare,
+});
 
 const INVARIANT_FIELDS: [&str; 7] = [
     "statement",
@@ -209,8 +276,7 @@ pub struct PendingChecker {
     pub due: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ManualCheck {
     pub statement: String,
     pub check: String,
@@ -232,8 +298,17 @@ pub struct ManualCheck {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+deserialize_with_extra!(ManualCheck {
+    statement,
+    check,
+    reason,
+    pending_checker,
+    definition,
+    labeled,
+    compare,
+});
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Fixture {
     pub description: String,
     #[serde(flatten)]
@@ -245,6 +320,64 @@ pub struct Fixture {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl<'de> Deserialize<'de> for Fixture {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FixtureVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FixtureVisitor {
+            type Value = Fixture;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("fixture mapping")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Fixture, M::Error> {
+                let mut fixture = Fixture::default();
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if FIXTURE_FIELDS.contains(&key.as_str()) && !seen.insert(key.clone()) {
+                        return Err(serde::de::Error::custom(format!("duplicate field {key:?}")));
+                    }
+                    match key.as_str() {
+                        "description" => fixture.description = map.next_value()?,
+                        "labels" => fixture.labels = map.next_value()?,
+                        "provider" | "frozen" | "recipe" => {
+                            let raw = map.next_value::<Value>()?;
+                            let source = match key.as_str() {
+                                "provider" => {
+                                    serde_yaml::from_value(raw.clone()).map(FixtureSource::Provider)
+                                }
+                                "frozen" => {
+                                    serde_yaml::from_value(raw.clone()).map(FixtureSource::Frozen)
+                                }
+                                _ => serde_yaml::from_value(raw.clone()).map(FixtureSource::Recipe),
+                            };
+                            // Missing/malformed and multiple sources remain local
+                            // fixture validation problems, preserving their YAML.
+                            if fixture.source.is_none()
+                                && let Ok(source) = source
+                            {
+                                fixture.source = Some(source);
+                            } else {
+                                fixture.extra.insert(key, raw);
+                            }
+                        }
+                        _ => {
+                            fixture.extra.insert(key, map.next_value()?);
+                        }
+                    }
+                }
+                Ok(fixture)
+            }
+        }
+
+        deserializer.deserialize_map(FixtureVisitor)
+    }
+}
+
 /// Exactly one source, flattened to preserve the original `provider` form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -254,14 +387,7 @@ pub enum FixtureSource {
     Recipe(FixtureRecipe),
 }
 
-impl Default for FixtureSource {
-    fn default() -> Self {
-        Self::Provider(String::new())
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FrozenFixture {
     pub sha256: String,
     pub storage_key: String,
@@ -269,8 +395,12 @@ pub struct FrozenFixture {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+deserialize_with_extra!(FrozenFixture {
+    sha256,
+    storage_key
+});
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FixtureRecipe {
     pub name: String,
     pub envs: Vec<String>,
@@ -279,6 +409,13 @@ pub struct FixtureRecipe {
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+
+deserialize_with_extra!(FixtureRecipe {
+    name,
+    envs,
+    provides,
+    ttl_mins
+});
 
 impl FixtureRecipe {
     pub fn valid(&self) -> bool {
@@ -333,8 +470,7 @@ impl Owners {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Journey {
     pub id: String,
     pub name: Option<String>,
@@ -362,6 +498,29 @@ pub struct Journey {
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+
+deserialize_with_extra!(Journey {
+    id,
+    name,
+    status,
+    status_reason,
+    env_status,
+    kind,
+    entry,
+    steps,
+    owner_groups,
+    owners,
+    invariants,
+    manual_checks,
+    fixtures,
+    traffic,
+    spec,
+    known_failure,
+    finisher,
+    evidence,
+    readback,
+    seeded,
+});
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -525,15 +684,20 @@ fn iso_date(date: &str) -> Option<chrono::NaiveDate> {
 }
 
 impl ValidationReport {
-    /// Reject an extra key that is a near-miss of a known field, so a typo
-    /// (`lables`, `pending_cheker`) cannot silently drop a rule.
-    fn misspelled_fields(
-        &mut self,
-        subject: &str,
-        extra: &BTreeMap<String, Value>,
-        known: &[&str],
-    ) {
-        for key in extra.keys() {
+    /// Reject tagged extras and near-misses of known fields, so invalid
+    /// metadata and typos become local problems instead of load failures.
+    fn extra_fields(&mut self, subject: &str, extra: &BTreeMap<String, Value>, known: &[&str]) {
+        fn tagged(value: &Value) -> bool {
+            match value {
+                Value::Tagged(_) => true,
+                Value::Sequence(items) => items.iter().any(tagged),
+                Value::Mapping(items) => items
+                    .iter()
+                    .any(|(key, value)| tagged(key) || tagged(value)),
+                _ => false,
+            }
+        }
+        for (key, value) in extra {
             // A second source is an exclusivity error, not a misspelling.
             if known.contains(&key.as_str()) {
                 continue;
@@ -549,6 +713,14 @@ impl ValidationReport {
                     "unknown_field",
                     subject,
                     format!("unknown field {key:?}; did you mean {field}?"),
+                );
+            } else if tagged(value) {
+                self.problem(
+                    "unknown_field",
+                    subject,
+                    format!(
+                        "unknown field {key:?}; YAML tags are not supported in extension fields"
+                    ),
                 );
             }
         }
@@ -713,6 +885,7 @@ impl Registry {
     pub fn validate(&self, tracked: &[String]) -> ValidationReport {
         use std::collections::BTreeSet;
         let mut report = ValidationReport::default();
+        report.extra_fields("registry", &self.extra, &[]);
         if self.version != Some(1) {
             report.problem("version", "registry", "version must be 1");
         }
@@ -761,7 +934,7 @@ impl Registry {
             if invariant.statement.trim().is_empty() || invariant.check.trim().is_empty() {
                 report.problem("invariant", &subject, "statement and check are required");
             }
-            report.misspelled_fields(&subject, &invariant.extra, &INVARIANT_FIELDS);
+            report.extra_fields(&subject, &invariant.extra, &INVARIANT_FIELDS);
             report.compare(&subject, invariant.compare.as_ref());
             if let Some(pending) = &invariant.pending_checker {
                 if let Some(summary) = report.pending_checker(&subject, pending, today) {
@@ -785,7 +958,7 @@ impl Registry {
                     "id is also an invariant; criterion ids must be unique",
                 );
             }
-            report.misspelled_fields(&subject, &manual.extra, &MANUAL_CHECK_FIELDS);
+            report.extra_fields(&subject, &manual.extra, &MANUAL_CHECK_FIELDS);
             report.compare(&subject, manual.compare.as_ref());
             match (manual.reason.as_deref(), &manual.pending_checker) {
                 (Some("human_judgment"), Some(_)) => report.problem(
@@ -840,7 +1013,7 @@ impl Registry {
                         !provider.is_empty()
                     }
                     Some(FixtureSource::Frozen(frozen)) => {
-                        report.misspelled_fields(
+                        report.extra_fields(
                             &format!("{subject}.frozen"),
                             &frozen.extra,
                             &["sha256", "storage_key"],
@@ -851,7 +1024,7 @@ impl Registry {
                             && frozen.extra.is_empty()
                     }
                     Some(FixtureSource::Recipe(recipe)) => {
-                        report.misspelled_fields(
+                        report.extra_fields(
                             &format!("{subject}.recipe"),
                             &recipe.extra,
                             &["name", "envs", "provides", "ttl_mins"],
@@ -866,7 +1039,7 @@ impl Registry {
                     report.problem("fixture", &subject,
                         "description and exactly one valid provider, frozen {sha256, storage_key}, or recipe {name, envs, provides, ttl_mins} are required");
                 }
-                report.misspelled_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
+                report.extra_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
             }
         }
         report.globs(
@@ -885,6 +1058,7 @@ impl Registry {
         }
         for journey in &self.journeys {
             let id = journey.id.as_str();
+            report.extra_fields(id, &journey.extra, &[]);
             if id.is_empty()
                 || !id.as_bytes()[0].is_ascii_alphanumeric()
                 || !id
@@ -1378,6 +1552,29 @@ journeys:
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+        // Plain extension metadata stays valid; reading known fields directly
+        // must still reject duplicates in both record and fixture visitors.
+        let plain = GABBER
+            .replace(
+                fresh,
+                "{description: New account, provider: account-seed, note: {1: value}}",
+            )
+            .replace(
+                "    fixtures: [fresh]",
+                "    fixtures: [fresh]\n    note: [value]",
+            )
+            + "\nnote: value\n";
+        assert!(parse(&plain).unwrap().validate(&[]).problems.is_empty());
+        for duplicate in [
+            GABBER.replace("version: 1", "version: 1\nversion: 1"),
+            GABBER.replace(
+                "provider: account-seed}",
+                "provider: account-seed, provider: other}",
+            ),
+        ] {
+            assert!(parse(&duplicate).is_err(), "duplicate known field accepted");
+        }
     }
 
     #[test]

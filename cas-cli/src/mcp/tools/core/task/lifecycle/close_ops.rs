@@ -8060,6 +8060,14 @@ impl CasCore {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
                 Err(message) => return Ok(Self::tool_error(message)),
             }
+            let qa_base = commit_receipt_window.as_ref().and_then(|window| {
+                let head = super::qa_evidence_gate::delivered_head(
+                    &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
+                )?;
+                task_attribution::delivery_base(
+                    &evidence_repo, &resolved_parent_branch, window, Some(&head),
+                )
+            });
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -8067,6 +8075,7 @@ impl CasCore {
                 &resolved_parent_branch,
                 qa_receipt,
                 attributed_paths.as_deref(),
+                qa_base.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {

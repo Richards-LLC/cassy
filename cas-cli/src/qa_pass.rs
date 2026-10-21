@@ -770,9 +770,14 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
 /// Reviewable paths a delivery brought into `target`: its own content commits
 /// before the first merge on the ancestry path, or its unmerged content
 /// commits. A non-merge receipt on the target's first-parent chain is itself
-/// the delivery, measured against its own parent (cas-a173). `None` when the
-/// delivery boundary cannot be found.
-pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
+/// the delivery, measured from its recorded base or its own parent (cas-420af).
+/// `None` when the delivery boundary cannot be found.
+pub fn integrated_paths(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    recorded_base: Option<&str>,
+) -> Option<Vec<String>> {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
         out.status
@@ -788,12 +793,11 @@ pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<Str
         // A squash/FF receipt is already an integration commit. Looking for
         // a later merge instead collapses merge-base(M^1, head) onto head.
         // Keep merge receipts on their existing content-selection path.
-        let full_head = git(&["rev-parse", "--verify", head])?;
         if git(&["rev-parse", "--verify", &format!("{head}^2")]).is_none()
-            && git(&["rev-list", "--first-parent", target])?
-                .lines().any(|commit| commit == full_head)
+            && crate::qa_evidence::receipt_on_first_parent(repo, head, target)?
         {
-            return delivery_content_paths(repo, &format!("{head}^1"), head).ok();
+            let base = crate::qa_evidence::receipt_delivery_base(repo, head, recorded_base)?;
+            return delivery_content_paths(repo, &base, head).ok();
         }
         let merges = git(&[
             "rev-list",
@@ -1607,7 +1611,7 @@ mod tests {
         let delivery_head = String::from_utf8(delivery_head.stdout).unwrap();
         git(&["switch", "-q", "main"]);
         git(&["merge", "-q", "--no-ff", "-m", "land worker", "factory/worker"]);
-        let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
+        let integrated = integrated_paths(repo, delivery_head.trim(), "main", None).unwrap();
         assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
         assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
     }

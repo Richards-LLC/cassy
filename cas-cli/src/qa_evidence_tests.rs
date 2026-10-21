@@ -322,7 +322,7 @@ fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String
     let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
     task.notes = notes.into();
     crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
-        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()]), None
     )
 }
 
@@ -1043,7 +1043,7 @@ fn delivery_range_before_and_after_merge() {
     git_ok(&fx.repo, &["branch", "-M", "main"]);
     git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/w"]);
     let tip = commit(&fx.repo, "ui.tsx", 30);
-    let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &tip, "main", None).unwrap();
     assert_eq!((from.as_str(), to.as_str()), (base.as_str(), tip.as_str()));
     assert_eq!(
         range_paths(&fx.repo, &from, &to).unwrap(),
@@ -1066,18 +1066,18 @@ fn delivery_range_before_and_after_merge() {
             "factory/w",
         ],
     );
-    let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &tip, "main", None).unwrap();
     assert!(from.ends_with("^1"), "{from}");
     assert_eq!(
         range_paths(&fx.repo, &from, &to).unwrap(),
         vec!["ui.tsx".to_string()]
     );
     assert_eq!(
-        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main").unwrap(),
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main", None).unwrap(),
         vec!["ui.tsx".to_string()]
     );
     let integration = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
-    let integration_range = delivery_range(&fx.repo, &integration, "main").unwrap();
+    let integration_range = delivery_range(&fx.repo, &integration, "main", None).unwrap();
 
     // cas-a173: a squash is itself on the target's first-parent chain.
     // A later docs merge must not replace its app.css delivery with an empty
@@ -1092,10 +1092,10 @@ fn delivery_range_before_and_after_merge() {
     commit(&fx.repo, "notes.md", 10);
     git_ok(&fx.repo, &["checkout", "-q", "main"]);
     git_ok(&fx.repo, &["merge", "-q", "--no-ff", "docs", "-m", "merge docs"]);
-    let (from, to) = delivery_range(&fx.repo, &squash, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &squash, "main", None).unwrap();
     assert_eq!(
         (
-            crate::qa_pass::integrated_paths(&fx.repo, &squash, "main"),
+            crate::qa_pass::integrated_paths(&fx.repo, &squash, "main", None),
             range_paths(&fx.repo, &from, &to),
         ),
         (Some(vec!["app.css".to_string()]), Some(vec!["app.css".to_string()])),
@@ -1116,10 +1116,10 @@ fn delivery_range_before_and_after_merge() {
     git_ok(&fx.repo, &["checkout", "-q", "main"]);
     git_ok(&fx.repo, &["merge", "-q", "--ff-only", "factory/ff"]);
     commit(&fx.repo, "later.rs", 6);
-    let (from, to) = delivery_range(&fx.repo, &ff_head, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &ff_head, "main", Some(&ff_base)).unwrap();
     assert_eq!(
         (
-            crate::qa_pass::integrated_paths(&fx.repo, &ff_head, "main"),
+            crate::qa_pass::integrated_paths(&fx.repo, &ff_head, "main", Some(&ff_base)),
             range_paths(&fx.repo, &from, &to),
         ),
         (
@@ -1128,9 +1128,9 @@ fn delivery_range_before_and_after_merge() {
         ),
         "both QA gates must retain the whole FF delivery from recorded base {ff_base}"
     );
-    assert_eq!(delivery_range(&fx.repo, &integration, "main"), Some(integration_range));
+    assert_eq!(delivery_range(&fx.repo, &integration, "main", Some(&base)), Some(integration_range));
     assert_eq!(
-        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main").unwrap(),
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main", None).unwrap(),
         vec!["ui.tsx".to_string()],
         "the ordinary merged delivery keeps its content range"
     );

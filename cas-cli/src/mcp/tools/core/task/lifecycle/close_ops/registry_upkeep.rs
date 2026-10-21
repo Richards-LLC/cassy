@@ -86,7 +86,7 @@ fn snapshot_range(
     let base = if let Some(w) = window {
         task_attribution::delivery_base(repo, target, w, Some(&head))
     } else {
-        crate::qa_evidence::delivery_range(repo, &head, &freshest_target_ref(repo, target))
+        crate::qa_evidence::delivery_range(repo, &head, &freshest_target_ref(repo, target), None)
             .map(|(base, _)| base)
     }
     .ok_or("UPKEEP WARNING: attributed delivery base unavailable (not blocking)")?;

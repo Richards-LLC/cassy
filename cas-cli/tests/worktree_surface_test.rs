@@ -2375,6 +2375,30 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
     }
 
+    // cas-e718: a worker-only request cannot guess among parked tasks,
+    // even when its stale lane happens to be contained already.
+    let mut implicit = request.clone();
+    implicit.task_id = None;
+    for parked_count in [0, 2] {
+        task.status = if parked_count == 0 { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        tasks.update(&task).unwrap();
+        let mut sibling = task.clone();
+        sibling.id = "cas-e718-other".into();
+        sibling.status = if parked_count == 2 { TaskStatus::AwaitingMerge } else { TaskStatus::Closed };
+        if parked_count == 0 { tasks.add(&sibling).unwrap(); } else { tasks.update(&sibling).unwrap(); }
+        for id in ["alice", "factory/alice"] {
+            implicit.id = Some(id.into());
+            match service.coordination(Parameters(implicit.clone())).await {
+                Err(error) if error.message.to_ascii_lowercase().contains("ambiguous") => {}
+                outcome => failures.push(format!("{id} with {parked_count} parked tasks must refuse as ambiguous: {outcome:?}")),
+            }
+        }
+        sibling.status = TaskStatus::Closed;
+        tasks.update(&sibling).unwrap();
+    }
+    task.status = TaskStatus::AwaitingMerge;
+    tasks.update(&task).unwrap();
+
     // A later parked round uses a noncanonical suffix in the same checkout.
     // The old worker ref is still contained; it must not mask the rework.
     let rework = "factory/alice-cas-4221-r2";
@@ -2398,6 +2422,26 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         }
         Err(error) if error.message.contains(rework) && error.message.contains(&tip) => {}
         Err(error) => failures.push(format!("refusal must name parked branch and tip: {error}")),
+    }
+    // Exactly one parked task must choose its recorded branch/anchor,
+    // rather than the old factory/alice ref that is already contained.
+    let recorded = format!("factory/alice-{}", task.id);
+    run_git(&["branch", &recorded, &tip], &repo.root);
+    task.deliverables.parked_branch = Some(recorded);
+    tasks.update(&task).unwrap();
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+    implicit.id = Some("alice".into());
+    match service.coordination(Parameters(implicit)).await {
+        Ok(result) => {
+            let text = get_text(&result);
+            if text.contains("Already contained")
+                || !Command::new("git").args(["merge-base", "--is-ancestor", &tip, "main"])
+                    .current_dir(&repo.root).status().unwrap().success()
+            {
+                failures.push(format!("worker-only merge must deliver the single parked tip: {text}"));
+            }
+        }
+        Err(error) => failures.push(format!("single parked worker delivery must merge: {error}")),
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }

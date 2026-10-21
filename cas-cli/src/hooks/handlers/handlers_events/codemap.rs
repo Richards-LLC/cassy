@@ -993,6 +993,13 @@ mod tests {
 
     #[test]
     fn cas_2aab_freshness_uses_worktree_task_target_instead_of_stale_store() {
+        // Re-enter this existing test only to capture the real CLI renderer.
+        if let Ok(command) = std::env::var("CAS_DC98_CAPTURE") {
+            use clap::Parser;
+            let cli = crate::cli::Cli::parse_from(["cas", "codemap", &command]);
+            crate::cli::run(cli).unwrap();
+            return;
+        }
         use crate::store::{SqliteTaskStore, TaskStore};
         use crate::types::{Task, TaskStatus, WorkTarget};
         use std::process::Command;
@@ -1061,6 +1068,76 @@ mod tests {
         assert!(matches!(evaluation.staleness, Some(CodemapStaleness::Stale { total_changes: 1, .. })));
         let overview = super::super::project_overview::check_freshness(&worker, None).unwrap();
         assert!(matches!(overview, Some(super::super::project_overview::ProjectOverviewStaleness::Stale { total_changes: 1, .. })), "{overview:?}");
+
+        // cas-dc98: each row exercises the real reader/handler, sharing this
+        // worktree/store fixture rather than duplicating a new test per case.
+        let mut failures = Vec::new();
+        let pending = CodemapPending {
+            changes: vec![CodemapChange { change_type: "A".into(), path: "src/ledger.rs".into(), old_path: None }],
+            commit: "fixture".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
+        };
+        std::fs::write(cas_root.join("codemap-pending.json"),
+            format!("{}\n", serde_json::to_string(&pending).unwrap())).unwrap();
+        let name = concat!(module_path!(), "::cas_2aab_freshness_uses_worktree_task_target_instead_of_stale_store");
+        let name = name.strip_prefix("cas::").unwrap_or(name);
+        for (command, expected) in [
+            ("status", "Pending ledger: 1 in-session structural change(s) recorded"),
+            ("pending", "+ src/ledger.rs"),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("CAS_DC98_CAPTURE", command).output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{stdout} {}", String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&stdout, name);
+            if !stdout.contains(expected) {
+                failures.push(format!("codemap {command} must read shared ledger: {stdout}"));
+            }
+        }
+        let plain = fixture.path().join("plain");
+        let plain_store = plain.join(".cas");
+        let nested = plain.join("subdir");
+        std::fs::create_dir_all(plain.join(".claude")).unwrap();
+        std::fs::create_dir_all(&plain_store).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(plain.join(".claude/CODEMAP.md"), "# Plain map\n").unwrap();
+        let plain_measurement = super::super::docs_freshness::Measurement::at(&nested, &plain_store);
+        if plain_measurement.root != plain || plain_measurement.store != plain_store
+            || plain_measurement.read(".claude/CODEMAP.md").as_deref() != Some("# Plain map\n")
+        {
+            failures.push(format!("non-Git subdirectory must retain project root/store: {:?}, {:?}",
+                plain_measurement.root, plain_measurement.store));
+        }
+        // Target advances while the worker also has an independent commit.
+        git(&["checkout", "-q", "staging"]);
+        for n in 0..10 {
+            std::fs::write(repo.join(format!("src/remote_{n}.rs")), "pub fn added() {}\n").unwrap();
+        }
+        git(&["add", "src"]);
+        git(&["commit", "-qm", "remote structural drift"]);
+        git(&["update-ref", "refs/remotes/origin/staging", "HEAD"]);
+        std::fs::write(worker.join("local.md"), "worker change\n").unwrap();
+        git(&["-C", worker.to_str().unwrap(), "add", "local.md"]);
+        git(&["-C", worker.to_str().unwrap(), "commit", "-qm", "worker diverges"]);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let input = HookInput {
+            cwd: worker.to_string_lossy().into_owned(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some(format!("{}task", crate::harness_policy::own_tool_prefix())),
+            tool_input: Some(serde_json::json!({"action": "create", "title": "Next task"})),
+            agent_role: Some("supervisor".into()),
+            ..Default::default()
+        };
+        let output = super::super::pre_tool::handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
+        let output = serde_json::to_value(output).unwrap();
+        let reason = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
+        if output["hookSpecificOutput"]["permissionDecision"] != "deny"
+            || !reason.contains("git merge origin/staging") || !reason.contains("git rebase origin/staging")
+        {
+            failures.push(format!("diverged checkout denial must name target sync: {output}"));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

@@ -692,13 +692,22 @@ fn handle_pre_tool_use_inner(
                 },
             ) = super::codemap::evaluate_codemap_at(&measurement).and_then(|evaluation| evaluation.staleness)
             {
+                let sync = if measurement.reference != "HEAD"
+                    && super::docs_freshness::git(&measurement.root,
+                        &["merge-base", "--is-ancestor", &measurement.reference, "HEAD"]).is_none()
+                {
+                    format!("Sync this checkout: `git merge {0}` or `git rebase {0}`.\n",
+                        measurement.reference)
+                } else {
+                    String::new()
+                };
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
                     &format!(
                         "🗺️  CODEMAP.md is significantly out of date ({total_changes} structural changes).\n\
                         Measured ref: {} ({}).\n\n\
                         Workers rely on CODEMAP for codebase orientation — dispatching against a stale map wastes tokens.\n\n\
-                        Run `/codemap` to refresh, then retry.", measurement.reference, measurement.root.display()
+                        {sync}Run `/codemap` to refresh, then retry.", measurement.reference, measurement.root.display()
                     ),
                 ));
             }

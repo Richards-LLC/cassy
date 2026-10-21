@@ -32,7 +32,7 @@ pub fn execute(cmd: &CodemapCommands, _cli: &Cli, cas_root: &Path) -> anyhow::Re
 fn execute_status(measurement: &Measurement) -> anyhow::Result<()> {
     let project_root = &measurement.root;
     let codemap_path = project_root.join(".claude/CODEMAP.md");
-    let pending_path = project_root.join(".cas").join(CODEMAP_PENDING_FILE);
+    let pending_path = measurement.store.join(CODEMAP_PENDING_FILE);
     println!("CODEMAP.md: {}", codemap_path.display());
     println!("  Evaluated ref: {}", measurement.reference);
     let last_updated = measurement.last_updated(".claude/CODEMAP.md")

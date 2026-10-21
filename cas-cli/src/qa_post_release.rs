@@ -34,13 +34,7 @@ pub struct Alarm {
     pub count: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Readback {
-    pub journey: String,
-    pub subject: String,
-    pub invariants: Vec<String>,
-    pub ok: bool,
-}
+pub use crate::qa_readback::Readback;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,11 +76,7 @@ impl Receipt {
                 run.output
                     .as_ref()
                     .and_then(|o| o.readback.as_ref())
-                    .is_some_and(|r| {
-                        r.ok && !r.journey.is_empty()
-                            && !r.subject.is_empty()
-                            && !r.invariants.is_empty()
-                    })
+                    .is_some_and(Readback::proves)
             })
         {
             return Verdict::Failed;

@@ -23,6 +23,10 @@ timeout_secs = 120
 [qa.release.components]
 backend = ["apps/backend", "packages/shared"]
 frontend = ["apps/web", "packages/shared"]
+
+[qa.release.migrations]
+paths = ["apps/backend/prisma/migrations/*/migration.sql"]
+env = "staging"
 ```
 
 | Key | Meaning |
@@ -34,9 +38,13 @@ frontend = ["apps/web", "packages/shared"]
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
 | `components` | Served component name to the repository paths it is built from. |
+| `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
+| `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes
-the components as one JSON object.
+the components as one JSON object. Paths must stay inside the repository: an
+absolute path, a `..` segment or git pathspec magic (`:(glob)…`, `:!…`) is
+refused when the config is set.
 
 ## Sandbox
 
@@ -74,8 +82,9 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. This slice implements
-`served`; the others are reserved for later slices.
+`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `readback`,
+`migrations` and fixture setup/teardown are implemented; later slices add the
+remaining verbs.
 
 ### `served`
 
@@ -122,3 +131,127 @@ adds no GitHub calls; it cannot discover a deploy already outside the first
 100-run snapshot before observation. Configure the watcher while deploys are
 current. The release gate's served-component check still detects stale deploys
 when a gate is attempted.
+
+## Fixtures and personas
+
+Registry fixtures share `description` and optional criterion `labels`. Each
+fixture declares exactly one source; existing `provider` entries remain valid:
+
+```yaml
+fixtures:
+  existing:
+    description: Existing account seed
+    provider: account-seed
+  stored-video:
+    description: Immutable golden-set video
+    frozen:
+      sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      storage_key: golden/videos/example.mp4
+  past-due:
+    description: Past-due staging persona
+    recipe:
+      name: past_due
+      envs: [staging]
+      provides: [account_id]
+      ttl_mins: 30
+```
+
+`frozen.sha256` is 64 hexadecimal characters, and `storage_key` is a nonempty
+opaque storage key. `cas qa journeys --check` reports HTTP(S) provider URLs as
+`live_url_fixture` debt: freeze their bytes to avoid deleted/private media and
+provider outages changing the golden set. Non-URL providers keep their current
+behavior. Recipes require a name, nonempty environment allow-list, unique
+nonempty output names and a positive TTL. Registry recipes never contain commands.
+
+`fixture-setup` receives `args: {name, provides, ttl_mins, cleanup_id}` and
+returns `data: {handle, outputs: {account_id: "opaque-id"}}`. Cassy refuses an
+environment outside `envs` before any adapter call. A setup failure or missing
+declared output is `NOT_EXERCISED{fixture_setup}`.
+
+The suite guard journals `{handle, env, expiry}` in `qa_fixture_cleanup` before
+returning the setup receipt. `finish` and early-return/unwind cleanup call
+`fixture-teardown` with `args: {name, handle, cleanup_id}` and the original
+environment and SHA. Teardown returns `data: {ok: true}` and must be idempotent:
+an already absent handle is successfully cleaned. Cleanup errors retain the
+row as orphan debt, separately from the suite verdict.
+
+After a crash, run `cas qa fixtures --sweep` in the project checkout. It tears
+down expired handles using the configured adapter, deletes successful rows and
+reports retained orphan debt (also available with `--json`). Unexpired handles
+stay available to their running suite. The TTL is a recovery deadline; set it
+longer than the expected suite duration. Migration 283 installs the journal in
+existing stores via `cas update --schema-only` and in newly initialized stores.
+
+## Read-back
+
+A journey declares what the gate may read back after it runs:
+
+```yaml
+journeys:
+  - id: signup
+    readback:
+      subjects: [account_uid, workspace_id]
+      invariants: [INV-ACCOUNT, INV-WORKSPACE]
+```
+
+`cas qa journeys --check` rejects a `readback` block with an unknown key, an
+empty list or an entry that is not an identifier.
+
+Cassy forwards only allow-listed values to the adapter's `readback` verb: the
+declared subject kinds with their opaque ids, and the declared invariant IDs.
+It never forwards a query. The following are refused before any call:
+
+- An undeclared subject kind.
+- A subject id that is not an opaque token of at most 128 letters, digits and
+  `-_.:@`.
+- An invariant ID that is not a plain identifier.
+
+```json
+{"v":1,"verb":"readback","env":"staging","sha":"<candidate>","journey":"signup","args":{"subjects":{"account_uid":"uid-7f3a","workspace_id":"ws_42"},"invariants":["INV-ACCOUNT","INV-WORKSPACE"]}}
+{"v":1,"ok":true,"data":{"INV-ACCOUNT":{"ok":true,"observed":1},"INV-WORKSPACE":{"ok":true,"observed":"…"}}}
+```
+
+The result is post-release's read-back shape: `{journey, subject, invariants,
+ok}`, with the subject ids rendered as `kind=id`. Observed values are never
+kept. The adapter must run these checks with read-only credentials.
+
+| Answer | Outcome |
+|---|---|
+| Every declared invariant `ok: true` | PASS |
+| Any invariant `ok: false` | FAIL, naming the failed invariants |
+| An `external`, `rate_limited` or `insufficient` error | BLOCKED_EXTERNAL |
+| An invariant missing from the answer, any other error or a timeout | no PASS (missing) |
+
+## Pending-migration merge refusal
+
+`worktree_merge` checks migrations once per merge into `integration_branch`,
+after lane CI admission and before Git runs. Other targets skip the check.
+Cassy lists the files the delivery adds, with renames counted as additions:
+`git diff --name-only --diff-filter=A <merge-base> <tip> -- <migrations.paths>`.
+The text the `*` matches is the migration id. A merge that adds no migration
+costs this one local diff and makes no adapter call.
+
+When ids are found, Cassy calls the `migrations` verb:
+
+```json
+{"v":1,"verb":"migrations","env":"staging","sha":"<tip>","args":{"ids":["20261021_add"]}}
+```
+
+```json
+{"v":1,"ok":true,"data":{"20261021_add":"applied"}}
+```
+
+The merge is admitted only when every id is `applied`. Each other outcome
+refuses with "No merge was attempted":
+
+| Outcome | Refusal |
+|---|---|
+| An id is `pending` or `unknown`, or missing from `data` | `MIGRATION PENDING: <ids> on <env>` |
+| `external`, `rate_limited` or `insufficient` error, or a timeout | `MIGRATION STATUS UNKNOWN` |
+| `invalid` or `internal` error, or a malformed response | `MIGRATION ADAPTER BUG` |
+| The delivery range cannot be diffed locally | `MIGRATION STATUS UNKNOWN` |
+
+A registered supervisor may override any refusal with
+`supervisor_override=true`, `task_id` and a non-empty `reason`. The override is
+logged as a decision note on the task. Cassy never applies a migration to a
+shared environment.

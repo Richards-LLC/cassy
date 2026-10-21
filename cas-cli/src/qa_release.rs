@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod fixtures;
+
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -35,6 +37,20 @@ pub struct ReleaseConfig {
     pub timeout_secs: u32,
     /// Served component name to the repository paths it is built from.
     pub components: BTreeMap<String, Vec<String>>,
+    /// Pending-migration refusal for merges into `integration_branch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migrations: Option<MigrationsConfig>,
+}
+
+/// `[qa.release.migrations]`: which added files are migrations, and the
+/// environment whose applied state a merge into the integration branch needs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MigrationsConfig {
+    /// Repository-relative patterns with exactly one `*`, which is the id.
+    pub paths: Vec<String>,
+    /// Environment name sent to the adapter, for example `staging`.
+    pub env: String,
 }
 
 impl Default for ReleaseConfig {
@@ -47,6 +63,7 @@ impl Default for ReleaseConfig {
             env: Vec::new(),
             timeout_secs: 120,
             components: BTreeMap::new(),
+            migrations: None,
         }
     }
 }
@@ -61,16 +78,45 @@ impl ReleaseConfig {
             if name.trim().is_empty() || paths.is_empty() {
                 return Err("Each qa.release.components entry needs a name and paths".into());
             }
-            if paths
-                .iter()
-                .any(|p| p.trim().is_empty() || Path::new(p).is_absolute())
-            {
-                return Err(format!(
-                    "qa.release.components.{name} paths must be repository-relative"
-                ));
+            for path in paths {
+                let escapes = Path::new(path)
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir));
+                if path.trim().is_empty() || Path::new(path).is_absolute() || escapes {
+                    return Err(format!(
+                        "qa.release.components.{name} path {path:?} must stay inside the repository"
+                    ));
+                }
+                // `:(...)` and `:!x` are git pathspec magic, not paths.
+                if path.starts_with(':') {
+                    return Err(format!(
+                        "qa.release.components.{name} path {path:?} uses git pathspec magic"
+                    ));
+                }
             }
         }
         Ok(components)
+    }
+
+    /// Parses and validates `qa.release.migrations.paths`.
+    pub fn parse_migration_paths(value: &str) -> Result<Vec<String>, String> {
+        let paths: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for path in &paths {
+            if Path::new(path).is_absolute()
+                || path.matches('*').count() != 1
+                || path.contains(['?', '[', ']', '\\'])
+            {
+                return Err(format!(
+                    "qa.release.migrations.paths entry {path} must be repository-relative with exactly one `*`, which is the migration id"
+                ));
+            }
+        }
+        Ok(paths)
     }
 }
 
@@ -344,6 +390,38 @@ pub fn preflight_served(
     }
 }
 
+/// Reads back `journey`'s declared invariants for the given subject ids
+/// through the adapter. Undeclared subjects, non-opaque ids and malformed
+/// invariant IDs are refused before any call.
+pub fn readback(
+    project_root: &Path,
+    config: &ReleaseConfig,
+    env: &str,
+    sha: &str,
+    journey: &crate::qa_registry::Journey,
+    subjects: &BTreeMap<String, String>,
+) -> Result<crate::qa_readback::Outcome, String> {
+    let (declaration, args) =
+        crate::qa_readback::request_args(&journey.id, journey.readback.as_ref(), subjects)?;
+    let answer = call(
+        project_root,
+        config,
+        Verb::Readback,
+        Request {
+            env,
+            sha,
+            journey: Some(&journey.id),
+            args,
+        },
+    );
+    Ok(crate::qa_readback::classify(
+        &journey.id,
+        declaration,
+        subjects,
+        answer,
+    ))
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
@@ -400,39 +478,207 @@ fn trees_equal(root: &Path, served: &str, candidate: &str, paths: &[String]) -> 
     }
 }
 
+/// One migration's state in the target environment, as `migrations` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MigrationStatus {
+    Applied,
+    Pending,
+    Unknown,
+}
+
+/// Why a merge into the integration branch must not proceed. Every variant
+/// fails closed.
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationRefusal {
+    /// At least one added migration is not known to be applied.
+    #[error("MIGRATION PENDING: {} on {env}", .ids.join(", "))]
+    Pending { ids: Vec<String>, env: String },
+    /// A transient failure: the status could not be read.
+    #[error("MIGRATION STATUS UNKNOWN: {0}")]
+    StatusUnknown(String),
+    /// The adapter or its configuration is broken.
+    #[error("MIGRATION ADAPTER BUG: {0}")]
+    AdapterBug(String),
+}
+
+/// The migration id `pattern`'s single `*` captures in `path`, if it matches.
+fn migration_id<'p>(pattern: &str, path: &'p str) -> Option<&'p str> {
+    let pattern: Vec<&str> = pattern.split('/').collect();
+    let path: Vec<&'p str> = path.split('/').collect();
+    if pattern.len() != path.len() {
+        return None;
+    }
+    let mut id = None;
+    for (want, got) in pattern.iter().zip(&path) {
+        match want.split_once('*') {
+            None if want == got => {}
+            None => return None,
+            Some((prefix, suffix)) => {
+                let rest = got.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                if rest.is_empty() {
+                    return None;
+                }
+                id = Some(rest);
+            }
+        }
+    }
+    id
+}
+
+/// The resolved `tip` and the migration ids it adds since its merge base with
+/// `target`: `git diff --name-only --diff-filter=A <merge-base> <tip> -- <paths>`.
+/// Renames count as additions.
+fn added_migrations(
+    root: &Path,
+    paths: &[String],
+    target: &str,
+    tip: &str,
+) -> Result<(String, Vec<String>), String> {
+    let rev = |name: &str| {
+        git(
+            root,
+            &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{name}^{{commit}}")],
+        )
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .ok_or_else(|| format!("{} is not a local commit", printable(name)))
+    };
+    let (target, tip) = (rev(target)?, rev(tip)?);
+    let base = git(root, &["merge-base", &target, &tip])
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .ok_or("git merge-base failed")?;
+    let pathspecs: Vec<String> = paths.iter().map(|p| format!(":(glob){p}")).collect();
+    let mut args = vec![
+        "diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", &base, &tip, "--",
+    ];
+    args.extend(pathspecs.iter().map(String::as_str));
+    let output = git(root, &args)
+        .filter(|output| output.status.success())
+        .ok_or("git diff of the delivery range failed")?;
+    let mut ids: Vec<String> = output
+        .stdout
+        .split(|b| *b == 0)
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .filter_map(|path| paths.iter().find_map(|p| migration_id(p, path)))
+        .map(str::to_owned)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok((tip, ids))
+}
+
+/// Merge admission for `[qa.release.migrations]`: every migration `tip` adds
+/// relative to `target` must be applied in the configured environment. A
+/// range that adds none returns empty after one local diff, with no adapter
+/// call. Returns the applied ids.
+pub fn check_migrations(
+    root: &Path,
+    config: &ReleaseConfig,
+    target: &str,
+    tip: &str,
+) -> Result<Vec<String>, MigrationRefusal> {
+    let Some(migrations) = config.migrations.as_ref().filter(|m| !m.paths.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let (tip_sha, ids) = added_migrations(root, &migrations.paths, target, tip)
+        .map_err(|detail| MigrationRefusal::StatusUnknown(format!("cannot list added migrations: {detail}")))?;
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let name = Verb::Migrations.as_str();
+    let data = call(
+        root,
+        config,
+        Verb::Migrations,
+        Request {
+            env: &migrations.env,
+            sha: &tip_sha,
+            args: serde_json::json!({ "ids": ids }),
+            ..Request::default()
+        },
+    )
+    .map_err(|error| match &error {
+        CallError::TimedOut(_) => MigrationRefusal::StatusUnknown(error.to_string()),
+        CallError::Adapter(_, adapter) => match adapter.kind {
+            ErrorKind::External | ErrorKind::RateLimited | ErrorKind::Insufficient => {
+                MigrationRefusal::StatusUnknown(error.to_string())
+            }
+            ErrorKind::Invalid | ErrorKind::Internal => {
+                MigrationRefusal::AdapterBug(error.to_string())
+            }
+        },
+        CallError::Protocol(..) => MigrationRefusal::AdapterBug(error.to_string()),
+    })?;
+    // The parse error is dropped: it could quote adapter data.
+    let statuses: BTreeMap<String, MigrationStatus> = serde_json::from_value(data).map_err(|_| {
+        MigrationRefusal::AdapterBug(format!(
+            "adapter {name} failed: data is not an id to applied|pending|unknown map"
+        ))
+    })?;
+    let unapplied: Vec<String> = ids
+        .iter()
+        .filter(|id| statuses.get(id.as_str()) != Some(&MigrationStatus::Applied))
+        .cloned()
+        .collect();
+    if unapplied.is_empty() {
+        Ok(ids)
+    } else {
+        Err(MigrationRefusal::Pending {
+            ids: unapplied,
+            env: printable(&migrations.env),
+        })
+    }
+}
+
+/// Test projects with the tracked fake adapter at `./scripts/qa/fake-adapter`.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_project {
+    use super::ReleaseConfig;
+    use std::path::Path;
     use std::process::Command;
 
-    /// The tracked fake adapter runs through the real sandbox: `served` echoes
-    /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a
-    /// classified error instead.
-    #[test]
-    fn served_equivalence() {
-        use std::os::unix::fs::PermissionsExt;
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        let project = tempfile::tempdir().unwrap();
-        let root = project.path();
-        let git = |args: &[&str]| {
+    pub(crate) struct Project(tempfile::TempDir);
+
+    impl Project {
+        /// A git repository on `main` with the fake adapter installed, uncommitted.
+        pub(crate) fn new() -> Self {
+            let project = Self(tempfile::tempdir().unwrap());
+            project.git(&["init", "-q", "-b", "main"]);
+            fake_adapter(project.root(), "");
+            project
+        }
+
+        pub(crate) fn root(&self) -> &Path {
+            self.0.path()
+        }
+
+        pub(crate) fn git(&self, args: &[&str]) -> String {
             let output = Command::new("git")
                 .args(["-c", "user.name=Cassy Test", "-c", "user.email=test@cas.test"])
                 .args(args)
-                .current_dir(root)
+                .current_dir(self.root())
                 .output()
                 .unwrap();
             assert!(output.status.success(), "git {args:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
-        let commit = |path: &str, body: &str| {
-            let file = root.join(path);
+        }
+
+        /// Writes `path` and commits everything; returns the new HEAD.
+        pub(crate) fn commit(&self, path: &str, body: &str) -> String {
+            let file = self.root().join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, body).unwrap();
-            git(&["add", "."]);
-            git(&["commit", "-qm", path]);
-            git(&["rev-parse", "HEAD"])
-        };
-        git(&["init", "-q", "-b", "main"]);
+            self.git(&["add", "."]);
+            self.git(&["commit", "-qm", path]);
+            self.git(&["rev-parse", "HEAD"])
+        }
+    }
+
+    /// Copies the tracked fake adapter into `root` and configures it.
+    pub(crate) fn fake_adapter(root: &Path, env: &str) -> ReleaseConfig {
+        use std::os::unix::fs::PermissionsExt;
         let adapter = root.join("scripts/qa/fake-adapter");
         std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
         std::fs::write(
@@ -441,24 +687,54 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let served = commit("apps/backend/api.ts", "v1");
-        let web_only = commit("apps/web/page.ts", "v2");
-        let backend_changed = commit("apps/backend/api.ts", "v3");
+        ReleaseConfig {
+            adapter: "./scripts/qa/fake-adapter".into(),
+            env: env.split(',').filter(|name| !name.is_empty()).map(str::to_owned).collect(),
+            timeout_secs: 5,
+            ..ReleaseConfig::default()
+        }
+    }
 
+    /// Builds `[qa.release]` through `cas config set`, checking each key lists back.
+    pub(crate) fn release_config(settings: &[(&str, &str)]) -> ReleaseConfig {
         let mut config = crate::config::Config::default();
-        for (key, value) in [
+        for (key, value) in settings {
+            let key = format!("qa.release.{key}");
+            config.set(&key, value).unwrap();
+            assert!(config.list().contains(&(key, (*value).into())));
+        }
+        config.qa.unwrap().release.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_project::{Project, fake_adapter, release_config};
+    use super::*;
+    use std::process::Command;
+
+    include!("qa_release/fixture_test.rs");
+
+    /// The tracked fake adapter runs through the real sandbox: `served` echoes
+    /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a
+    /// classified error instead.
+    #[test]
+    fn served_equivalence() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = Project::new();
+        let root = project.root();
+        let served = project.commit("apps/backend/api.ts", "v1");
+        let web_only = project.commit("apps/web/page.ts", "v2");
+        let backend_changed = project.commit("apps/backend/api.ts", "v3");
+
+        let config = release_config(&[
             ("adapter", "./scripts/qa/fake-adapter"),
             ("env", "FAKE_SERVED_SHA,FAKE_ERROR_KIND"),
             ("components", r#"{"backend":["apps/backend"]}"#),
             ("integration_branch", "staging"),
             ("branches", "main"),
             ("timeout_secs", "5"),
-        ] {
-            let key = format!("qa.release.{key}");
-            config.set(&key, value).unwrap();
-            assert!(config.list().contains(&(key, value.into())));
-        }
-        let config = config.qa.unwrap().release.unwrap();
+        ]);
         env.set("FAKE_SERVED_SHA", &served);
         env.set("FAKE_PRIVATE", "must-not-inherit");
 
@@ -480,6 +756,129 @@ mod tests {
                 assert_eq!(error.retry_after_s, Some(30));
             }
             other => panic!("expected a classified adapter error, got {other:?}"),
+        }
+    }
+
+    /// Only declared subject kinds with opaque ids and declared invariant IDs
+    /// reach the adapter; its answer maps to pass, fail, blocked or missing.
+    #[test]
+    fn readback_allowlist() {
+        use crate::qa_readback::{Declaration, Outcome};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = fake_adapter(project.path(), "FAKE_READBACK_DATA,FAKE_ERROR_KIND");
+        let mut journey = crate::qa_registry::Journey {
+            id: "signup".into(),
+            readback: Some(Declaration {
+                subjects: vec!["account_uid".into(), "workspace_id".into()],
+                invariants: vec!["INV-ACCOUNT".into(), "INV-WORKSPACE".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ids = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let subjects = ids(&[("account_uid", "uid-7f3a"), ("workspace_id", "ws_42")]);
+        let run = |journey: &crate::qa_registry::Journey, subjects: &BTreeMap<String, String>| {
+            readback(project.path(), &config, "staging", &"a".repeat(40), journey, subjects)
+        };
+
+        // Refused before any adapter call (FAKE_READBACK_DATA is still unset).
+        for refused in [
+            ids(&[("email", "a@b.c")]),
+            ids(&[("account_uid", "1; DROP TABLE users")]),
+        ] {
+            assert!(run(&journey, &refused).is_err(), "{refused:?}");
+        }
+        let declared = journey.readback.clone();
+        journey.readback.as_mut().unwrap().invariants =
+            vec!["SELECT * FROM accounts".into()];
+        assert!(run(&journey, &subjects).is_err(), "a query is not an invariant ID");
+        journey.readback = declared;
+
+        env.set(
+            "FAKE_READBACK_DATA",
+            r#"{"INV-ACCOUNT":{"ok":true,"observed":1},"INV-WORKSPACE":{"ok":true,"observed":"secret"}}"#,
+        );
+        match run(&journey, &subjects).unwrap() {
+            Outcome::Pass(readback) => {
+                assert!(readback.proves());
+                assert_eq!(readback.subject, "account_uid=uid-7f3a workspace_id=ws_42");
+            }
+            other => panic!("expected PASS, got {other:?}"),
+        }
+        env.set(
+            "FAKE_READBACK_DATA",
+            r#"{"INV-ACCOUNT":{"ok":true},"INV-WORKSPACE":{"ok":false}}"#,
+        );
+        assert!(matches!(
+            run(&journey, &subjects).unwrap(),
+            Outcome::Fail { failed, .. } if failed == ["INV-WORKSPACE"]
+        ));
+        env.set("FAKE_READBACK_DATA", r#"{"INV-ACCOUNT":{"ok":true}}"#);
+        assert!(matches!(run(&journey, &subjects).unwrap(), Outcome::Missing(_)));
+        env.set("FAKE_ERROR_KIND", "external");
+        assert!(matches!(
+            run(&journey, &subjects).unwrap(),
+            Outcome::BlockedExternal { provider: Some(p), .. } if p == "fake-health"
+        ));
+    }
+
+    /// Only added files under `migrations.paths` reach the `migrations` verb;
+    /// each answer class maps to its refusal, all failing closed.
+    #[test]
+    fn migrations_verb() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = Project::new();
+        let calls = tempfile::tempdir().unwrap();
+        let log = calls.path().join("calls.log");
+        let config = release_config(&[
+            ("adapter", "./scripts/qa/fake-adapter"),
+            ("env", "FAKE_MIGRATIONS,FAKE_ERROR_KIND,FAKE_CALL_LOG"),
+            ("integration_branch", "staging"),
+            ("migrations.paths", "db/migrations/*/migration.sql"),
+            ("migrations.env", "staging"),
+            ("timeout_secs", "5"),
+        ]);
+        env.set("FAKE_CALL_LOG", &log);
+        let root = project.root();
+        project.commit("db/migrations/20260101_init/migration.sql", "init");
+        project.git(&["checkout", "-qb", "plain"]);
+        project.commit("db/migrations/20260101_init/migration.sql", "edited");
+        project.commit("db/migrations/20261021_add/notes.md", "not a migration");
+        assert!(check_migrations(root, &config, "main", "plain").unwrap().is_empty());
+        assert!(!log.exists(), "a merge adding no migration must not call the adapter");
+
+        project.git(&["checkout", "-q", "main"]);
+        project.git(&["checkout", "-qb", "migration"]);
+        let tip = project.commit("db/migrations/20261021_add/migration.sql", "add");
+        env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
+        assert_eq!(check_migrations(root, &config, "main", "migration").unwrap(), ["20261021_add"]);
+        let request = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            request.contains(&format!(r#""sha":"{tip}""#))
+                && request.contains(r#""args":{"ids":["20261021_add"]}"#),
+            "{request}"
+        );
+
+        for data in [r#"{"20261021_add":"pending"}"#, r#"{"20261021_add":"unknown"}"#, "{}"] {
+            env.set("FAKE_MIGRATIONS", data);
+            let refusal = check_migrations(root, &config, "main", "migration").unwrap_err();
+            assert_eq!(refusal.to_string(), "MIGRATION PENDING: 20261021_add on staging");
+        }
+        for (kind, prefix) in [
+            ("rate_limited", "MIGRATION STATUS UNKNOWN: "),
+            ("external", "MIGRATION STATUS UNKNOWN: "),
+            ("internal", "MIGRATION ADAPTER BUG: "),
+            ("invalid", "MIGRATION ADAPTER BUG: "),
+        ] {
+            env.set("FAKE_ERROR_KIND", kind);
+            let refusal = check_migrations(root, &config, "main", "migration").unwrap_err().to_string();
+            assert!(refusal.starts_with(prefix), "{kind}: {refusal}");
         }
     }
 }

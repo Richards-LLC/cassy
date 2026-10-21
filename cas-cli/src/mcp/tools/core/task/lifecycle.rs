@@ -188,6 +188,7 @@ pub(crate) fn initial_factory_branch_reset_target(
 /// tip is refused with the first commit whose ownership could not be established.
 fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
+    worker_name: &str,
     expected_branch: &str,
     target_branch: &str,
     task_identity: Option<&close_ops::TaskCommitIdentity>,
@@ -353,6 +354,13 @@ fn reconcile_reused_factory_branch(
     // it under a local name and start the new task from its own target.
     // Nothing is pushed, so origin keeps the parked tip for its reviewer.
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        // A per-task branch already is the parked delivery's stable ref.
+        // Only the reusable base lane may move after preserving its old tip.
+        if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some() {
+            return Err(format!(
+                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` before starting."
+            ));
+        }
         require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
@@ -428,7 +436,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -452,7 +460,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
         assert!(error.contains(&worker_tip), "{error}");
@@ -466,7 +474,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -485,7 +493,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
@@ -507,7 +515,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -544,7 +552,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -2101,6 +2109,7 @@ impl CasCore {
                         });
                     match reconcile_reused_factory_branch(
                         worker_checkout,
+                        &worker.name,
                         &worker_branch,
                         &target_branch,
                         Some(&close_ops::task_commit_identity(&task, None)),

@@ -64,8 +64,12 @@ pub struct Invariant {
     /// Graded against each fixture's `labels` entry instead of one universal rule.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labeled: bool,
-    /// How a measured value is graded against its baseline.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// How a measured value is graded against its baseline. Singleton-map
+    /// form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "serde_yaml::with::singleton_map_recursive"
+    )]
     pub compare: Option<Compare>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -180,8 +184,12 @@ pub struct ManualCheck {
     /// Graded against each fixture's `labels` entry instead of one universal rule.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub labeled: bool,
-    /// How a measured value is graded against its baseline.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// How a measured value is graded against its baseline. Singleton-map
+    /// form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "serde_yaml::with::singleton_map_recursive"
+    )]
     pub compare: Option<Compare>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

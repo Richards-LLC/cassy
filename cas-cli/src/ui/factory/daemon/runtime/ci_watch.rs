@@ -191,9 +191,10 @@ pub(crate) fn ci_completed_runs(
         return Ok(None);
     }
     // cas-e845: a run reports completed/success while one of its jobs is still
-    // in_progress. Gate on the same check-run predicate worktree_merge admits
-    // on, limited to these runs' check suites so scheduled or unrelated
-    // workflows never hold the wake. Runs without a suite id keep run status.
+    // in_progress. Gate on merge admission's check-run rules, limited to these
+    // runs' check suites so scheduled or unrelated workflows never hold the
+    // wake. cas-ae6a: a failed check, or one cancelled with no rerun, settles.
+    // Runs without a suite id keep run status.
     let suites: Option<Vec<u64>> = runs.iter().map(|run| run.check_suite_id).collect();
     if let (Some(suites), Some(checks)) = (suites, transport.check_runs_for_sha(&condition.sha)?) {
         let ours: Vec<serde_json::Value> = checks
@@ -205,7 +206,7 @@ pub(crate) fn ci_completed_runs(
                     .is_some_and(|suite| suites.contains(&suite))
             })
             .collect();
-        if crate::mcp::tools::core::workflow::check_runs_unfinished(&ours) {
+        if crate::mcp::tools::core::workflow::check_runs_still_running(&ours) {
             return Ok(None);
         }
     }
@@ -234,11 +235,19 @@ pub(crate) fn collect_ci_wakes(
     candidates.iter().filter_map(wake).collect()
 }
 
-/// The wake's overall verdict over its completed runs.
+/// The wake's overall verdict over its completed runs: `success`, `cancelled`
+/// when nothing failed but a run was cancelled (cas-ae6a), else `failure`.
 pub(crate) fn ci_outcome(runs: &[CiRun]) -> &'static str {
     let passed =
         |run: &CiRun| matches!(run.conclusion.as_deref(), Some("success" | "skipped" | "neutral"));
-    if runs.iter().all(passed) { "success" } else { "failure" }
+    let cancelled = |run: &CiRun| run.conclusion.as_deref() == Some("cancelled");
+    if runs.iter().all(passed) {
+        "success"
+    } else if runs.iter().all(|run| passed(run) || cancelled(run)) {
+        "cancelled"
+    } else {
+        "failure"
+    }
 }
 
 /// A `ci_completed` reminder whose runs have all completed.

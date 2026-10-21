@@ -4695,6 +4695,28 @@ mod spawn_base_tests {
         assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
     }
 
+    #[test]
+    fn configured_origin_fetch_failure_refuses_unmanaged_spawn_cas_02ae() {
+        super::spawn_readiness_tests::with_fixture(|f| {
+            let mut task = cas_types::Task::new("cas-offline".into(), "Offline integration".into());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:bfa1-round2".into(),
+                target_branch: "main".into(),
+            });
+            open_task_store_cached(&f.root).unwrap().add(&task).unwrap();
+            f.offline();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("cached equal refs cannot prove a configured origin is current").to_string();
+            assert!(error.contains("fetch") && error.contains("failed"), "{error}");
+            assert!(error.contains(&f.old), "{error}");
+            assert!(error.contains("0 local-only, 0 remote-only"), "{error}");
+            assert_eq!(full_sha(&f.repo, "main").as_deref(), Some(f.old.as_str()));
+            assert_eq!(full_sha(&f.repo, "origin/main").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+        });
+    }
+
     /// No `origin/<base>` at all (fresh local-only repo): nothing to compare,
     /// so nothing to change and nothing to warn about.
     #[test]

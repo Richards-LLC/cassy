@@ -495,7 +495,7 @@ fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
 
 #[test]
 fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
-    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     std::fs::create_dir_all(env.home().join(".claude")).unwrap();
     let mut args = update_test_args();
     args.dry_run = true;
@@ -505,6 +505,39 @@ fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
     execute(&args, &update_test_cli(true), None).unwrap();
     assert!(!env.home().join(".claude/skills").exists());
     assert!(!env.home().join(".config/cas/credentials.env").exists());
+
+
+    // The native project sweep must preview upkeep adoption without changing
+    // the config. Discovery excludes /tmp, so use the sanctioned fixture root.
+    let fixture = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = fixture.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&project)
+        .status().unwrap().success());
+    let root = crate::store::init_cas_dir(&project).unwrap();
+    let config_path = root.join("config.toml");
+    let original = std::fs::read(&config_path).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_PROJECT_ROOTS", fixture.path());
+    env.set_current_dir(&project);
+    args.user = false;
+    args.all_projects = true;
+    args.refresh_receipt = Some(fixture.path().join("refresh.json"));
+    let report = refresh_all_projects(
+        &args, &update_test_cli(false), Some(&root), None, None, None,
+    ).unwrap();
+    assert_eq!(report.project_count, 1);
+    assert_eq!(std::fs::read(&config_path).unwrap(), original);
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    let changes = receipt["projects"][0]["phase_documents"]["docs_upkeep"][0]["changes"]
+        .as_array().expect("dry run must report planned upkeep changes");
+    assert_eq!(changes.len(), 3);
+    for stage in ["upkeep.codemap = observe", "upkeep.product_overview = observe", "qa.registry.enforce = observe"] {
+        assert!(changes.iter().any(|change| change.as_str().unwrap().starts_with(stage)), "{changes:?}");
+        assert!(report.verbose_summary.contains(stage), "{}", report.verbose_summary);
+    }
 }
 
 #[test]

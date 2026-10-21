@@ -11,11 +11,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Selected journeys** — Was: QA could depend on a legacy catalog or miss a shared pipeline change. → Now: Commander uses its tracked journey registry and semantic path selection, including shared-pipeline fan-out, while preserving catalog parity.
 
-- **Pending checkers** — Was: an unwritten automated check had no accountable owner or deadline. → Now: criteria can name a pending checker with an owner and due date; overdue checkers fail validation, and manual checks distinguish human judgment from automation still to be written.
+- **Pending checkers** — Was: an unwritten automated check had no accountable owner or deadline. → Now: criteria can name a pending checker with an owner and due date. Overdue checkers fail validation, and manual checks distinguish human judgment from automation still to be written.
 
-- **Labeled criteria** — Was: example fixtures had no shared labels for judging a criterion. → Now: criteria can declare a definition and require per-fixture labels; missing labels become debt and unknown or contradictory labels are rejected.
+- **Labeled criteria** — Was: example fixtures had no shared labels for judging a criterion. → Now: criteria can declare a definition and require per-fixture labels. Missing labels become debt and unknown or contradictory labels are rejected.
 
-- **Numeric comparisons** — Was: numeric criteria could not declare exact equality or an allowed change from a baseline. → Now: criteria accept exact or banded comparisons with a minimum ratio or maximum delta; invalid bands and misspelled or contradictory criterion fields are diagnosed.
+- **Numeric comparisons** — Was: numeric criteria could not declare exact equality or an allowed change from a baseline. → Now: criteria accept exact or banded comparisons with a minimum ratio or maximum delta. Invalid bands and misspelled or contradictory criterion fields are diagnosed.
 
 ### Fixed — QA warnings and evidence stay trustworthy
 
@@ -31,7 +31,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added — inspect documentation drift before enforcing it
 
-- **Upkeep status and warnings** — Was: turning on enforcement could reveal documentation drift only after it started blocking work. → Now: `cas qa journeys --status` reports registry, CODEMAP and overview drift against a pinned integration commit; a real transition to enforcement warns about known positive drift after saving the setting, while zero and unknown remain distinct.
+- **Upkeep status and warnings** — Was: turning on enforcement could reveal documentation drift only after it started blocking work. → Now: `cas qa journeys --status` reports registry, CODEMAP and overview drift against a pinned integration commit. A real transition to enforcement warns about known positive drift after saving the setting, while zero and unknown remain distinct.
 
 ### Fixed — documentation follows the active checkout
 
@@ -41,11 +41,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — work resumes and hands over without losing its history
 
-- **Resume after review** — Was: resuming a review hold could reject the same task’s own accepted commits. → Now: owned delivery commits remain attributable across review holds, anchored target merges and dirty edits; a fresh task still refuses unrelated uncommitted work.
+- **Resume after review** — Was: resuming a review hold could reject the same task’s own accepted commits. → Now: owned delivery commits remain attributable across review holds, anchored target merges and dirty edits. A fresh task still refuses unrelated uncommitted work.
 
 - **Rebased delivery ownership** — Was: rebasing after a conflict could make a valid delivery look unrelated or let a foreign subject pass through a body reference. → Now: fresh parking binds to the task-owned rebased delivery and checks the commit subject independently of references in its body.
 
-- **Empty helper work** — Was: a truly empty helper delivery could be sent through code QA, while a superficially empty range could conceal unmerged work. → Now: only verified empty helper work skips irrelevant delivery gates; unnamed code work, unmerged deliveries and shared QA fallback keep their checks.
+- **Empty helper work** — Was: a truly empty helper delivery could be sent through code QA, while a superficially empty range could conceal unmerged work. → Now: only verified empty helper work skips irrelevant delivery gates. Unnamed code work, unmerged deliveries and shared QA fallback keep their checks.
 
 - **Squash receipt range** — Was: later documentation merges could distort the change range proved by a squash receipt. → Now: a first-parent squash receipt is measured against its own parent instead of a later target position.
 
@@ -53,7 +53,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Proof provenance** — Was: trusted notes could be partially matched, truncated or reused outside their original provenance block. → Now: whole provenance blocks are preserved and trusted notes match exactly from the start of a complete note.
 
-- **Artifact and reset boundaries** — Was: artifact discovery could capture the wrong store and reset could accept overrides for ownership it could not prove. → Now: artifact discovery is bounded to the intended project context and reset removes unsafe overrides.
+- **Store discovery and config reset** — Was: commands inside a `.cas` data folder could select its enclosing store, and resetting a key saved a default override. → Now: discovery stops at the enclosing `.cas` folder, so `cas config set` from a directory such as `~/.cas/artifacts` reports not initialized instead of writing machine settings. `cas config reset <key>` removes the stored key instead of writing the default into it.
 
 - **Staged managed repairs** — Was: reconciling managed files could create an unexpected commit on an integration branch. → Now: integration-branch repairs remain staged for review, using the full HEAD reference to classify the branch.
 
@@ -79,11 +79,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — disk space recovers before builds are refused
 
-- **Managed scratch cleanup** — Was: relocated build targets were omitted from cache cleanup and a full disk required manual intervention. → Now: GC inventories verified scratch targets on the admission filesystem, preserves live and warm targets, and admission attempts guarded cleanup once before remeasuring free space; safe shutdown and replacement retire their target after preserving proof.
+- **Managed scratch cleanup** — Was: relocated build targets were omitted from cache cleanup and a full disk required manual intervention. → Now: GC inventories verified scratch targets on the admission filesystem, preserves live and warm targets, and admission attempts guarded cleanup once before remeasuring free space. Safe shutdown and replacement retire their target after preserving proof.
 
 ### Fixed — account checks keep their real cause
 
-- **SSH keychain diagnostics** — Was: a locked macOS login keychain over SSH could look like a signed-out Claude account. → Now: checks identify the unavailable keychain and provide a local unlock remedy; repeated account probes reuse bounded evidence without refreshing its age.
+- **SSH keychain diagnostics** — Was: a locked macOS login keychain over SSH could look like a signed-out Claude account. → Now: checks identify the unavailable keychain and provide a local unlock remedy. Repeated account probes reuse bounded evidence without refreshing its age.
 
 - **Optional auth cache failure** — Was: a broken optional cache could hide the account’s actual login state. → Now: cache failures fall back to the real authentication probe and preserve its evidence, including a genuine logout.
 

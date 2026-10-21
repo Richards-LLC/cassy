@@ -288,19 +288,25 @@ fn check(
     let mut qa = qa.clone();
     // A delivery cannot relax its own gate. At each revision the tracked
     // header wins, with local configuration as fallback only when absent.
-    // An unreadable header cannot authorize a downgrade: retain at least
-    // enforcement, including strict local policy when configured.
+    // An unreadable base cannot authorize a downgrade: retain at least enforce
+    // (or local strict). A broken head keeps the base/local policy's severity.
     if let Some(stage) = [base, head]
         .into_iter()
         .filter_map(|revision| {
-            git(repo, &["show", &format!("{revision}:{}", qa.registry.path)]).ok()
+            git(repo, &["show", &format!("{revision}:{}", qa.registry.path)])
+                .ok()
+                .map(|text| (revision, text))
         })
-        .map(|text| match crate::qa_registry::parse(&text) {
-            Ok(registry) => registry.enforce.unwrap_or(qa.registry.enforce),
-            Err(_) if qa.registry.enforce == RegistryEnforcement::Strict => {
-                RegistryEnforcement::Strict
+        .filter_map(|(revision, text)| match crate::qa_registry::parse(&text) {
+            Ok(registry) => Some(registry.enforce.unwrap_or(qa.registry.enforce)),
+            Err(_) if revision == base => {
+                Some(if qa.registry.enforce == RegistryEnforcement::Strict {
+                    RegistryEnforcement::Strict
+                } else {
+                    RegistryEnforcement::Enforce
+                })
             }
-            Err(_) => RegistryEnforcement::Enforce,
+            Err(_) => None,
         })
         .max_by_key(|stage| match stage {
             RegistryEnforcement::Off => 0,

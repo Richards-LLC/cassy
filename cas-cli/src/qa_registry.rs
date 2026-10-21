@@ -237,7 +237,7 @@ pub struct ManualCheck {
 pub struct Fixture {
     pub description: String,
     #[serde(flatten)]
-    pub source: FixtureSource,
+    pub source: Option<FixtureSource>,
     /// Expected value per labeled criterion ID for this fixture.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, Value>,
@@ -260,20 +260,24 @@ impl Default for FixtureSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FrozenFixture {
     pub sha256: String,
     pub storage_key: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FixtureRecipe {
     pub name: String,
     pub envs: Vec<String>,
     pub provides: Vec<String>,
     pub ttl_mins: u32,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl FixtureRecipe {
@@ -291,6 +295,7 @@ impl FixtureRecipe {
             && names(&self.envs)
             && names(&self.provides)
             && self.ttl_mins > 0
+            && self.extra.is_empty()
     }
 }
 
@@ -529,6 +534,10 @@ impl ValidationReport {
         known: &[&str],
     ) {
         for key in extra.keys() {
+            // A second source is an exclusivity error, not a misspelling.
+            if known.contains(&key.as_str()) {
+                continue;
+            }
             // At most two edits, and no more than a third of the field, so
             // short free-form keys (`tag` vs `bug`) stay free-form.
             if let Some(field) = known.iter().find(|field| {
@@ -818,8 +827,9 @@ impl Registry {
         if let Some(fixtures) = &self.fixtures {
             for (name, fixture) in fixtures {
                 let subject = format!("fixtures.{name}");
-                let valid = match &fixture.source {
-                    FixtureSource::Provider(provider) => {
+                let valid = match fixture.source.as_ref() {
+                    None => false,
+                    Some(FixtureSource::Provider(provider)) => {
                         let provider = provider.trim();
                         if provider.to_ascii_lowercase().starts_with("http://")
                             || provider.to_ascii_lowercase().starts_with("https://")
@@ -829,12 +839,25 @@ impl Registry {
                         }
                         !provider.is_empty()
                     }
-                    FixtureSource::Frozen(frozen) => {
+                    Some(FixtureSource::Frozen(frozen)) => {
+                        report.misspelled_fields(
+                            &format!("{subject}.frozen"),
+                            &frozen.extra,
+                            &["sha256", "storage_key"],
+                        );
                         frozen.sha256.len() == 64
                             && frozen.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                             && !frozen.storage_key.trim().is_empty()
+                            && frozen.extra.is_empty()
                     }
-                    FixtureSource::Recipe(recipe) => recipe.valid(),
+                    Some(FixtureSource::Recipe(recipe)) => {
+                        report.misspelled_fields(
+                            &format!("{subject}.recipe"),
+                            &recipe.extra,
+                            &["name", "envs", "provides", "ttl_mins"],
+                        );
+                        recipe.valid()
+                    }
                 };
                 let multiple = ["provider", "frozen", "recipe"]
                     .iter()

@@ -130,6 +130,11 @@ fixtures:
       ttl_mins: 30
 ```
 
+Missing sources and misspelled source or nested fixture fields remain readable
+by registry consumers; `--check` reports them as validation problems. Read-back
+unknown fields likewise retain YAML values (including tags and map keys) for
+validation instead of aborting the registry load.
+
 `frozen.sha256` is 64 hexadecimal characters, and `storage_key` is a nonempty
 opaque storage key. `cas qa journeys --check` reports HTTP(S) provider URLs as
 `live_url_fixture` debt: freeze their bytes to avoid deleted/private media and

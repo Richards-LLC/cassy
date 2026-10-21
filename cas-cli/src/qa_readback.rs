@@ -27,8 +27,7 @@ impl Readback {
 }
 
 /// A journey's `readback:` declaration in the registry.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Declaration {
     /// Subject kinds, for example `account_uid` or `workspace_id`.
     pub subjects: Vec<String>,
@@ -36,7 +35,53 @@ pub struct Declaration {
     pub invariants: Vec<String>,
     /// Unknown keys, kept so registry validation can name a typo.
     #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    pub extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+impl<'de> Deserialize<'de> for Declaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Flatten's intermediate content rejects YAML tags before the value
+        // type sees them. Read unknown YAML values directly from the map.
+        struct DeclarationVisitor;
+        impl<'de> serde::de::Visitor<'de> for DeclarationVisitor {
+            type Value = Declaration;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a readback declaration")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Declaration, A::Error> {
+                let (mut subjects, mut invariants) = (None, None);
+                let mut extra = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "subjects" => {
+                            if subjects.is_some() {
+                                return Err(serde::de::Error::duplicate_field("subjects"));
+                            }
+                            subjects = Some(map.next_value()?);
+                        }
+                        "invariants" => {
+                            if invariants.is_some() {
+                                return Err(serde::de::Error::duplicate_field("invariants"));
+                            }
+                            invariants = Some(map.next_value()?);
+                        }
+                        _ => {
+                            extra.insert(key, map.next_value()?);
+                        }
+                    }
+                }
+                Ok(Declaration {
+                    subjects: subjects.unwrap_or_default(),
+                    invariants: invariants.unwrap_or_default(),
+                    extra,
+                })
+            }
+        }
+        deserializer.deserialize_map(DeclarationVisitor)
+    }
 }
 
 impl Declaration {

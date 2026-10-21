@@ -1291,6 +1291,10 @@ pub(crate) fn collect_failures(
         .and_then(|config| config.qa)
         .and_then(|qa| qa.release)
         .unwrap_or_default();
+    let mut watched_branches = watched_branches.clone();
+    if !release.integration_branch.trim().is_empty() {
+        watched_branches.insert(release.integration_branch.clone());
+    }
     let is_deploy = |run: &CiRun| {
         !release.integration_branch.trim().is_empty()
             && run.head_branch == release.integration_branch
@@ -1983,7 +1987,7 @@ mod tests {
             frontend.id = 101;
             frontend.name = "Deploy Frontend".into();
             frontend.conclusion = Some("timed_out".into());
-            let transport = TipTransport {
+            let mut transport = TipTransport {
                 runs: vec![
                     backend,
                     frontend,
@@ -2019,6 +2023,10 @@ mod tests {
                     &row.prompt
                 ));
             }
+            transport.runs = vec![run_with("staging", "red-deploy", 201, Some("failure"))];
+            let failures = collect_failures(&transport, &BTreeSet::new(), Some(temp.path())).unwrap();
+            assert!(failures.iter().any(|failure| failure.workflow == "CI"),
+                "the configured integration branch also belongs to the ordinary CI watch set");
         }
     }
 

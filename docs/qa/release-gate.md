@@ -102,7 +102,8 @@ then touched its paths.
 ## Deploy failure alerts
 
 The factory daemon watches configured deploy workflows on the integration branch
-at its existing CI polling cadence. Completed `push` and `workflow_dispatch`
+at its existing CI polling cadence. That branch also joins the ordinary CI watch
+set. Completed `push` and `workflow_dispatch`
 runs count; CI and each deploy workflow have independent verdicts. A failed or
 timed-out deploy with a failed job becomes a Critical supervisor `BLOCKER` naming
 the job and failed step when GitHub reports one. The relay key includes the

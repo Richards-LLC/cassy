@@ -5958,7 +5958,7 @@ impl CasService {
             lost.iter()
                 .filter_map(|(name, _, restored)| restored.is_ok().then_some(name)),
         ) {
-            match crate::ui::factory::app::render_and_ops::epic_workers::enqueue_context_resume_brief(
+            match crate::ui::factory::enqueue_context_resume_brief(
                 &self.inner.cas_root,
                 &resume_source,
                 factory_session.as_deref(),

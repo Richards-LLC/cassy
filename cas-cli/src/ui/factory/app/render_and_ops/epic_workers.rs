@@ -6752,6 +6752,7 @@ mod tests {
             assert!(!brief.contains(excluded), "exclude {excluded}: {brief}");
         }
         assert!(brief.len() < 16_000, "the resume brief has a bounded history");
+        // pin: the original unread body must remain available to the ordinary inbox drain.
         assert!(queue.peek_unseen_for_recipient("wise-raven", Some("session-a622"), 100).unwrap().iter().any(|row| row.prompt == "UNRECEIVED"), "building a brief never consumes pending mail");
     }
 

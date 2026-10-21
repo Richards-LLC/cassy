@@ -41,3 +41,26 @@ the delivered commit.
 | Machine contract | 5 | One JSON document preserves both arrays and supplies typed counts and nullable comparisons. |
 
 Scored by true-otter-3 on 2026-10-21; all floors hold.
+
+## Upkeep critique (cas-a77e)
+
+terminal-qa: PASS qa-upkeep-status · 12 runs · 0 fail · 0 warn · 0 allowed
+
+terminal-qa: PASS qa-enforce-warning · 12 runs · 0 fail · 0 warn · 0 allowed
+
+Receipts: task `cas-a77e`, `terminal-qa/status/report.json` and
+`terminal-qa/enforce/report.json`. The actual CLI inherits each test's terminal;
+Git fixture setup is captured separately. Long integration refs exercise the
+80-column truncation and full-ref JSON escape. Both 80-column four-palette
+renders were inspected. Final delivery evidence records the candidate version,
+mtime and commit; the candidate comes from the capped CLI integration test.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | DRIFT leads status, followed by the measured ref and three artifact counts. A saved config leads its advisory warning. |
+| Fit | 5 | Three aggregate rows expose drift while curation debt stays separate; JSON carries full refs and diagnostic detail. |
+| Craft | 4 | Long refs truncate visibly at 80 columns and name the JSON escape; both command surfaces remain readable. |
+| Theme safety | 5 | Both surfaces pass all four palettes and plain-output checks; inspected renders retain clear labels and counts. |
+| Machine contract | 5 | One JSON document preserves existing fields; unknown counts are null and config warnings are an explicit array. |
+
+Scored by true-otter-3 on 2026-10-21; all floors hold.

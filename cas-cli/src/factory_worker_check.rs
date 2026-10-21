@@ -1,6 +1,7 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -535,8 +536,16 @@ fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTe
 pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
     let mut receipts = passing_test_records(cas_root, repo, head)
         .into_iter()
-        .map(|(package, test)| {
-            format!("test: PASS {head} {package} {} {}{}", test.filter, test.count, test.path_note())
+        .map(|(receipt_head, package, test)| {
+            let rebind = (receipt_head != head)
+                .then(|| format!(" rebound from {receipt_head} to {head}"))
+                .unwrap_or_default();
+            format!(
+                "test: PASS {receipt_head} {package} {} {}{}{rebind}",
+                test.filter,
+                test.count,
+                test.path_note()
+            )
         })
         .collect::<Vec<_>>();
     receipts.sort();
@@ -550,15 +559,22 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
 pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
     let mut packages = passing_test_records(cas_root, repo, head)
         .into_iter()
-        .map(|(package, _)| package)
+        .map(|(_, package, _)| package)
         .collect::<Vec<_>>();
     packages.sort();
     packages.dedup();
     packages
 }
 
-/// Every valid passing targeted-test receipt for `head` in this worktree.
-fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String, TestReceipt)> {
+/// Exact test receipts plus ancestor receipts whose full commit range contains
+/// no Rust, test or build inputs. The latter saves an identical rerun after a
+/// documentation-only delivery commit while keeping proof tied to its tested
+/// tree.
+fn passing_test_records(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+) -> Vec<(String, String, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -569,39 +585,189 @@ fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut records = Vec::new();
-    for entry in entries.flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(&format!("{head}-test-"))
-        {
-            continue;
-        }
-        let record = std::fs::read(entry.path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok());
-        let Some(mut record) = record else {
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut exact = BTreeMap::new();
+    let mut ancestors = Vec::new();
+    for entry in entries {
+        let Some((receipt_head, package, test)) =
+            read_passing_test_record(cas_root, &repo, &entry)
+        else {
             continue;
         };
-        let Some(test) = record.test.take() else {
-            continue;
-        };
-        if record.repo == repo
-            && record.head == head
-            && record.packages.len() == 1
-            && valid_package(&record.packages[0])
-            && named_filter(&test.filter)
-            && test.count > 0
-            && test
-                .harness
-                .as_ref()
-                .is_none_or(|harness| valid_package(harness))
-        {
-            records.push((record.packages.remove(0), test));
+        if receipt_head == head {
+            exact.insert(
+                (package, test.harness.clone(), test.filter.clone()),
+                (receipt_head, test),
+            );
+        } else {
+            ancestors.push((receipt_head, package, test));
         }
     }
-    records
+
+    for (receipt_head, package, test) in ancestors {
+        let key = (package, test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key)
+            || !receipt_range_has_no_proof_inputs(&repo, &receipt_head, head)
+        {
+            continue;
+        }
+        match exact.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert((receipt_head, test));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot)
+                if receipt_head_is_ancestor(&repo, &slot.get().0, &receipt_head) =>
+            {
+                slot.insert((receipt_head, test));
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+
+    exact
+        .into_iter()
+        .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
+        .collect()
+}
+
+fn read_passing_test_record(
+    cas_root: &Path,
+    repo: &Path,
+    entry: &std::fs::DirEntry,
+) -> Option<(String, String, TestReceipt)> {
+    if !entry.file_type().ok()?.is_file() {
+        return None;
+    }
+    let mut record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
+    let test = record.test.take()?;
+    if record.repo != repo
+        || record.packages.len() != 1
+        || !valid_package(&record.packages[0])
+        || !named_filter(&test.filter)
+        || test.count == 0
+        || test
+            .harness
+            .as_ref()
+            .is_some_and(|harness| !valid_package(harness))
+    {
+        return None;
+    }
+    let package = record.packages.remove(0);
+    let targeted_test = TargetedTest {
+        package: package.clone(),
+        harness: test.harness.clone(),
+        filter: test.filter.clone(),
+    };
+    (entry.path() == test_receipt_path(cas_root, repo, &record.head, &targeted_test))
+        .then_some((record.head, package, test))
+}
+
+fn receipt_range_has_no_proof_inputs(
+    repo: &Path,
+    receipt_head: &str,
+    delivered_head: &str,
+) -> bool {
+    if !valid_git_oid(receipt_head)
+        || !valid_git_oid(delivered_head)
+        || !receipt_head_is_ancestor(repo, receipt_head, delivered_head)
+    {
+        return false;
+    }
+    let range = format!("{receipt_head}..{delivered_head}");
+    let Ok(changes) = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "-m",
+            "-z",
+            &range,
+        ])
+        .current_dir(repo)
+        .output()
+    else {
+        return false;
+    };
+    changes.status.success()
+        && changes.stdout.split(|byte| *byte == 0).all(|path| {
+            path.is_empty()
+                || std::str::from_utf8(path)
+                    .is_ok_and(|path| !is_test_or_build_input_path(path))
+        })
+}
+
+fn receipt_head_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    valid_git_oid(ancestor)
+        && valid_git_oid(descendant)
+        && Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .current_dir(repo)
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn valid_git_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_test_or_build_input_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let parts = lower.split('/').collect::<Vec<_>>();
+    let name = parts.last().copied().unwrap_or_default();
+    if parts.iter().any(|part| {
+        matches!(
+            *part,
+            "test" | "tests" | "__tests__" | "spec" | "specs" | "fixture" | "fixtures"
+                | "testdata" | "snapshots" | "benches" | "build" | "scripts" | "ci"
+                | ".cargo" | ".github" | "xtask"
+        )
+    }) {
+        return true;
+    }
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    if name.starts_with("test_")
+        || name.starts_with("test-")
+        || [".test.", "_test.", "-test.", ".spec.", "_spec.", "-spec."]
+            .iter()
+            .any(|marker| name.contains(marker))
+        || matches!(stem, "test" | "spec")
+        || matches!(
+            name,
+            "cargo.toml"
+                | "cargo.lock"
+                | "build.rs"
+                | "makefile"
+                | "gnumakefile"
+                | "justfile"
+                | "taskfile"
+                | "cmakelists.txt"
+                | "build.ninja"
+                | "dockerfile"
+                | "rust-toolchain"
+                | "rust-toolchain.toml"
+                | ".rust-toolchain"
+                | "nextest.toml"
+                | "clippy.toml"
+                | "rustfmt.toml"
+                | ".rustfmt.toml"
+        )
+    {
+        return true;
+    }
+    let extension = name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
+    matches!(
+        extension,
+        "rs" | "c" | "cc" | "cpp" | "h" | "hpp" | "go" | "py" | "pyi" | "js"
+            | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "sh" | "bash" | "java" | "kt"
+            | "kts" | "cs" | "php" | "swift" | "lua" | "sql" | "pl" | "r" | "ex"
+            | "exs" | "scala" | "clj" | "vue" | "svelte" | "toml" | "lock" | "json"
+            | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
+            | "proto" | "graphql" | "nix"
+    )
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates

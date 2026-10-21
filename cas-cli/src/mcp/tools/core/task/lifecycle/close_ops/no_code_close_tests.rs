@@ -414,6 +414,44 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     assert!(task.notes.contains(PROOF), "{}", task.notes);
 }
 
+/// cas-c202: a supervisor proof_scope_fix that lands after this close loaded
+/// the task, but before its terminal write, must survive: the close refuses
+/// rather than writing its stale copy (status, proof_targets, notes) back.
+#[tokio::test]
+async fn close_refuses_terminal_write_over_a_concurrent_proof_scope_fix_cas_c202() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let id = "cas-c202-race";
+    f.put(&assigned(id, TaskType::Task, "main"));
+    claim(&f, id);
+    let cas_dir = f.cas_dir();
+    close_race_hook::before_terminal_write(id, move || {
+        let store = open_task_store(&cas_dir).unwrap();
+        let loaded = store.get("cas-c202-race").unwrap();
+        let mut corrected = loaded.clone();
+        corrected.status = TaskStatus::Open;
+        corrected.proof_targets = vec!["pre_tool".into(), "pre_tool::shell_effects".into()];
+        corrected.notes.push_str("\n\n[2026-10-21 14:18] PROOF-SCOPE FIX widened");
+        store.update_if_current(&corrected, &loaded).unwrap();
+    });
+    let response = call(
+        &f.worker,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Deployed the monthly release",
+            "execution_note": "no-code", "external_ref": PROOF,
+        }),
+    )
+    .await;
+    let task = f.task(id);
+    assert_eq!(task.status, TaskStatus::Open, "the correction's status survives: {response}");
+    assert_eq!(task.proof_targets, ["pre_tool", "pre_tool::shell_effects"], "{response}");
+    assert!(task.notes.contains("PROOF-SCOPE FIX"), "{}", task.notes);
+    assert!(
+        response.contains("CLOSE REFUSED") && response.contains("Reload"),
+        "the refusal tells the worker to reload and retry: {response}"
+    );
+}
+
 /// GH #1147: a no-code spike created under a code epic inherits the epic's
 /// WorkTarget. The worker's close must not park it for the epic branch.
 #[tokio::test]
@@ -1030,11 +1068,12 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
 #[tokio::test]
 async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     let mut env = TestEnvGuard::temp_home();
-    for (lane, foreign_after_start) in [
-        (LANE, false),
-        (LANE, true),
-        ("factory/nocode-worker-cas-a0b1", false),
-        ("factory/nocode-worker-cas-a0b1", true),
+    for (lane, foreign_after_start, rebase_after_start) in [
+        (LANE, false, false),
+        (LANE, true, false),
+        ("factory/nocode-worker-cas-a0b1", false, false),
+        ("factory/nocode-worker-cas-a0b1", true, false),
+        (LANE, false, true),
     ] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
@@ -1083,6 +1122,15 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
             f.task(id).deliverables.factory_branch_start.as_ref(),
             Some(&boundary)
         );
+        if rebase_after_start {
+            // A target update is already integrated work, even when a rebase
+            // puts its ordinary foreign-named commit after our start boundary.
+            std::fs::write(repo.join("target.rs"), "pub fn integrated() {}\n").unwrap();
+            git(repo, &["add", "target.rs"]);
+            git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target delivery"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            git(&worker_path, &["rebase", "origin/main"]);
+        }
         if foreign_after_start {
             std::fs::write(worker_path.join("foreign.rs"), "pub fn foreign() {}\n").unwrap();
             git(&worker_path, &["add", "foreign.rs"]);

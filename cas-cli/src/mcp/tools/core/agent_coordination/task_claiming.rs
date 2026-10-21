@@ -974,6 +974,10 @@ impl CasCore {
             data: None,
         })?;
 
+        // A supervisor issues the transfer but is not its previous holder.
+        // Capture the source before the assignee is overwritten below.
+        let previous_holder = lease.as_ref().map(|lease| lease.agent_id.clone())
+            .or_else(|| task.assignee.clone()).unwrap_or_else(|| "<unassigned>".into());
         // prior_lease_holder is Some(<agent_id>) when we force-released a live lease.
         // Used below for the audit note.
         let prior_lease_holder: Option<String> = match &lease {
@@ -1193,7 +1197,7 @@ impl CasCore {
             &req.task_id,
             &target_agent.id,
             DEFAULT_LEASE_DURATION_SECS,
-            Some(&format!("Transferred from {agent_id}")),
+            Some(&format!("Transferred from {previous_holder}")),
         );
 
         let claim_msg = match claim_result {
@@ -1223,7 +1227,7 @@ impl CasCore {
         Ok(Self::success(format!(
             "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
-            agent_id,
+            previous_holder,
             target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),

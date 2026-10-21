@@ -1068,6 +1068,17 @@ Task creation excludes common planning words and prose such as `NOT` and
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
+### Assignment on task creation
+
+In factory mode, `task action=create assignee=<worker>` uses the same worker
+identity normalization and freshness policy as `task action=update assignee=`.
+A refused assignment rejects the entire create before saving a task or queuing
+a worker prompt. Successful creates show the stored assignee, including any
+normalization or freshness warnings. `task action=show` always shows the stored
+assignee or `(unassigned)`. Parked-delivery and clean-idle reset exemptions,
+warning-only configuration, and assignments to workers not yet registered retain
+the update policy.
+
 ### Task start cancellation
 
 `task action=start` commits its local lease and InProgress status before awaiting

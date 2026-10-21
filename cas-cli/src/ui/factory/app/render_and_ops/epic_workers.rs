@@ -873,10 +873,29 @@ fn prefer_fresher_base_ref_observed(
     // prove freshness after a failed fetch. Managed epics own their observation
     // and publication policy, so they deliberately arrive with fetch=false.
     if verify_origin {
-        git.fetch_branch(branch).map_err(|error| format!(
-            "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
-            observed_state(),
-        ))?;
+        git.fetch_branch(branch).map_err(|error| {
+            // A failed fetch alone cannot distinguish missing publication from
+            // transport failure. Git's exit 2 means a reachable origin has no
+            // matching head; stderr and cached refs are not absence evidence.
+            let mut command = std::process::Command::new("git");
+            command.args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(repo_root);
+            let absent = crate::worktree::GitOperations::run_command_bounded(
+                command, std::time::Duration::from_secs(10),
+            ).is_ok_and(|output| output.status.code() == Some(2));
+            if absent {
+                format!(
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    observed_state(),
+                )
+            } else {
+                format!(
+                    "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
+                    observed_state(),
+                )
+            }
+        })?;
     }
     if base.starts_with("origin/") {
         return Ok((None, None));
@@ -997,9 +1016,6 @@ fn checkout_ref_for_spawn_base_observed(
     repo_root: &std::path::Path, parent_branch: &str, source: &SpawnBaseSource, fetch: bool,
 ) -> Result<(Option<String>, Option<String>, String), String> {
     let (mut base_ref, mut freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch)?;
-    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
-        freshness_notice = Some(format!("SPAWN BASE LOCAL-ONLY: '{parent_branch}' has no configured origin remote; using the local tip."));
-    }
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
@@ -1020,6 +1036,17 @@ fn checkout_ref_for_spawn_base_observed(
                 base_ref = Some(local_sha);
             }
         }
+    }
+    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
+        let selected = base_ref.as_deref().unwrap_or(parent_branch);
+        let sha = full_sha(repo_root, selected).unwrap_or_else(|| "unresolved".into());
+        let remote = format!("origin/{parent_branch}");
+        if base_ref.is_some() && full_sha(repo_root, &remote).as_deref() == Some(sha.as_str()) {
+            checkout_ref = remote;
+        }
+        freshness_notice = Some(format!(
+            "SPAWN BASE LOCAL-ONLY: origin is not configured; checkout '{checkout_ref}' ({sha})."
+        ));
     }
     Ok((base_ref, freshness_notice, checkout_ref))
 }

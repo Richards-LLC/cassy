@@ -158,12 +158,12 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
                             Some(install_cli_command(cli).to_owned()),
                         ),
                         LaunchError::ProfileMissing { cli, path } => (
-                            format!("profile {profile} missing"),
+                            "profile missing".to_owned(),
                             Some(path),
                             Some(format!("cas {cli} login {profile}")),
                         ),
                         LaunchError::NotLoggedIn { cli, profile } => (
-                            format!("profile {profile} not logged in"),
+                            "profile not logged in".to_owned(),
                             None,
                             Some(format!("cas {cli} login {profile}")),
                         ),
@@ -1450,10 +1450,7 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
         }
         for readiness in &report.launch_readiness {
             if readiness.ready {
-                println!(
-                    "  {} launch: ready (profile {})",
-                    readiness.cli, readiness.profile
-                );
+                println!("  {} launch: ready", readiness.cli);
                 continue;
             }
             println!(

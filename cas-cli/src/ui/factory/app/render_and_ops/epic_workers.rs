@@ -3375,7 +3375,15 @@ mod spawn_base_tests {
         assert_eq!(notices, 1, "one stale tip must not produce eight identical refresh notices");
     }
 
-    fn without_spawn_disk_floor(_repo: &std::path::Path) {}
+    /// Base-selection fixtures exercise real provisioning without depending on
+    /// the host's free disk. Disk-floor refusal has its own spawn-isolation test.
+    fn without_spawn_disk_floor(repo: &std::path::Path) {
+        let cas_dir = repo.join(".cas");
+        let mut config = crate::config::Config::load(&cas_dir).unwrap();
+        config.factory.get_or_insert_with(Default::default).spawn_min_free_gib = 0;
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        config.save(&cas_dir).unwrap();
+    }
 
     fn init_repo(dir: &std::path::Path) {
         Command::new("git")
@@ -4314,7 +4322,8 @@ mod spawn_base_tests {
         std::fs::write(
             cas_dir.join("config.toml"),
             format!("[factory]\nspawn_min_free_gib = {}\n", u32::MAX),
-        ).unwrap();
+        )
+        .unwrap();
         without_spawn_disk_floor(&repo);
         WorkerSpawnPrep {
             worker_name: "loner-worker".to_string(),

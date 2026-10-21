@@ -6558,6 +6558,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
         id: task_id, with_deps: false,
     })).await.unwrap());
+    // pin: task show must explicitly distinguish an unassigned task from an omitted field.
     assert!(shown.contains("Assignee: (unassigned)"), "{shown}");
 }
 

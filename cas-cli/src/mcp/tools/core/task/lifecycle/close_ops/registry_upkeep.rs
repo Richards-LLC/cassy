@@ -31,37 +31,10 @@ pub(super) fn at_park(
     if qa.registry.enforce == RegistryEnforcement::Off {
         return Ok(vec![]);
     }
-    let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
-    else {
-        return warning(
-            store,
-            task,
-            "UPKEEP WARNING: delivery head unavailable (not blocking)".into(),
-        );
+    let (base, head, paths) = match delivery_snapshot(task, repo, target, window, receipt) {
+        Ok(snapshot) => snapshot,
+        Err(message) => return warning(store, task, message),
     };
-    let paths =
-        window.and_then(|window| task_attribution::paths(repo, target, window, Some(&head)));
-    let base = if let Some(window) = window {
-        task_attribution::delivery_base(repo, target, window, Some(&head))
-    } else {
-        crate::qa_evidence::delivery_range(repo, &head, &freshest_target_ref(repo, target))
-            .map(|(base, _)| base)
-    };
-    let Some(base) = base else {
-        return warning(
-            store,
-            task,
-            "UPKEEP WARNING: attributed delivery base unavailable (not blocking)".into(),
-        );
-    };
-    // Do not substitute a broad diff when attribution could not be established.
-    if window.is_some() && paths.is_none() {
-        return warning(
-            store,
-            task,
-            "UPKEEP WARNING: attributed delivery paths unavailable (not blocking)".into(),
-        );
-    }
     check(
         store,
         task,
@@ -74,7 +47,30 @@ pub(super) fn at_park(
     )
 }
 
-fn warning(
+pub(super) fn delivery_snapshot(
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+    receipt: Option<&str>,
+) -> Result<(String, String, Option<Vec<String>>), String> {
+    let head = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+        .ok_or("UPKEEP WARNING: delivery head unavailable (not blocking)")?;
+    let paths = window.and_then(|w| task_attribution::paths(repo, target, w, Some(&head)));
+    let base = if let Some(w) = window {
+        task_attribution::delivery_base(repo, target, w, Some(&head))
+    } else {
+        crate::qa_evidence::delivery_range(repo, &head, &freshest_target_ref(repo, target))
+            .map(|(base, _)| base)
+    }
+    .ok_or("UPKEEP WARNING: attributed delivery base unavailable (not blocking)")?;
+    if window.is_some() && paths.is_none() {
+        return Err("UPKEEP WARNING: attributed delivery paths unavailable (not blocking)".into());
+    }
+    Ok((base, head, paths))
+}
+
+pub(super) fn warning(
     store: &dyn cas_store::TaskStore,
     task: &mut Task,
     text: String,
@@ -120,11 +116,11 @@ pub(super) fn epic_escape_summary(store: &dyn cas_store::TaskStore, epic: &Task)
     )
 }
 
-struct Finding {
-    gate: &'static str,
-    token: &'static str,
-    title: &'static str,
-    detail: String,
+pub(super) struct Finding {
+    pub(super) gate: &'static str,
+    pub(super) token: &'static str,
+    pub(super) title: &'static str,
+    pub(super) detail: String,
 }
 impl Finding {
     fn broken(detail: String) -> Self {
@@ -146,10 +142,11 @@ fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
     })
 }
 
-fn finish(
+pub(super) fn finish(
     store: &dyn cas_store::TaskStore,
     task: &mut Task,
-    qa: &QaConfig,
+    stage: RegistryEnforcement,
+    input_path: &str,
     findings: Vec<Finding>,
     warnings: &[String],
     override_reason: Option<&str>,
@@ -160,9 +157,9 @@ fn finish(
     }
     let mut refusals = Vec::new();
     for finding in findings {
-        let text = gate_text::registry_upkeep_message(
+        let text = gate_text::upkeep_message(
             &task.id,
-            &qa.registry.path,
+            input_path,
             finding.title,
             &finding.detail,
             finding.token,
@@ -180,7 +177,7 @@ fn finish(
                     text
                 ),
             );
-        } else if qa.registry.enforce == RegistryEnforcement::Observe {
+        } else if stage == RegistryEnforcement::Observe {
             notices.push(format!(
                 "UPKEEP OBSERVE {}: {} (see task notes)",
                 finding.gate, finding.title
@@ -208,14 +205,14 @@ fn finish(
     }
 }
 
-fn tracked(repo: &Path, revision: &str) -> anyhow::Result<Vec<String>> {
+pub(super) fn tracked(repo: &Path, revision: &str) -> anyhow::Result<Vec<String>> {
     Ok(git(repo, &["ls-tree", "-rz", "--name-only", revision])?
         .split('\0')
         .filter(|path| !path.is_empty())
         .map(str::to_owned)
         .collect())
 }
-fn read(
+pub(super) fn read(
     repo: &Path,
     revision: &str,
     path: &str,
@@ -270,7 +267,15 @@ fn check(
     }
     let result = inspect(task, repo, qa, base, head, paths);
     match result {
-        Ok((findings, warnings)) => finish(store, task, qa, findings, &warnings, override_reason),
+        Ok((findings, warnings)) => finish(
+            store,
+            task,
+            qa.registry.enforce,
+            &qa.registry.path,
+            findings,
+            &warnings,
+            override_reason,
+        ),
         // Git failures cannot establish causality. Never brick unrelated deliveries.
         Err(error) => warning(
             store,

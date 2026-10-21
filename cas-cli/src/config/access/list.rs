@@ -339,6 +339,8 @@ impl Config {
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),
+            ("upkeep.codemap".into(), self.upkeep().codemap().to_string()),
+            ("upkeep.product_overview".into(), self.upkeep().product_overview().to_string()),
             ("qa.registry.enforce".into(), qa.registry.enforce.to_string()),
             ("qa.registry.path".to_string(), qa.registry.path.clone()),
             ("qa.post_release.command".into(), self.get("qa.post_release.command").unwrap()),

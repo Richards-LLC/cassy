@@ -15,6 +15,9 @@ pub(crate) mod hooks;
 pub mod operator_policy;
 mod runtime;
 mod settings;
+mod upkeep;
+pub use upkeep::{ProjectOverviewConfig, UpkeepConfig, UpkeepStage};
+pub(crate) use upkeep::refresh_upkeep;
 
 pub use hooks::*;
 pub use runtime::*;
@@ -51,6 +54,14 @@ pub struct Config {
     /// User-facing QA gate configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa: Option<QaConfig>,
+
+    /// Paths and directory globs used by overview freshness and G6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_overview: Option<ProjectOverviewConfig>,
+
+    /// Delivery-scoped documentation upkeep stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upkeep: Option<UpkeepConfig>,
 
     /// Dev mode configuration for tracing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,6 +263,8 @@ impl Config {
         merge_option!(hooks);
         merge_option!(tasks);
         merge_option!(qa);
+        merge_option!(upkeep);
+        merge_option!(project_overview);
         merge_option!(dev);
         merge_option!(daemon);
         merge_option!(code);

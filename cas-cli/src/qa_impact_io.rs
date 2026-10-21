@@ -254,6 +254,7 @@ pub(super) fn analyze(
             .as_ref()
             .map(|s| s.paths.as_slice())
             .unwrap_or(&tree.paths),
+        &tree.paths,
     );
     Ok(report)
 }
@@ -339,87 +340,20 @@ fn upkeep(
     registry: Option<&Registry>,
     previous: Option<&Registry>,
     base_paths: &[String],
+    head_paths: &[String],
 ) -> Upkeep {
-    use std::collections::BTreeSet;
-    let mut upkeep = Upkeep::default();
-    let touched = |path: &str| {
-        changes
-            .iter()
-            .any(|c| c.file == path || c.old_file.as_deref() == Some(path))
-    };
-    if let Some(codemap) = codemap.filter(|_| !touched(".claude/CODEMAP.md")) {
-        let labels = codemap_labels(codemap);
-        let enumerated: BTreeSet<&str> = labels
-            .iter()
-            .filter_map(|label| label.prefix.rsplit_once('/').map(|(p, _)| p))
-            .collect();
-        for change in changes {
-            let removed = if change.status.starts_with('D') {
-                Some(change.file.as_str())
-            } else {
-                change.old_file.as_deref()
-            };
-            if let Some(path) =
-                removed.filter(|path| labels.iter().any(|label| label.prefix == *path))
-            {
-                upkeep
-                    .codemap
-                    .reasons
-                    .push(format!("deleted or renamed mapped path {path}"));
-            }
-            if change.status.starts_with(['A', 'R']) {
-                let mut dir = change.file.rsplit_once('/').map(|(p, _)| p);
-                while let Some(path) = dir {
-                    if let Some((parent, _)) = path.rsplit_once('/') {
-                        if enumerated.contains(parent)
-                            && !base_paths.iter().any(|old| contains_path(path, old))
-                        {
-                            upkeep
-                                .codemap
-                                .reasons
-                                .push(format!("new directory {path} under enumerated {parent}"));
-                        }
-                        dir = Some(parent);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if overview && !touched("docs/PRODUCT_OVERVIEW.md") {
-        let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
-        for change in changes {
-            for path in std::iter::once(change.file.as_str()).chain(change.old_file.as_deref()) {
-                if watch.is_domain_path(path)
-                    || (change.status.starts_with(['A', 'D', 'R']) && watch.is_in_watch_dir(path))
-                {
-                    upkeep
-                        .product_overview
-                        .reasons
-                        .push(format!("watched product path {path}"));
-                }
-            }
-        }
-        if let Some(registry) = registry {
-            for journey in &registry.journeys {
-                let old = previous.and_then(|r| r.journeys.iter().find(|j| j.id == journey.id));
-                if (journey.status == "live" && old.is_none() && touched(&report.registry.path))
-                    || old.is_some_and(|old| {
-                        matches!(
-                            (old.status.as_str(), journey.status.as_str()),
-                            ("live", "dead") | ("dead", "live")
-                        )
-                    })
-                {
-                    upkeep.product_overview.reasons.push(format!(
-                        "journey {} added live or changed live/dead status",
-                        journey.id
-                    ));
-                }
-            }
-        }
-    }
+    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
+    let mut upkeep = docs_upkeep(
+        changes,
+        &report.registry.path,
+        codemap,
+        overview,
+        registry,
+        previous,
+        &watch,
+        base_paths,
+        head_paths,
+    );
     if registry.is_some() {
         upkeep.registry.reasons.extend(
             report
@@ -446,6 +380,121 @@ fn upkeep(
         &mut upkeep.product_overview,
         &mut upkeep.registry,
     ] {
+        item.reasons.sort();
+        item.reasons.dedup();
+        item.required = !item.reasons.is_empty();
+    }
+    upkeep
+}
+
+/// Shared G5/G6 facts for impact reports and park-time enforcement. Callers
+/// select snapshots and watch configuration; this function performs no I/O.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn docs_upkeep(
+    changes: &[Change],
+    registry_path: &str,
+    codemap: Option<&str>,
+    overview: bool,
+    registry: Option<&Registry>,
+    previous: Option<&Registry>,
+    watch: &crate::hooks::handlers::handlers_events::project_overview::WatchTargets,
+    base_paths: &[String],
+    head_paths: &[String],
+) -> Upkeep {
+    use std::collections::BTreeSet;
+    let mut upkeep = Upkeep::default();
+    let touched = |path: &str| {
+        changes
+            .iter()
+            .any(|c| c.file == path || c.old_file.as_deref() == Some(path))
+    };
+    if let Some(codemap) = codemap.filter(|_| !touched(".claude/CODEMAP.md")) {
+        let labels = codemap_labels(codemap);
+        // CODEMAP lists direct children of these parents. Git has no directory
+        // records, so existence is established from tracked snapshot paths.
+        let parent = |path: &str| path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
+        let enumerated: BTreeSet<String> =
+            labels.iter().map(|label| parent(&label.prefix)).collect();
+        for change in changes {
+            let removed = if change.status.starts_with('D') {
+                Some(change.file.as_str())
+            } else if change.status.starts_with('R') {
+                change.old_file.as_deref()
+            } else {
+                None
+            };
+            if let Some(removed) = removed {
+                for label in &labels {
+                    if contains_path(&label.prefix, removed)
+                        && base_paths
+                            .iter()
+                            .any(|old| contains_path(&label.prefix, old))
+                        && !head_paths
+                            .iter()
+                            .any(|now| contains_path(&label.prefix, now))
+                    {
+                        upkeep
+                            .codemap
+                            .reasons
+                            .push(format!("deleted or renamed mapped path {}", label.prefix));
+                    }
+                }
+            }
+            if change.status.starts_with(['A', 'R']) {
+                let mut dir = change.file.rsplit_once('/').map(|(p, _)| p);
+                while let Some(path) = dir {
+                    let parent = parent(path);
+                    if enumerated.contains(&parent)
+                        && !base_paths.iter().any(|old| contains_path(path, old))
+                    {
+                        upkeep.codemap.reasons.push(format!(
+                            "new directory {path} under enumerated {}",
+                            if parent.is_empty() {
+                                "repository root"
+                            } else {
+                                &parent
+                            }
+                        ));
+                    }
+                    dir = path.rsplit_once('/').map(|(p, _)| p);
+                }
+            }
+        }
+    }
+    if overview && !touched("docs/PRODUCT_OVERVIEW.md") {
+        for change in changes {
+            for path in std::iter::once(change.file.as_str()).chain(change.old_file.as_deref()) {
+                if watch.is_domain_path(path)
+                    || (change.status.starts_with(['A', 'D', 'R']) && watch.is_in_watch_dir(path))
+                {
+                    upkeep
+                        .product_overview
+                        .reasons
+                        .push(format!("watched product path {path}"));
+                }
+            }
+        }
+        if let Some(registry) = registry {
+            for journey in &registry.journeys {
+                let old = previous.and_then(|r| r.journeys.iter().find(|j| j.id == journey.id));
+                if (journey.status == "live" && old.is_none() && touched(registry_path))
+                    || (touched(registry_path)
+                        && old.is_some_and(|old| {
+                            matches!(
+                                (old.status.as_str(), journey.status.as_str()),
+                                ("live", "dead") | ("dead", "live")
+                            )
+                        }))
+                {
+                    upkeep.product_overview.reasons.push(format!(
+                        "journey {} added live or changed live/dead status",
+                        journey.id
+                    ));
+                }
+            }
+        }
+    }
+    for item in [&mut upkeep.codemap, &mut upkeep.product_overview] {
         item.reasons.sort();
         item.reasons.dedup();
         item.required = !item.reasons.is_empty();

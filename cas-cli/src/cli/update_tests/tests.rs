@@ -390,6 +390,7 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     std::fs::write(&user, &original).unwrap();
     let mut args = update_test_args();
     args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
     let cli = update_test_cli(false);
     // Inject only the network probe; run the real user store/builtin phases
     // and the entire native per-project loop, including rules/skills sync.
@@ -417,7 +418,14 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     );
     assert_eq!(report.project_count, 2, "{output}");
     assert_eq!(report.failed_count, 0, "{output}");
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    for project in receipt["projects"].as_array().unwrap() {
+        assert_eq!(project["phase_documents"]["docs_upkeep"][0]["changes"].as_array().unwrap().len(), 2);
+    }
     for root in &roots {
+        let config = crate::config::Config::load(root).unwrap();
+        assert_eq!(config.upkeep().codemap(), crate::config::UpkeepStage::Observe);
+        assert_eq!(config.upkeep().product_overview(), crate::config::UpkeepStage::Observe);
         let raw = std::fs::read_to_string(root.join("proxy.toml")).unwrap();
         let doc: toml::Value = toml::from_str(&raw).unwrap();
         assert_eq!(

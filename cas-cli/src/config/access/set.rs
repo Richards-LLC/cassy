@@ -728,6 +728,14 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "upkeep.codemap" | "upkeep.product_overview" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                let upkeep = self.upkeep.get_or_insert_with(UpkeepConfig::default);
+                let gate = key.strip_prefix("upkeep.").unwrap();
+                if gate == "codemap" { upkeep.codemap = Some(stage); }
+                else { upkeep.product_overview = Some(stage); }
+                upkeep.observe_since.remove(gate);
+            }
             "qa.registry.enforce" => {
                 let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
                 self.qa.get_or_insert_with(QaConfig::default).registry.enforce = stage;

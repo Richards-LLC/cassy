@@ -2,6 +2,17 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_qa(registry: &mut ConfigRegistry) {
+    for (key, name) in [("upkeep.codemap", "CODEMAP Upkeep Stage"), ("upkeep.product_overview", "Product Overview Upkeep Stage")] {
+        registry.register(ConfigMeta {
+            key, section: "upkeep", name,
+            description: "Delivery-scoped docs gate at park. off disables; observe records would-refusals; enforce refuses new drift. Setting observe explicitly pins it beyond the one-release adoption window.",
+            value_type: ConfigType::String, default: "enforce",
+            constraint: Constraint::OneOf(vec!["off".into(), "observe".into(), "enforce".into()]),
+            advanced: false, requires_feature: None,
+            keywords: &["docs", "codemap", "overview", "upkeep", "observe"],
+            use_cases: &["Keep navigation and product documentation current with the delivered diff"],
+        });
+    }
     registry.register(ConfigMeta {
         key: "qa.registry.enforce", section: "qa", name: "Registry Upkeep Stage",
         description: "G1–G3 at park: off, observe (durable would-refusals), enforce (new surfaces), strict (also modified unowned surfaces). Strict is opt-in only.",

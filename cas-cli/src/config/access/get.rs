@@ -171,6 +171,8 @@ impl Config {
             "factory.ai_enrichment.api_key_env" => Some(factory.ai_enrichment.api_key_env.clone()),
             "factory.ai_enrichment.model" => Some(factory.ai_enrichment.model.clone()),
             "factory.ai_enrichment.effort" => Some(factory.ai_enrichment.effort.clone()),
+            "upkeep.codemap" => Some(self.upkeep().codemap().to_string()),
+            "upkeep.product_overview" => Some(self.upkeep().product_overview().to_string()),
             "qa.registry.enforce" => Some(qa.registry.enforce.to_string()),
             "qa.registry.path" => Some(qa.registry.path.clone()),
             "qa.mode" => Some(qa.mode.to_string()),

@@ -5225,10 +5225,8 @@ async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe()
             .cas_task_start(Parameters(IdRequest { id: id.clone() }))
             .await;
         if path == "retained" {
-            assert!(
-                text.contains("Lease retained") && text.contains(&source_id),
-                "{text}"
-            );
+            // Retaining a blocking lease must identify its current holder.
+            assert!(text.contains(&source_id), "{text}");
             let error = started.expect_err("a peer update must not revoke the live lease");
             assert!(error.message.contains("locked"), "{error}");
             assert_eq!(

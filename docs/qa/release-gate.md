@@ -22,6 +22,10 @@ timeout_secs = 120
 [qa.release.components]
 backend = ["apps/backend", "packages/shared"]
 frontend = ["apps/web", "packages/shared"]
+
+[qa.release.migrations]
+paths = ["apps/backend/prisma/migrations/*/migration.sql"]
+env = "staging"
 ```
 
 | Key | Meaning |
@@ -32,6 +36,8 @@ frontend = ["apps/web", "packages/shared"]
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
 | `components` | Served component name to the repository paths it is built from. |
+| `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
+| `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes
 the components as one JSON object.
@@ -72,8 +78,9 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `readback`
-and fixture setup/teardown are implemented; later slices add the remaining verbs.
+`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `readback`,
+`migrations` and fixture setup/teardown are implemented; later slices add the
+remaining verbs.
 
 ### `served`
 
@@ -183,3 +190,37 @@ kept. The adapter must run these checks with read-only credentials.
 | Any invariant `ok: false` | FAIL, naming the failed invariants |
 | An `external`, `rate_limited` or `insufficient` error | BLOCKED_EXTERNAL |
 | An invariant missing from the answer, any other error or a timeout | no PASS (missing) |
+
+## Pending-migration merge refusal
+
+`worktree_merge` checks migrations once per merge into `integration_branch`,
+after lane CI admission and before Git runs. Other targets skip the check.
+Cassy lists the files the delivery adds, with renames counted as additions:
+`git diff --name-only --diff-filter=A <merge-base> <tip> -- <migrations.paths>`.
+The text the `*` matches is the migration id. A merge that adds no migration
+costs this one local diff and makes no adapter call.
+
+When ids are found, Cassy calls the `migrations` verb:
+
+```json
+{"v":1,"verb":"migrations","env":"staging","sha":"<tip>","args":{"ids":["20261021_add"]}}
+```
+
+```json
+{"v":1,"ok":true,"data":{"20261021_add":"applied"}}
+```
+
+The merge is admitted only when every id is `applied`. Each other outcome
+refuses with "No merge was attempted":
+
+| Outcome | Refusal |
+|---|---|
+| An id is `pending` or `unknown`, or missing from `data` | `MIGRATION PENDING: <ids> on <env>` |
+| `external`, `rate_limited` or `insufficient` error, or a timeout | `MIGRATION STATUS UNKNOWN` |
+| `invalid` or `internal` error, or a malformed response | `MIGRATION ADAPTER BUG` |
+| The delivery range cannot be diffed locally | `MIGRATION STATUS UNKNOWN` |
+
+A registered supervisor may override any refusal with
+`supervisor_override=true`, `task_id` and a non-empty `reason`. The override is
+logged as a decision note on the task. Cassy never applies a migration to a
+shared environment.

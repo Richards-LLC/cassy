@@ -1,13 +1,16 @@
 #!/bin/sh
 # Fake project QA adapter for qa_release tests (protocol v1). It runs through
 # the real qa_command sandbox: only allow-listed variables reach it.
-#   served:   echoes FAKE_SERVED_SHA as the backend component.
-#   readback: answers FAKE_READBACK_DATA, the {invariant: {ok, observed}} map.
-# FAKE_ERROR_KIND answers any verb with that classified error instead.
+#   served:     echoes FAKE_SERVED_SHA as the backend component.
+#   readback:   answers FAKE_READBACK_DATA, the {invariant: {ok, observed}} map.
+#   migrations: answers FAKE_MIGRATIONS, the {id: applied|pending|unknown} map.
+# FAKE_CALL_LOG records each request; FAKE_ERROR_KIND answers any verb with
+# that classified error instead.
 set -eu
 [ -z "${FAKE_PRIVATE:-}" ] || exit 1
 [ "$#" -eq 1 ] || exit 1
 request=$(cat)
+[ -z "${FAKE_CALL_LOG:-}" ] || printf '%s\n' "$request" >>"$FAKE_CALL_LOG"
 case "$request" in *'"v":1'*) ;; *) exit 1 ;; esac
 case "$request" in *"\"verb\":\"$1\""*) ;; *) exit 1 ;; esac
 case "$request" in *'"env":"staging"'*) ;; *) exit 1 ;; esac
@@ -21,5 +24,7 @@ case "$1" in
   readback)
     case "$request" in *'"journey":"signup"'*) ;; *) exit 1 ;; esac
     printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_READBACK_DATA" ;;
+  migrations)
+    printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_MIGRATIONS" ;;
   *) exit 1 ;;
 esac

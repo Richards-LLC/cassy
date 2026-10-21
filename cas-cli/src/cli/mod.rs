@@ -566,6 +566,14 @@ impl std::fmt::Display for JsonReportedFailure {
 
 impl std::error::Error for JsonReportedFailure {}
 
+/// Format the machine-readable message and human stderr diagnostic alike.
+pub fn json_error_message(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<crate::error::CasError>()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{error:#}"))
+}
+
 /// Run the CLI with the given arguments
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let tracer_timer = std::time::Instant::now();

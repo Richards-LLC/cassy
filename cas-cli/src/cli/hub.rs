@@ -99,11 +99,11 @@ pub enum HubCommands {
     Stop(HubStopArgs),
     /// Stop and start the hub while preserving machine identity
     ///
-    /// With `--json`, emits one object whose `stop` value contains `stopped`,
-    /// `pid`, `tailscale_serve_removed`, and `tailscale_warning`, and whose
-    /// `start` value is the resulting `HubProcessRecord`. If a concurrent
-    /// restart already satisfied the request, `stop` contains
-    /// `stopped: false` and `already_satisfied: true`.
+    /// Detached restart: one `{stop,start}` JSON; start errors include `stop`.
+    ///
+    /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
+    ///
+    /// Stop also has `already_satisfied`; supervised restart reports hub status.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),
@@ -637,6 +637,39 @@ struct HubStopReceipt {
     tailscale_warning: Option<String>,
 }
 
+#[derive(Serialize)]
+struct HubRestartStopReceipt {
+    stopped: bool,
+    pid: Option<u32>,
+    tailscale_serve_removed: Option<bool>,
+    tailscale_warning: Option<String>,
+    already_satisfied: bool,
+}
+
+impl From<HubStopReceipt> for HubRestartStopReceipt {
+    fn from(stop: HubStopReceipt) -> Self {
+        Self {
+            stopped: stop.stopped,
+            pid: stop.pid,
+            tailscale_serve_removed: Some(stop.tailscale_serve_removed),
+            tailscale_warning: stop.tailscale_warning,
+            already_satisfied: false,
+        }
+    }
+}
+
+impl HubRestartStopReceipt {
+    fn already_satisfied() -> Self {
+        Self {
+            stopped: false,
+            pid: None,
+            tailscale_serve_removed: None,
+            tailscale_warning: None,
+            already_satisfied: true,
+        }
+    }
+}
+
 /// Wait for the machine to go quiescent, unless the relaunch is already done.
 ///
 /// `settle_pid` is the hub we just signalled: quiescence additionally requires
@@ -1149,15 +1182,10 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
             )? {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
+                        let stop = HubRestartStopReceipt::already_satisfied();
                         println!(
                             "{}",
-                            serde_json::json!({
-                                "stop": {
-                                    "stopped": false,
-                                    "already_satisfied": true,
-                                },
-                                "start": record,
-                            })
+                            serde_json::json!({"stop": stop, "start": record})
                         );
                     } else {
                         println!(
@@ -1168,14 +1196,30 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                     Ok(())
                 }
                 StopOutcome::Stopped(stop) => {
-                    let start = start_with_output_resolved(
+                    let stop = HubRestartStopReceipt::from(stop);
+                    let start = match start_with_output_resolved(
                         &serve,
                         cli,
                         tailscale_serve,
                         tailscale_port,
                         !cli.json,
                         cli_launch_origin(),
-                    )?;
+                    ) {
+                        Ok(start) => start,
+                        Err(error) if cli.json => {
+                            let message = super::json_error_message(&error);
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "error",
+                                    "message": message,
+                                    "stop": stop,
+                                })
+                            );
+                            return Err(super::JsonReportedFailure(error).into());
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if cli.json {
                         println!("{}", serde_json::json!({"stop": stop, "start": start}));
                     }

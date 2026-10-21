@@ -25,6 +25,8 @@ use crate::hub::{
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
+const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn hub_launch_timeout(tailscale_serve: bool) -> Duration {
     if tailscale_serve {
@@ -1387,6 +1389,41 @@ fn start_with_output_from(
     .map(|_| ())
 }
 
+fn peer_hub_record_after_child_exit(
+    paths: &HubRuntimePaths,
+    launcher_pid: u32,
+) -> Result<Option<u32>> {
+    let mut deadline = None;
+    loop {
+        let peer_holders = paths
+            .lock_holders()
+            .into_iter()
+            .filter(|holder| holder.pid != launcher_pid && process_is_running(holder.pid))
+            .map(|holder| holder.pid)
+            .collect::<Vec<_>>();
+        if let Some(record) = paths.read_process_record().ok()
+            && peer_holders.contains(&record.pid)
+        {
+            return Ok(Some(record.pid));
+        }
+        if peer_holders.is_empty() {
+            return Ok(None);
+        }
+        if deadline.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER",
+                "peer-record-wait",
+                "release-peer-record-wait",
+                launcher_pid,
+            )?;
+            deadline = Some(Instant::now() + HUB_PEER_RECORD_PUBLISH_TIMEOUT);
+        } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(None);
+        }
+        std::thread::sleep(HUB_PEER_RECORD_POLL_INTERVAL);
+    }
+}
+
 fn start_with_output_resolved(
     args: &HubServeArgs,
     cli: &Cli,
@@ -1704,23 +1741,7 @@ fn start_with_output_resolved(
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
-            let winner_pid = paths.read_process_record().ok().and_then(|record| {
-                (record.pid != launcher_pid
-                    && process_is_running(record.pid)
-                    && paths
-                        .lock_holders()
-                        .iter()
-                        .any(|holder| holder.pid == record.pid))
-                .then_some(record.pid)
-            });
-            if winner_pid.is_none() {
-                hold_hub_test_barrier(
-                    "CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER",
-                    "peer-record-wait",
-                    "release-peer-record-wait",
-                    launcher_pid,
-                )?;
-            }
+            let winner_pid = peer_hub_record_after_child_exit(&paths, launcher_pid)?;
             if let Some(winner_pid) = winner_pid {
                 let error = anyhow::anyhow!(
                     "another cas hub instance won the machine lock (pid {winner_pid}); replacement process exited with {status} before becoming ready; inspect {}",

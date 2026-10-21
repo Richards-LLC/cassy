@@ -676,6 +676,13 @@ impl CasCore {
         // this validation while holding its write lock, so a malformed patch
         // cannot corrupt an existing state even if another writer races us.
         if let Some(patch) = state_patch.as_ref() {
+            if patch.as_object().is_some_and(|object| object.contains_key("qa_impact")) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("TASK EXECUTION STATE REJECTED: qa_impact is managed by delivery park and QA dispatch; record journey dispositions in the QA ledger."),
+                    data: None,
+                });
+            }
             if patch
                 .as_object()
                 .and_then(|object| object.get("blocked_hold"))

@@ -85,13 +85,7 @@ impl WatchTargets {
 
 #[derive(Debug, serde::Deserialize, Default)]
 struct RawConfig {
-    project_overview: Option<RawProjectOverview>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RawProjectOverview {
-    domain_paths: Option<Vec<String>>,
-    watch_dirs: Option<Vec<String>>,
+    project_overview: Option<crate::config::ProjectOverviewConfig>,
 }
 
 /// Load watch targets from `<repo_root>/.cas/config.toml`, falling back to defaults.
@@ -100,7 +94,11 @@ pub fn watch_targets(repo_root: &Path) -> WatchTargets {
     let Ok(content) = std::fs::read_to_string(&config_path) else {
         return WatchTargets::defaults();
     };
-    let Ok(raw): Result<RawConfig, _> = toml::from_str(&content) else {
+    watch_targets_from_content(Some(&content))
+}
+
+pub(crate) fn watch_targets_from_content(content: Option<&str>) -> WatchTargets {
+    let Ok(raw): Result<RawConfig, _> = toml::from_str(content.unwrap_or("")) else {
         return WatchTargets::defaults();
     };
     let Some(po) = raw.project_overview else {

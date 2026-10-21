@@ -45,6 +45,21 @@ from the epic tip (`factory/<name>-<task-id>`), preserving the parked branch.
 No simultaneous task ownership. For rejection details, read [recovery.md](recovery.md).
 Never set `status=closed` or invent a verification record to bypass close.
 
+## Upkeep refusals at park
+
+Before the merge request, close checks that the delivery kept the journey
+registry, `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` true for the
+paths it changed (G1–G3, G5, G6). Old debt never refuses; it prints as a
+warning. On a refusal, fix it in this branch and commit (own the new file,
+add the bug's case, edit the named CODEMAP or overview rows), then retry
+close. When the change truly needs no upkeep, record the gate's escape token
+from cas-qa-craft's
+[escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
+as a decision note with a specific reason, then retry. Cassy writes the
+`UPKEEP ESCAPE` and `UPKEEP OBSERVE` notes itself; never write them by hand,
+and treat an `UPKEEP OBSERVE` note as the refusal a later `enforce` stage will
+make. The reviewer and QA see each escape, so a vague reason costs a round.
+
 ## Delivery receipts
 
 - `commit_receipt=<sha>` names this task's immutable, non-empty delivered commit.
@@ -59,7 +74,7 @@ Never set `status=closed` or invent a verification record to bypass close.
 
 ## Conditional evidence
 
-- Demo, configured user-facing path or catalog journey: use `cas-qa-craft`
+- Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking; cite its commit-bound bundle or real-build ledger. A
   binary-driven ledger runs the supervisor's exact-tip candidate, never a
   compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal

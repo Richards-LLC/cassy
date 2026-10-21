@@ -2,6 +2,88 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_qa(registry: &mut ConfigRegistry) {
+    for (key, name) in [("upkeep.codemap", "CODEMAP Upkeep Stage"), ("upkeep.product_overview", "Product Overview Upkeep Stage")] {
+        registry.register(ConfigMeta {
+            key, section: "upkeep", name,
+            description: "Delivery-scoped docs gate at park. off disables; observe records would-refusals; enforce refuses new drift. Setting observe explicitly pins it beyond the one-release adoption window.",
+            value_type: ConfigType::String, default: "enforce",
+            constraint: Constraint::OneOf(vec!["off".into(), "observe".into(), "enforce".into()]),
+            advanced: false, requires_feature: None,
+            keywords: &["docs", "codemap", "overview", "upkeep", "observe"],
+            use_cases: &["Keep navigation and product documentation current with the delivered diff"],
+        });
+    }
+    registry.register(ConfigMeta {
+        key: "qa.registry.enforce", section: "qa", name: "Registry Upkeep Stage",
+        description: "G1–G3 at park: off, observe (durable would-refusals), enforce (new surfaces), strict (also modified unowned surfaces). Strict is opt-in only.",
+        value_type: ConfigType::String, default: "enforce",
+        constraint: Constraint::OneOf(vec!["off".into(), "observe".into(), "enforce".into(), "strict".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["qa", "journey", "registry", "upkeep", "observe", "strict"],
+        use_cases: &["Roll out registry upkeep gates and measure would-refusals"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.registry.path",
+        section: "qa",
+        name: "Journey Registry Path",
+        description: "Project-relative YAML journey registry validated by cas qa journeys --check.",
+        value_type: ConfigType::String,
+        default: "docs/qa/journeys.yaml",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["qa", "journey", "registry", "yaml"],
+        use_cases: &["Choose a project-specific journey registry location"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "qa.post_release.command", section: "qa", name: "Post-release command",
+        description: "Project-relative read-only executable and whitespace-separated arguments; no shell.",
+        value_type: ConfigType::String, default: "", constraint: Constraint::None,
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.post_release.window_mins", section: "qa", name: "Post-release window mins",
+        description: "Observation window in minutes.",
+        value_type: ConfigType::Int, default: "30", constraint: Constraint::Min(1),
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.post_release.interval_mins", section: "qa", name: "Post-release interval mins",
+        description: "Minutes between observations, including first and final runs.",
+        value_type: ConfigType::Int, default: "15", constraint: Constraint::Min(1),
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.post_release.timeout_secs", section: "qa", name: "Post-release timeout secs",
+        description: "Per-run timeout; a timeout fails the check.",
+        value_type: ConfigType::Int, default: "120", constraint: Constraint::Min(1),
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.post_release.release_branches", section: "qa", name: "Post-release release branches",
+        description: "Release branches; empty uses the origin default branch.",
+        value_type: ConfigType::StringList, default: "", constraint: Constraint::None,
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
+    registry.register(ConfigMeta {
+        key: "qa.post_release.env", section: "qa", name: "Post-release env",
+        description: "Environment variable names allowed into the read-only command.",
+        value_type: ConfigType::StringList, default: "", constraint: Constraint::None,
+        advanced: true, requires_feature: None,
+        keywords: &["qa", "post-release", "canary"],
+        use_cases: &["Observe a release before announcing it or closing its epic"],
+    });
     registry.register(ConfigMeta {
         key: "qa.mode", section: "qa", name: "QA Mode",
         description: "per_task keeps per-delivery evidence and independent QA. batch defers evidence at park and accepts one published staging ledger for its listed delivery anchors after integration; no automatic per-task QA is dispatched. Explicit QA requests remain available.",

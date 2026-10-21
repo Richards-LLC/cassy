@@ -54,6 +54,12 @@ steps 3–4; the automated selection is the worker's responsibility. Read the
 tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
 bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
 
+Where the project has a journey registry, the QA task's journey table is the
+park-time impact for the reviewed head: every live journey in it needs its own
+ledger row ([journey rows](journeys.md#journey-rows)), and each upkeep escape
+the task lists is a claim to check against the diff. A reason that does not
+hold is a Normal finding.
+
 If that evidence is absent, failed, incomplete, or belongs to different inputs
 or an incompatible environment, run the missing checks. For affected journeys:
 

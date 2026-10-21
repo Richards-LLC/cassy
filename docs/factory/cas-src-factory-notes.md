@@ -122,3 +122,27 @@ checkout from this repository.
 - **Receipt:** after every cross-team filing, save a Cassy memory with the issue
   URL, one-line ask, and date. Recent examples are cloud-to-Cassy GH #215 and
   Cassy-to-cloud `Richards-LLC/petra-stella-cloud#44`.
+
+## For `cas-qa-craft` and `cas-supervisor/references/reporting-and-routing.md` — upkeep stages in cas-src
+
+cas-src runs every upkeep gate at `enforce`. The first `cas update` on the
+release that ships these keys gives existing projects, cas-src included, a
+one-release `observe` window. After that update, pin cas-src from the main
+checkout:
+
+```bash
+cas config set qa.registry.enforce enforce
+cas config set upkeep.codemap enforce
+cas config set upkeep.product_overview enforce
+cas config get qa.registry.enforce   # enforce
+```
+
+Explicit values survive later updates and clear the adoption markers. Pin
+only with a binary that knows these keys: an older `cas config set` rewrites
+the config without them.
+
+cas-src keeps its Markdown catalog (`docs/qa/journeys.md` plus
+`scripts/journeys-for-diff.py`): its selector also matches static imports and
+CSS selectors, which globs cannot. Impact reads it through the legacy-catalog
+adapter. With no `docs/qa/journeys.yaml`, G1–G3 and G8 stay off here while G5
+and G6 enforce. Converting the catalog to YAML is a separate task.

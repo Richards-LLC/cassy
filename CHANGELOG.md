@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — adaptive QA picks the journeys a change touches
+
+- **Journey registry** — Was: a project's user journeys lived only in prose QA docs, with nothing to check them against the code. → Now: `docs/qa/journeys.yaml` lists each journey's owners, specs and surfaces; `cas qa journeys --check` reports broken references, untracked specs and curation debt, `cas qa journeys --seed` drafts a registry from the project and keeps curated entries on re-seed, and `cas doctor` shows the registry's counts.
+- **Journey impact** — Was: QA chose which journeys to walk by hand. → Now: `cas qa impact` maps a diff, file list or task delivery to the journeys it touches, the evidence each one needs and the files no journey owns, as text, Markdown or versioned JSON; it exits 2 for usage errors and 3 for read errors. Parked deliveries carry this impact, and the QA ledger must account for each touched journey.
+- **Post-release check** — Was: nothing confirmed a release still worked after it shipped. → Now: a project can configure a read-only `[qa.post_release]` command; `cas serve` runs it over a window after the merge lands (by default at about +0, +15 and +30 minutes), records a clean, pending or failed receipt, and a release-notes post (flagged `--release-notes --epic …` or recognised by its rubric heading) waits for a clean receipt. Projects without the check are unaffected.
+- **Upkeep at park** — Was: a delivery could add a journey or change the layout without updating the journey registry, `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`. → Now: park refuses until the delivery updates the affected document or records a `registry unchanged:`, `codemap unchanged:` or `overview unchanged:` decision with a reason. New projects enforce these checks; existing projects start in `observe` on their first `cas update`, which only notes would-be refusals. The old `docs/qa/features` close check is retired.
+
+### Internal
+
+- **Adaptive QA plumbing** — Was: QA selection, registry checks and post-release checks had no shared code. → Now: `qa_registry`, `qa_impact`, `qa_seed` and `qa_post_release` modules back the CLI, the close gate's G1–G6 upkeep checks, `upkeep.*` and `qa.*` config keys, and the publication gate; built-in QA, worker, release-notes, codemap and overview skills teach the new flow.
+
 ## [3.69.0] - 2026-10-21
 
 ### Security — workers cannot read operator credential stores

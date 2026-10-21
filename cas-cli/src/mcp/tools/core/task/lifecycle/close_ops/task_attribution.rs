@@ -496,7 +496,7 @@ pub(super) fn diff_stat(
 /// Return the paths carried by the same task-attributed delivery ranges used
 /// by the close diff stat. Risk proof must not fall back to an unrelated
 /// branch-wide diff: a proof narrower than this set is a hard close failure.
-pub(super) fn paths(
+pub(crate) fn paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -589,7 +589,7 @@ pub(super) fn qa_paths(
 /// task window and the receipt, so it does not move when the worktree is
 /// rebased, when the branch is merged, or when the gate happens to inspect a
 /// checkout parked on another branch.
-pub(super) fn delivery_base(
+pub(crate) fn delivery_base(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,

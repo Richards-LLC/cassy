@@ -101,6 +101,16 @@ impl CasService {
         // against exactly the tip under review (cas-c3b8 contract v1).
         let (citation, bundle) = crate::qa_pass::validate_round_evidence(&cas_root, std::path::Path::new(ledger_path), &claimed, verdict)
             .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
+        if verdict == QaVerdict::Approved {
+            let state = self.inner.open_task_store()?.get_execution_state(task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if let Some(impact) = state.as_ref().and_then(|state| state.get("qa_impact"))
+                && let Some(refusal) = crate::mcp::tools::core::task::lifecycle::qa_impact::ledger_refusal(
+                    impact, &claimed.bound_head, &ledger_text)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            }
+        }
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
             task_id,

@@ -911,6 +911,11 @@ fn the_publication_gate_refuses_a_file_post_before_connecting() {
         "{out}"
     );
     assert_eq!(seen.borrow().len(), 1);
+    let hub = ScriptedHub::default();
+    let (_, result) = run_cli(&["post","--channel","cas-internal","--text","Shipped","--release-notes","--epic","cas-epic"],&hub,false,&gate);
+    assert_eq!(result.unwrap_err().code,"publication_blocked");
+    assert_eq!(hub.connects(),0);
+    assert_eq!(seen.borrow()[1]["epic_id"],"cas-epic");
 }
 
 // ---------------------------------------------------------------------------

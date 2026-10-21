@@ -184,6 +184,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // store opener. All MCP configurations — including freshly spawned
     // factory workers — enter through `cas serve` and share this boundary.
     ensure_mcp_schema(&cas_root)?;
+    crate::qa_post_release::spawn_runner(cas_root.clone());
 
     // Register this repo in the host-scoped known_repos registry. Fires
     // every time `cas serve` starts in a directory with `.cas/`, catching

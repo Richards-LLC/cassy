@@ -771,9 +771,12 @@ impl<'de> Deserialize<'de> for TaskDeliverables {
     }
 }
 
-/// Maximum serialized size of the structured task execution state. The state
-/// is a bounded resume surface, not an append-only transcript.
+/// Maximum serialized size of hand-written task resume fields. Automatic
+/// qa_impact has a separate bounded allowance; neither is a transcript.
 pub const TASK_EXECUTION_STATE_MAX_BYTES: usize = 16 * 1024;
+// Full diff impact can exceed the hand-written resume-state budget. Keep a
+// separate finite allowance so large owned diffs retain all journey matches.
+const TASK_QA_IMPACT_MAX_BYTES: usize = 1024 * 1024;
 const TASK_EXECUTION_STATE_MAX_STRING_BYTES: usize = 2 * 1024;
 const TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS: usize = 256;
 
@@ -793,6 +796,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "decisions",
     "next_step",
     "blocked_hold",
+    "qa_impact",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -828,14 +832,6 @@ pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Resul
 
     let result = Value::Object(merged);
     validate_task_execution_state(&result)?;
-    let encoded = serde_json::to_vec(&result)
-        .map_err(|error| format!("failed to encode execution state: {error}"))?;
-    if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
-        return Err(format!(
-            "execution state exceeds the {}-byte limit",
-            TASK_EXECUTION_STATE_MAX_BYTES
-        ));
-    }
     Ok(result)
 }
 
@@ -858,7 +854,9 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
         }
         validate_task_execution_state_field(field, value)?;
     }
-    let encoded = serde_json::to_vec(state)
+    let mut resume = object.clone();
+    resume.remove("qa_impact");
+    let encoded = serde_json::to_vec(&resume)
         .map_err(|error| format!("failed to encode execution state: {error}"))?;
     if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
         return Err(format!(
@@ -904,6 +902,51 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
                         "execution state receipt {index} only allows command and exit_status"
                     ));
                 }
+            }
+            Ok(())
+        }
+        "qa_impact" => {
+            let impact = value
+                .as_object()
+                .ok_or_else(|| "qa_impact must be an object".to_string())?;
+            if impact.get("version").and_then(Value::as_u64) != Some(1)
+                || !impact
+                    .get("head_sha")
+                    .and_then(Value::as_str)
+                    .is_some_and(|head| {
+                        head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                || !impact.get("registry").is_some_and(Value::is_object)
+            {
+                return Err(
+                    "qa_impact requires version=1, a full head_sha and registry metadata".into(),
+                );
+            }
+            let journeys = impact
+                .get("journeys")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "qa_impact requires a journeys array".to_string())?;
+            for journey in journeys {
+                if !journey
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || !matches!(
+                        journey.get("status").and_then(Value::as_str),
+                        Some("live" | "dark" | "dead")
+                    )
+                {
+                    return Err("qa_impact journeys require an id and live/dark/dead status".into());
+                }
+            }
+            if serde_json::to_vec(value)
+                .map_err(|error| error.to_string())?
+                .len()
+                > TASK_QA_IMPACT_MAX_BYTES
+            {
+                return Err(format!(
+                    "qa_impact exceeds the {TASK_QA_IMPACT_MAX_BYTES}-byte limit"
+                ));
             }
             Ok(())
         }
@@ -1486,6 +1529,30 @@ mod tests {
             "Wait for operator decision"
         );
         assert!(validate_task_execution_state(&state).is_ok());
+
+        let impact = serde_json::json!({"version": 1, "head_sha": "a".repeat(40),
+            "registry": {"present": true}, "journeys": [{"id": "SEND", "status": "live"}],
+            "matches": "x".repeat(TASK_EXECUTION_STATE_MAX_BYTES)});
+        let with_impact =
+            merge_task_execution_state_patch(&state, &serde_json::json!({"qa_impact": impact}))
+                .unwrap();
+        assert_eq!(with_impact["qa_impact"]["journeys"][0]["id"], "SEND");
+        assert_eq!(with_impact["blocked_hold"], state["blocked_hold"]);
+        for invalid in [
+            serde_json::json!(false),
+            serde_json::json!({}),
+            serde_json::json!({"version":1, "head_sha":"a".repeat(40), "registry":{}, "journeys":[{"id":"SEND", "status":"unknown"}]}),
+            serde_json::json!({"version":1, "head_sha":"a".repeat(40), "registry":{}, "journeys":[], "oversize":"x".repeat(TASK_QA_IMPACT_MAX_BYTES)}),
+        ] {
+            assert!(
+                merge_task_execution_state_patch(&state, &serde_json::json!({"qa_impact":invalid}))
+                    .is_err()
+            );
+        }
+        let cleared_impact =
+            merge_task_execution_state_patch(&with_impact, &serde_json::json!({"qa_impact":null}))
+                .unwrap();
+        assert_eq!(cleared_impact, state);
 
         let cleared =
             merge_task_execution_state_patch(&state, &serde_json::json!({"blocked_hold": null}))

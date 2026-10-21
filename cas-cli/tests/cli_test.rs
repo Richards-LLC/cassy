@@ -780,7 +780,7 @@ fn test_config_set_validation() {
         .expect("--json config refusal must emit one JSON document");
     assert_eq!(error["status"], "error", "{error}");
     assert!(
-        error["message"].as_str().unwrap_or_default().contains("Invalid coordination mode"),
+        error["message"].as_str().unwrap_or_default().contains("Value must be one of: local, cloud"),
         "{error}"
     );
 }

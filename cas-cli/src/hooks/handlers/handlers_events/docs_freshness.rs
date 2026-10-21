@@ -161,7 +161,7 @@ fn task_target(root: &Path, store: &Path) -> Option<String> {
     }
     let mut statement = conn
         .prepare(
-            "SELECT deliverables FROM tasks WHERE status IN ('in_progress', 'open', 'blocked')
+        "SELECT deliverables FROM tasks WHERE status = 'in_progress'
          AND assignee IN (SELECT value FROM json_each(?1)) LIMIT 2",
         )
         .ok()?;

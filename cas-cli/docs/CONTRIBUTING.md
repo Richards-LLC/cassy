@@ -2118,8 +2118,16 @@ boundary rule lives in one resolver. The legacy in-tree
 
 `gc_report` lists the relocated caches with their sizes under "Scratch root
 caches": the build-cache, each worker target and the release scratch base. Its
-release-scratch section scans the relocated base. `gc_cleanup` still reclaims
-only in-tree worker targets.
+release-scratch section scans the relocated base. `gc_cleanup` also inventories
+and reclaims stale worker targets in the exact project scratch namespace. It
+holds the worker lane, Cargo locks and any durable lifetime lease through a
+sibling quarantine and deletion; live owners and recent writes remain protected.
+The newest `factory.target_cache_retention_count` eligible scratch targets stay
+warm. Missing-checkout targets and unmanaged scratch directories stay review-only.
+GC reports the same filesystem path as build admission and reserves the configured
+builder cap's 10 GiB per lane when deciding pressure, even below the high
+watermark. Selection and warm retention are computed separately per device, so
+reclaim on the checkout device cannot count against scratch pressure.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

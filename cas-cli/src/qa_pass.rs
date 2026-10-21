@@ -1521,6 +1521,7 @@ mod tests {
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
         for only in [
+            vec![], // cas-255b: a known empty delivery has no surface to demonstrate.
             vec!["docs/qa/journeys.md", "README.md"],
             vec!["hub-web/e2e/journeys/reply.journey.spec.ts", "hub-web/playwright.config.ts"],
             vec!["cas-cli/tests/cli_test.rs", "crates/x/src/foo_tests.rs"],

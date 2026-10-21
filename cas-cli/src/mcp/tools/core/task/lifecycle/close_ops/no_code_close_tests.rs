@@ -311,6 +311,36 @@ fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
     );
 }
 
+/// cas-255b: a worker-created helper never allocated a lane or delivered code.
+/// HEAD happens to be a previous UI merge; that is not the helper's delivery.
+#[tokio::test]
+async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    std::fs::write(worker_path.join("app.css"), "body { color: red; }\n").unwrap();
+    git(&worker_path, &["add", "app.css"]);
+    git(&worker_path, &["commit", "-q", "-m", OTHER]);
+    git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge earlier UI delivery"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    git(repo, &["worktree", "remove", "--force", worker_path.to_str().unwrap()]);
+    git(repo, &["branch", "-D", LANE]);
+    git(repo, &["push", "-q", "origin", "--delete", LANE]);
+    let id = "cas-255b";
+    let mut helper = assigned(id, TaskType::Chore, "main");
+    helper.title = "Own the iOS simulator".into();
+    f.put(&helper);
+    claim(&f, id);
+    let response = call(
+        &f.worker,
+        serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
+    ).await;
+    assert_closed_without_lane(&f, id, &response);
+    assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+    assert!(cas_store::list_qa_passes(&f.cas_dir(), id).unwrap().is_empty());
+}
+
 /// GH #1133: a deploy-only task targeting `main`, started on a lane whose tip
 /// is another task's delivery. The worker declares no-code at close.
 #[tokio::test]

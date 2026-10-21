@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural navigation at the v53 release freeze (`c9e2fda28`). Regenerate with `/codemap` when modules move.
+> Structural navigation at the v54 release freeze (`51b91ea82`). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -90,6 +90,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `crates/cas-mux/src/pane/mod.rs`, `crates/cas-mux/src/pane/snapshot.rs` - pane readiness, startup-screen state, and terminal snapshots.
 - `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, queued injection, and submit gating.
 - `crates/cas-pty/src/`, `crates/cas-pty/conformance/` - PTY adapters, queued input, and harness conformance receipts.
+- `crates/cas-pty/src/store_isolation.rs` - Linux worker namespace that masks operator credential stores (bubblewrap) and copies `ssh_config.d` for workers.
 
 ## MCP and transport
 

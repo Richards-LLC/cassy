@@ -9,7 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Security — workers cannot read operator credential stores
 
-- **Neon and Vercel stores hidden from workers** — Was: a factory worker could read the operator's Neon or Vercel credential files through a script, a piped shell or variable indirection that the command guard could not parse. → Now: on Linux, workers start with those store directories masked by an empty read-only view, so no command inside the worker can read them; supervisors are unaffected. A host that cannot provide the mask refuses the worker with a remedy; macOS still relies on the command guard.
+- **Neon and Vercel stores hidden from workers** — Was: a factory worker could read the operator's Neon or Vercel credential files through a script, a piped shell or variable indirection that the command guard could not parse. → Now: on Linux, workers start with those store directories masked by an empty read-only view, so no command inside the worker can read them; supervisors are unaffected. A host that cannot provide the mask refuses the worker with a remedy (install bubblewrap, or set `CAS_WORKER_STORE_ISOLATION=off` in the factory daemon's environment to accept the exposure). ssh and `git push` keep working from a user-owned copy of the host's `ssh_config.d` drop-ins, symlinked ones included. macOS still relies on the command guard.
+
+### Fixed — readable warnings and refusals
+
+- **Tailscale Serve warning in `cas update`** — Was: the inactive-Serve warning printed its label and cause as one long run, wrapped mid-sentence in the findings table. → Now: `Tailscale Serve inactive:` stands on its own line and the cause wraps beneath it, indented.
+- **`--json` refusals for config and hub** — Was: a refused `cas --json config …` or `cas --json hub …` command printed a styled error on stderr and nothing on stdout. → Now: it prints one JSON document, `{"status":"error","message":…}`, on stdout and keeps the same exit code.
+- **Status marks without UTF-8** — Was: a styled status line on a terminal without a UTF-8 locale printed glyphs such as `✓` that the terminal could not draw. → Now: it prints `[OK]`, `[WARN]`, `[ERROR]` or `[INFO]` in colour instead.
 
 ## [3.68.0] - 2026-10-21
 

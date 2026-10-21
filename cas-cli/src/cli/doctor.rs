@@ -29,6 +29,7 @@ mod idle_sync;
 mod slack_transport;
 mod communication;
 mod git_hooks;
+mod journeys;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -277,7 +278,7 @@ impl CheckGroup {
             | "models"
             | "git hooks path"
             | "sessionstart budget" => Self::Config,
-            "issue repositories" | "shipped issues" => Self::Config,
+            "issue repositories" | "shipped issues" | "journey registry" => Self::Config,
             "integrations" | "violet" | "violet wake" | "violet claims" | "github origin" => {
                 Self::Integrations
             }
@@ -2733,6 +2734,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 ),
             });
             checks.push(issue_repositories_check(&config, &cas_root));
+            if let Some(check) = journeys::check(project_root, &config.qa()) {
+                checks.push(check);
+            }
         }
         Err(error) => {
             checks.push(Check {

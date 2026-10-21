@@ -24,6 +24,14 @@ base has a queue, otherwise one assembly build + test of the epic tip and its
 note on the epic. Child closes reference that proof. A non-Rust
 `risk=platform` task still carries its worker `platform_proof` receipt.
 
+For a Cassy source CLI QA walk requiring an exact-tip binary, run
+`cas qa candidate build --task <task-id> --rev <sha>` as supervisor. The command
+uses release/assembly Zig and scratch resolution and the warm native Cargo
+target; it writes `cas`, `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` under
+the task's canonical artifact `candidate/` directory. Give the path, version
+and binary SHA-256 to the QA reviewer. The command builds evidence only and
+does not run or replace the epic's release checks.
+
 For a proof produced on another machine, use the worker's
 [cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs):
 attach a published artifact, then fetch and read the hash-verified copy on the

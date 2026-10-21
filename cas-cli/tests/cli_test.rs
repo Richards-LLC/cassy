@@ -86,6 +86,7 @@ fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
     assert_eq!(plan["binary"], candidate.join("cas").display().to_string());
     assert_eq!(plan["version_file"], candidate.join("VERSION.txt").display().to_string());
     assert_eq!(plan["checksums_file"], candidate.join("SHA256SUMS").display().to_string());
+    assert_eq!(plan["receipt_file"], candidate.join("RECEIPT.json").display().to_string());
     assert_eq!(plan["revision"].as_str().unwrap().len(), 40);
     assert!(!candidate.exists(), "planning must not build or create evidence");
 }

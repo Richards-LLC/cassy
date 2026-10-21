@@ -33,6 +33,7 @@ mod peers;
 mod project_overview_cmd;
 mod qa;
 mod qa_impact;
+pub(crate) mod qa_post_release;
 mod provider_default;
 mod release_report;
 mod sweep;

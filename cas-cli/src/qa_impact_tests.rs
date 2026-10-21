@@ -53,6 +53,19 @@ fn qa_impact_orders_status_share_id_and_ignores_paths() {
     ])
     .unwrap();
     assert!(cli.json && matches!(cli.command, Some(crate::cli::Commands::Qa(_))));
+    let post_release = crate::cli::Cli::try_parse_from([
+        "cas",
+        "qa",
+        "post-release",
+        "status",
+        "--epic",
+        "cas-1234",
+    ])
+    .unwrap();
+    assert!(matches!(
+        post_release.command,
+        Some(crate::cli::Commands::Qa(_))
+    ));
     let temp = repo();
     let repo = temp.path();
     write(repo, "src/flow.ts", "flow");

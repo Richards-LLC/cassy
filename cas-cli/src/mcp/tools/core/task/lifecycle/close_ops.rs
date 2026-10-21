@@ -7093,6 +7093,19 @@ impl CasCore {
             data: None,
         })?;
 
+        if task.task_type == TaskType::Epic && !task.is_terminal() {
+            if let Ok(actor) = self.get_agent_id() {
+                if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {
+                    tracing::warn!(%error,epic=%task.id,"could not arm post-release fallback");
+                }
+            }
+            if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
+                return Ok(Self::tool_error(reason));
+            }
+            // An override use appends an audit note; do not overwrite it later.
+            task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
+        }
+
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
         // verification dispatch, or completion-receipt projection so every
@@ -25674,6 +25687,23 @@ mod merge_state_gate_tests {
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
         assert!(queue.peek("relay-supervisor-id", 10).unwrap().is_empty());
         assert!(cas_store::SqlitePromptQueueStore::open(dir.path()).unwrap().peek_all(10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_ops_post_release_pending_refuses_epic() {
+        use cas_store::TaskStore;
+        let _env = TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        let cas = dir.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let (core, tasks, _, mut epic) = close_relay_fixture_cas_3a82(&cas);
+        epic.task_type = TaskType::Epic;
+        tasks.update(&epic).unwrap();
+        std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
+        let result = core.cas_task_close(Parameters(base_req(&epic.id))).await.unwrap();
+        assert_eq!(result.is_error,Some(true));
+        assert!(result.content.iter().any(|c| matches!(&c.raw,rmcp::model::RawContent::Text(t) if t.text.contains("POST-RELEASE CHECK pending"))),"{result:?}");
+        assert_eq!(tasks.get(&epic.id).unwrap().status,TaskStatus::InProgress);
     }
 
     fn git_command(dir: &std::path::Path, args: &[&str]) -> Command {

@@ -12324,6 +12324,12 @@ fn run_reminder_scan(scan: ReminderScanInput) {
     }
 
     for (reminder, context) in &external_ready {
+        if let Err(error) = crate::qa_post_release::start_from_reminder(&cas_dir,reminder) {
+            if !crate::qa_post_release::lock_contention(&error) {
+                tracing::warn!(%error,"post-release fallback start failed; reminder remains pending");
+            }
+            continue;
+        }
         fire_reminder(
             reminder,
             &reminder_store,

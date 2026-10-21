@@ -434,6 +434,9 @@ pub struct QaConfig {
     /// Journey registry location; enforcement stages are added by the upkeep gates.
     #[serde(default)]
     pub registry: QaRegistryConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_release: Option<crate::qa_post_release::PostReleaseConfig>,
+
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
     #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
     pub mode: QaMode,
@@ -598,6 +601,7 @@ pub fn default_user_facing_labels() -> Vec<String> {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
+            post_release: None,
             mode: QaMode::PerTask,
             registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),

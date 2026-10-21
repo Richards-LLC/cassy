@@ -53,6 +53,12 @@ pub struct PostArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Message text; with --file it is the files' shared comment
     #[arg(long)]
     pub text: Option<String>,
@@ -72,6 +78,12 @@ pub struct ThreadArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Top-level message text
     #[arg(long)]
     pub text: String,
@@ -132,6 +144,9 @@ pub fn execute(
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let gate = |post: &Value| {
+        if post.get("kind").and_then(Value::as_str) == Some("message") {
+            return crate::hooks::handlers::handlers_events::violet_post_release_denial(post,cas_root);
+        }
         crate::hooks::handlers::handlers_events::violet_publication_denial(
             "violet_post",
             Some(post),
@@ -266,11 +281,9 @@ fn run_post(
         }])?;
     }
     let route = choose_route(&files);
-    if route != Route::Message {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": route_kind(route)}),
-        )?;
+    let post = json!({"channel":channel,"kind":route_kind(route),"text":text,"release_notes":args.release_notes,"epic_id":args.epic});
+    if route != Route::Message || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post) {
+        gate_check(context,&post)?;
     }
     let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     // cas-8239 (GH #1300): a reply into a thread this session claimed and
@@ -612,11 +625,13 @@ fn run_thread(
         }
     }
     draft_check::check(&drafts)?;
-    if replies.iter().any(|reply| !reply.files.is_empty()) {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": "thread", "replies": [{"files": []}]}),
-        )?;
+    let shares_files = replies.iter().any(|reply| !reply.files.is_empty());
+    let mut post = json!({"channel":channel,"kind":"thread","text":text,"release_notes":args.release_notes,"epic_id":args.epic});
+    if shares_files {
+        post["replies"] = json!([{"files":[]}]);
+    }
+    if shares_files || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post) {
+        gate_check(context, &post)?;
     }
     let mut hub = (context.connect)()?;
     let receipt = post_thread(hub.as_mut(), &channel, &text, &key, &replies)?;

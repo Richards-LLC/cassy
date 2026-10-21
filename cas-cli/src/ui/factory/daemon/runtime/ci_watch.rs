@@ -2057,6 +2057,8 @@ mod tests {
             assert_eq!(rows.len(), 2);
             for row in rows {
                 assert_eq!(row.priority, NotificationPriority::Critical);
+                // pin: deploy alerts identify the workflow as a deployment failure.
+                assert!(row.prompt.contains("Deploy Deploy Backend failed") || row.prompt.contains("Deploy Deploy Frontend failed"));
                 assert!(row.summary.as_deref().unwrap().contains("BLOCKER"));
                 // pin: the supervisor must see GitHub's failed job and step.
                 assert!(row.prompt.contains("Deploy service"));
@@ -2074,7 +2076,43 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_ordinary_ci_run_is_a_red_alert() {
+        let transport = TipTransport {
+            runs: vec![run_with("main", "current", 101, Some("timed_out"))],
+            tip: Some("current"),
+            failed_job: Some("Integration checks"),
+            job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".into()]), None).unwrap();
+        assert_eq!(failures.len(), 1);
+        let temp = tempfile::tempdir().unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(emit_failure(&queue, "factory-session", &failures[0]).unwrap());
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].priority, NotificationPriority::High);
+        // pin: a timed-out run names the job that needs attention.
+        assert!(rows[0].prompt.contains("Failing job: Integration checks"));
+    }
+
+    #[test]
     fn deploy_configuration_errors_preserve_ordinary_ci_alerts() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || Capture(sink.clone())).finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let mut errors = Vec::new();
         for (file, damaged) in [
             ("config.toml", "[qa.release]\nintegration_branch = ["),
@@ -2108,13 +2146,35 @@ mod tests {
                     Err(error) => errors.push(format!("{file}: {error}")),
                 }
             }
-            assert_eq!(std::fs::read_to_string(damaged_path).unwrap(), damaged);
+            assert_eq!(std::fs::read_to_string(&damaged_path).unwrap(), damaged);
             if errors.is_empty() {
                 let rows = queue.peek_all(10).unwrap();
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].priority, NotificationPriority::High);
             }
+            if file == "config.toml" {
+                deploy_config(temp.path());
+            } else {
+                std::fs::write(&damaged_path, "[]").unwrap();
+            }
+            collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+            std::fs::write(&damaged_path, damaged).unwrap();
+            for _ in 0..2 {
+                collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+            }
+            if file == "ci-deploy-watch.json" {
+                // Parse -> read error without recovery must produce a new warning.
+                std::fs::remove_file(&damaged_path).unwrap();
+                std::fs::create_dir(&damaged_path).unwrap();
+                for _ in 0..2 {
+                    collect_failures(&transport, &watched, Some(temp.path())).unwrap();
+                }
+            }
         }
+        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        // pin: count warning episodes for the actionable ordinary-CI diagnostic.
+        assert_eq!(logs.matches("ordinary CI watching continues").count(), 5,
+            "each error class warns once, and a healthy read rearms the warning: {logs}");
         assert!(
             errors.is_empty(),
             "deploy setup silenced ordinary CI: {errors:?}"
@@ -2142,12 +2202,19 @@ mod tests {
             1,
             "a path-filtered deploy remains red after the tip moves"
         );
+        #[cfg(unix)]
+        let state_inode = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(temp.path().join("ci-deploy-watch.json")).unwrap());
         // A fresh collector reads persisted observations when the old deploy
         // falls outside GitHub's 100-run window (also covers daemon restart).
         transport.runs = (200..300)
             .map(|id| run_with("main", "moved-tip", id, Some("success")))
             .collect();
         assert_eq!(collect(&transport), red);
+        #[cfg(unix)]
+        assert_eq!(state_inode, std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(temp.path().join("ci-deploy-watch.json")).unwrap()),
+            "an unchanged observation must not replace the state file");
         for (event, workflow, conclusion, id) in [
             ("push", "Deploy Backend", "success", 99),
             ("push", "Deploy Backend", "cancelled", 301),

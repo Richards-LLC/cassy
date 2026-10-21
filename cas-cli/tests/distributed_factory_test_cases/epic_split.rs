@@ -277,11 +277,14 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
 #[tokio::test(flavor = "multi_thread")]
 async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    for (old_status, reparented, released) in [
-        (TaskStatus::Closed, false, true),
-        (TaskStatus::Cancelled, false, true),
-        (TaskStatus::InProgress, true, true),
-        (TaskStatus::InProgress, false, false),
+    let mut failures = Vec::new();
+    for (old_status, reparented, released, repair_error, cleanup_pending) in [
+        (TaskStatus::Closed, false, true, false, false),
+        (TaskStatus::Cancelled, false, true, false, false),
+        (TaskStatus::InProgress, true, true, false, false),
+        (TaskStatus::InProgress, false, false, false, false),
+        (TaskStatus::InProgress, false, false, true, false),
+        (TaskStatus::Closed, true, true, false, true),
     ] {
         let cloud = FakeCloud::start();
         let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
@@ -294,44 +297,63 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
         tasks.add(&old_epic).unwrap();
         let child = "cas-a1";
         if !reparented {
-            tasks
-                .remove_dependency_of_type(child, EPIC, DependencyType::ParentChild)
-                .unwrap();
-            tasks
-                .add_dependency(&Dependency::new(
-                    child.into(),
-                    old_epic.id.clone(),
-                    DependencyType::ParentChild,
-                ))
-                .unwrap();
+            for id in std::iter::once(child).chain(repair_error.then_some("cas-a2")) {
+                tasks.remove_dependency_of_type(id, EPIC, DependencyType::ParentChild).unwrap();
+                tasks.add_dependency(&Dependency::new(
+                    id.into(), old_epic.id.clone(), DependencyType::ParentChild,
+                )).unwrap();
+            }
         }
         let now = chrono::Utc::now();
         let historical = cas_store::EpicSplit {
             id: "split-687eb1ce".into(),
             epic_id: old_epic.id.clone(),
-            local_agent_id: "gone-owner".into(),
+            local_agent_id: if repair_error || cleanup_pending { "sw" } else { "gone-owner" }.into(),
             peer_agent_id: "gone-peer".into(),
             peer_name: "patient-gopher-67".into(),
             peer_machine: "prowl".into(),
             direction: cas_store::SplitDirection::Outgoing,
-            mine: vec![],
-            theirs: vec![child.into()],
-            state: cas_store::SplitState::Accepted,
+            mine: if cleanup_pending { vec![child.into()] } else if repair_error { vec!["cas-a2".into()] } else { vec![] },
+            theirs: if cleanup_pending { vec![] } else { vec![child.into()] },
+            state: if cleanup_pending { cas_store::SplitState::Cancelled } else { cas_store::SplitState::Accepted },
             reason: None,
             message_id: None,
             expires_at: now - chrono::Duration::days(4),
             created_at: now - chrono::Duration::days(4),
             decided_at: Some(now - chrono::Duration::days(4)),
             decided_by: None,
-            cleanup_pending: false,
+            cleanup_pending,
             expiry_notice_pending: false,
         };
         cas_store::insert_epic_split(root, &historical).unwrap();
-        assert_eq!(
-            cas::cloud::epic_split::split_hold_for(root, child).is_none(),
-            released,
-            "closed/cancelled epics and changed parents must release read-side binding: {old_status:?}, reparented={reparented}"
-        );
+        let claims = cas::cloud::peer_claims::PeerClaims::for_project(root).unwrap();
+        for id in &historical.mine {
+            assert_eq!(claims.acquire(id, cas::cloud::peer_claims::ClaimKind::Task,
+                "sw", "soundwave", 600, &|_| false), cas::cloud::peer_claims::Acquire::Claimed);
+        }
+        if repair_error {
+            // A real outbox failure leaves a committed task and failed repair.
+            // Keep the trigger installed so this never depends on the 5s cache window.
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            conn.execute_batch("CREATE TRIGGER fail_split_repair BEFORE INSERT ON sync_queue
+                WHEN NEW.entity_type = 'task' BEGIN
+                SELECT RAISE(FAIL, 'injected split repair failure'); END;").unwrap();
+            let mut task = tasks.get(child).unwrap();
+            task.title.push_str(" with pending sync");
+            assert!(tasks.update(&task).unwrap_err().to_string().contains("injected split repair failure"));
+            assert!(tasks.init().unwrap_err().to_string().contains("injected split repair failure"));
+            assert!(open_task_store(root).is_err(), "the normal task-store open must replay the repair failure");
+        }
+        let released_now = cas::cloud::epic_split::split_hold_for(root, child).is_none();
+        let renewed = repair_error.then(|| cas::cloud::epic_split::renew_split_claims(root, &claims, "sw", 600));
+        if repair_error {
+            rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .execute_batch("DROP TRIGGER fail_split_repair;").unwrap();
+            tasks.init().unwrap();
+        }
+        if (released_now, renewed) != (released, repair_error.then_some(1)) {
+            failures.push(format!("binding/renewal: {old_status:?}, reparented={reparented}, repair_error={repair_error}: released={released_now}, renewed={renewed:?}"));
+        }
         if released && !reparented {
             tasks
                 .remove_dependency_of_type(child, &old_epic.id, DependencyType::ParentChild)
@@ -348,7 +370,7 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
             .factory(json!({"id": if released { EPIC } else { &old_epic.id },
             "target": "prowl", "mine": child}))
             .await;
-        if released {
+        if released && !cleanup_pending {
             let proposed = outcome.unwrap();
             assert!(proposed.contains("Proposed epic split"), "{proposed}");
             let id = split_id(&proposed);
@@ -358,17 +380,22 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
                 .await
                 .unwrap();
             assert!(accepted.contains("Accepted epic split"), "{accepted}");
-        } else {
-            let refusal = outcome.unwrap_err();
-            assert!(
+        } else if let Err(refusal) = outcome {
+            if !(
                 refusal.contains(&historical.id)
                     && refusal.contains(&old_epic.id)
-                    && refusal.contains("accepted")
-                    && refusal.contains("in_progress")
+                    && refusal.contains(if cleanup_pending { "cancelled" } else { "accepted" })
+                    && refusal.contains(&old_status.to_string())
                     && refusal
-                        .contains("factory action=epic_split id=split-687eb1ce decision=cancel"),
-                "{refusal}"
-            );
+                        .contains("factory action=epic_split id=split-687eb1ce decision=cancel")
+            ) {
+                failures.push(format!("overlap refusal must identify its historical reservation: {refusal}"));
+            }
+        } else {
+            failures.push(format!("overlap unexpectedly allowed: cleanup_pending={cleanup_pending}, {outcome:?}"));
+        }
+        if cleanup_pending {
+            assert_eq!(cloud_holder(&cloud, child).as_deref(), Some("sw"), "cleanup still owns the old claim");
         }
         assert_eq!(
             cas_store::get_epic_split(root, &historical.id).unwrap(),
@@ -376,6 +403,7 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
             "the fix must not cancel or rewrite the historical split"
         );
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// The demo: propose, accept, and each side refused on the other's children.

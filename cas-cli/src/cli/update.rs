@@ -40,7 +40,7 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 mod discovery_probe;
 mod bindings;
-mod findings;
+pub(crate) mod findings;
 mod fixture;
 mod live;
 mod preview;

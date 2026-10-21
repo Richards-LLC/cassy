@@ -231,7 +231,7 @@ impl StallEvidenceRequest {
                 .ok()
                 .and_then(|store| store.list(None).ok()),
         };
-        let (Some(agents), Ok(splits)) = (agents, cas_store::open_epic_splits(&self.cas_dir))
+        let (Some(agents), Ok(splits)) = (agents, crate::cloud::epic_split::current_epic_splits(&self.cas_dir))
         else {
             // Missing evidence remains pending, so it cannot demand a merge.
             return HashMap::new();

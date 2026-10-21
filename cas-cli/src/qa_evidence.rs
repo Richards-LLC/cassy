@@ -279,24 +279,30 @@ fn validate_pairs(
     Ok(files)
 }
 
-/// Even when full bundle proof is deferred, a declared comparison cannot drop
-/// baseline cells. The caller alone authenticates and records explicit waivers.
+/// Probe optional citations for declared comparisons, including deferred proof.
+/// Unreadable/non-manifest citations are advisory here; full Bundle validation
+/// handles them strictly. Returns whether pairs were declared. Only the caller
+/// authenticates and records explicit waivers of declared-pairs failures.
 pub(crate) fn validate_cited_pair_coverage(
     ctx: &EvidenceContext<'_>,
-) -> Result<(), EvidenceRefusal> {
+) -> Result<bool, EvidenceRefusal> {
     let Some(cited) = cited_bundle_path(ctx.notes) else {
-        return Ok(());
+        return Ok(false);
     };
-    let path = resolve_inside_task_dir(ctx, &cited)?;
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| EvidenceRefusal::new(format!("unreadable bundle: {e}"), cite_command(ctx)))?;
-    let manifest: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| EvidenceRefusal::new(format!("malformed bundle: {e}"), cite_command(ctx)))?;
+    let Ok(path) = resolve_inside_task_dir(ctx, &cited) else {
+        return Ok(false);
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(false);
+    };
     let Some(relative) = manifest
         .pointer("/files/pairs")
         .filter(|value| !value.is_null())
     else {
-        return Ok(());
+        return Ok(false);
     };
     let relative = relative.as_str().ok_or_else(|| missing_key("pairs"))?;
     let head = manifest
@@ -309,7 +315,7 @@ pub(crate) fn validate_cited_pair_coverage(
         relative,
         head,
     )
-    .map(|_| ())
+    .map(|_| true)
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the

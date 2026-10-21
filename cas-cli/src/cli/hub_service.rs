@@ -115,6 +115,8 @@ struct LaunchReadiness {
     profile_path: Option<PathBuf>,
     #[serde(skip)]
     repair: Option<String>,
+    #[serde(skip)]
+    cause: Option<String>,
 }
 
 impl ServiceReport {
@@ -147,29 +149,32 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
                     summary: String::new(),
                     profile_path: None,
                     repair: None,
+                    cause: None,
                 },
                 Err(error) => {
                     use crate::hub::launch_env::LaunchError;
                     let detail = error.to_string();
-                    let (summary, profile_path, repair) = match error {
+                    let (summary, profile_path, repair, cause) = match error {
                         LaunchError::MissingBinary { cli } => (
                             "CLI missing".to_owned(),
                             None,
                             Some(install_cli_command(cli).to_owned()),
+                            None,
                         ),
                         LaunchError::ProfileMissing { cli, path } => (
                             "profile missing".to_owned(),
                             Some(path),
                             Some(format!("cas {cli} login {profile}")),
+                            None,
                         ),
                         LaunchError::NotLoggedIn { cli, profile } => (
                             "profile not logged in".to_owned(),
                             None,
                             Some(format!("cas {cli} login {profile}")),
+                            None,
                         ),
-                        LaunchError::ProbeFailed { .. } => {
-                            ("launch check failed".to_owned(), None, None)
-                        }
+                        LaunchError::ProbeFailed { detail, .. } =>
+                            ("launch check failed".to_owned(), None, None, Some(detail)),
                     };
                     LaunchReadiness {
                         cli,
@@ -179,6 +184,7 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
                         summary,
                         profile_path,
                         repair,
+                        cause,
                     }
                 }
             }
@@ -190,18 +196,16 @@ fn install_cli_command(cli: &str) -> &'static str {
     match cli {
         "claude" => "npm install -g @anthropic-ai/claude-code",
         "codex" => "npm install -g @openai/codex",
-        "grok" => "npm install -g @xai-official/grok",
+        "grok" => "curl -fsSL https://x.ai/cli/install.sh | bash",
         _ => "Install the CLI and add it to PATH",
     }
 }
 
-fn readiness_path(path: &Path, home: &Path, full: bool, width: usize) -> (String, bool) {
+fn readiness_path(path: &Path, full: bool, width: usize) -> (String, bool) {
     let display = if full {
         path.display().to_string()
-    } else if let Ok(relative) = path.strip_prefix(home) {
-        PathBuf::from("~").join(relative).display().to_string()
     } else {
-        path.display().to_string()
+        crate::cli::update::findings::home_relative(path)
     };
     let available = width.saturating_sub("    path: ".len()).max(1);
     if full || display_cells(&display) <= available {
@@ -222,6 +226,18 @@ fn display_cells(value: &str) -> usize {
         .chars()
         .map(|character| if character.is_ascii() { 1 } else { 2 })
         .sum()
+}
+
+fn fit_cause(cause: &str, width: usize) -> String {
+    let mut result = String::new();
+    for character in cause.chars() {
+        if display_cells(&result) + display_cells(&character.to_string()) > width.saturating_sub(1) {
+            result.push('…');
+            return result;
+        }
+        result.push(character);
+    }
+    result
 }
 
 fn trailing_path_cells(value: &str, limit: usize) -> String {
@@ -1394,7 +1410,6 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
     if cli.json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
-        let home = home_dir()?;
         let terminal_width = usize::from(crate::ui::components::formatter::terminal_width());
         let terminal_width = if terminal_width < 40 {
             80
@@ -1443,13 +1458,7 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
             .and_then(|index| report.launch_readiness[index].repair.as_deref())
         {
             println!("  Fix: {repair}");
-        } else if report.manager_warning.is_some() {
-            println!("  Retry: cas hub status");
-        } else if report.supervision == "manual" {
-            println!("  Fix: install systemd --user for automatic startup.");
-        } else if !report.installed {
-            println!("  Fix: cas hub service install");
-        } else {
+        } else if launch_issues == 0 {
             println!("  Launch readiness: healthy");
         }
 
@@ -1462,8 +1471,15 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                 "  {} launch: unavailable ({})",
                 readiness.cli, readiness.summary
             );
+            if let Some(cause) = &readiness.cause {
+                let suffix = "; details: --json";
+                let available = terminal_width.saturating_sub("    Cause: ".len() + suffix.len());
+                let cause = cause.lines().next().unwrap_or(cause);
+                let cause = fit_cause(cause, available);
+                println!("    Cause: {cause}{suffix}");
+            }
             if let Some(path) = &readiness.profile_path {
-                let (path, shortened) = readiness_path(path, &home, cli.full, terminal_width);
+                let (path, shortened) = readiness_path(path, cli.full, terminal_width);
                 paths_shortened |= shortened;
                 println!("    path: {path}");
             }
@@ -1474,7 +1490,9 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
             }
         }
         if report.supervision == "manual" {
-            println!("  Start at login: cas hub start --tailscale-serve");
+            for line in manual_linux_reboot_lines() {
+                println!("{line}");
+            }
         } else {
             println!(
                 "  Supervision: {}; {}; {}",
@@ -1496,7 +1514,7 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
         }
         if let Some(log_path) = report.log_path {
             let (log_path, shortened) =
-                readiness_path(Path::new(&log_path), &home, cli.full, terminal_width);
+                readiness_path(Path::new(&log_path), cli.full, terminal_width);
             paths_shortened |= shortened;
             println!("  Logs: {log_path}");
         }
@@ -2032,6 +2050,14 @@ fn systemd_escape(value: &str) -> String {
 
 fn manual_linux_instructions() -> &'static str {
     "systemd --user is unavailable; run `cas hub start --tailscale-serve` from your distribution's rc script after networking and Tailscale, and use `cas hub status` to verify it. Cassy cannot supervise reboot startup on this host."
+}
+
+fn manual_linux_reboot_lines() -> [&'static str; 3] {
+    [
+        "  Reboot: rc script after networking and Tailscale",
+        "  Run: cas hub start --tailscale-serve",
+        "  Verify: cas hub status",
+    ]
 }
 
 #[cfg(test)]
@@ -2890,6 +2916,10 @@ exit 0
         assert!(instructions.contains("systemd --user is unavailable"));
         assert!(instructions.contains("rc script"));
         assert!(instructions.contains("cannot supervise reboot startup"));
+        let human = manual_linux_reboot_lines().join("\n");
+        assert!(human.contains("rc script after networking and Tailscale"));
+        assert!(human.contains("cas hub start --tailscale-serve"));
+        assert!(human.contains("cas hub status"));
     }
 
     #[test]

@@ -3,13 +3,30 @@
 `cas qa journeys --check` validates the project's journey registry against Git's
 tracked files. It exits 1 for invalid YAML, schema problems, broken references,
 unmatched owner/group/surface globs, or untracked specs. It exits 0 when only
-curation debt remains. It never runs the journey's spec.
+curation debt remains. It never runs the journey's spec. Human output says
+`DEBT` for a valid registry with debt, lists counts by kind beneath the verdict,
+and flags any increase since the previous recorded check. Use `--verbose` for
+the individual debt rows. `PASS` means there are neither problems nor debt.
 
 The default file is `docs/qa/journeys.yaml`. Set another project-relative path
 with `cas config set qa.registry.path docs/qa/custom.yaml`. Run from the project
-checkout; global `--json` returns one `{problems, debt}` object. Each array contains
-`{code, subject, message}` rows. The same loader and validator serve future impact
+checkout; global `--json` returns one `{problems, debt, debt_summary}` object.
+Each array contains `{code, subject, message}` rows. `debt_summary` contains
+`total`, `by_kind` (counts keyed by debt code), `previous_total`, signed `delta`,
+`grew`, and `history_status`. The first recorded run has null comparison fields.
+The same loader and validator serve impact
 and upkeep consumers. Registry upkeep also runs automatically at task park.
+
+Checks retain their latest versioned receipt in the existing project
+`cas.db` metadata table, keyed by canonical checkout and registry paths. The
+receipt records current counts, the previous total and the check time. Different
+worktrees or registry paths have separate baselines; concurrent checks serialize
+their receipt updates. A completed validation records its count even when it
+finds problems; a read, YAML parse or Git failure does not replace the baseline.
+Checking never initializes a database or adds a state file. When the existing
+database or receipt cannot be read or written, current validation still runs;
+`history_status` is `unavailable`, comparisons are null, and `history_error`
+explains why in JSON (or human `--verbose`). An unavailable baseline is not zero.
 
 ## Path filters
 
@@ -203,11 +220,14 @@ fixtures:
 ### Numeric comparison
 
 A numeric criterion declares how a measured value is graded against its
-baseline. `compare: exact` fails on any difference (coverage counts, presence).
+baseline. `compare: exact` fails on any difference, so use it for whole-number counts
+and presence; fractional measurements need a band.
 `compare: {banded: {min_ratio: 0.9}}` passes at or above 90% of the baseline;
 `compare: {banded: {max_delta: 20}}` passes within 20 either side. A band names
 exactly one bound; `min_ratio` must be in (0, 1] and `max_delta` non-negative,
-else `--check` fails with `compare`. Graders record the measured value and its
+else `--check` fails with `compare`. A malformed value (`compare: fuzzy`,
+`{banded: {min_rato: 0.9}}`) is the same single `compare` problem on that
+criterion; the rest of the registry still loads. Graders record the measured value and its
 percentage of the baseline, so wording noise (1,862 text characters against a
 1,871 baseline is 99.52%) passes a band visibly instead of failing a strict
 floor.

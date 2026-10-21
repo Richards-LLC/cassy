@@ -768,6 +768,21 @@ fn test_config_set_validation() {
         .args(["config", "set", "hooks.token_budget", "notanumber"])
         .assert()
         .failure();
+
+    // Refusals under --json still produce one machine-readable error document.
+    let invalid = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "config", "set", "coordination.mode", "invalid"])
+        .output()
+        .expect("cas config set must run");
+    assert!(!invalid.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&invalid.stdout)
+        .expect("--json config refusal must emit one JSON document");
+    assert_eq!(error["status"], "error", "{error}");
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("Invalid coordination mode"),
+        "{error}"
+    );
 }
 
 #[test]

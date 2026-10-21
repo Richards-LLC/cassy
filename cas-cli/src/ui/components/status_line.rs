@@ -184,6 +184,20 @@ mod tests {
     }
 
     #[test]
+    fn warning_styled_uses_ascii_tag_under_c_locale() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        env.remove("NO_COLOR");
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut buf, ActiveTheme::default_dark());
+            StatusLine::warning("configuration refused").render(&mut fmt).unwrap();
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("[WARN]"), "{output:?}");
+        assert!(!output.contains('⚠'), "{output:?}");
+    }
+
+    #[test]
     fn test_info_plain() {
         let mut buf = Vec::new();
         {

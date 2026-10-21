@@ -297,12 +297,13 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             line.starts_with("Detached restart:")
                 || line.starts_with("Stop keys:")
                 || line.starts_with("Stop also has")
+                || line.starts_with("Start also has")
         })
         .collect::<Vec<_>>();
     assert_eq!(
         restart_help_lines.len(),
-        3,
-        "restart help should render its three concise contract lines: {help_text}"
+        4,
+        "restart help should render its four concise contract lines: {help_text}"
     );
     for line in restart_help_lines {
         assert!(

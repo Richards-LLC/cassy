@@ -104,6 +104,8 @@ pub enum HubCommands {
     /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
     ///
     /// Stop also has `already_satisfied`; supervised restart reports hub status.
+    ///
+    /// Start also has `already_satisfied` when a peer launches the requested hub.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),
@@ -646,6 +648,25 @@ struct HubRestartStopReceipt {
     already_satisfied: bool,
 }
 
+struct HubStartOutcome {
+    record: HubProcessRecord,
+    already_satisfied: bool,
+}
+
+impl HubStartOutcome {
+    fn into_restart_json(self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self.record)?;
+        let object = value
+            .as_object_mut()
+            .context("hub process record must serialize as a JSON object")?;
+        object.insert(
+            "already_satisfied".to_owned(),
+            serde_json::Value::Bool(self.already_satisfied),
+        );
+        Ok(value)
+    }
+}
+
 impl From<HubStopReceipt> for HubRestartStopReceipt {
     fn from(stop: HubStopReceipt) -> Self {
         Self {
@@ -1186,9 +1207,14 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
                         let stop = HubRestartStopReceipt::already_satisfied();
+                        let start = HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        }
+                        .into_restart_json()?;
                         println!(
                             "{}",
-                            serde_json::json!({"stop": stop, "start": record})
+                            serde_json::json!({"stop": stop, "start": start})
                         );
                     } else {
                         println!(
@@ -1224,6 +1250,7 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                         Err(error) => return Err(error),
                     };
                     if cli.json {
+                        let start = start.into_restart_json()?;
                         println!("{}", serde_json::json!({"stop": stop, "start": start}));
                     }
                     Ok(())
@@ -1367,7 +1394,7 @@ fn start_with_output_resolved(
     tailscale_port: u16,
     emit_output: bool,
     launch_origin: HubLaunchOrigin,
-) -> Result<HubProcessRecord> {
+) -> Result<HubStartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
         SocketAddr::new(args.bind, args.port),
@@ -1406,7 +1433,10 @@ fn start_with_output_resolved(
                             );
                         }
                     }
-                    return Ok(record);
+                    return Ok(HubStartOutcome {
+                        record,
+                        already_satisfied: true,
+                    });
                 }
                 HubStartDecision::Restart {
                     version_drift,
@@ -1447,7 +1477,10 @@ fn start_with_output_resolved(
                                 record.pid, record.version
                             );
                         }
-                        return Ok(*record);
+                        return Ok(HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        });
                     }
                     return start_with_output_resolved(
                         args,
@@ -1488,7 +1521,10 @@ fn start_with_output_resolved(
                     record.pid, record.version
                 );
             }
-            return Ok(*record);
+            return Ok(HubStartOutcome {
+                record: *record,
+                already_satisfied: true,
+            });
         }
     };
     let prior_record = paths.read_process_record().ok();
@@ -1635,7 +1671,10 @@ fn start_with_output_resolved(
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
                 }
-                return Ok(record);
+                return Ok(HubStartOutcome {
+                    record,
+                    already_satisfied: false,
+                });
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {

@@ -59,6 +59,9 @@ Post order: user top-level → capture `message.message_id` → user reply → d
 - **No agent / factory / supervisor / worker / coordination narration and no drama.**
   Describe the product, not how it got built.
 - **One punch per top-level message.**
+- **No line over 300 characters** (a `<url|label>` link counts as its label).
+  The Violet hub refuses the whole post. A Was → Now item too long for one line
+  starts `→ Now:` on a second line.
 - **Plain language** in the User thread.
 - **Honest reverts:** if something shipped and came back out, say so plainly.
 - **Before/after screenshots:** when a change in the User reply has a real

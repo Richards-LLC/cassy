@@ -3064,6 +3064,54 @@ impl CasCore {
         )))
     }
 
+    /// Resolve worker ownership synchronously so candidate Task values do not
+    /// enlarge the async merge future or its transactional callers' stacks.
+    fn parked_delivery_for_worker(&self, id: &str) -> Result<(Box<cas_types::Task>, String), McpError> {
+        let agents = self.open_agent_store()?;
+        let token = id.strip_prefix("factory/").unwrap_or(id);
+        let worker = agents.get(token).ok().map(|agent| agent.name)
+            .unwrap_or_else(|| token.to_string());
+        let mut parked = Vec::new();
+        for task in self.open_task_store()?.list(Some(cas_types::TaskStatus::AwaitingMerge))
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Cannot resolve parked merge tasks: {error}")),
+                data: None,
+            })?
+        {
+            match authorize_explicit_task_for_system_b_worker(&task, &worker, agents.as_ref()) {
+                Ok(()) => parked.push(task),
+                Err(error) if error.code == ErrorCode::INTERNAL_ERROR => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if parked.len() != 1 {
+            let mut ids = parked.iter().map(|task| task.id.as_str()).collect::<Vec<_>>();
+            ids.sort_unstable();
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "AMBIGUOUS PARKED DELIVERY: worker {worker} has {} parked tasks ({}). Supply task_id=<task> and its recorded delivery branch. No merge was attempted.",
+                    parked.len(), if ids.is_empty() { "none".into() } else { ids.join(", ") },
+                )),
+                data: None,
+            });
+        }
+        let task = parked.pop().expect("one parked task");
+        if task.deliverables.parked_branch.as_deref().is_none_or(|branch| branch.trim().is_empty())
+            || task.deliverables.factory_branch_anchor.as_deref().is_none_or(|sha| sha.trim().is_empty())
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "PARKED DELIVERY INCOMPLETE: task {} needs its recorded branch and branch_tip. Re-park the delivery or supply task_id explicitly. No merge was attempted.", task.id,
+                )),
+                data: None,
+            });
+        }
+        Ok((Box::new(task), worker))
+    }
+
     /// Resolve a remote-only delivery through task and supervisor authority.
     /// The real pushed branch is materialized locally for the existing CI/QA
     /// gates; divergent local refs are never overwritten.
@@ -3236,7 +3284,7 @@ impl CasCore {
         // cas-bebc (GH #1023 finding 9): never integrate another live factory
         // session's worker branch or task from this session.
         let mut scoped_task =
-            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
+            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok()).map(Box::new);
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
             |agents, caller, now| {
@@ -3244,7 +3292,7 @@ impl CasCore {
                     agents,
                     caller,
                     id,
-                    scoped_task.as_ref(),
+                    scoped_task.as_deref(),
                     now,
                 )
             },
@@ -3278,49 +3326,7 @@ impl CasCore {
                 worktree.epic_id.is_none() || worktree.branch.starts_with("factory/")
             })
         {
-            let agents = self.open_agent_store()?;
-            let token = id.strip_prefix("factory/").unwrap_or(id);
-            let worker = agents.get(token).ok().map(|agent| agent.name)
-                .unwrap_or_else(|| token.to_string());
-            let mut parked = Vec::new();
-            for task in self.open_task_store()?.list(Some(cas_types::TaskStatus::AwaitingMerge))
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Cannot resolve parked merge tasks: {error}")),
-                    data: None,
-                })?
-            {
-                match authorize_explicit_task_for_system_b_worker(&task, &worker, agents.as_ref()) {
-                    Ok(()) => parked.push(task),
-                    Err(error) if error.code == ErrorCode::INTERNAL_ERROR => return Err(error),
-                    Err(_) => {}
-                }
-            }
-            if parked.len() != 1 {
-                let mut ids = parked.iter().map(|task| task.id.as_str()).collect::<Vec<_>>();
-                ids.sort_unstable();
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "AMBIGUOUS PARKED DELIVERY: worker {worker} has {} parked tasks ({}). Supply task_id=<task> and its recorded delivery branch. No merge was attempted.",
-                        parked.len(), if ids.is_empty() { "none".into() } else { ids.join(", ") },
-                    )),
-                    data: None,
-                });
-            }
-            let task = parked.pop().expect("one parked task");
-            if task.deliverables.parked_branch.as_deref().is_none_or(|branch| branch.trim().is_empty())
-                || task.deliverables.factory_branch_anchor.as_deref().is_none_or(|sha| sha.trim().is_empty())
-            {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "PARKED DELIVERY INCOMPLETE: task {} needs its recorded branch and branch_tip. Re-park the delivery or supply task_id explicitly. No merge was attempted.", task.id,
-                    )),
-                    data: None,
-                });
-            }
-            Some((task, worker))
+            Some(self.parked_delivery_for_worker(id)?)
         } else {
             None
         };
@@ -3332,7 +3338,7 @@ impl CasCore {
             if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
                 &cas_root,
                 |agents, caller, now| crate::factory_session_scope::foreign_owner_of_merge(
-                    agents, caller, id, scoped_task.as_ref(), now,
+                    agents, caller, id, scoped_task.as_deref(), now,
                 ),
             ) {
                 return Err(McpError {
@@ -3463,7 +3469,7 @@ impl CasCore {
 
         let remote_source = if system_a.is_none() {
             self.prepare_remote_merge_source(
-                &manager, scoped_task.as_ref(), id, cleanup,
+                &manager, scoped_task.as_deref(), id, cleanup,
                 implicit_delivery.as_ref().map(|(_, worker)| worker.as_str()),
             )?
         } else {
@@ -3652,11 +3658,11 @@ impl CasCore {
             }
             // Later dirty-checkout and merge-intent handling use the same
             // durable anchor that the source guard just validated.
-            scoped_task = Some(store.get(task_id).map_err(|error| McpError {
+            scoped_task = Some(Box::new(store.get(task_id).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Cannot reload parked delivery after source validation: {error}")),
                 data: None,
-            })?);
+            })?));
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -3882,7 +3888,7 @@ impl CasCore {
         // for unfinished CI or let a docs-only tip mask earlier code.
         let parked_source_tip = transactional_delivery.as_ref()
             .map(|(receipt, _)| receipt.commit_sha.clone())
-            .or_else(|| scoped_task.as_ref()
+            .or_else(|| scoped_task.as_deref()
                 .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
             .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
         let ci_source = remote_source.as_ref()
@@ -4098,7 +4104,7 @@ impl CasCore {
             // exact origin/anchor agreement is verified inside the manager.
             let parked_anchor = transactional_delivery.as_ref()
                 .map(|(receipt, _)| receipt.commit_sha.as_str())
-                .or_else(|| scoped_task.as_ref()
+                .or_else(|| scoped_task.as_deref()
                     .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
                     .and_then(|task| task.deliverables.factory_branch_anchor.as_deref()));
             let dirty_pushed_anchor = if !force && !do_cleanup && source_worktree_live {

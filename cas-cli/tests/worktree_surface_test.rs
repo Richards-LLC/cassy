@@ -3297,8 +3297,8 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
     assert!(result.is_err(), "branchless parent epic must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(
-        msg.contains("no branch") || msg.contains("branch field"),
-        "must cite missing branch. Got: {msg}"
+        msg.contains("no declared merge target") && msg.contains("refusing trunk fallback"),
+        "must refuse branchless target instead of choosing trunk. Got: {msg}"
     );
 }
 
@@ -6013,7 +6013,7 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
 }
 
 /// cas-c85e (GH #997) fixture: a repo whose selector is
-/// `remote:github.com/org/c85e-target`, a live `epic/c85e` lane, and alice's
+/// `project:github.com/org/c85e-target`, a live `epic/c85e` lane, and alice's
 /// committed worktree. Returns the repo, env guard, and CAS root.
 fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
     let repo = GitRepo::new();
@@ -6022,9 +6022,19 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
         &["remote", "add", "origin", "git@github.com:org/c85e-target.git"],
         &repo.root,
     );
+    let remote = repo.root.join(".git/c85e-origin.git");
+    run_git(&["init", "--bare", remote.to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.display()),
+        "git@github.com:org/c85e-target.git"], &repo.root);
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    // Git transport is local; the declared cross-repo selector stays stable.
+    std::fs::write(cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n")
+        .unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
     disable_system_a(&cas_root);
     run_git(&["branch", "epic/c85e"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/c85e"], &repo.root);
 
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
@@ -6035,7 +6045,7 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
     (repo, env, cas_root, wt_path)
 }
 
-const C85E_SELECTOR: &str = "remote:github.com/org/c85e-target";
+const C85E_SELECTOR: &str = "project:github.com/org/c85e-target";
 
 fn c85e_trunk_target() -> WorkTarget {
     WorkTarget {

@@ -604,6 +604,7 @@ mod tests {
         );
         git(&repo, &["add", "."]);
         env.set_current_dir(&repo);
+        env.set("CAS_ROOT", repo.join(".cas"));
         journeys(&["--status", "--json"]).unwrap();
         assert!(!super::status(&repo, &Default::default()).unwrap().present);
         journeys(&["--seed"]).unwrap();

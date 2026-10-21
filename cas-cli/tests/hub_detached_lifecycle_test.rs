@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use cas::hub::HubRuntimePaths;
 use serde_json::Value;
 
 fn fixture_tailscale(home: &Path, path: &OsStr) -> PathBuf {
@@ -353,9 +354,11 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             "race hub start failed: {}",
             String::from_utf8_lossy(&initial.stderr)
         );
+        let initial: Value =
+            serde_json::from_slice(&initial.stdout).expect("race hub start JSON");
 
         let spawn_restart = |name: &str| {
-            let mut command = cas_process_command(race_home.path(), &path);
+            let mut command = cas_command(race_home.path(), &path);
             command
                 .env("CAS_AGENT_ROLE", "worker")
                 .env("CAS_FACTORY_SESSION", &session)

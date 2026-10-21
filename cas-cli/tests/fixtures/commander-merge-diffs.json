@@ -1,5 +1,5 @@
 {
-  "description": "Ten latest first-parent main merges captured for cas-1a420. Retain changed hub-web/catalog paths and one unrelated path when none exist; all omitted paths lie outside the legacy hub-web catalog surface. Full git diff path lists are in the task parity-baseline artifact. Expected IDs were captured from the committed legacy selector. CSS/import hunks have a separate focused fixture.",
+  "description": "Ten latest first-parent main merges captured for cas-1a420, plus two older merges with production hub-web/src changes for cas-7002. Retain changed hub-web/catalog paths and one unrelated path when none exist; all omitted paths lie outside the legacy hub-web catalog surface. Expected IDs were captured from the committed legacy selector at the migration head and sorted by the Rust legacy adapter contract. CSS/import hunks have a separate focused fixture.",
   "diffs": [
     {
       "base": "5f868a44a18d50c126be75adee380593465fa5a3",
@@ -94,6 +94,69 @@
         "docs/release-notes/2026-10-19-v3.65.0-slack.md"
       ],
       "journeys": []
+    },
+    {
+      "base": "74ae31197470f1a8674f4f8afa8d60bad69d2451",
+      "head": "45174f76d962f1f42cd656e734cf5e2b26e347f7",
+      "changed_file_count": 218,
+      "files": [
+        "hub-web/dist/app.js",
+        "hub-web/e2e/journeys/operator-inbox.journey.ts",
+        "hub-web/src/inbox/controller.test.ts",
+        "hub-web/src/inbox/controller.ts",
+        "hub-web/src/inbox/inbox-view.test.ts",
+        "hub-web/src/inbox/inbox-view.ts"
+      ],
+      "journeys": [
+        "HUB-J19"
+      ]
+    },
+    {
+      "base": "6ae4d0f9a1d4a8af7d6b3bfa79bca6c25427a968",
+      "head": "74ae31197470f1a8674f4f8afa8d60bad69d2451",
+      "changed_file_count": 160,
+      "files": [
+        "docs/qa/journeys.md",
+        "hub-web/dist/app.js",
+        "hub-web/e2e/journeys/operator-inbox.journey.ts",
+        "hub-web/scripts/operator-inbox-live-native.mjs",
+        "hub-web/scripts/operator-inbox-live.spec.mjs",
+        "hub-web/scripts/presence-live-account.mjs",
+        "hub-web/scripts/presence-live-account.test.mjs",
+        "hub-web/scripts/presence-live.mjs",
+        "hub-web/src/commander-journal.test.ts",
+        "hub-web/src/commander-journal.ts",
+        "hub-web/src/connection.ts",
+        "hub-web/src/inbox/controller.test.ts",
+        "hub-web/src/inbox/controller.ts",
+        "hub-web/src/inbox/inbox-view.ts",
+        "hub-web/src/inbox/reply-grants.brief.md",
+        "hub-web/src/invariants.test.ts",
+        "hub-web/src/main.ts"
+      ],
+      "journeys": [
+        "HUB-J1",
+        "HUB-J10",
+        "HUB-J11",
+        "HUB-J12",
+        "HUB-J13",
+        "HUB-J14",
+        "HUB-J15",
+        "HUB-J16",
+        "HUB-J17",
+        "HUB-J18",
+        "HUB-J19",
+        "HUB-J2",
+        "HUB-J20",
+        "HUB-J21",
+        "HUB-J3",
+        "HUB-J4",
+        "HUB-J5",
+        "HUB-J6",
+        "HUB-J7",
+        "HUB-J8",
+        "HUB-J9"
+      ]
     }
   ]
 }

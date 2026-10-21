@@ -220,6 +220,32 @@ fn inspect_with_probe(
     dry_run: bool,
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
+    inspect_scoped_with_probe(
+        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe,
+    )
+}
+
+/// Admission reclaims only verified relocated worker targets. Keep full factory
+/// GC (previews, in-tree caches, traces and artifacts) an explicit operation.
+pub(crate) fn reclaim_scratch_for_admission(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+) -> io::Result<TargetCacheReport> {
+    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, probe)?;
+    cleanup_selected(cas_root, &mut report, policy, &[])?;
+    Ok(report)
+}
+
+fn inspect_scoped_with_probe(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    known_worktree_roots: &[PathBuf],
+    live_worktree_roots: &[PathBuf],
+    dry_run: bool,
+    scratch_only: bool,
+    probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+) -> io::Result<TargetCacheReport> {
     let repo_root = cas_root.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -235,6 +261,9 @@ fn inspect_with_probe(
     capacity.pressure = crate::factory_build_guard::disk_pressure(&capacity, reserved_builders);
     let now = SystemTime::now();
     let mut scanned = discover_caches(repo_root, cas_root, known_worktree_roots);
+    if scratch_only {
+        scanned.retain(|cache| relocated_target(&cache.worktree, &cache.path));
+    }
     let canonical_live_roots: HashSet<PathBuf> = live_worktree_roots
         .iter()
         .filter_map(|path| path.canonicalize().ok())
@@ -345,7 +374,11 @@ fn inspect_with_probe(
     }
     records.sort_by(|a, b| a.path.cmp(&b.path));
     let candidate_bytes = records.iter().map(|record| record.bytes).sum();
-    let lane_previews = lane::inspect(cas_root, policy, live_worktree_roots);
+    let lane_previews = if scratch_only {
+        Vec::new()
+    } else {
+        lane::inspect(cas_root, policy, live_worktree_roots)
+    };
     let selected_bytes = records
         .iter()
         .filter(|record| record.disposition == CacheDisposition::Selected)

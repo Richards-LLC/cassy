@@ -374,6 +374,7 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     for explicit in [None, Some(home.path().join("override.socket")), Some(home.path().join("missing.socket"))] {
         let selected = explicit.as_ref().unwrap_or(&socket);
         for args in [vec!["hub", "status"], vec!["hub", "restart", "--port", "0"]] {
+            let is_restart = args.contains(&"restart");
             let mut command = cas_command(home.path(), bin.as_os_str());
             if let Some(explicit) = &explicit { command.env("TAILSCALE_SOCKET", explicit); }
             let output = command.args(args).output().unwrap();
@@ -384,8 +385,67 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
             for expected in [cause, "TAILSCALE_SOCKET", tailscale.to_str().unwrap(), selected.to_str().unwrap()] {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
+            if is_restart {
+                for expected in [
+                    "Hub transport required: Tailscale is unavailable.",
+                    "Restart refused; existing hub (pid ",
+                    ") remains running.",
+                    "Retry: TAILSCALE_SOCKET=<signed-in-socket> cas hub restart.",
+                ] {
+                    assert!(text.contains(expected), "missing {expected}: {text}");
+                }
+            }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(home.path(), &bin.join("tailscale"), "#!/bin/sh\nexit 1\n");
+    let mut path_entries = vec![bin.clone()];
+    path_entries.extend(std::env::split_paths(&system_path()));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let start = cas_command(home.path(), &path)
+        .args(["hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let mut cleanup = LegacyHubCleanup(vec![paths.read_process_record().unwrap().pid]);
+
+    let restart = cas_command(home.path(), &path)
+        .args(["hub", "restart", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
+    let record = paths.read_process_record().unwrap();
+    cleanup.0.clear();
+    cleanup.0.push(record.pid);
+
+    let warning = String::from_utf8_lossy(&restart.stderr);
+    for expected in [
+        "Tailscale Serve inactive; hub is loopback-only.",
+        "Cause:",
+        "Retry: tailscale status && cas hub restart",
+    ] {
+        assert!(warning.contains(expected), "missing {expected}: {warning}");
+    }
+    assert!(
+        warning.lines().all(|line| line.chars().count() <= 80),
+        "warning exceeds 80 columns: {warning}"
+    );
+
+    let stop = cas_command(home.path(), &path)
+        .args(["hub", "stop", "--force"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    cleanup.0.clear();
 }
 
 #[cfg(unix)]

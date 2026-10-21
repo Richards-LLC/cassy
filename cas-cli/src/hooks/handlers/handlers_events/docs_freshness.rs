@@ -36,14 +36,28 @@ fn same_repo(a: &Path, b: &Path) -> bool {
 impl Measurement {
     /// Hooks supply the harness cwd; CLI status supplies the process cwd.
     pub fn at(cwd: &Path, cas_root: &Path) -> Self {
+        Self::resolve(cwd, cas_root, false)
+    }
+
+    /// Pre-enforcement reports measure integration, including when HEAD is ahead.
+    pub fn integration_at(cwd: &Path, cas_root: &Path) -> Self {
+        Self::resolve(cwd, cas_root, true)
+    }
+
+    fn resolve(cwd: &Path, cas_root: &Path, integration_only: bool) -> Self {
         let root = crate::store::detect::find_git_toplevel(cwd).unwrap_or_else(|_| {
-            if cwd.is_dir() {
+            let hint = cas_root.parent().unwrap_or(cwd);
+            let current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+            let project = hint.canonicalize().unwrap_or_else(|_| hint.to_path_buf());
+            if current.starts_with(&project) {
+                hint.to_path_buf()
+            } else if cwd.is_dir() {
                 cwd.to_path_buf()
             } else {
-                cas_root.parent().unwrap_or(cwd).to_path_buf()
+                hint.to_path_buf()
             }
         });
-        let store = if cas_root.parent().is_some_and(|hint| same_repo(&root, hint)) {
+        let store = if cas_root.parent().is_some_and(|hint| root.as_path() == hint || same_repo(&root, hint)) {
             cas_root.to_path_buf()
         } else {
             root.join(".cas")
@@ -62,7 +76,7 @@ impl Measurement {
             )
             .is_some()
         };
-        let mut reference = if exists(&remote) {
+        let mut reference = if integration_only || exists(&remote) {
             remote
         } else if exists(target) {
             target.into()
@@ -71,7 +85,8 @@ impl Measurement {
         };
         // A worker ahead of integration must see its own new changes. A stale
         // or divergent checkout must not hide drift on the integration ref.
-        if reference != "HEAD"
+        if !integration_only
+            && reference != "HEAD"
             && git(&root, &["merge-base", "--is-ancestor", &reference, "HEAD"]).is_some()
             && git(&root, &["rev-parse", &reference]) != git(&root, &["rev-parse", "HEAD"])
         {
@@ -87,11 +102,19 @@ impl Measurement {
     /// Preserve explicit fixture/project roots while letting shared-store
     /// consumers follow a cwd in another linked checkout of that repository.
     pub fn for_store(cas_root: &Path) -> Self {
+        Self::resolve_store(cas_root, false)
+    }
+
+    pub fn integration_for_store(cas_root: &Path) -> Self {
+        Self::resolve_store(cas_root, true)
+    }
+
+    fn resolve_store(cas_root: &Path, integration_only: bool) -> Self {
         let hint = cas_root.parent().unwrap_or(cas_root);
         let cwd = std::env::current_dir()
             .ok()
             .filter(|cwd| same_repo(cwd, hint));
-        Self::at(cwd.as_deref().unwrap_or(hint), cas_root)
+        Self::resolve(cwd.as_deref().unwrap_or(hint), cas_root, integration_only)
     }
 
     pub fn read(&self, path: &str) -> Option<String> {
@@ -144,6 +167,181 @@ impl Measurement {
     }
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct ArtifactDrift {
+    pub name: &'static str,
+    pub path: String,
+    pub drift_count: Option<usize>,
+    pub unit: &'static str,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_count: Option<usize>,
+}
+
+impl ArtifactDrift {
+    fn unknown(name: &'static str, path: &str, unit: &'static str) -> Self {
+        Self {
+            name,
+            path: path.into(),
+            drift_count: None,
+            unit,
+            state: "unknown",
+            detail: None,
+            debt_count: None,
+        }
+    }
+
+    fn observe(&mut self, count: Option<usize>) {
+        self.drift_count = count;
+        self.state = match count {
+            None => "missing",
+            Some(0) => "current",
+            Some(_) => "drift",
+        };
+    }
+}
+
+/// Shared integration inventory for status and post-save enforcement warnings.
+/// Curation debt is deliberately not registry drift or a predicted close refusal.
+#[derive(serde::Serialize)]
+pub(crate) struct UpkeepReport {
+    pub measured_ref: String,
+    pub codemap: ArtifactDrift,
+    pub product_overview: ArtifactDrift,
+    pub registry: ArtifactDrift,
+}
+
+impl UpkeepReport {
+    pub fn at(measurement: &Measurement, qa: &crate::config::QaConfig) -> Self {
+        use super::{codemap::CodemapStaleness, project_overview::ProjectOverviewStaleness};
+        let sha = git(
+            &measurement.root,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", measurement.reference),
+            ],
+        );
+        let mut report = Self {
+            measured_ref: format!(
+                "{}@{}",
+                measurement.reference,
+                sha.as_deref().map(str::trim).unwrap_or("unavailable")
+            ),
+            codemap: ArtifactDrift::unknown(
+                "CODEMAP",
+                ".claude/CODEMAP.md",
+                "structural change(s)",
+            ),
+            product_overview: ArtifactDrift::unknown(
+                "PRODUCT_OVERVIEW",
+                super::project_overview::DOC_PATH,
+                "relevant change(s)",
+            ),
+            registry: ArtifactDrift::unknown(
+                "journey registry",
+                &qa.registry.path,
+                "registry issue(s)",
+            ),
+        };
+        let Some(sha) = sha else {
+            return report;
+        };
+        // Keep every read on the named commit even if another process fetches
+        // or advances the integration ref while this report is being built.
+        let snapshot = Measurement {
+            root: measurement.root.clone(),
+            store: measurement.store.clone(),
+            reference: sha.trim().into(),
+        };
+        let measurement = &snapshot;
+        if let Some(evaluation) = super::codemap::evaluate_codemap_at(measurement) {
+            report.codemap.observe(match evaluation.staleness {
+                None => Some(0),
+                Some(CodemapStaleness::Missing) => None,
+                Some(
+                    CodemapStaleness::Stale { total_changes, .. }
+                    | CodemapStaleness::SignificantlyStale { total_changes, .. },
+                ) => Some(total_changes),
+            });
+        }
+        let watch_warning = measurement
+            .read(super::project_overview::DOC_PATH)
+            .and_then(|overview| {
+                let config = measurement
+                    .read(".cas/config.toml")
+                    .or_else(|| std::fs::read_to_string(measurement.store.join("config.toml")).ok())
+                    .and_then(|text| super::project_overview::config_section(&text));
+                super::project_overview::resolve_watch_targets(config, Some(&overview), || {
+                    measurement.tracked()
+                })
+                .warning
+            });
+        if let Some(warning) = watch_warning {
+            report.product_overview.detail = Some(warning);
+        } else {
+            match super::project_overview::check_freshness_at(measurement) {
+                Ok(staleness) => report.product_overview.observe(match staleness {
+                    None => Some(0),
+                    Some(ProjectOverviewStaleness::Missing) => None,
+                    Some(
+                        ProjectOverviewStaleness::Stale { total_changes, .. }
+                        | ProjectOverviewStaleness::SignificantlyStale { total_changes, .. },
+                    ) => Some(total_changes),
+                }),
+                Err(error) => report.product_overview.detail = Some(error.to_string()),
+            }
+        }
+        let Some(tracked) = git(
+            &measurement.root,
+            &["ls-tree", "-rz", "--name-only", &measurement.reference],
+        ) else {
+            return report;
+        };
+        let tracked: Vec<String> = tracked
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let registry = measurement
+            .read(&qa.registry.path)
+            .map(|text| crate::qa_registry::parse(&text));
+        let status = crate::qa_seed::status_with_registry(qa, registry, &tracked);
+        if status.present {
+            report
+                .registry
+                .observe(Some(status.problems.len() + status.unowned_surfaces.len()));
+            if !status.valid {
+                report.registry.state = "invalid";
+            }
+            report.registry.debt_count = Some(status.debt_count);
+            report.registry.detail = Some(format!(
+                "{} validation problem(s), {} unowned surface file(s)",
+                status.problems.len(),
+                status.unowned_surfaces.len()
+            ));
+        } else {
+            report.registry.observe(None);
+        }
+        report
+    }
+
+    pub fn for_key(&self, key: &str) -> Option<&ArtifactDrift> {
+        match key {
+            "upkeep.codemap" => Some(&self.codemap),
+            "upkeep.product_overview" => Some(&self.product_overview),
+            "qa.registry.enforce" => Some(&self.registry),
+            _ => None,
+        }
+    }
+
+    pub fn artifacts(&self) -> [&ArtifactDrift; 3] {
+        [&self.codemap, &self.product_overview, &self.registry]
+    }
+}
+
 /// A status read never initializes or migrates the shared store. Only one
 /// unambiguous current assignment may supply the task's integration target.
 fn task_target(root: &Path, store: &Path) -> Option<String> {
@@ -161,7 +359,7 @@ fn task_target(root: &Path, store: &Path) -> Option<String> {
     }
     let mut statement = conn
         .prepare(
-        "SELECT deliverables FROM tasks WHERE status = 'in_progress'
+            "SELECT deliverables FROM tasks WHERE status = 'in_progress'
          AND assignee IN (SELECT value FROM json_each(?1)) LIMIT 2",
         )
         .ok()?;

@@ -314,24 +314,14 @@ fn probe_claude_auth_with(
                 "Retry doctor after one minute; a transient probe failure is not an unavailable account.",
             ),
         )?;
-        let evidence = if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
-            unknown(
-                now_ms,
-                "macOS login keychain locked in ssh session",
-                "Unlock the login keychain from a local macOS session, then retry doctor after one minute.",
-            )
-        } else {
-            probe_claude_auth_uncached(account_dir, now_ms, deadline, run)
-        };
-        write_claude_auth_cache(&mut file, &evidence)?;
+        let evidence = probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run);
+        // A completed probe already supplies real evidence. Persistence failure
+        // must neither hide that result nor launch the auth command a second time.
+        let _ = write_claude_auth_cache(&mut file, &evidence);
         Ok(evidence)
     })();
     cached.unwrap_or_else(|_| {
-        unknown(
-            now_ms,
-            "Claude auth probe cache could not be accessed",
-            "Restore read/write access to ~/.cas/cache/claude-auth, then retry doctor.",
-        )
+        probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run)
     })
 }
 
@@ -382,12 +372,20 @@ fn probe_claude_auth_uncached(
     account_dir: Option<&str>,
     now_ms: u64,
     deadline: Deadline,
+    macos_ssh: bool,
     run: &mut impl FnMut(
         &mut Command,
         Deadline,
         Duration,
     ) -> Result<std::process::Output, BoundedCommandError>,
 ) -> CapabilityEvidence {
+    if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
+        return unknown(
+            now_ms,
+            "macOS login keychain locked in ssh session",
+            "Unlock the login keychain from a local macOS session, then retry doctor after one minute.",
+        );
+    }
     let mut command = Command::new("claude");
     if let Some(account_dir) = account_dir.filter(|dir| !dir.trim().is_empty()) {
         command
@@ -682,6 +680,37 @@ mod tests {
                 run_command(command, deadline, cap)
             },
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_cache_failure_keeps_real_auth_evidence_cas_eb0f() {
+        let mut env = claude_probe_fixture();
+        let cache = env.home().join(".cas/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        // A file in place of the cache directory fails even under privileged
+        // test runners; unlike chmod, it deterministically prevents caching.
+        std::fs::write(cache.join("claude-auth"), "not a directory").unwrap();
+        let calls = env.home().join("claude-calls");
+        for (index, (response, expected)) in [
+            (r#"{"loggedIn":false}"#, CapabilityAvailability::Unavailable),
+            (r#"{"loggedIn":true}"#, CapabilityAvailability::Available),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            env.set("CLAUDE_TEST_STATUS", response);
+            let evidence = fixture_claude_probe(&env, None, 10, false);
+            assert_eq!(
+                evidence.availability, expected,
+                "a broken optional cache must not hide the account's real auth status"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap().lines().count(),
+                index + 1,
+                "each failed-cache request must execute exactly one real auth probe"
+            );
+        }
     }
 
     #[cfg(unix)]

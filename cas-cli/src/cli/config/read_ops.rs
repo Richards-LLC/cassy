@@ -147,6 +147,29 @@ pub(crate) fn set_config_value(
     cas_root: &Path,
     context: impl FnOnce() -> InvocationContext,
 ) -> anyhow::Result<String> {
+    update_config_in_place(
+        config,
+        key,
+        cas_root,
+        |before, after| {
+            let old_value = before.get(key).unwrap_or_default();
+            after.set(key, value)?;
+            Ok(old_value)
+        },
+        |before, after| guard_operator_config(before, after, context),
+    )
+}
+
+/// Apply a validated mutation through the config editor without serializing
+/// unrelated defaults back into the document. The guard lets the operator-only
+/// write-roots path retain its separate cgroup policy.
+pub(crate) fn update_config_in_place<T>(
+    config: &mut Config,
+    key: &str,
+    cas_root: &Path,
+    update: impl FnOnce(&Config, &mut Config) -> anyhow::Result<T>,
+    guard: impl FnOnce(&Config, &Config) -> anyhow::Result<()>,
+) -> anyhow::Result<T> {
     let _lock = crate::config::lock_project_config(cas_root)?;
     let path = cas_root.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
@@ -159,21 +182,25 @@ pub(crate) fn set_config_value(
     } else {
         toml::from_str(&raw)?
     };
-    let old_value = before.get(key).unwrap_or_default();
     let mut after = before.clone();
-    after.set(key, value)?;
+    let result = update(&before, &mut after)?;
 
     let serialized_after = toml::to_string(&after)?;
     let after_document = toml_edit::Document::parse(serialized_after)?;
-    let replacement = config_document_item(after_document.as_item(), key).cloned();
     let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    set_config_document_item(&mut document, key, replacement)?;
+    let (serialized_path, stored_path, alternate_path) =
+        config_document_paths(&document, key);
+    let replacement = config_document_item(after_document.as_item(), serialized_path).cloned();
+    set_config_document_item(&mut document, stored_path, replacement)?;
+    if let Some(alternate_path) = alternate_path {
+        set_config_document_item(&mut document, alternate_path, None)?;
+    }
     if let Some(marker) = upkeep_observe_marker_for_set(key) {
         set_config_document_item(&mut document, marker, None)?;
     }
     let contents = document.to_string();
     let saved: Config = toml::from_str(&contents)?;
-    guard_operator_config(&before, &saved, context)?;
+    guard(&before, &saved)?;
     if contents != raw {
         crate::config::atomic_replace_project_config(&path, &contents)?;
     }
@@ -181,12 +208,44 @@ pub(crate) fn set_config_value(
     if key == "viktor.enabled" {
         crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
     }
-    Ok(old_value)
+    Ok(result)
 }
 
 fn config_document_item<'a>(item: &'a toml_edit::Item, path: &str) -> Option<&'a toml_edit::Item> {
     path.split('.')
         .try_fold(item, |item, part| item.as_table_like()?.get(part))
+}
+
+fn config_document_paths<'a>(
+    document: &toml_edit::DocumentMut,
+    key: &'a str,
+) -> (&'a str, &'a str, Option<&'a str>) {
+    let (serialized_path, alternate_path) = match key {
+        "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+            ("factory.cargo_build_jobs", Some("factory.worker_build_jobs"))
+        }
+        "staging.staging_dir" | "staging.large_artifact_dir" => {
+            ("staging.staging_dir", Some("staging.large_artifact_dir"))
+        }
+        _ => (key, None),
+    };
+    let stored_path = if config_document_item(document.as_item(), serialized_path).is_some() {
+        serialized_path
+    } else if let Some(alternate_path) = alternate_path.filter(|path| {
+        config_document_item(document.as_item(), path).is_some()
+    }) {
+        alternate_path
+    } else {
+        serialized_path
+    };
+    let remove_path = alternate_path.map(|alternate_path| {
+        if stored_path == serialized_path {
+            alternate_path
+        } else {
+            serialized_path
+        }
+    });
+    (serialized_path, stored_path, remove_path)
 }
 
 fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {
@@ -295,6 +354,39 @@ fn reset_config_value(
     Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
 }
 
+#[derive(serde::Serialize)]
+struct EnforcementWarning {
+    artifact: &'static str,
+    drift_count: usize,
+    unit: &'static str,
+    measured_ref: String,
+}
+
+fn enforcement_warning(
+    config: &Config,
+    key: &str,
+    old: &str,
+    value: &str,
+    cas_root: &Path,
+) -> Option<EnforcementWarning> {
+    if value != "enforce"
+        || !matches!(old, "off" | "observe")
+        || upkeep_observe_marker_for_set(key).is_none()
+    {
+        return None;
+    }
+    use crate::hooks::handlers::handlers_events::docs_freshness::{Measurement, UpkeepReport};
+    let report = UpkeepReport::at(&Measurement::integration_for_store(cas_root), &config.qa());
+    let artifact = report.for_key(key)?;
+    let count = artifact.drift_count.filter(|count| *count > 0)?;
+    Some(EnforcementWarning {
+        artifact: artifact.name,
+        drift_count: count,
+        unit: artifact.unit,
+        measured_ref: report.measured_ref,
+    })
+}
+
 fn execute_set_internal(
     config: &mut Config,
     key: &str,
@@ -310,21 +402,57 @@ fn execute_set_internal(
         InvocationContext::from_process,
     )?;
 
+    // Measurement is best effort after the successful save, outside its config lock.
+    let warnings: Vec<_> = enforcement_warning(config, key, &old_value, value, cas_root)
+        .into_iter()
+        .collect();
     if cli.json {
         let json = serde_json::json!({
             "key": key,
             "old_value": old_value,
-            "new_value": value
+            "new_value": value,
+            "warnings": warnings
         });
         println!("{}", serde_json::to_string(&json)?);
     } else {
         let theme = ActiveTheme::default();
         let mut out = std::io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
-        fmt.success(&format!("Set {key} = {value}"))?;
-        if !old_value.is_empty() && old_value != value {
-            fmt.write_raw("  ")?;
-            fmt.write_muted(&format!("was: {old_value}"))?;
+        let shadowed_mode = (key == "hub.tailscale_serve")
+            .then(|| config.hub.as_ref().and_then(|hub| hub.transport_mode))
+            .flatten();
+        if let Some(mode) = shadowed_mode {
+            let effective_value = config.get(key).unwrap_or_else(|| value.to_owned());
+            let requested_mode = if value == "true" { "auto" } else { "loopback" };
+            fmt.warning(&format!(
+                "Legacy {key} = {value} saved; ignored by hub.transport_mode."
+            ))?;
+            fmt.write_raw(&format!(
+                "  Effective value: {key} = {effective_value} (transport_mode = {}).",
+                mode.as_str()
+            ))?;
+            fmt.newline()?;
+            fmt.write_raw(&format!(
+                "  Use: cas config set hub.transport_mode {requested_mode}"
+            ))?;
+            fmt.newline()?;
+        } else {
+            fmt.success(&format!("Set {key} = {value}"))?;
+            if !old_value.is_empty() && old_value != value {
+                fmt.write_raw("  ")?;
+                fmt.write_muted(&format!("was: {old_value}"))?;
+                fmt.newline()?;
+            }
+        }
+        for warning in &warnings {
+            fmt.write_raw(&format!(
+                "WARNING: {} drift: {} {}",
+                warning.artifact, warning.drift_count, warning.unit
+            ))?;
+            fmt.newline()?;
+            fmt.write_raw(&crate::cli::qa::measured_ref_line(&warning.measured_ref))?;
+            fmt.newline()?;
+            fmt.write_raw("Review: cas qa journeys --status --json")?;
             fmt.newline()?;
         }
     }

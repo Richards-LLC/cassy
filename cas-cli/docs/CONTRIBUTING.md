@@ -284,6 +284,8 @@ that session without creating a new log directory or running launch-only checks.
 Refused launches with `--name` append to that session's `launch.log`. Unnamed
 refusals append to one stable project file, `<CAS_ROOT>/<logging.log_dir>/factory-launch.log`
 (by default `.cas/logs/factory-launch.log`), without reserving a session name.
+Before a project store exists, unnamed refusals use `~/.cas/logs/factory-launch.log`
+and leave the project's `.cas` absent so `cas init` can initialize it normally.
 A refused launch prints its log path alongside its original reason. Repeated
 refusals append dated records at the same path.
 
@@ -1327,6 +1329,18 @@ each live and requested builder and refuse when that would reach
 builder-slot locks count on macOS as well as Linux. No-code spawns reserve no
 target growth. Disk headroom is rechecked on proof continuations, and a failed
 capacity probe refuses admission until the target volume can be inspected.
+At projected disk pressure, admission first makes one attempt to reclaim stale,
+verified worker targets under `factory.scratch_root`, retaining the configured
+warm caches and all live, recent or unverifiable output. It logs the reclaimed
+bytes and remeasures actual free space before deciding whether to refuse. This
+attempt does not remove unmanaged scratch directories or run full factory GC.
+Worker shutdown and replacement also retire safe terminal or parked-and-pushed
+targets, copying proof logs to durable artifacts before removal. In-progress,
+unpushed or unverifiable work keeps its target and checkout.
+QA candidate builds use a private bounded target inside their owned release
+scratch directory. Candidate artifacts are copied out before that directory is
+removed; existing shared supervisor targets remain review-only. Interrupted
+candidate directories use the release-scratch GC naming and ownership protocol.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |

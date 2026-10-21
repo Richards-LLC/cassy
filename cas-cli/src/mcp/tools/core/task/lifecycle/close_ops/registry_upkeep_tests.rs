@@ -182,6 +182,30 @@ fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
 
 #[test]
 fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
+    // A failed selector must not erase the G1 findings already computed.
+    let mut failed_impact = Fixture::new(&format!("selection: legacy_catalog\n{YAML}"));
+    git(
+        failed_impact.repo.path(),
+        &["mv", "src/pages/signup.ts", "src/pages/renamed.ts"],
+    );
+    let head = commit(failed_impact.repo.path());
+    let error = failed_impact.run(&head).unwrap_err();
+    assert!(
+        error.contains("JOURNEY REGISTRY BROKEN")
+            && error.contains("signup.ts")
+            && error.contains("legacy_catalog selection requires docs/qa/journeys.md"),
+        "{error}"
+    );
+    failed_impact.decision("registry unchanged: journey retirement reviewed");
+    assert!(
+        failed_impact
+            .run(&head)
+            .unwrap()
+            .join("\n")
+            .contains("not blocking"),
+        "unavailable analysis alone cannot establish a diff-caused problem"
+    );
+
     let yaml = YAML.replace(
         "surfaces:",
         "owner_groups:\n  historical: {description: Old, globs: ['old/**']}\nsurfaces:",
@@ -278,6 +302,57 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
 
 #[test]
 fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
+    // A delivery that breaks YAML retains the base policy's severity, including
+    // a tracked header that overrides a different local configuration.
+    for (header, local, expected) in [
+        (
+            None,
+            RegistryEnforcement::Observe,
+            RegistryEnforcement::Observe,
+        ),
+        (None, RegistryEnforcement::Off, RegistryEnforcement::Off),
+        (
+            Some("observe"),
+            RegistryEnforcement::Strict,
+            RegistryEnforcement::Observe,
+        ),
+        (
+            Some("enforce"),
+            RegistryEnforcement::Off,
+            RegistryEnforcement::Enforce,
+        ),
+    ] {
+        let yaml = header.map_or_else(
+            || YAML.to_owned(),
+            |stage| format!("enforce: {stage}\n{YAML}"),
+        );
+        let mut broken = Fixture::new(&yaml);
+        broken.qa.registry.enforce = local;
+        write(
+            broken.repo.path(),
+            crate::qa_registry::DEFAULT_PATH,
+            "invalid: [",
+        );
+        let head = commit(broken.repo.path());
+        let result = broken.run(&head);
+        match expected {
+            RegistryEnforcement::Off => {
+                assert!(result.unwrap().is_empty());
+                assert!(broken.store.get(&broken.task.id).unwrap().notes.is_empty());
+            }
+            RegistryEnforcement::Observe => {
+                result.unwrap();
+                let notes = broken.store.get(&broken.task.id).unwrap().notes;
+                assert!(
+                    notes.contains("UPKEEP OBSERVE G1")
+                        && notes.contains("JOURNEY REGISTRY BROKEN"),
+                    "{notes}"
+                );
+            }
+            _ => assert!(result.unwrap_err().contains("JOURNEY REGISTRY BROKEN")),
+        }
+    }
+
     let mut config = crate::config::Config::default();
     let key = "qa.registry.enforce";
     assert_eq!(config.get(key).as_deref(), Some("enforce"));
@@ -356,6 +431,29 @@ fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
 
 #[test]
 fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
+    // Repairing an unreadable base cannot disable the gate in the same delivery,
+    // even when the local fallback is off; strict local policy must also survive.
+    for stage in [RegistryEnforcement::Off, RegistryEnforcement::Strict] {
+        let mut repair = Fixture::new("invalid: [");
+        if stage == RegistryEnforcement::Strict {
+            write(repair.repo.path(), "src/pages/legacy.ts", "old");
+            repair.base = commit(repair.repo.path());
+        }
+        repair.qa.registry.enforce = stage;
+        write(repair.repo.path(), "src/pages/legacy.ts", "changed");
+        write(
+            repair.repo.path(),
+            crate::qa_registry::DEFAULT_PATH,
+            &format!("enforce: off\n{YAML}"),
+        );
+        let head = commit(repair.repo.path());
+        let error = repair.run(&head).unwrap_err();
+        assert!(
+            error.contains("UNOWNED USER-FACING FILE") && error.contains("legacy.ts"),
+            "{stage:?}: {error}"
+        );
+    }
+
     let mut f = Fixture::new("invalid: [");
     write(f.repo.path(), "src/pages/new.ts", "entry");
     let head = commit(f.repo.path());
@@ -381,4 +479,40 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
     );
     f.decision("registry unchanged: existing parse debt is being migrated");
     f.run(&head).unwrap();
+}
+
+#[test]
+fn registry_upkeep_catalog_drift_refuses_with_missing_journey() {
+    let mut f = Fixture::new(&format!("selection: legacy_catalog\n{YAML}"));
+    write(
+        f.repo.path(),
+        "scripts/journeys-for-diff.py",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/journeys-for-diff.py"
+        )),
+    );
+    // The catalog changes but the registry does not: selected metadata is absent.
+    write(
+        f.repo.path(),
+        "docs/qa/journeys.md",
+        "## hub-web\n\n### HUB-J99 · New entry\n\n- **Touches:** `src/pages/signup.ts`\n",
+    );
+    let head = commit(f.repo.path());
+    let error = f.run(&head).unwrap_err();
+    assert!(
+        error.contains("JOURNEY REGISTRY BROKEN")
+            && error.contains("HUB-J99")
+            && error.contains(crate::qa_registry::DEFAULT_PATH),
+        "{error}"
+    );
+    f.qa.registry.enforce = RegistryEnforcement::Observe;
+    f.run(&head).unwrap();
+    assert!(
+        f.store
+            .get(&f.task.id)
+            .unwrap()
+            .notes
+            .contains("UPKEEP OBSERVE G1")
+    );
 }

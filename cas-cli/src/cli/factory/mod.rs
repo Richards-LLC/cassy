@@ -2111,7 +2111,21 @@ fn record_factory_launch_diagnostics(
     let log_dir = cas_root.join(&logging.log_dir);
     let path = match session_name {
         Some(name) => crate::ui::factory::session_log_dir(name).join("launch.log"),
-        None => log_dir.join("factory-launch.log"),
+        None if crate::store::detect::cas_store_present(cas_root) => {
+            log_dir.join("factory-launch.log")
+        }
+        // A refusal must not create a project's .cas: init treats its presence
+        // as initialization. Keep pre-init diagnostics in the host log directory.
+        None => dirs::home_dir()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "home directory unavailable for factory launch diagnostics",
+                )
+            })?
+            .join(".cas")
+            .join("logs")
+            .join("factory-launch.log"),
     };
     std::fs::create_dir_all(path.parent().expect("launch log directory"))?;
     let now = chrono::Local::now();
@@ -2422,10 +2436,9 @@ mod tests {
     #[test]
     fn attach_reuses_session_without_speculative_launch_logs_cas_2688() {
         use crate::ui::factory::{SessionManager, create_metadata, socket_path};
-        let env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let project = env.home().join("project");
-        let root = project.join(".cas");
-        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
         std::fs::write(
             root.join("config.toml"),
             "[logging]\nlog_dir = 'runtime-traces'\n",
@@ -2445,8 +2458,9 @@ mod tests {
             .unwrap();
         let _listener =
             std::os::unix::net::UnixListener::bind(socket_path("running-session")).unwrap();
+        let session_logs = env.home().join(".cas/logs/factory");
         let session_dirs = || {
-            std::fs::read_dir(env.home().join(".cas/logs/factory"))
+            std::fs::read_dir(&session_logs)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<std::collections::BTreeSet<_>>()
@@ -2478,19 +2492,37 @@ mod tests {
 
         // An actual unnamed launch refusal gets one project-scoped log, not a new session.
         args.legacy = true;
-        let refusal_path = root.join("runtime-traces/factory-launch.log");
-        for _ in 0..2 {
-            let error = prepare_factory_session(&args, &project, Some(&root))
-                .err()
-                .unwrap();
-            let error = format!("{error:#}");
-            assert!(
-                error.contains(&refusal_path.display().to_string()),
-                "{error}"
-            );
+        // Keep the missing-store row outside HOME so its ancestor is not the host .cas.
+        let uninitialized = tempfile::tempdir().unwrap();
+        env.remove("CAS_ROOT");
+        for (cwd, cas_root, refusal_path) in [
+            (
+                project.as_path(),
+                Some(root.as_path()),
+                root.join("runtime-traces/factory-launch.log"),
+            ),
+            (
+                uninitialized.path(),
+                None,
+                env.home().join(".cas/logs/factory-launch.log"),
+            ),
+        ] {
+            for _ in 0..2 {
+                let error = prepare_factory_session(&args, cwd, cas_root).err().unwrap();
+                let error = format!("{error:#}");
+                assert!(
+                    !uninitialized.path().join(".cas").exists(),
+                    "refusal initialized {}",
+                    cwd.display()
+                );
+                assert!(
+                    error.contains(&refusal_path.display().to_string()),
+                    "{error}"
+                );
+            }
+            let refusals = std::fs::read_to_string(refusal_path).unwrap();
+            assert_eq!(refusals.matches("Refused before daemon startup").count(), 2);
         }
-        let refusals = std::fs::read_to_string(refusal_path).unwrap();
-        assert_eq!(refusals.matches("Refused before daemon startup").count(), 2);
         assert_eq!(
             session_dirs(),
             before,

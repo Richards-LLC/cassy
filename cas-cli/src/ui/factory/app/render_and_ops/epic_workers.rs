@@ -873,10 +873,29 @@ fn prefer_fresher_base_ref_observed(
     // prove freshness after a failed fetch. Managed epics own their observation
     // and publication policy, so they deliberately arrive with fetch=false.
     if verify_origin {
-        git.fetch_branch(branch).map_err(|error| format!(
-            "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
-            observed_state(),
-        ))?;
+        git.fetch_branch(branch).map_err(|error| {
+            // A failed fetch alone cannot distinguish missing publication from
+            // transport failure. Git's exit 2 means a reachable origin has no
+            // matching head; stderr and cached refs are not absence evidence.
+            let mut command = std::process::Command::new("git");
+            command.args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(repo_root);
+            let absent = crate::worktree::GitOperations::run_command_bounded(
+                command, std::time::Duration::from_secs(10),
+            ).is_ok_and(|output| output.status.code() == Some(2));
+            if absent {
+                format!(
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    observed_state(),
+                )
+            } else {
+                format!(
+                    "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
+                    observed_state(),
+                )
+            }
+        })?;
     }
     if base.starts_with("origin/") {
         return Ok((None, None));
@@ -997,9 +1016,6 @@ fn checkout_ref_for_spawn_base_observed(
     repo_root: &std::path::Path, parent_branch: &str, source: &SpawnBaseSource, fetch: bool,
 ) -> Result<(Option<String>, Option<String>, String), String> {
     let (mut base_ref, mut freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch)?;
-    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
-        freshness_notice = Some(format!("SPAWN BASE LOCAL-ONLY: '{parent_branch}' has no configured origin remote; using the local tip."));
-    }
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
@@ -1020,6 +1036,17 @@ fn checkout_ref_for_spawn_base_observed(
                 base_ref = Some(local_sha);
             }
         }
+    }
+    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
+        let selected = base_ref.as_deref().unwrap_or(parent_branch);
+        let sha = full_sha(repo_root, selected).unwrap_or_else(|| "unresolved".into());
+        let remote = format!("origin/{parent_branch}");
+        if base_ref.is_some() && full_sha(repo_root, &remote).as_deref() == Some(sha.as_str()) {
+            checkout_ref = remote;
+        }
+        freshness_notice = Some(format!(
+            "SPAWN BASE LOCAL-ONLY: origin is not configured; checkout '{checkout_ref}' ({sha})."
+        ));
     }
     Ok((base_ref, freshness_notice, checkout_ref))
 }
@@ -1435,14 +1462,21 @@ pub fn crash_cleanup_io(cleanup: &CrashCleanup) -> CrashCleanupOutcome {
     let Ok(agent_store) = open_agent_store(&cleanup.cas_dir) else {
         return CrashCleanupOutcome { worktree: None };
     };
-    let Some(agent_id) = agent_store
+    let Some(agent) = agent_store
         .list(None)
         .ok()
-        .and_then(|agents| agents.into_iter().find(|a| a.name == name).map(|a| a.id))
+        .and_then(|agents| agents.into_iter().find(|a| a.name == name))
     else {
         return CrashCleanupOutcome { worktree: None };
     };
-    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) {
+    let agent_id = agent.id.clone();
+    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) || worker_has_open_tasks(&cleanup.cas_dir, name) {
+        return CrashCleanupOutcome { worktree: None };
+    }
+    // Never orphan relocated output by deleting its checkout/provenance first.
+    if crate::factory_scratch::worker_target_dir(&plan.worktree.path).exists()
+        && !crate::factory_target_cache::retirement::retire_worker(&cleanup.cas_dir, &agent).unwrap_or(false)
+    {
         return CrashCleanupOutcome { worktree: None };
     }
     let outcome = crate::worktree::remove_worker_worktree_io(plan);
@@ -2929,6 +2963,18 @@ impl FactoryApp {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }
 
+        // Reclaim safe terminal/parked output for shutdown AND replacement.
+        // Check before settling bindings: that step can clear task assignees.
+        // Retirement checks the configured scratch path and preserves evidence
+        // before deleting; no absent in-tree target can stand in for success.
+        let target_retired = match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
+            Ok(complete) => complete,
+            Err(error) => {
+                tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
+                false
+            }
+        };
+
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
         let (_, released_task_ids) = settle_retired_worker_bindings_reporting(
@@ -2959,21 +3005,6 @@ impl FactoryApp {
 
         // Ensure selected tab is still valid
         self.clamp_selected_worker_tab();
-
-        // Evidence becomes durable even when a checkout stays parked. Recycle
-        // keeps its warm target; a shutdown attempts complete target retirement.
-        let target_retired = if preserve_worktree {
-            false
-        } else {
-            match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
-                Ok(removed) => removed || agent.metadata.get("clone_path")
-                    .is_some_and(|path| !std::path::Path::new(path).join("target").exists()),
-                Err(error) => {
-                    tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
-                    false
-                }
-            }
-        };
 
         // Teardown the worker's worktree when it's safe. "Safe" means all of its
         // tasks are Closed AND the tree is clean — we never destroy in-progress
@@ -4746,6 +4777,21 @@ mod spawn_base_tests {
                 target_branch: "main".into(),
             });
             open_task_store_cached(&f.root).unwrap().add(&task).unwrap();
+            // cas-cd99: reachable origin lacks this local-only branch; the
+            // operator needs publication guidance, not an access repair.
+            super::spawn_readiness_tests::git(&f.repo, &["branch", "feature/unpublished"]);
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "feature/unpublished".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("unpublished branch must name the publication requirement").to_string();
+            assert!(error.contains("origin/feature/unpublished") && error.contains("not published"), "{error}");
+            assert!(error.contains("git push origin feature/unpublished"), "{error}");
+            assert!(!error.contains("restore origin access"), "{error}");
+            assert_eq!(full_sha(&f.repo, "feature/unpublished").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "main".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
             f.offline();
             let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
                 .err().expect("cached equal refs cannot prove a configured origin is current").to_string();
@@ -4770,6 +4816,21 @@ mod spawn_base_tests {
         assert_eq!(prefer_fresher_base_ref(&repo, "main"), (None, None));
         let (_, notice, _) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
         assert!(notice.unwrap().contains("LOCAL-ONLY"));
+
+        // cas-cd99: an origin-less repo can retain a tracking ref from a
+        // previous fetch. The notice must name that actual checkout source.
+        let local = full_sha(&repo, "main").unwrap();
+        commit_file(&repo, "cached-only.txt", "cached origin content");
+        let cached = full_sha(&repo, "main").unwrap();
+        super::spawn_readiness_tests::git(&repo, &["update-ref", "refs/remotes/origin/main", &cached]);
+        super::spawn_readiness_tests::git(&repo, &["reset", "--hard", &local]);
+        let (base_ref, notice, checkout_ref) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
+        assert_eq!(base_ref.as_deref(), Some(cached.as_str()));
+        assert_eq!(checkout_ref, "origin/main");
+        let notice = notice.unwrap();
+        assert!(notice.contains("LOCAL-ONLY") && notice.contains("origin/main"), "{notice}");
+        assert!(notice.contains(&cached), "{notice}");
+        assert_eq!(full_sha(&repo, "main").as_deref(), Some(local.as_str()));
     }
 
     #[test]

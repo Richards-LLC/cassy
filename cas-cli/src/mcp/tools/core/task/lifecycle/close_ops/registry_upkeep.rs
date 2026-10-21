@@ -288,13 +288,26 @@ fn check(
     let mut qa = qa.clone();
     // A delivery cannot relax its own gate. At each revision the tracked
     // header wins, with local configuration as fallback only when absent.
+    // An unreadable base cannot authorize a downgrade: retain at least enforce
+    // (or local strict). A broken head keeps the base/local policy's severity.
     if let Some(stage) = [base, head]
         .into_iter()
         .filter_map(|revision| {
-            git(repo, &["show", &format!("{revision}:{}", qa.registry.path)]).ok()
+            git(repo, &["show", &format!("{revision}:{}", qa.registry.path)])
+                .ok()
+                .map(|text| (revision, text))
         })
-        .filter_map(|text| crate::qa_registry::parse(&text).ok())
-        .map(|registry| registry.enforce.unwrap_or(qa.registry.enforce))
+        .filter_map(|(revision, text)| match crate::qa_registry::parse(&text) {
+            Ok(registry) => Some(registry.enforce.unwrap_or(qa.registry.enforce)),
+            Err(_) if revision == base => {
+                Some(if qa.registry.enforce == RegistryEnforcement::Strict {
+                    RegistryEnforcement::Strict
+                } else {
+                    RegistryEnforcement::Enforce
+                })
+            }
+            Err(_) => None,
+        })
         .max_by_key(|stage| match stage {
             RegistryEnforcement::Off => 0,
             RegistryEnforcement::Observe => 1,
@@ -413,7 +426,7 @@ fn inspect(
         .filter(|p| !caused.contains(p))
         .cloned()
         .collect();
-    let warnings = if debt.is_empty() {
+    let mut warnings = if debt.is_empty() {
         vec![]
     } else {
         vec![format!(
@@ -430,7 +443,20 @@ fn inspect(
             problem_lines(&caused)
         )));
     }
-    let impact = crate::qa_impact::analyze(repo, qa, &changes, Some(base), Some(head))?;
+    let impact = match crate::qa_impact::analyze(repo, qa, &changes, Some(base), Some(head)) {
+        Ok(impact) => impact,
+        Err(error) => {
+            if error.is::<crate::qa_impact::io::CatalogDrift>() {
+                findings.push(Finding::broken(format!("{error:#}")));
+            } else {
+                warnings.push(format!(
+                    "UPKEEP WARNING: journey impact unavailable (not blocking): {error:#}"
+                ));
+            }
+            // An unavailable impact report must not erase proven G1 findings.
+            return Ok((findings, warnings));
+        }
+    };
     let unowned: Vec<_> = impact
         .unowned
         .iter()

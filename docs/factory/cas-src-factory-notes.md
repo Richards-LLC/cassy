@@ -127,6 +127,8 @@ checkout from this repository.
 
 cas-src runs every upkeep gate at `enforce`. Its tracked `docs/qa/journeys.yaml`
 declares `enforce: enforce`, authoritative over local `qa.registry.enforce`.
+Each delivery uses the stricter policy at base and head, so it cannot relax its
+own gate; a relaxed header takes effect for subsequent deliveries.
 The local registry setting applies only when the header has no policy. The first
 `cas update` that ships upkeep keys gives existing projects a one-release
 `observe` window; the tracked registry policy takes precedence. Pin the remaining

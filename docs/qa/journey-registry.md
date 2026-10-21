@@ -31,7 +31,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `version` | Required integer `1`. |
 | `updated` | Required ISO date, `YYYY-MM-DD`, of the last curated edit. |
 | `selection` | Optional `globs` (default) or `legacy_catalog`. The latter preserves the existing Markdown catalog's import and CSS selector coverage; YAML still supplies journey metadata and ownership. |
-| `enforce` | Optional `off`, `observe`, `enforce`, or `strict`. The delivered registry header is authoritative when set; local `qa.registry.enforce` is the fallback only when this header has no policy. |
+| `enforce` | Optional `off`, `observe`, `enforce`, or `strict`. The tracked header is authoritative; local `qa.registry.enforce` is fallback only when it has no policy. A delivery uses the stricter policy from base and head. |
 | `seeded_from` | Optional list of source descriptions. |
 | `traffic_snapshot` | Optional free-form map; counts and sources are not validated. |
 | `ignore` | Optional ordered path filters ignored by impact and ownership checks. |
@@ -165,9 +165,12 @@ attributed diff (including deletions and rename sources). They read Git snapshot
 uncommitted changes do not repair a delivery. Missing registries disable these gates.
 
 Header `enforce` accepts `off`, `observe`, `enforce`, or `strict`, and takes precedence
-over local `qa.registry.enforce`. The local setting is used only when the delivered
-header has no policy; its default is `enforce`. A local setting cannot downgrade a
-tracked policy, and uncommitted YAML cannot change a delivered policy.
+over local `qa.registry.enforce`. At each revision the local setting is fallback
+only when the header has no policy; its default is `enforce`. A delivery uses the
+stricter policy from base and head (`off < observe < enforce < strict`), so a
+delivery cannot relax its own gates. A relaxed header takes effect for later
+deliveries. A local setting cannot downgrade a tracked policy, and uncommitted
+YAML cannot change a delivered policy.
 `observe` persists would-be refusals as task notes and passes. `strict` is explicit
 opt-in and also checks modified unowned surface files. The stage
 is operator-controlled; strict is never selected automatically. Existing

@@ -1,6 +1,7 @@
 # Commander registry: stable journey metadata and file ownership.
 # Keep docs/qa/journeys.md as the detailed narrative and semantic selector input.
 # Header policy is authoritative; local qa.registry.enforce is fallback only.
+# A delivery uses the stricter policy at base and head.
 version: 1
 updated: '2026-10-21'
 selection: legacy_catalog

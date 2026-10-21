@@ -27,7 +27,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns.
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
-- **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<epic>`; a message to an ended session goes to its live successor.
+- **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
 - **Worker isolation** - on Linux, workers cannot read operator credential stores such as Neon and Vercel, and see only the connectors an operator grants a dedicated worker account.
 - **Memory, Rule, Skill** - durable facts, versioned instructions that sync into agent harnesses, and procedural playbooks agents load for a kind of work.
 - **Knowledge page** - a distilled, source-linked page about the current repository; the code index connects symbols to that context.
@@ -54,3 +54,9 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - Commander browser app: `hub-web/`.
 - Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`.
 - Release history: `CHANGELOG.md`.
+
+<!-- cas:project-overview
+# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
+domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs"]
+watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
+-->

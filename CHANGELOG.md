@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.68.0] - 2026-10-21
+
 ### Fixed — the macOS hub keeps its settings and restarts cleanly
 
 - **Saved hub transport** — Was: restarting or updating the hub could drop the machine's chosen transport policy. → Now: `cas hub restart` and `cas update` honor the saved `auto`, `required` or `loopback` policy from `~/.cas/config.toml`; a command-line flag overrides one launch only.

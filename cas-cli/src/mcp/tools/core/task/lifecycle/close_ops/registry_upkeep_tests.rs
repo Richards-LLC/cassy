@@ -327,9 +327,31 @@ fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
             .unwrap_err()
             .contains("UNOWNED USER-FACING FILE")
     );
+    f.base = enforced;
+    write(f.repo.path(), "src/pages/relaxed.ts", "new entry");
     let disabled = commit(f.repo.path());
+    // A delivery cannot relax its own gate: base enforce beats head off.
+    assert!(
+        f.run(&disabled)
+            .unwrap_err()
+            .contains("UNOWNED USER-FACING FILE")
+    );
+    // The relaxed header takes effect only for a later delivery.
+    f.base = disabled;
+    write(f.repo.path(), "src/pages/later.ts", "later entry");
+    let later = commit(f.repo.path());
     f.qa.registry.enforce = RegistryEnforcement::Strict;
-    f.run(&disabled).unwrap();
+    f.run(&later).unwrap();
+
+    let mut absent = Fixture::new(YAML);
+    git(
+        absent.repo.path(),
+        &["rm", crate::qa_registry::DEFAULT_PATH],
+    );
+    absent.base = commit(absent.repo.path());
+    absent.qa.registry.enforce = RegistryEnforcement::Off;
+    let same_tip = absent.base.clone();
+    assert!(absent.run(&same_tip).unwrap().is_empty());
 }
 
 #[test]

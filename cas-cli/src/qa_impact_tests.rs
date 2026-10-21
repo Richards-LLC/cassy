@@ -356,3 +356,54 @@ fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
         assert_eq!(report.journeys[0].invariants[0].id, "INV");
     }
 }
+
+#[test]
+fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let validation =
+        crate::qa_registry::check(root, Path::new(crate::qa_registry::DEFAULT_PATH)).unwrap();
+    assert!(validation.problems.is_empty(), "{:?}", validation.problems);
+    let registry = crate::qa_registry::load(&root.join(crate::qa_registry::DEFAULT_PATH)).unwrap();
+    // pin: cas-src's enforcement must travel with its tracked registry.
+    assert_eq!(
+        registry.enforce,
+        Some(crate::config::RegistryEnforcement::Enforce)
+    );
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/commander-merge-diffs.json")).unwrap();
+    let head = git(root, &["rev-parse", "HEAD"]);
+    for diff in fixture["diffs"].as_array().unwrap() {
+        // Replay real merge path sets against the migrated catalog at this head.
+        // Original revisions are provenance, not a dependency on deep CI history.
+        let files = diff["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let legacy =
+            crate::qa_evidence::journeys::journeys_for_paths_at(root, &head, &files).unwrap();
+        let report = analyze(
+            root,
+            &QaConfig::default(),
+            &files.iter().map(Change::modified).collect::<Vec<_>>(),
+            None,
+            Some(&head),
+        )
+        .unwrap();
+        assert_eq!(report.source, "registry");
+        assert!(report.registry.valid);
+        let ids = report
+            .journeys
+            .iter()
+            .map(|j| j.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, legacy, "merge {}", diff["head"]);
+        assert_eq!(
+            serde_json::to_value(ids).unwrap(),
+            diff["journeys"],
+            "captured legacy IDs for {}",
+            diff["head"]
+        );
+    }
+}

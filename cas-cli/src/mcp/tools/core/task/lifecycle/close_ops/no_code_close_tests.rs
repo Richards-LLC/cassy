@@ -1068,11 +1068,12 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
 #[tokio::test]
 async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     let mut env = TestEnvGuard::temp_home();
-    for (lane, foreign_after_start) in [
-        (LANE, false),
-        (LANE, true),
-        ("factory/nocode-worker-cas-a0b1", false),
-        ("factory/nocode-worker-cas-a0b1", true),
+    for (lane, foreign_after_start, rebase_after_start) in [
+        (LANE, false, false),
+        (LANE, true, false),
+        ("factory/nocode-worker-cas-a0b1", false, false),
+        ("factory/nocode-worker-cas-a0b1", true, false),
+        (LANE, false, true),
     ] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
@@ -1121,6 +1122,15 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
             f.task(id).deliverables.factory_branch_start.as_ref(),
             Some(&boundary)
         );
+        if rebase_after_start {
+            // A target update is already integrated work, even when a rebase
+            // puts its ordinary foreign-named commit after our start boundary.
+            std::fs::write(repo.join("target.rs"), "pub fn integrated() {}\n").unwrap();
+            git(repo, &["add", "target.rs"]);
+            git(repo, &["commit", "-q", "-m", "fix(cas-a0b1): target delivery"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            git(&worker_path, &["rebase", "origin/main"]);
+        }
         if foreign_after_start {
             std::fs::write(worker_path.join("foreign.rs"), "pub fn foreign() {}\n").unwrap();
             git(&worker_path, &["add", "foreign.rs"]);

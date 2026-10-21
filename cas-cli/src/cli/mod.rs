@@ -545,6 +545,19 @@ fn ensure_authenticated() -> anyhow::Result<()> {
     }
 }
 
+/// A failure raised after the command already printed its `--json` report.
+/// The shared error path keeps it off stdout so callers still parse one document.
+#[derive(Debug)]
+pub struct JsonReportedFailure(pub anyhow::Error);
+
+impl std::fmt::Display for JsonReportedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for JsonReportedFailure {}
+
 /// Run the CLI with the given arguments
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let tracer_timer = std::time::Instant::now();

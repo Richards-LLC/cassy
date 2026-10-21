@@ -137,7 +137,7 @@ api_request() {
             timeout_seconds="$remaining"
         fi
     fi
-    if timeout --signal=TERM "${timeout_seconds}s" "$gh_bin" api "$@" 2>"$api_failure_file"; then
+    if timeout --signal=TERM -k 5s "${timeout_seconds}s" "$gh_bin" api "$@" 2>"$api_failure_file"; then
         : >"$api_failure_file"
         return 0
     else
@@ -185,6 +185,8 @@ has_pending_run() {
 complete_run_id=""
 find_complete_run() {
     local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
+    local artifact_query_ok artifact_attempt artifact_retry_backoff artifact_retry_cap
+    local remaining sleep_for failure_reason
     complete_run_id=""
     mapfile -t run_ids < <(jq -r \
         '.workflow_runs[]? | select(.status == "completed" and .conclusion == "success") | .id // empty' \
@@ -192,8 +194,48 @@ find_complete_run() {
 
     for run_id in "${run_ids[@]}"; do
         artifacts_json=""
-        if ! artifacts_json="$(api_request "$deadline" \
-            "repos/$repo/actions/runs/$run_id/artifacts?per_page=100")"; then
+        artifact_query_ok=false
+        artifact_attempt=0
+        artifact_retry_backoff=1
+        artifact_retry_cap=30
+        while :; do
+            artifact_attempt=$((artifact_attempt + 1))
+            if artifacts_json="$(api_request "$deadline" \
+                "repos/$repo/actions/runs/$run_id/artifacts?per_page=100")"; then
+                artifact_query_ok=true
+                break
+            fi
+            # Keep the initial pre-wait lookup unchanged. During the bounded
+            # wait, retry a transient artifacts failure while time remains.
+            if [[ -z "$deadline" ]]; then
+                break
+            fi
+            remaining=$((deadline - SECONDS))
+            failure_reason="$(<"$api_failure_file")"
+            failure_reason="${failure_reason:-exit code 1}"
+            if (( remaining <= 0 )); then
+                printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s) at the deadline\n' \
+                    "$artifact_attempt" "$run_id" "$failure_reason" >&2
+                break
+            fi
+            printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s); retrying within the remaining deadline\n' \
+                "$artifact_attempt" "$run_id" "$failure_reason" >&2
+            sleep_for="$artifact_retry_backoff"
+            if (( sleep_for > remaining )); then
+                sleep_for="$remaining"
+            fi
+            if (( sleep_for > 0 )); then
+                sleep "$sleep_for"
+            fi
+            if (( artifact_retry_backoff < artifact_retry_cap )); then
+                artifact_retry_backoff=$((artifact_retry_backoff * 2))
+                if (( artifact_retry_backoff > artifact_retry_cap )); then
+                    artifact_retry_backoff="$artifact_retry_cap"
+                fi
+            fi
+            (( SECONDS < deadline )) || break
+        done
+        if [[ "$artifact_query_ok" != true ]]; then
             continue
         fi
         complete=true

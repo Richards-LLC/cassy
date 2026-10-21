@@ -382,18 +382,20 @@ pub fn start(cas_root: &Path, epic: &str, sha: &str) -> Result<Receipt> {
 pub const OVERRIDE_MARKER: &str = "POST-RELEASE OVERRIDE:";
 fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
     notes.lines().rev().find_map(|line| {
-        let (prefix, reason) = line.split_once(OVERRIDE_MARKER)?;
-        if reason.trim().is_empty() || !prefix.contains("DECISION") {
+        let (stamp, body) = line.trim_start().strip_prefix('[')?.split_once(']')?;
+        let body = body.trim_start();
+        let body = body
+            .strip_prefix("✅ DECISION")
+            .or_else(|| body.strip_prefix("DECISION:"))?
+            .trim_start();
+        let reason = body.strip_prefix(OVERRIDE_MARKER)?.trim();
+        if reason.is_empty() {
             return None;
         }
-        let when = chrono::NaiveDateTime::parse_from_str(
-            prefix.trim_start().strip_prefix('[')?.get(..16)?,
-            "%Y-%m-%d %H:%M",
-        )
-        .ok()?;
+        let when = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?;
         let age = now.naive_utc() - when;
         (age >= chrono::Duration::minutes(-5) && age <= chrono::Duration::hours(6))
-            .then_some(reason.trim())
+            .then_some(reason)
     })
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
@@ -464,7 +466,12 @@ fn run_summary(run: &Run) -> String {
             output
                 .alarms
                 .iter()
-                .map(|a| a.id.as_str())
+                .map(|a| a
+                    .id
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(80)
+                    .collect::<String>())
                 .collect::<Vec<_>>()
                 .join(",")
         ),

@@ -204,7 +204,8 @@ fn publication_gate_post_release_pending_and_override() {
     for (note, allowed) in [
         (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: "),false),
         ("[2020-01-01 00:00] DECISION: POST-RELEASE OVERRIDE: too old".into(),false),
-        (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: operator accepts the observation gap"),true),
+        (format!("[{stamp}] POST-RELEASE 1/3 ALARM DECISION: POST-RELEASE OVERRIDE: probe text is not a decision"),false),
+        (format!("[{stamp}] ✅ DECISION POST-RELEASE OVERRIDE: operator accepts the observation gap"),true),
     ] {
         store.append_note("cas-pub-epic",&note).unwrap();
         let result = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap());

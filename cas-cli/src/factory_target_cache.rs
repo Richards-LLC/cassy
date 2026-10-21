@@ -1487,6 +1487,64 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_root_gc_inventories_and_reclaims_dead_targets_cas_9725() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        let cas = repo.join(".cas");
+        let scratch = env.home().join("separate-scratch");
+        fs::create_dir_all(cas.join("worktrees")).unwrap();
+        fs::write(cas.join("config.toml"), format!(
+            "[factory]\nscratch_root = {:?}\n", scratch.display().to_string()
+        )).unwrap();
+        let mut targets = Vec::new();
+        for (name, age) in [("old", 300), ("warm", 200), ("live", 100)] {
+            let worker = cas.join("worktrees").join(name);
+            fs::create_dir_all(&worker).unwrap();
+            fs::write(worker.join("source.rs"), "keep source").unwrap();
+            drop(owner::acquire(&cas, &worker).unwrap().unwrap());
+            let target = crate::factory_scratch::worker_target_dir(&worker);
+            fs::create_dir_all(target.join("debug")).unwrap();
+            fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+            fs::write(target.join("debug/output"), vec![0u8; 32]).unwrap();
+            let time = filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(age));
+            for entry in WalkDir::new(&target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), time).unwrap();
+            }
+            targets.push((worker, target));
+        }
+        let live = vec![targets[2].0.clone()];
+        let unmanaged = scratch.join("verify-leftover");
+        fs::create_dir_all(&unmanaged).unwrap();
+        fs::write(unmanaged.join("evidence"), "review only").unwrap();
+        let policy = TargetCachePolicy { high_watermark_percent: 1,
+            low_watermark_percent: 0, min_idle_secs: 60, retention_count: 1 };
+        let mut report = inspect(&cas, policy, &[], &live, false).unwrap();
+        let dispositions: Vec<_> = targets.iter().map(|(_, path)| {
+            report.caches.iter().find(|record| record.path == *path)
+                .unwrap_or_else(|| panic!("scratch target missing from inventory: {}", path.display()))
+                .disposition
+        }).collect();
+        assert_eq!(dispositions, [CacheDisposition::Selected, CacheDisposition::Retained, CacheDisposition::LiveProcess]);
+        assert!(report.caches.iter().all(|record| record.bytes >= 32));
+        let cargo = OpenOptions::new().read(true).write(true).open(targets[0].1.join("debug/.cargo-lock")).unwrap();
+        cargo.lock_exclusive().unwrap();
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(targets[0].1.exists(), "contended Cargo output must survive");
+        drop(cargo);
+        report = inspect(&cas, policy, &[], &live, false).unwrap();
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(!targets[0].1.exists(), "dead scratch target must be reclaimed");
+        assert!(report.reclaimed_bytes >= 32);
+        assert!(targets[1].1.exists(), "warm cache retained");
+        assert!(targets[2].1.exists(), "live cache retained");
+        assert_eq!(fs::read_to_string(targets[0].0.join("source.rs")).unwrap(), "keep source");
+        assert_eq!(fs::read_to_string(unmanaged.join("evidence")).unwrap(), "review only");
+        let rendered = crate::factory_scratch::render_relocated(&cas);
+        assert!(rendered.contains(&unmanaged.display().to_string()), "unmanaged scratch review item absent: {rendered}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn lsof_output_handles_paths_process_identity_and_unknown_evidence_cas_29b0() {

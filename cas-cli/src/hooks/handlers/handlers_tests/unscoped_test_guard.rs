@@ -183,8 +183,6 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
         ] {
             let mut request = input(command, "worker");
             request.cwd = worktree.into();
-            // Forward-compatible Codex projection; current Codex needs absolute logs.
-            request.tool_input.as_mut().unwrap()["workdir"] = serde_json::json!(worktree);
             let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
             assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
             let value = serde_json::to_value(&out).unwrap();
@@ -252,7 +250,6 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
         ] {
             let mut request = input(command, "worker");
             request.cwd = cwd.into();
-            request.tool_input.as_mut().unwrap()["workdir"] = serde_json::json!(cwd);
             let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
             assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
             let value = serde_json::to_value(&out).unwrap();
@@ -542,17 +539,15 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
         }))
         .expect("Codex's PreToolUse payload deserializes")
     };
-    let log = dir.path().join("target/worker-check.log").display().to_string();
 
     for (dispatch, tool_use_id) in [("direct exec_command", "call_direct"), ("functions.exec → exec_command", "call_nested")] {
         for command in [
             "cargo check -p cas --tests",
             "cargo check -p cas --tests > target/worker-check.log 2>&1 &",
         ] {
-            let command = command.replace("target/worker-check.log", &log);
-            let out = handle_pre_tool_use(&codex_payload(tool_use_id, &command), Some(&root)).unwrap();
+            let out = handle_pre_tool_use(&codex_payload(tool_use_id, command), Some(&root)).unwrap();
             let stdout = serde_json::to_value(&out).unwrap();
-            let runs = codex_effective_command(&stdout, &command)
+            let runs = codex_effective_command(&stdout, command)
                 .unwrap_or_else(|| panic!("{dispatch}: {command} was blocked: {stdout}"));
             assert!(
                 runs.contains("factory worker-check --cas-root"),
@@ -572,16 +567,15 @@ fn codex_nested_exec_command_check_runs_through_the_capped_runner_cas_980d() {
         "cargo check -p cas --tests > target/worker-check.log 2>&1 &",
         "cargo nextest run -p cas --lib -E 'test(one)' > target/worker-check.log 2>&1 &",
     ] {
-        let command = command.replace("target/worker-check.log", &log);
-        let out = handle_pre_tool_use(&codex_payload("call_bg", &command), Some(&root)).unwrap();
+        let out = handle_pre_tool_use(&codex_payload("call_bg", command), Some(&root)).unwrap();
         let stdout = serde_json::to_value(&out).unwrap();
-        let runs = codex_effective_command(&stdout, &command).expect("backgrounded run is allowed");
+        let runs = codex_effective_command(&stdout, command).expect("backgrounded run is allowed");
         assert!(runs.contains("factory worker-check --cas-root"), "{runs}");
         assert!(
             !runs.trim_end().ends_with('&') && runs.contains("--detach --"),
             "Codex kills a shell `&` job with its caller; `{runs}` would exit 0 without running"
         );
-        assert!(runs.ends_with(&format!(">> {log} 2>&1")), "{runs}");
+        assert!(runs.ends_with(">> target/worker-check.log 2>&1"), "{runs}");
     }
     // Without a log the detached output and receipt would be lost: refuse.
     let command = "cargo check -p cas --tests &";

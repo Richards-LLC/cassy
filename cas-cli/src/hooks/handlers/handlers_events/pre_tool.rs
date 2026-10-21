@@ -9008,6 +9008,7 @@ mod workspace_contract_tests {
         for (command, workdir, expected, missing_workdir) in [
             ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false),
             ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false),
+            ("printf x > target/check.log 2>&1".to_string(), None, "allow", false),
             ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true),
             ("printf x > ../../outside.log".to_string(), Some(child), "deny", false),
             (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false),

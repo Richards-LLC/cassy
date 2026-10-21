@@ -999,6 +999,41 @@ fn delivery_range_before_and_after_merge() {
         range_paths(&fx.repo, &from, &to).unwrap(),
         vec!["ui.tsx".to_string()]
     );
+    assert_eq!(
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main").unwrap(),
+        vec!["ui.tsx".to_string()]
+    );
+    let integration = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let integration_range = delivery_range(&fx.repo, &integration, "main").unwrap();
+
+    // cas-a173: a squash is itself on the target's first-parent chain.
+    // A later docs merge must not replace its app.css delivery with an empty
+    // content range (independent QA) or the docs delta (evidence bundles).
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/squash"]);
+    commit(&fx.repo, "app.css", 15);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--squash", "factory/squash"]);
+    git_ok(&fx.repo, &["commit", "-qm", "squash UI delivery"]);
+    let squash = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "docs"]);
+    commit(&fx.repo, "notes.md", 10);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--no-ff", "docs", "-m", "merge docs"]);
+    let (from, to) = delivery_range(&fx.repo, &squash, "main").unwrap();
+    assert_eq!(
+        (
+            crate::qa_pass::integrated_paths(&fx.repo, &squash, "main"),
+            range_paths(&fx.repo, &from, &to),
+        ),
+        (Some(vec!["app.css".to_string()]), Some(vec!["app.css".to_string()])),
+        "both QA gates must measure the squash delivery itself"
+    );
+    assert_eq!(delivery_range(&fx.repo, &integration, "main"), Some(integration_range));
+    assert_eq!(
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main").unwrap(),
+        vec!["ui.tsx".to_string()],
+        "the ordinary merged delivery keeps its content range"
+    );
 }
 
 #[test]

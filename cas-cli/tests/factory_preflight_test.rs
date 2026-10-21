@@ -118,6 +118,51 @@ fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
 }
 
+fn gc_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
+    let mut command = Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ));
+    command
+        .current_dir(cwd)
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
+        .env("GROK_HOME", cwd.join(".test-grok-home"))
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_SOURCE_DIR")
+        .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA");
+    command
+}
+
+#[test]
+fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
+    let project = project(false);
+    cas::store::init_cas_dir(project.path()).expect("initialize fake store");
+    let home = TempDir::new().unwrap();
+
+    let report = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report = String::from_utf8(report).unwrap();
+    assert!(report.starts_with("Factory GC Report\n"), "{report}");
+    assert!(report.contains("TARGET_CACHE_STATUS_JSON="), "{report}");
+
+    let cleanup = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup", "--force", "--no-dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cleanup = String::from_utf8(cleanup).unwrap();
+    assert!(cleanup.starts_with("Factory GC cleanup complete."), "{cleanup}");
+    assert!(cleanup.contains("Cargo target caches: mode=cleanup"), "{cleanup}");
+}
+
 #[test]
 fn invalid_explicit_deployment_pin_keeps_its_own_diagnostic_cas_b0c5() {
     let project = project(true);

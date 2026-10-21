@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.71.0] - 2026-10-21
+
 ### Added — QA checks describe what good looks like
 
 - **Selected journeys** — Was: QA could depend on a legacy catalog or miss a shared pipeline change. → Now: Commander uses its tracked journey registry and semantic path selection, including shared-pipeline fan-out, while preserving catalog parity.

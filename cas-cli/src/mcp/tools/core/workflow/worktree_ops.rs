@@ -3926,7 +3926,8 @@ impl CasCore {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}")),
                 data: None,
-            })
+            })?;
+            Ok(())
         };
         let migration_policy_notice = match &migration_override {
             Some(refusal) => {

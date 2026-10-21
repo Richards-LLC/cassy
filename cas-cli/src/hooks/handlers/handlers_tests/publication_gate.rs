@@ -182,3 +182,26 @@ fn artifact_post_is_a_gated_deliverable_share_cassy_1148() {
     store.update(&verify).unwrap();
     assert!(denied(handle_pre_tool_use(&input("mcp__cas__artifact", post, dir.path()), Some(&cas)).unwrap()).is_none());
 }
+
+#[test]
+fn publication_gate_post_release_pending_and_override() {
+    let _env = TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let store = epic_store(dir.path());
+    let cas = dir.path().join(".cas");
+    std::fs::write(cas.join("config.toml"), "[qa.post_release]\ncommand = './check'\n").unwrap();
+    let post = json!({"channel":"release-channel","kind":"message","release_notes":true,"epic_id":"cas-pub-epic","text":"Shipped"});
+    let reason = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap()).expect("pending check must refuse release notes");
+    assert!(reason.contains("post_release_pending"),"{reason}");
+    let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    for (note, allowed) in [
+        (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: "),false),
+        ("[2020-01-01 00:00] DECISION: POST-RELEASE OVERRIDE: too old".into(),false),
+        (format!("[{stamp}] DECISION: POST-RELEASE OVERRIDE: operator accepts the observation gap"),true),
+    ] {
+        store.append_note("cas-pub-epic",&note).unwrap();
+        let result = denied(handle_pre_tool_use(&input("violet.violet_post",post.clone(),dir.path()),Some(&cas)).unwrap());
+        assert_eq!(result.is_none(),allowed,"{result:?}");
+    }
+    assert!(store.get("cas-pub-epic").unwrap().notes.contains("post-release gate overridden"));
+}

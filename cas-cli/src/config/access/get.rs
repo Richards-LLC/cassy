@@ -186,6 +186,12 @@ impl Config {
             "qa.preflight_gh_token" => Some(qa.preflight_gh_token.to_string()),
             "qa.deployed_origins" => Some(qa.deployed_origins.join(",")),
             "qa.preflight_env_files" => Some(qa.preflight_env_files.join(",")),
+            "qa.post_release.command" => Some(qa.post_release.clone().unwrap_or_default().command),
+            "qa.post_release.window_mins" => Some(qa.post_release.clone().unwrap_or_default().window_mins.to_string()),
+            "qa.post_release.interval_mins" => Some(qa.post_release.clone().unwrap_or_default().interval_mins.to_string()),
+            "qa.post_release.timeout_secs" => Some(qa.post_release.clone().unwrap_or_default().timeout_secs.to_string()),
+            "qa.post_release.release_branches" => Some(qa.post_release.clone().unwrap_or_default().release_branches.join(",")),
+            "qa.post_release.env" => Some(qa.post_release.clone().unwrap_or_default().env.join(",")),
             "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
             "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),
             // Dev section

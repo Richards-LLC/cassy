@@ -393,15 +393,17 @@ pub(super) fn print(fmt: &mut Formatter<'_>, sweep: &SweepFindings) -> io::Resul
         }
         fmt.write_muted(&format!("{:<PHASE_CELLS$}", finding.phase))?;
         fmt.write_raw(" ")?;
-        let (lines, cut) = wrap_finding_cause(
+        let (lines, cut, continuation_at) = wrap_finding_cause(
             &finding.cause,
-            width.saturating_sub(cause_at),
+            width,
+            cause_at,
+            lead + 2,
             unicode,
         );
         shortened |= cut;
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
-                fmt.write_raw(&" ".repeat(cause_at))?;
+                fmt.write_raw(&" ".repeat(continuation_at))?;
             }
             fmt.write_text(line)?;
             fmt.newline()?;
@@ -560,14 +562,21 @@ fn words(text: &str) -> Vec<String> {
     words
 }
 
-fn wrap_finding_cause(cause: &str, cells: usize, unicode: bool) -> (Vec<String>, bool) {
+fn wrap_finding_cause(
+    cause: &str,
+    width: usize,
+    cause_at: usize,
+    continuation_at: usize,
+    unicode: bool,
+) -> (Vec<String>, bool, usize) {
     const INACTIVE_SERVE: &str = "Tailscale Serve inactive: ";
     let Some(reason) = cause.strip_prefix(INACTIVE_SERVE) else {
-        return wrap(cause, cells, unicode);
+        let (lines, shortened) = wrap(cause, width.saturating_sub(cause_at), unicode);
+        return (lines, shortened, cause_at);
     };
-    let (mut lines, shortened) = wrap(reason, cells, unicode);
+    let (mut lines, shortened) = wrap(reason, width.saturating_sub(continuation_at), unicode);
     lines.insert(0, "Tailscale Serve inactive:".to_owned());
-    (lines, shortened)
+    (lines, shortened, continuation_at)
 }
 
 /// Wrap prose at word boundaries; a single word wider than the column is

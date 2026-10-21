@@ -5177,7 +5177,7 @@ mod tests {
 
     #[test]
     fn mocked_branch_ci_lookup_distinguishes_no_checks_from_gh_failure() {
-        let no_pr = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
+        let no_checks = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
             gh_output(
                 true,
                 "exit status: 0",
@@ -5185,35 +5185,32 @@ mod tests {
                 "",
             )
         });
-        let no_pr_receipt = describe_branch_ci_state("factory/fox", &no_pr);
+        let no_checks_receipt = describe_branch_ci_state("factory/fox", &no_checks);
         assert!(
-            no_pr_receipt.contains("repos/<unresolved-repository>/commits/deadbeef/check-runs"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("repos/<unresolved-repository>/commits/deadbeef/check-runs"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("no CI checks found for deadbeef (no check runs for sha)"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("no CI checks found for deadbeef (no check runs for sha)"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("Admission path: no CI receipt (advisory)"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("Admission path: no CI receipt (advisory)"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("Receipt id: none"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("Receipt id: none"),
+            "{no_checks_receipt}"
         );
+        assert_eq!(admit_branch_ci(&no_checks, false, None), Ok(false));
         assert!(
-            no_pr_receipt.contains("HTTP 404: Not Found"),
-            "{no_pr_receipt}"
-        );
-        assert!(
-            format!("{no_pr_receipt}{CI_ADVISORY_POLICY_NOTICE}")
+            format!("{no_checks_receipt}{CI_ADVISORY_POLICY_NOTICE}")
                 .contains("Merge policy: merge proceeded because CI is advisory."),
-            "{no_pr_receipt}"
+            "{no_checks_receipt}"
         );
         assert!(
-            !no_pr_receipt.contains("CI state unknown"),
-            "{no_pr_receipt}"
+            !no_checks_receipt.contains("CI state unknown"),
+            "{no_checks_receipt}"
         );
 
         let auth_failure = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
@@ -6373,32 +6370,44 @@ mod cas_7ce6_parked_merge_source_tests {
     /// the parked task's name when its delivery branch sits on the anchor.
     #[test]
     fn stacked_work_on_top_prefers_the_exact_delivery_branch() {
-        let (repo, anchor) = stacked_lane();
-        let path = repo.path();
         let _env = crate::test_support::TestEnvGuard::temp_home();
-        // Parked A is published; B is local-only. The production source
-        // guard must refuse B even though it still contains A (cas-e718).
-        git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
-        let tip = commit(path, "stacked-next-task");
-        let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
-        task.status = cas_types::TaskStatus::AwaitingMerge;
-        task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
-        let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
-        let before = git(path, &["rev-parse", "main"]);
-        let refusal = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
-            .expect_err("local work after park must not replace the reviewed source");
-        assert!(refusal.contains(&anchor), "{refusal}");
-        assert!(refusal.contains(&tip), "{refusal}");
-        assert_eq!(git(path, &["rev-parse", "main"]), before);
-        git(path, &["branch", "factory/w-cas-park", &anchor]);
-        let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
-            .unwrap().expect("an exact delivery branch remains usable");
-        assert_eq!(git(path, &["rev-parse", &source]), anchor);
-        git(path, &["checkout", "-q", "main"]);
-        git(path, &["merge", "--no-ff", "-m", "integrate parked source", &source]);
-        assert!(path.join("parked").is_file());
-        assert!(!path.join("stacked-next-task").exists(), "only parked A is delivered");
+        for local_sync in [false, true] {
+            let (repo, anchor) = stacked_lane();
+            let path = repo.path();
+            let ops = GitOperations::new(path.to_path_buf());
+            // Parked A is published; B is local-only. Include the incident's
+            // target-sync merge, which must not be rebound as a same-patch rebase.
+            git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
+            let tip = if local_sync {
+                git(path, &["checkout", "-q", "main"]);
+                commit(path, "target-update");
+                git(path, &["checkout", "-q", "factory/w"]);
+                git(path, &["merge", "--no-ff", "-m", "local target sync", "main"]);
+                git(path, &["rev-parse", "HEAD"])
+            } else {
+                commit(path, "stacked-next-task")
+            };
+            let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+            let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
+            let before = git(path, &["rev-parse", "main"]);
+            let refusal = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
+                .expect_err("local work after park must not replace the reviewed source");
+            assert!(refusal.contains(&anchor), "{refusal}");
+            assert!(refusal.contains(&tip), "{refusal}");
+            assert_eq!(git(path, &["rev-parse", "main"]), before);
+            git(path, &["branch", "factory/w-cas-park", &anchor]);
+            let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
+                .unwrap().expect("an exact delivery branch remains usable");
+            assert_eq!(git(path, &["rev-parse", &source]), anchor);
+            git(path, &["checkout", "-q", "main"]);
+            git(path, &["merge", "--no-ff", "-m", "integrate parked source", &source]);
+            assert!(path.join("parked").is_file());
+            assert_eq!(git(path, &["rev-parse", "main^2"]), anchor);
+            assert!(!ops.is_ancestor(&tip, "main"), "unreviewed B must not be integrated");
+        }
     }
 
     /// cas-7ce6 (the cas-06f5 symptom): a source that lacks the task's

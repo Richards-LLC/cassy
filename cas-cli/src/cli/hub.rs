@@ -1697,7 +1697,8 @@ fn start_with_output_resolved(
         std::thread::sleep(Duration::from_millis(50));
     }
     if let Ok(record) = paths.read_process_record()
-        && record_is_ready(&paths, &record)
+        && record.pid != launcher_pid
+        && record_is_live(&record)
         && running_hub_satisfies_request(
             &record,
             args,
@@ -1707,14 +1708,25 @@ fn start_with_output_resolved(
             tailscale_cli_available(&paths),
         )
     {
-        let already_satisfied = record.pid != launcher_pid;
-        if already_satisfied {
+        if record_is_ready(&paths, &record) {
             terminate_failed_launch(&mut child, cgroup.as_deref());
+            return Ok(HubStartOutcome {
+                record,
+                already_satisfied: true,
+            });
         }
-        return Ok(HubStartOutcome {
-            record,
-            already_satisfied,
-        });
+        if paths
+            .lock_holders()
+            .iter()
+            .any(|holder| holder.pid == record.pid)
+        {
+            let pid = record.pid;
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            anyhow::bail!(
+                "another cas hub instance won the machine lock (pid {pid}); this restart launch did not become ready before timeout; inspect {}",
+                paths.log_path().display()
+            );
+        }
     }
     let error = anyhow::anyhow!(
         "cas hub did not become ready; inspect {}",

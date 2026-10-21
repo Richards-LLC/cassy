@@ -7496,13 +7496,17 @@ impl CasCore {
         // cas-e74c: resolve the work-cycle identity before the later
         // delivery/review gates. cas-a699 needs the same current-cycle
         // boundary used by the delivery and verification gates below.
-        let mut task_commit_identity = task_commit_identity(
+        let mut task_commit_identity = match task_commit_identity_in_repo(
+            &close_project_root,
             &task,
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
                 .ok()
                 .flatten()
                 .map(|(receipt, _)| receipt.commit_sha),
-        );
+        ) {
+            Ok(identity) => identity,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
         // An approved proof can be followed by an administrative re-claim
         // before the worker retries close. Keep the exact delivery commits
         // bound to that still-valid dispatch in the identity set so a
@@ -11496,6 +11500,7 @@ impl CasCore {
             task.deliverables.delivery_pr_number = None;
             task.deliverables.delivery_pr_merge_commit = None;
             task.deliverables.delivery_pr_merged_at = None;
+            task.deliverables.factory_branch_start = None;
             // cas-cf64 (P2, anchor freshness — Scenario B): a stale
             // `factory_branch_anchor` from a PRIOR close/park cycle must not
             // survive a reopen as active authority. Preserve it as historical
@@ -11800,6 +11805,9 @@ pub(crate) struct AdditiveOnlyViolation {
 /// pre-cas-9596 behavior: nothing is recognized as the task's own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TaskCommitIdentity {
+    /// Validated start boundary. Backward receipt expansion must stop here;
+    /// explicitly identified earlier-cycle work remains attributable.
+    pub start_base: Option<String>,
     /// The task id, matched as a whole token against commit messages.
     pub task_id: Option<String>,
     /// Commit ids Cassy durably recorded for this task (active and historical
@@ -11865,9 +11873,35 @@ pub(crate) fn task_commit_identity(
         }
     }
     TaskCommitIdentity {
+        start_base: None,
         task_id: Some(task.id.clone()),
         known_commits,
     }
+}
+
+/// Include the validated start-to-delivery graph without treating its base
+/// (the preceding task's tip) as this task's commit.
+pub(crate) fn task_commit_identity_in_repo(
+    repo: &std::path::Path,
+    task: &Task,
+    latest_delivery_commit: Option<String>,
+) -> Result<TaskCommitIdentity, String> {
+    let mut identity = task_commit_identity(task, latest_delivery_commit);
+    if task.deliverables.factory_branch_start.is_some()
+        && let Some(target) = task.deliverables.work_target.as_ref()
+    {
+        fetch_parent_branch_best_effort(repo, &target.target_branch);
+    }
+    if let Some(delivery) = task_attribution::started_delivery(repo, task)? {
+        identity.start_base = task.deliverables.factory_branch_start.as_ref()
+            .map(|start| start.base_sha.clone());
+        for commit in delivery.commits {
+            if !identity.known_commits.contains(&commit) {
+                identity.known_commits.push(commit);
+            }
+        }
+    }
+    Ok(identity)
 }
 
 /// Return only the exact commits a still-valid, approved task dispatch bound
@@ -13283,6 +13317,7 @@ fn epic_anchor_content_presence(
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
     let identity = TaskCommitIdentity {
+        start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: vec![anchor.to_string()],
     };
@@ -14328,6 +14363,9 @@ pub(crate) fn resolve_close_delivery_branch(
     task: &Task,
     assignee: &str,
 ) -> Result<String, String> {
+    if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
+        return Ok(delivery.branch);
+    }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
         return Ok(branch);
     }
@@ -14350,6 +14388,7 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(own);
     }
     let identity = TaskCommitIdentity {
+        start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: task.deliverables.factory_branch_anchor.clone().into_iter().collect(),
     };
@@ -14427,8 +14466,10 @@ pub(crate) fn resolve_close_delivery_branch(
          exist, no `{prefix}*` branch has a commit claiming {id}, and `{own}` ends in another \
          task's delivery ({foreign}) with no commit claiming {id}. Cassy will not measure \
          another task's delivery as this one.\n\n\
-         Commit {id}'s work with {id} in the commit subject on `{task_branch}`, push it, and \
-         retry; or close with commit_receipt=<this task's delivery SHA>.",
+         If the current lane tip is {id}'s delivery, publish that exact tip with \
+         `git push origin {own_ref}:refs/heads/{task_branch}`, then retry \
+         `task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
+         do not publish another task's work under its name.",
         id = task.id,
     ))
 }
@@ -14573,6 +14614,7 @@ pub(crate) fn task_without_own_commits_judged(
         return false;
     }
     let identity = TaskCommitIdentity {
+        start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
     };
@@ -14764,6 +14806,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         },
     };
     let fallback_content_identity = TaskCommitIdentity {
+        start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
     };
@@ -17225,6 +17268,7 @@ fn render_close_diff_stat(
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
                 identity: TaskCommitIdentity {
+                    start_base: window.identity.start_base.clone(),
                     task_id: window.identity.task_id.clone(),
                     known_commits: filtered_commits,
                 },
@@ -19345,6 +19389,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         refname,
                         parent_branch,
                         &TaskCommitIdentity {
+                            start_base: None,
                             task_id: Some(t.id.clone()),
                             known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
                         },
@@ -21791,6 +21836,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -21812,6 +21858,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: vec![wip_sha],
             },
@@ -21832,6 +21879,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -21861,6 +21909,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -21895,6 +21944,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -22355,6 +22405,7 @@ pub(crate) fn run_declared_pre_close_hook(
     // remain behind a supervisor merge, while origin/<target_branch> carries
     // the live delivery. The resolver below then prefers origin/ when present.
     fetch_parent_branch_best_effort(receipt_repo, &repo_context.target_branch);
+    task_attribution::started_delivery(receipt_repo, task)?;
     let (live_target_ref, live_target_source) = preferred_live_target_ref_for_delivery(
         receipt_repo,
         &repo_context.target_branch,
@@ -28309,6 +28360,7 @@ esac
             basis: "task work cycle",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some(task.id.clone()),
                 known_commits: vec![receipt.clone()],
             },
@@ -30570,6 +30622,7 @@ esac
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-test1".to_string()),
                 known_commits: vec![receipt.clone()],
             },
@@ -32169,7 +32222,7 @@ esac
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
-        let identity = TaskCommitIdentity { task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+        let identity = TaskCommitIdentity { start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
         let (dir, anchor) = build("");
         let presence =
@@ -32209,7 +32262,7 @@ esac
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
             let mut window = window_at(0, "historical delivery replay");
-            window.identity = TaskCommitIdentity { task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            window.identity = TaskCommitIdentity { start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
@@ -32344,6 +32397,7 @@ esac
     fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
         let mut window = window_at(0, "cas-f2eb fixture");
         window.identity = TaskCommitIdentity {
+            start_base: None,
             task_id: Some("cas-test1".into()),
             known_commits: vec![receipt.to_string()],
         };
@@ -40659,6 +40713,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -40704,6 +40759,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-41cd".to_string()),
                 known_commits: Vec::new(),
             },
@@ -40781,6 +40837,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },
@@ -40814,6 +40871,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
             },

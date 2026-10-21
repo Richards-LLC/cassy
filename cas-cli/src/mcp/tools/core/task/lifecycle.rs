@@ -175,6 +175,7 @@ pub(crate) fn initial_factory_branch_reset_target(
 ) -> Option<&cas_types::WorkTarget> {
     if status != TaskStatus::Open
         || task.deliverables.factory_branch_anchor.is_some()
+        || task.deliverables.factory_branch_start.is_some()
         || !task.deliverables.historical_factory_branch_anchors.is_empty()
     {
         return None;
@@ -2061,10 +2062,8 @@ impl CasCore {
 
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
-        let reused_factory_branch_reset = if is_worker
-            && task.status == TaskStatus::Open
-            && task.deliverables.work_target.is_some()
-        {
+        let mut factory_branch_start = None;
+        let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
                 // not guess from the worker's incidental checkout when legacy
@@ -2085,10 +2084,8 @@ impl CasCore {
                                 format!("Cannot inspect worker checkout before task start: {error}"),
                             )
                         })?;
-                    if !super::repo_context::repo_answers_to(
-                        &worker_repo_root,
-                        &context.repo_selector,
-                    ) {
+                    if !super::repo_context::repo_answers_to(&worker_repo_root, &context.repo_selector)
+                    {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
                             "Cannot start task: worker checkout belongs to another repository",
@@ -2107,44 +2104,77 @@ impl CasCore {
                         .unwrap_or_else(|| {
                             crate::factory_isolation::expected_worker_branch(&worker.name)
                         });
-                    match reconcile_reused_factory_branch(
-                        worker_checkout,
-                        &worker.name,
-                        &worker_branch,
-                        &target_branch,
-                        Some(&close_ops::task_commit_identity(&task, None)),
-                        |tip| {
-                            crate::mcp::tools::parked_delivery_at_tip(
-                                task_store.as_ref(),
-                                &worker.name,
+                    let reset_note = if task.status == TaskStatus::Open {
+                        let identity =
+                            close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
+                                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        match reconcile_reused_factory_branch(
+                            worker_checkout,
+                            &worker.name,
+                            &worker_branch,
+                            &target_branch,
+                            Some(&identity),
+                            |tip| {
+                                crate::mcp::tools::parked_delivery_at_tip(
+                                    task_store.as_ref(),
+                                    &worker.name,
+                                    tip,
+                                )
+                                .filter(|parked| parked.task_id != task.id)
+                                .map(|parked| parked.task_id)
+                            },
+                        ) {
+                            Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
+                                "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
+                            )),
+                            Ok(ReusedFactoryBranchStart::MovedFromParked {
+                                task_id,
                                 tip,
-                            )
-                            .filter(|parked| parked.task_id != task.id)
-                            .map(|parked| parked.task_id)
-                        },
-                    ) {
-                        Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
-                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
-                        )),
-                        Ok(ReusedFactoryBranchStart::MovedFromParked {
-                            task_id,
-                            tip,
-                            delivery_branch,
-                        }) => Some(format!(
-                            "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
-                             {worker_branch} was reset to `{target_branch}` for this task. \
-                             Don't force-push {worker_branch} while a PR is open on it.{}",
-                            publish_parked_delivery_branch(
-                                worker_checkout,
-                                &task_id,
-                                delivery_branch.as_deref(),
-                            ),
-                        )),
-                        Ok(ReusedFactoryBranchStart::Unchanged) => None,
-                        Err(message) => {
-                            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                                delivery_branch,
+                            }) => Some(format!(
+                                "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
+                                 {worker_branch} was reset to `{target_branch}` for this task. \
+                                 Don't force-push {worker_branch} while a PR is open on it.{}",
+                                publish_parked_delivery_branch(
+                                    worker_checkout,
+                                    &task_id,
+                                    delivery_branch.as_deref(),
+                                ),
+                            )),
+                            Ok(ReusedFactoryBranchStart::Unchanged) => None,
+                            Err(message) => {
+                                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                            }
                         }
+                    } else {
+                        None
+                    };
+                    // Persist only with the successful InProgress transition
+                    // below. Repeated starts must never advance this boundary.
+                    if task.deliverables.factory_branch_start.is_none()
+                        && crate::factory_isolation::branch_at(worker_checkout).as_deref()
+                            == Some(worker_branch.as_str())
+                    {
+                        let base_sha = GitOperations::new(worker_repo_root)
+                            .ref_sha(&worker_branch)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INVALID_PARAMS,
+                                    format!("Cannot record task start base: {error}"),
+                                )
+                            })?;
+                        factory_branch_start = Some(cas_types::FactoryBranchStart {
+                            work_target: task
+                                .deliverables
+                                .work_target
+                                .clone()
+                                .expect("declared target"),
+                            assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
+                            branch: worker_branch,
+                            base_sha,
+                        });
                     }
+                    reset_note
                 } else {
                     None
                 }
@@ -2723,6 +2753,9 @@ impl CasCore {
             task.notes.push_str(&split_note);
         }
         task.deliverables.split_takeover = None;
+        if let Some(start) = factory_branch_start {
+            task.deliverables.factory_branch_start = Some(start);
+        }
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store

@@ -13,6 +13,147 @@ struct DeliveryRange {
 
 use crate::git_evidence::git_text;
 
+pub(super) struct StartedDelivery {
+    pub branch: String,
+    pub commits: Vec<String>,
+}
+
+/// cas-ead0: only the graph after the server's start boundary belongs to
+/// this cycle. Old subjects before it cannot claim the new task's lane.
+/// Bound all probes to immutable SHAs and refuse foreign descendants before
+/// any anchor/commit-subject shortcut can grant delivery identity.
+pub(super) fn started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+        return Ok(None);
+    };
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            repo,
+            &start.work_target.repo_selector,
+        )
+    {
+        return Ok(None);
+    }
+    let refuse = |reason: &str| {
+        format!(
+            "DELIVERY BRANCH UNRESOLVED: task {} started on {} at {}, but {reason}. \
+         Restore this task's lane from that base and remove foreign work before retrying close.",
+            task.id, start.branch, start.base_sha,
+        )
+    };
+    if !is_safe_git_refname(&start.branch)
+        || !matches!(start.base_sha.len(), 40 | 64)
+        || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(refuse("the recorded start boundary is invalid"));
+    }
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{}", start.branch)) {
+        start.branch.clone()
+    } else if git_ref_exists(repo, &format!("refs/remotes/origin/{}", start.branch)) {
+        format!("origin/{}", start.branch)
+    } else {
+        return Ok(None);
+    };
+    let mut tip = resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
+        .ok_or_else(|| refuse("the delivery tip cannot be read"))?;
+    // Once parked, later tasks may reuse the lane. Its immutable anchor ends
+    // this delivery; current in-progress commit-hook anchors do not truncate WIP.
+    if matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Closed)
+        && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+        && git_commit_is_ancestor(repo, anchor, &tip)
+    {
+        tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+            .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+    }
+    if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
+        return Err(refuse("the base is no longer an ancestor of the delivery"));
+    }
+    let range = format!("{}..{tip}", start.base_sha);
+    let target = preferred_diff_target_ref_for_delivery(
+        repo,
+        &start.work_target.target_branch,
+        task.delivery_mode,
+    );
+    let lane_history = git_text(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &range,
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the lane history cannot be read"))?;
+    // Inspect side-parent work too, excluding integrated target history so a
+    // large target sync does not consume this task's attribution budget.
+    let side_history = git_text(
+        repo,
+        &[
+            "log",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &tip,
+            &format!("^{}", start.base_sha),
+            &format!("^{target}"),
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the off-target history cannot be read"))?;
+    let mut records = Vec::new();
+    for (on_lane, history) in [(true, &lane_history), (false, &side_history)] {
+        let range: Vec<_> = history
+            .split('\u{1e}')
+            .map(str::trim)
+            .filter(|record| !record.is_empty())
+            .collect();
+        if range.len() > 200 {
+            return Err(refuse("the start-to-delivery range exceeds 200 commits"));
+        }
+        records.extend(range.into_iter().map(|record| (on_lane, record)));
+    }
+    let mut seen = HashSet::new();
+    let identity = task_commit_identity(task, None);
+    let mut commits = Vec::new();
+    for (on_lane, record) in records {
+        let (metadata, message) = record
+            .split_once('\u{1f}')
+            .ok_or_else(|| refuse("the commit metadata cannot be read"))?;
+        let mut metadata = metadata.split_whitespace();
+        let sha = metadata
+            .next()
+            .ok_or_else(|| refuse("a commit id cannot be read"))?;
+        if !seen.insert(sha) {
+            continue;
+        }
+        let parents: Vec<String> = metadata.map(str::to_owned).collect();
+        let merged = parents.get(1..).unwrap_or_default();
+        if is_target_sync_merge(repo, merged, &target) {
+            continue;
+        }
+        if subject_claims_another_task(message, &identity) {
+            let subject = message.trim().lines().next().unwrap_or("");
+            return Err(refuse(&format!(
+                "foreign commit {sha} ({subject}) follows the base"
+            )));
+        }
+        if on_lane
+            && (merged.is_empty()
+                || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+        {
+            commits.push(sha.to_string());
+        }
+    }
+    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+}
+
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
@@ -398,6 +539,7 @@ fn task_delivery_selection(
         while j > 0 {
             let previous = &commits[j - 1];
             if previous.parent.is_empty()
+                || window.identity.start_base.as_deref() == Some(previous.sha.as_str())
                 || previous.foreign
                 || previous.merge
                 || (!historical_receipt && previous.epoch < floor)
@@ -1695,6 +1837,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-taskb".into()),
                 known_commits: vec![],
             },
@@ -2925,6 +3068,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            start_base: None,
             task_id: Some("cas-taskb".into()),
             known_commits: vec![tip.clone()],
         };

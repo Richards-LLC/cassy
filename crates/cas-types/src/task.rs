@@ -525,6 +525,16 @@ pub struct SplitTakeoverAuthorization {
     pub reason: String,
 }
 
+/// Server-captured graph boundary for a worker starting a task on a reused
+/// lane. The base belongs to the preceding work, never to this task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryBranchStart {
+    pub work_target: WorkTarget,
+    pub assignee: String,
+    pub branch: String,
+    pub base_sha: String,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
@@ -605,6 +615,12 @@ pub struct TaskDeliverables {
     /// needed — serde `default` keeps old rows deserializing as `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
+
+    /// Recorded after start reconciles the lane, preserved across resumes.
+    /// Descendants establish task identity without commit-message conventions;
+    /// close still rejects explicit foreign work after this boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory_branch_start: Option<FactoryBranchStart>,
 
     /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
@@ -706,6 +722,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_anchor: Option<String>,
     #[serde(default)]
+    factory_branch_start: Option<FactoryBranchStart>,
+    #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
@@ -739,6 +757,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             delivery_pr_merged_at: value.delivery_pr_merged_at,
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
+            factory_branch_start: value.factory_branch_start,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             parked_branch: value.parked_branch,
@@ -1113,6 +1132,7 @@ impl TaskDeliverables {
             && self.delivery_pr_merged_at.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
+            && self.factory_branch_start.is_none()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
@@ -1619,6 +1639,19 @@ mod tests {
             "cas-historical-anchor".to_string(),
             "Retain declined delivery identity".to_string(),
         );
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget {
+                repo_selector: "project:test".into(),
+                target_branch: "main".into(),
+            },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: "b".repeat(40),
+        });
+        assert!(
+            !task.deliverables.is_empty(),
+            "start evidence alone must persist"
+        );
         task.deliverables
             .historical_factory_branch_anchors
             .push("a".repeat(40));
@@ -1633,8 +1666,13 @@ mod tests {
             vec!["a".repeat(40)]
         );
 
+        assert_eq!(
+            decoded.deliverables.factory_branch_start,
+            task.deliverables.factory_branch_start
+        );
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.historical_factory_branch_anchors.is_empty());
+        assert!(legacy.factory_branch_start.is_none());
     }
 
     #[test]

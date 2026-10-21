@@ -1027,6 +1027,69 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     execute_at_with_scope(cas_root, args, cwd, cargo, None)
 }
 
+/// cas-d95c: run a task's named tests at a verification's bound head under the
+/// same admission as a worker check (PSI and builder cap, a counted builder
+/// slot, a private target, the zero-test guard). A verifier otherwise has no
+/// clean checkout of that head under the worktrees root, and fell back to
+/// plain Cargo that no admission saw.
+pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> Result<()> {
+    execute_verifier_at(
+        cas_root,
+        head,
+        args,
+        &std::env::current_dir()?,
+        Path::new("cargo"),
+        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+    )
+}
+
+fn execute_verifier_at(
+    cas_root: &Path,
+    head: &str,
+    args: &[String],
+    cwd: &Path,
+    cargo: &Path,
+    scope_runner: Option<&Path>,
+) -> Result<()> {
+    if targeted_test(args).is_none() {
+        bail!(
+            "Verifier tests run named tests only: `nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`"
+        );
+    }
+    let worktree = verifier_worktree(cas_root, cwd, head)?;
+    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner)
+}
+
+/// A detached checkout of `head` under the Cassy worktrees root, so the
+/// capped runner admits it and its slot counts. Reused while it still points
+/// at `head`; it never touches a worker's checkout.
+fn verifier_worktree(cas_root: &Path, cwd: &Path, head: &str) -> Result<PathBuf> {
+    if !valid_git_oid(head) {
+        bail!("Verifier tests need the full bound head commit SHA, not {head:?}");
+    }
+    let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
+    git(&repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])
+        .with_context(|| format!("bound head {head} is not in this repository; fetch it first"))?;
+    let worktree = cas_root.join("worktrees").join(format!("verify-{}", &head[..12]));
+    if worktree.exists() {
+        let current = git(&worktree, &["rev-parse", "HEAD"])?;
+        if current.trim() != head {
+            bail!(
+                "{} is checked out at {} instead of the bound head {head}; remove it and retry",
+                worktree.display(),
+                current.trim()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(cas_root.join("worktrees"))?;
+        git(
+            &repo,
+            &["worktree", "add", "--detach", &worktree.to_string_lossy(), head],
+        )?;
+    }
+    Ok(worktree)
+}
+
 /// Prefer the active task's declared integration target, never the pushed
 /// worker branch's upstream (which would erase the task diff after a push).
 fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Result<String> {
@@ -2589,6 +2652,40 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
     /// runner only reads git state, so a builder-cap refusal, like every other
     /// path, must not take the optional index lock at all.
     #[cfg(unix)]
+    /// cas-d95c: a verifier's named-test run at a bound head is admitted
+    /// against the same builder cap as a worker check, in a checkout under the
+    /// counted worktrees root, instead of running as uncounted plain Cargo.
+    #[test]
+    fn verifier_tests_are_admitted_against_the_builder_cap_cas_d95c() {
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 1\n").unwrap();
+        let slots = root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let _held = acquire_slot(&slots, 1).unwrap();
+        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+
+        let error = execute_verifier_at(&root, &head, &args, &repo, Path::new("/nonexistent/cargo"), None)
+            .expect_err("the only builder slot is held");
+        assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
+        let checkout = root.join("worktrees").join(format!("verify-{}", &head[..12]));
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+
+        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"].iter().map(|arg| arg.to_string()).collect();
+        let error = execute_verifier_at(&root, &head, &unnamed, &repo, Path::new("/nonexistent/cargo"), None)
+            .expect_err("verifiers run named tests only");
+        assert!(error.to_string().contains("named tests only"), "{error}");
+    }
+
     #[test]
     fn builder_cap_refusal_never_takes_the_index_lock_cas_39f3() {
         use std::os::unix::fs::MetadataExt;

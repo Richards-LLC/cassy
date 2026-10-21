@@ -61,6 +61,8 @@ rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|ex
 
 Back every finding with a command output or an exact line reference.
 
+To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
+
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 
 - A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.

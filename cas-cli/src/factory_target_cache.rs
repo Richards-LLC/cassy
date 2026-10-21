@@ -1502,7 +1502,7 @@ mod tests {
         for (name, age) in [("old", 300), ("warm", 200), ("live", 100)] {
             let worker = cas.join("worktrees").join(name);
             fs::create_dir_all(&worker).unwrap();
-            fs::write(worker.join("source.rs"), "keep source").unwrap();
+            fs::write(worker.join("source.txt"), "keep source").unwrap();
             drop(owner::acquire(&cas, &worker).unwrap().unwrap());
             let target = crate::factory_scratch::worker_target_dir(&worker);
             fs::create_dir_all(target.join("debug")).unwrap();
@@ -1539,7 +1539,7 @@ mod tests {
         assert!(report.reclaimed_bytes >= 32);
         assert!(targets[1].1.exists(), "warm cache retained");
         assert!(targets[2].1.exists(), "live cache retained");
-        assert_eq!(fs::read_to_string(targets[0].0.join("source.rs")).unwrap(), "keep source");
+        assert_eq!(fs::read_to_string(targets[0].0.join("source.txt")).unwrap(), "keep source");
         assert_eq!(fs::read_to_string(unmanaged.join("evidence")).unwrap(), "review only");
         let rendered = crate::factory_scratch::render_relocated(&cas);
         assert!(rendered.contains(&unmanaged.display().to_string()), "unmanaged scratch review item absent: {rendered}");

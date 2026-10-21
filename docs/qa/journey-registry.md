@@ -203,11 +203,14 @@ fixtures:
 ### Numeric comparison
 
 A numeric criterion declares how a measured value is graded against its
-baseline. `compare: exact` fails on any difference (coverage counts, presence).
+baseline. `compare: exact` fails on any difference, so use it for whole-number counts
+and presence; fractional measurements need a band.
 `compare: {banded: {min_ratio: 0.9}}` passes at or above 90% of the baseline;
 `compare: {banded: {max_delta: 20}}` passes within 20 either side. A band names
 exactly one bound; `min_ratio` must be in (0, 1] and `max_delta` non-negative,
-else `--check` fails with `compare`. Graders record the measured value and its
+else `--check` fails with `compare`. A malformed value (`compare: fuzzy`,
+`{banded: {min_rato: 0.9}}`) is the same single `compare` problem on that
+criterion; the rest of the registry still loads. Graders record the measured value and its
 percentage of the baseline, so wording noise (1,862 text characters against a
 1,871 baseline is 99.52%) passes a band visibly instead of failing a strict
 floor.

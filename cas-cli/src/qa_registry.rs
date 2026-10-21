@@ -1277,8 +1277,8 @@ journeys:
                 "unwritten checker needs an owner and due date",
                 with_criteria("2999-12-31")
                     .replace(
-                        "    pending_checker: {owner: qa-team, due: \"2999-12-31\"}\n  MANUAL-OLD",
-                        "  MANUAL-OLD",
+                        "    pending_checker: {owner: qa-team, due: \"2999-12-31\"}\n    compare:",
+                        "    compare:",
                     )
                     .replace(
                         "MANUAL-OLD: {statement: Legacy entry, check: Walk it}",

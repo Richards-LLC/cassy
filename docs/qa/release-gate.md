@@ -15,6 +15,7 @@ change which command runs or which environment it sees.
 [qa.release]
 integration_branch = "staging"
 branches = ["main"]
+deploy_workflows = ["Deploy Backend to Staging", "Deploy Frontend to Staging"]
 adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
@@ -28,6 +29,7 @@ frontend = ["apps/web", "packages/shared"]
 |---|---|
 | `integration_branch` | The branch the gate walks. |
 | `branches` | Promotion targets whose PRs need a clean gate. |
+| `deploy_workflows` | Exact GitHub Actions workflow names watched on `integration_branch` (default empty). |
 | `adapter` | Project-relative adapter executable. Empty leaves the gate off. |
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
@@ -96,3 +98,26 @@ pass. Each of the following refuses with `SERVED MISMATCH`:
 A failed `served` call refuses with `SERVED UNKNOWN` and keeps its error kind.
 A served backend can therefore lag the staging tip, as long as no commit since
 then touched its paths.
+
+## Deploy failure alerts
+
+The factory daemon watches configured deploy workflows on the integration branch
+at its existing CI polling cadence. Completed `push` and `workflow_dispatch`
+runs count; CI and each deploy workflow have independent verdicts. A failed or
+timed-out deploy with a failed job becomes a Critical supervisor `BLOCKER` naming
+the job and failed step when GitHub reports one. The relay key includes the
+branch, workflow and SHA, so repeated polls send one blocker for that failure.
+This watcher works even when no release adapter is configured.
+
+Path-filtered deploys may not rerun after the branch moves. An observed red deploy
+therefore stays red until a newer successful run of the same workflow on the
+integration branch. Cancelled, skipped and neutral runs do not clear it. Latest
+deploy observations persist in `.cas/ci-deploy-watch.json`, including successful
+run watermarks, so daemon restarts and eviction from the 100 completed-run window
+do not lose an observed failure. Removing a workflow from config drops its state.
+
+The watcher reuses its existing GitHub run list and red-run detail lookups. It
+adds no GitHub calls; it cannot discover a deploy already outside the first
+100-run snapshot before observation. Configure the watcher while deploys are
+current. The release gate's served-component check still detects stale deploys
+when a gate is attempted.

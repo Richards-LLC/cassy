@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use cas_store::{NotificationPriority, PromptQueueStore};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bounded_process::{Deadline, run_command};
 
@@ -45,8 +45,9 @@ const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
 pub(crate) const DELIVERY_MERGE_CLOSE_GRACE: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CiFailure {
+    pub workflow: String,
     pub branch: String,
     pub head_sha: String,
     pub run_id: u64,
@@ -62,7 +63,7 @@ pub(crate) struct CiFailure {
     pub merged_into: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SuppressedCiRun {
     head_sha: String,
     run_id: u64,
@@ -70,7 +71,7 @@ struct SuppressedCiRun {
 
 impl CiFailure {
     pub(crate) fn dedupe_key(&self) -> String {
-        format!("ci-red-run:{}:{}", self.branch, self.head_sha)
+        format!("ci-red-run:{}:{}:{}", self.branch, self.workflow, self.head_sha)
     }
 }
 
@@ -237,7 +238,7 @@ impl CiWake {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CiRun {
     pub id: u64,
     #[serde(default)]
@@ -1267,60 +1268,140 @@ fn is_branch_ci_verdict(run: &CiRun) -> bool {
         && run.status == "completed"
 }
 
-/// Keep only the latest completed CI push/merge-group failure per watched branch.
-///
-/// GitHub Action run IDs increase monotonically.  Selecting the highest run ID
-/// per branch makes the current completed conclusion authoritative: a newer
-/// green run resolves an older failure, while a newer red run replaces it.  We
-/// deliberately do this before looking up failed jobs/logs so a historical
-/// backlog is both silent and cheap to scan.
+/// The last observed deploy verdict, including its actionable failure detail.
+/// Keeping green watermarks prevents an older red snapshot from resurrecting it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeployObservation {
+    run: CiRun,
+    failure: Option<CiFailure>,
+}
+
+/// Keep the latest verdict per (branch, workflow). Deploy observations survive
+/// the bounded 100-run window and daemon restarts in local runtime state. The
+/// same completed-runs request supplies CI and deploys; no extra forge probes.
 pub(crate) fn collect_failures(
     transport: &dyn CiTransport,
     watched_branches: &BTreeSet<String>,
-    _cas_dir: Option<&Path>,
+    cas_dir: Option<&Path>,
 ) -> Result<Vec<CiFailure>, CiWatchError> {
-    let runs = transport.completed_runs()?;
-    let mut latest_by_branch = BTreeMap::<String, &CiRun>::new();
+    let release = cas_dir
+        .map(crate::config::Config::load)
+        .transpose()
+        .map_err(|error| CiWatchError::Malformed(format!("CI watch config: {error}")))?
+        .and_then(|config| config.qa)
+        .and_then(|qa| qa.release)
+        .unwrap_or_default();
+    let is_deploy = |run: &CiRun| {
+        !release.integration_branch.trim().is_empty()
+            && run.head_branch == release.integration_branch
+            && release.deploy_workflows.contains(&run.name)
+            && matches!(run.event.as_str(), "push" | "workflow_dispatch")
+            && run.status == "completed"
+    };
+    let state_path = cas_dir.map(|dir| dir.join("ci-deploy-watch.json"));
+    let mut deploys = BTreeMap::new();
+    if let Some(path) = &state_path {
+        let saved: Vec<DeployObservation> = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+                CiWatchError::Malformed(format!("CI deploy watch state: {error}"))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(CiWatchError::Unavailable(format!(
+                    "CI deploy watch state: {error}"
+                )));
+            }
+        };
+        for observation in saved.into_iter().filter(|o| is_deploy(&o.run)) {
+            deploys.insert(
+                (
+                    observation.run.head_branch.clone(),
+                    observation.run.name.clone(),
+                ),
+                observation,
+            );
+        }
+    }
 
+    let runs = transport.completed_runs()?;
+    let mut latest = BTreeMap::<(String, String), &CiRun>::new();
     for run in &runs {
-        if !is_branch_ci_verdict(run) || !watched_branches.contains(&run.head_branch) {
+        // Deploy cancellation/neutral/skipped conclusions do not resolve an
+        // observed failure. Only a newer successful deploy may do that.
+        let deploy_verdict = is_deploy(run)
+            && matches!(
+                run.conclusion.as_deref(),
+                Some("failure" | "timed_out" | "success")
+            );
+        if !deploy_verdict
+            && !(is_branch_ci_verdict(run) && watched_branches.contains(&run.head_branch))
+        {
             continue;
         }
-        let replace = latest_by_branch
-            .get(&run.head_branch)
-            .is_none_or(|current| run.id > current.id);
-        if replace {
-            latest_by_branch.insert(run.head_branch.clone(), run);
+        let key = (run.head_branch.clone(), run.name.clone());
+        if latest.get(&key).is_none_or(|current| run.id > current.id) {
+            latest.insert(key, run);
         }
     }
 
     let mut failures = Vec::new();
-    for (_, run) in latest_by_branch {
-        if run.conclusion.as_deref() != Some("failure") {
-            continue;
-        }
-        // cas-c188: a run for a commit the branch has moved past is history,
-        // not the branch's state. Main can go weeks without a completed run of
-        // its own (merge-queue receipts are reused), which made a seven-week-old
-        // run the "latest" and relayed it as current.
-        if let Some(tip) = transport.branch_tip(&run.head_branch)?
-            && tip != run.head_sha
+    for (key, run) in latest {
+        let deploy = is_deploy(run);
+        if deploy
+            && deploys
+                .get(&key)
+                .is_some_and(|saved| saved.run.id >= run.id)
         {
             continue;
         }
-        // A run whose jobs were cancelled, not failed, is not red; with no
-        // failed job there is nothing to name or fix.
-        let Some(failing_job) = transport.failing_job(run.id)? else {
+        if deploy && run.conclusion.as_deref() == Some("success") {
+            deploys.insert(
+                key,
+                DeployObservation {
+                    run: run.clone(),
+                    failure: None,
+                },
+            );
+            continue;
+        }
+        if !matches!(run.conclusion.as_deref(), Some("failure" | "timed_out")) {
+            continue;
+        }
+        // cas-c188 still applies to ordinary CI. Deploys can be path-filtered:
+        // moving the tip need not schedule a replacement deploy at all.
+        if !deploy {
+            if let Some(tip) = transport.branch_tip(&run.head_branch)?
+                && tip != run.head_sha
+            {
+                continue;
+            }
+        }
+        let failing_job = if deploy {
+            transport
+                .failed_job_detail(run.id)?
+                .map(|job| match job.step {
+                    Some(step) => format!("{} / {step}", job.name),
+                    None => job.name,
+                })
+        } else {
+            transport.failing_job(run.id)?
+        };
+        // A run with cancelled jobs only neither creates nor clears a blocker.
+        let Some(failing_job) = failing_job else {
             continue;
         };
-
         let mut suppressed_red_runs: Vec<_> = runs
             .iter()
             .filter(|older| {
                 older.head_branch == run.head_branch
+                    && older.name == run.name
                     && older.id < run.id
-                    && is_branch_ci_verdict(older)
-                    && older.conclusion.as_deref() == Some("failure")
+                    && (if deploy {
+                        is_deploy(older)
+                    } else {
+                        is_branch_ci_verdict(older)
+                    })
+                    && matches!(older.conclusion.as_deref(), Some("failure" | "timed_out"))
             })
             .map(|older| SuppressedCiRun {
                 head_sha: older.head_sha.clone(),
@@ -1328,12 +1409,12 @@ pub(crate) fn collect_failures(
             })
             .collect();
         suppressed_red_runs.sort_by_key(|older| older.run_id);
-
         let failing_test = transport
             .failed_log(run.id)?
             .as_deref()
             .and_then(first_failing_test);
-        failures.push(CiFailure {
+        let failure = CiFailure {
+            workflow: run.name.clone(),
             branch: run.head_branch.clone(),
             head_sha: run.head_sha.clone(),
             run_id: run.id,
@@ -1341,8 +1422,33 @@ pub(crate) fn collect_failures(
             failing_job,
             failing_test,
             suppressed_red_runs,
-            merged_into: None,
-        });
+            merged_into: deploy.then(|| release.integration_branch.clone()),
+        };
+        if deploy {
+            deploys.insert(
+                key,
+                DeployObservation {
+                    run: run.clone(),
+                    failure: Some(failure),
+                },
+            );
+        } else {
+            failures.push(failure);
+        }
+    }
+    failures.extend(deploys.values().filter_map(|saved| saved.failure.clone()));
+    // Atomic replacement keeps restart recovery from reading a partial write.
+    // Save before relaying: a crash between save and enqueue is recovered by
+    // the next poll, while the prompt queue's stable key prevents duplicates.
+    if let Some(path) = state_path
+        && (!release.deploy_workflows.is_empty() || path.exists())
+    {
+        let saved: Vec<_> = deploys.into_values().collect();
+        let json = serde_json::to_string(&saved)
+            .map_err(|error| CiWatchError::Malformed(format!("CI deploy watch state: {error}")))?;
+        crate::cli::integrate::fs::atomic_write(&path, &json).map_err(|error| {
+            CiWatchError::Unavailable(format!("CI deploy watch state: {error}"))
+        })?;
     }
     Ok(failures)
 }
@@ -1405,19 +1511,23 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
         })
         .unwrap_or_default();
     let next = match &failure.merged_into {
+        Some(integration) if &failure.branch == integration => format!(
+            "BLOCKER: deployment to {integration} failed. Fix or revert it before {integration} is queued."
+        ),
         Some(integration) => format!(
             "BLOCKER: this commit is already merged into {integration}. Fix or revert it there before {integration} is queued."
         ),
         None => "This red run is the branch's latest completed conclusion; inspect or fix it before merging further lanes.".to_string(),
     };
     format!(
-        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nFailing job: {}{}{}\n{next}\n</ci-red-run>",
+        "<ci-red-run branch=\"{}\" head_sha=\"{}\" run_id=\"{}\">\nCI failed on branch {} at {}.\nRun: {}\nWorkflow: {}\nFailing job: {}{}{}\n{next}\n</ci-red-run>",
         failure.branch,
         failure.head_sha,
         failure.run_id,
         failure.branch,
         failure.head_sha,
         failure.run_url,
+        failure.workflow,
         failure.failing_job,
         test,
         suppressed,
@@ -1425,7 +1535,7 @@ pub(crate) fn relay_body(failure: &CiFailure) -> String {
 }
 
 /// Durable prompt handoff.  The stable key makes repeated polls and daemon
-/// restarts silent for the same `(branch, head_sha)` red run.
+/// restarts silent for the same `(branch, workflow, head_sha)` red run.
 pub(crate) fn emit_failure(
     queue: &dyn PromptQueueStore,
     factory_session: &str,
@@ -1434,6 +1544,10 @@ pub(crate) fn emit_failure(
     let key = failure.dedupe_key();
     let source = format!("lifecycle-wake:{key}");
     let (summary, priority) = match &failure.merged_into {
+        Some(integration) if &failure.branch == integration => (
+            format!("BLOCKER: deploy {} is red in {integration}", failure.workflow),
+            NotificationPriority::Critical,
+        ),
         Some(integration) => (
             format!(
                 "BLOCKER: merged lane {} is red in {integration}",
@@ -1840,10 +1954,20 @@ mod tests {
 
     fn deploy_config(cas_dir: &Path) {
         let mut config = crate::config::Config::default();
-        config.set("qa.release.integration_branch", "staging").unwrap();
+        config
+            .set("qa.release.integration_branch", "staging")
+            .unwrap();
         // Also exercises the public config accessors, not only TOML decoding.
-        config.set("qa.release.deploy_workflows", "Deploy Backend,Deploy Frontend").unwrap();
-        assert_eq!(config.get("qa.release.deploy_workflows").as_deref(), Some("Deploy Backend,Deploy Frontend"));
+        config
+            .set(
+                "qa.release.deploy_workflows",
+                "Deploy Backend,Deploy Frontend",
+            )
+            .unwrap();
+        assert_eq!(
+            config.get("qa.release.deploy_workflows").as_deref(),
+            Some("Deploy Backend,Deploy Frontend")
+        );
         config.save(cas_dir).unwrap();
     }
 
@@ -1860,13 +1984,21 @@ mod tests {
             frontend.name = "Deploy Frontend".into();
             frontend.conclusion = Some("timed_out".into());
             let transport = TipTransport {
-                runs: vec![backend, frontend, run_with("staging", "red-deploy", 200, Some("success"))],
+                runs: vec![
+                    backend,
+                    frontend,
+                    run_with("staging", "red-deploy", 200, Some("success")),
+                ],
                 tip: Some("red-deploy"),
                 failed_job: Some("Deploy service"),
                 job_lookups: Cell::new(0),
             };
             let failures = collect_failures(&transport, &BTreeSet::new(), Some(temp.path())).unwrap();
-            assert_eq!(failures.len(), 2, "each configured workflow needs its own verdict");
+            assert_eq!(
+                failures.len(),
+                2,
+                "each configured workflow needs its own verdict"
+            );
             let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
             queue.init().unwrap();
             for failure in &failures {
@@ -1883,7 +2015,9 @@ mod tests {
                 assert!(row.prompt.contains("Deploy service"));
                 // pin: the failed step is actionable deploy context.
                 assert!(row.prompt.contains("Apply migrations"));
-                assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(&row.prompt));
+                assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(
+                    &row.prompt
+                ));
             }
         }
     }
@@ -1900,12 +2034,20 @@ mod tests {
             failed_job: Some("Deploy service"),
             job_lookups: Cell::new(0),
         };
-        let collect = |transport: &TipTransport| collect_failures(transport, &BTreeSet::new(), Some(temp.path())).unwrap();
+        let collect = |transport: &TipTransport| {
+            collect_failures(transport, &BTreeSet::new(), Some(temp.path())).unwrap()
+        };
         let red = collect(&transport);
-        assert_eq!(red.len(), 1, "a path-filtered deploy remains red after the tip moves");
+        assert_eq!(
+            red.len(),
+            1,
+            "a path-filtered deploy remains red after the tip moves"
+        );
         // A fresh collector reads persisted observations when the old deploy
         // falls outside GitHub's 100-run window (also covers daemon restart).
-        transport.runs = (200..300).map(|id| run_with("main", "moved-tip", id, Some("success"))).collect();
+        transport.runs = (200..300)
+            .map(|id| run_with("main", "moved-tip", id, Some("success")))
+            .collect();
         assert_eq!(collect(&transport), red);
         for (event, workflow, conclusion, id) in [
             ("push", "Deploy Backend", "success", 99),
@@ -1920,9 +2062,23 @@ mod tests {
             unrelated.name = workflow.into();
             unrelated.conclusion = Some(conclusion.into());
             transport.runs = vec![unrelated];
-            assert_eq!(collect(&transport), red, "only newer green for the same deploy clears red");
+            assert_eq!(
+                collect(&transport),
+                red,
+                "only newer green for the same deploy clears red"
+            );
         }
-        deploy.id = 305;
+        let mut cancelled_jobs = deploy.clone();
+        cancelled_jobs.id = 305;
+        transport.runs = vec![cancelled_jobs];
+        transport.failed_job = None;
+        assert_eq!(
+            collect(&transport),
+            red,
+            "cancelled jobs do not clear the previous red deploy"
+        );
+        transport.failed_job = Some("Deploy service");
+        deploy.id = 306;
         deploy.conclusion = Some("success".into());
         transport.runs = vec![deploy];
         assert!(collect(&transport).is_empty());
@@ -2098,8 +2254,9 @@ mod tests {
     }
 
     #[test]
-    fn repeat_failure_has_one_stable_branch_sha_dedupe_key() {
+    fn repeat_failure_has_one_stable_branch_workflow_sha_dedupe_key() {
         let failure = CiFailure {
+            workflow: "CI".into(),
             branch: "main".to_string(),
             head_sha: "abc123".to_string(),
             run_id: 1,
@@ -2109,7 +2266,7 @@ mod tests {
             suppressed_red_runs: Vec::new(),
             merged_into: None,
         };
-        assert_eq!(failure.dedupe_key(), "ci-red-run:main:abc123");
+        assert_eq!(failure.dedupe_key(), "ci-red-run:main:CI:abc123");
         assert_eq!(failure.dedupe_key(), failure.clone().dedupe_key());
     }
 
@@ -2119,6 +2276,7 @@ mod tests {
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let failure = CiFailure {
+            workflow: "CI".into(),
             branch: "main".to_string(),
             head_sha: "abc123".to_string(),
             run_id: 1,
@@ -2132,7 +2290,7 @@ mod tests {
         assert!(!emit_failure(&queue, "factory-session", &failure).unwrap());
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].source, "lifecycle-wake:ci-red-run:main:abc123");
+        assert_eq!(rows[0].source, "lifecycle-wake:ci-red-run:main:CI:abc123");
         assert!(rows[0].prompt.contains("Failing job: Fast Validation"));
     }
 
@@ -2144,6 +2302,7 @@ mod tests {
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let failure = CiFailure {
+            workflow: "CI".into(),
             branch: "factory/noble-gopher-88-cas-38e7".to_string(),
             head_sha: "bc452ab0d".to_string(),
             run_id: 38684348776,
@@ -2210,6 +2369,7 @@ mod tests {
             "factory/merged",
         ]);
         let failure = |branch: &str, sha: &str| CiFailure {
+            workflow: "CI".into(),
             branch: branch.to_string(),
             head_sha: sha.to_string(),
             run_id: 1,
@@ -2239,6 +2399,7 @@ mod tests {
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let failure = CiFailure {
+            workflow: "CI".into(),
             branch: "main".to_string(),
             head_sha: "abc123".to_string(),
             run_id: 1,

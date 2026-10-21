@@ -18611,7 +18611,7 @@ impl EpicGitSnapshot {
     }
 
     fn read_ref(&self, requested: &str) -> CheckedRefRead {
-        if self.ref_exists(requested) || self.resolved_anchors.contains(requested) {
+        if self.ref_exists(requested) {
             return CheckedRefRead::Local {
                 requested: requested.to_string(),
             };
@@ -18639,7 +18639,12 @@ impl EpicGitSnapshot {
         if !is_safe_git_refname(requested) || !is_safe_git_refname(parent_branch) {
             return None;
         }
-        let commit_ref = self.read_ref(requested).read_ref()?.to_string();
+        // Summary rows can measure an already-validated receipt SHA directly.
+        let commit_ref = if self.resolved_anchors.contains(requested) {
+            requested.to_string()
+        } else {
+            self.read_ref(requested).read_ref()?.to_string()
+        };
         let parent_ref = if self.ref_exists(parent_branch) {
             parent_branch.to_string()
         } else {
@@ -19234,7 +19239,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut checked_ref_reads = Vec::new();
         let mut any_ref_resolved = false;
         for commit in checked_refs {
-            let read = git_snapshot.read_ref(commit);
+            let read = if options.summary && resolved_anchor == Some(commit) {
+                CheckedRefRead::Local {
+                    requested: commit.to_string(),
+                }
+            } else {
+                git_snapshot.read_ref(commit)
+            };
             if let Some(refname) = read.read_ref() {
                 any_ref_resolved = true;
                 let count = git_snapshot

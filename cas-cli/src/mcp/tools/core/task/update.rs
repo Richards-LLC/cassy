@@ -2376,6 +2376,18 @@ impl CasCore {
                 })
                 .unwrap_or_else(|| "unknown".into())
         });
+        // Snapshot before persisting ownership changes. A concurrent claim
+        // must never turn this update into permission to revoke a new epoch.
+        let lease_snapshot = if req.assignee.is_some() || explicit_block_status {
+            let agents = self.open_agent_store()?;
+            let lease = agents.get_lease(&req.id).map_err(|error| Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Cannot inspect task lease before update: {error}"),
+            ))?;
+            lease.map(|lease| (agents, lease))
+        } else {
+            None
+        };
         // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
         // pushed below matches the persisted row.
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
@@ -2384,11 +2396,6 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.assignee.is_some() && task.assignee != prior_assignee {
-            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
-                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
-            }
-        }
 
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the
         // task cites, so a worker without GitHub credentials reads them from
@@ -2445,6 +2452,60 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+        }
+
+        if let Some((agents, lease)) = lease_snapshot {
+            let holder = agents.get(&lease.agent_id).ok();
+            let holder_label = holder.as_ref()
+                .map(|agent| format!("{} ({})", agent.name, lease.agent_id))
+                .unwrap_or_else(|| lease.agent_id.clone());
+            let same_holder = task.assignee.as_deref()
+                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(&lease.agent_id))
+                || holder.as_ref().is_some_and(|holder| {
+                    super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), holder)
+                });
+            let reassigned = req.assignee.is_some() && !same_holder;
+            let yielding = explicit_block_status && task.status == TaskStatus::Blocked
+                && self.get_registered_agent_id_read_only().ok().as_deref() == Some(lease.agent_id.as_str())
+                && holder.as_ref().is_some_and(|holder| holder.role == cas_types::AgentRole::Worker);
+            let supervisor_reassigned = reassigned && self.resolve_live_supervisor_authority().is_ok();
+            if yielding || supervisor_reassigned {
+                let reason = if yielding { "Worker yielded on blocked hold" } else { "Supervisor reassigned task" };
+                match agents.release_lease_if_owner_epoch(&req.id, &lease.agent_id, lease.epoch, reason) {
+                    Ok(true) => {
+                        warnings.push(format!("Lease released from {holder_label}: {reason}."));
+                        // Release only this holder's peer claim, never a receiver's
+                        // claim established after the local lease was released.
+                        if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root) {
+                            if let Err(error) = claims.release_own(&req.id, &lease.agent_id) {
+                                warnings.push(format!("Previous holder's Cloud claim could not be released: {error}. Check the claim before the new assignee starts."));
+                            }
+                        }
+                    }
+                    Ok(false) => match agents.get_lease(&req.id) {
+                        Ok(Some(current)) => warnings.push(format!(
+                            "Lease retained by {} until {}: its generation changed during update; no replacement lease was revoked. Check ownership before starting.",
+                            current.agent_id, current.expires_at.to_rfc3339(),
+                        )),
+                        Ok(None) => {},
+                        Err(error) => warnings.push(format!("Lease generation changed during update; current holder could not be read: {error}. Check ownership before starting.")),
+                    },
+                    Err(error) => warnings.push(format!(
+                        "Lease release from {holder_label} failed: {error}. Task fields were updated; check the lease before starting.",
+                    )),
+                }
+            } else if reassigned || explicit_block_status {
+                warnings.push(format!(
+                    "Lease retained by {holder_label} until {}. Assignment/status changes did not release it; ask a live supervisor to reassign or transfer the task, or have the holder yield with status=blocked before starting.",
+                    lease.expires_at.to_rfc3339(),
+                ));
+            }
+        }
+
+        if task.assignee.is_some() && task.assignee != prior_assignee {
+            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
+                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
+            }
         }
 
         // cas-062d: push blocked / ready-reopened transitions.

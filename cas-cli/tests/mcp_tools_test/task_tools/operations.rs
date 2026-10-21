@@ -5162,6 +5162,89 @@ fn make_task_create_req(title: &str) -> TaskCreateRequest {
     }
 }
 
+/// A hold or a supervisor's reassignment ends the old execution lease.
+/// An unrelated worker cannot revoke that lease through an assignee update.
+#[tokio::test]
+async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe() {
+    for path in ["yield", "supervisor", "retained"] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, source) = setup_cas_as(&mut env, AgentRole::Worker);
+        let cas_dir = temp.path().join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let source_id = format!("test-session-{}", std::process::id());
+        let receiver =
+            Agent::new_with_role("receiver-id".into(), "new-worker".into(), AgentRole::Worker);
+        agents.register(&receiver).unwrap();
+        let supervisor = Agent::new_with_role(
+            "supervisor-id".into(),
+            "supervisor".into(),
+            AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor_core.set_agent_id_for_testing(supervisor.id.clone());
+        let receiver_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        receiver_core.set_agent_id_for_testing(receiver.id.clone());
+
+        let id = create_task_titled(&source, "Lease ownership handoff").await;
+        let mut task = tasks.get(&id).unwrap();
+        task.assignee = Some("test-agent".into());
+        tasks.update(&task).unwrap();
+        source
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        let original = agents.get_lease(&id).unwrap().unwrap();
+        assert_eq!(original.agent_id, source_id);
+
+        if path == "yield" {
+            update_task_json(&source, serde_json::json!({
+                "id": id, "status": "blocked", "notes": "Yielding task ownership to supervisor; no source changes",
+            })).await;
+            assert!(
+                agents.get_lease(&id).unwrap().is_none(),
+                "yield must release its lease"
+            );
+            assert!(tasks.get_execution_state(&id).unwrap().unwrap()["blocked_hold"].is_object());
+        }
+        let actor = if path == "retained" {
+            &receiver_core
+        } else {
+            &supervisor_core
+        };
+        // Spoofing the environment does not grant registered supervisor authority.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": id, "assignee": receiver.name, "status": "open",
+        }))
+        .unwrap();
+        let text = extract_text(actor.cas_task_update(Parameters(request)).await.unwrap());
+        env.set("CAS_AGENT_ROLE", "worker");
+        let started = receiver_core
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await;
+        if path == "retained" {
+            // Retaining a blocking lease must identify its current holder.
+            assert!(text.contains(&source_id), "{text}");
+            let error = started.expect_err("a peer update must not revoke the live lease");
+            assert!(error.message.contains("locked"), "{error}");
+            assert_eq!(
+                agents.get_lease(&id).unwrap().unwrap().epoch,
+                original.epoch
+            );
+        } else {
+            started.unwrap_or_else(|error| {
+                panic!("{path}: new assignee must start without override: {error}")
+            });
+            let lease = agents.get_lease(&id).unwrap().unwrap();
+            assert_eq!(lease.agent_id, receiver.id);
+            assert!(lease.epoch > original.epoch);
+            assert_eq!(agents.get(&source_id).unwrap().active_tasks, 0);
+        }
+    }
+}
+
 /// Happy path: supervisor force-transfers a task claimed by a live worker.
 ///
 /// AC: Supervisor has a documented, supported path to reassign a
@@ -5250,6 +5333,11 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         .expect("supervisor force-transfer should succeed");
 
     let text = extract_text(result);
+
+    // The issuer and previous holder differ on supervisor force-transfer.
+    let receipt = text.lines().next().unwrap();
+    assert!(receipt.contains(&worker_session_id), "{receipt}");
+    assert!(!receipt.contains(&supervisor_id), "{receipt}");
 
     // Response must confirm transfer and note the override was used.
     assert!(

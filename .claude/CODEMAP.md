@@ -71,6 +71,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/artifacts/retention.rs`, `cas-cli/src/task_simulators.rs` - task artifact retention and owned iOS simulator cleanup.
 - `cas-cli/src/task_ownership.rs`, `cas-cli/src/task_assignment.rs` - project ownership proof and assignment identity.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_batch.rs` - QA rounds, evidence gates, and batch receipts.
+- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_post_release.rs` - journey registry checks and seeding, diff-to-journey impact, and post-release read-only checks.
 - `cas-cli/src/builtins/` - canonical agents, skills, jobs, harness mirrors, and sync manifest.
 
 ## Factory runtime and terminals

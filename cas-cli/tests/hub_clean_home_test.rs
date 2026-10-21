@@ -2582,10 +2582,15 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let value: Value = serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|error| panic!("{name} did not emit one JSON value ({error}): {detail}"));
         if output.status.success() {
-            let pid = value["pid"]
+            let pid = value["start"]["pid"]
                 .as_u64()
-                .or_else(|| value["record"]["pid"].as_u64())
                 .unwrap_or_else(|| panic!("{name} success has no hub PID: {value}"));
+            if value["stop"]["already_satisfied"] == true {
+                assert_eq!(
+                    pid, running_pid,
+                    "{name} already-satisfied stop must return the running hub: {value}; {detail}"
+                );
+            }
             successful_pids.push(pid);
         } else {
             let message = value["message"].as_str().unwrap_or_default();

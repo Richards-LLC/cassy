@@ -459,9 +459,44 @@ impl std::fmt::Display for QaMode {
     }
 }
 
+/// Registry upkeep rollout; strict only expands G2 to modified files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryEnforcement {
+    Off,
+    Observe,
+    #[default]
+    Enforce,
+    Strict,
+}
+impl std::fmt::Display for RegistryEnforcement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+            Self::Strict => "strict",
+        })
+    }
+}
+impl std::str::FromStr for RegistryEnforcement {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "observe" => Ok(Self::Observe),
+            "enforce" => Ok(Self::Enforce),
+            "strict" => Ok(Self::Strict),
+            _ => Err("qa.registry.enforce must be off, observe, enforce or strict"),
+        }
+    }
+}
+
 /// Journey registry settings at `[qa.registry]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaRegistryConfig {
+    #[serde(default)]
+    pub enforce: RegistryEnforcement,
     #[serde(default = "default_registry_path")]
     pub path: String,
 }
@@ -472,14 +507,17 @@ fn default_registry_path() -> String {
 
 impl Default for QaRegistryConfig {
     fn default() -> Self {
-        Self { path: default_registry_path() }
+        Self {
+            path: default_registry_path(),
+            enforce: RegistryEnforcement::default(),
+        }
     }
 }
 
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
-    /// Journey registry location; enforcement stages are added by the upkeep gates.
+    /// Journey registry location and staged upkeep enforcement.
     #[serde(default)]
     pub registry: QaRegistryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]

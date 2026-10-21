@@ -728,6 +728,10 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "qa.registry.enforce" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                self.qa.get_or_insert_with(QaConfig::default).registry.enforce = stage;
+            }
             "qa.registry.path" => {
                 let path = std::path::Path::new(value.trim());
                 if path.as_os_str().is_empty() || path.is_absolute()

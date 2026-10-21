@@ -3,6 +3,15 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     registry.register(ConfigMeta {
+        key: "qa.registry.enforce", section: "qa", name: "Registry Upkeep Stage",
+        description: "G1–G3 at park: off, observe (durable would-refusals), enforce (new surfaces), strict (also modified unowned surfaces). Strict is opt-in only.",
+        value_type: ConfigType::String, default: "enforce",
+        constraint: Constraint::OneOf(vec!["off".into(), "observe".into(), "enforce".into(), "strict".into()]),
+        advanced: false, requires_feature: None,
+        keywords: &["qa", "journey", "registry", "upkeep", "observe", "strict"],
+        use_cases: &["Roll out registry upkeep gates and measure would-refusals"],
+    });
+    registry.register(ConfigMeta {
         key: "qa.registry.path",
         section: "qa",
         name: "Journey Registry Path",

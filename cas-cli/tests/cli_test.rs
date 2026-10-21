@@ -44,6 +44,67 @@ fn test_version() {
         .stdout(predicate::str::contains("cas"));
 }
 
+#[test]
+fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    cas_cmd(root).current_dir(root).args(["init", "--yes"]).assert().success();
+    let registry = root.join("docs/qa/journeys.yaml");
+    std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    std::fs::write(root.join("page.ts"), "export {};\n").unwrap();
+    let seeded = "version: 1\nupdated: '2026-10-21'\ninvariants:\n  ACCOUNT: {statement: Account exists, check: Read account}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Join}\n    owners: ['page.ts']\n";
+    std::fs::write(&registry, seeded).unwrap();
+    assert!(std::process::Command::new("git").args(["add", "page.ts", "docs/qa/journeys.yaml"])
+        .current_dir(root).status().unwrap().success());
+    let human = |expected: &str| {
+        let output = cas_cmd(root).current_dir(root).args(["qa", "journeys", "--check"])
+            .assert().success().get_output().stdout.clone();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with(expected), "{output}");
+        assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
+        output
+    };
+    let json = || {
+        let output = cas_cmd(root).current_dir(root).args(["qa", "journeys", "--check", "--json"])
+            .assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let first = human("DEBT: 0 problem(s), 1 debt item(s)\nDebt by kind:\n  seeded: 1\n");
+    assert!(first.contains("first recorded check"), "{first}");
+    assert!(!first.contains("DEBT signup"), "individual rows belong under --verbose: {first}");
+
+    std::fs::write(&registry, format!("{seeded}    traffic: {{share_pct: null}}\n")).unwrap();
+    let increased = json();
+    assert_eq!(increased["problems"], serde_json::json!([]));
+    assert_eq!(increased["debt"].as_array().unwrap().len(), 2);
+    assert_eq!(increased["debt_summary"]["by_kind"], serde_json::json!({"seeded": 1, "unmeasured_traffic": 1}));
+    assert_eq!(increased["debt_summary"]["previous_total"], 1);
+    assert_eq!(increased["debt_summary"]["delta"], 1);
+    assert_eq!(increased["debt_summary"]["grew"], true);
+    assert_eq!(increased["debt_summary"]["history_status"], "recorded");
+
+    // Remove and re-add traffic debt so the human renderer also observes growth.
+    std::fs::write(&registry, seeded).unwrap();
+    let decreased = json();
+    assert_eq!(decreased["debt_summary"]["delta"], -1);
+    assert_eq!(decreased["debt_summary"]["grew"], false);
+    std::fs::write(&registry, format!("{seeded}    traffic: {{share_pct: null}}\n")).unwrap();
+    let grew = human("DEBT: 0 problem(s), 2 debt item(s)\nDebt by kind:\n  seeded: 1\n  unmeasured_traffic: 1\n");
+    assert!(grew.contains("Debt grew: +1 since previous check (1 -> 2)"), "{grew}");
+    let unchanged = json();
+    assert_eq!(unchanged["debt_summary"]["previous_total"], 2);
+    assert_eq!(unchanged["debt_summary"]["delta"], 0);
+    assert_eq!(unchanged["debt_summary"]["grew"], false);
+
+    let alternate = root.join("docs/qa/alternate.yaml");
+    std::fs::write(&alternate, seeded).unwrap();
+    cas_cmd(root).current_dir(root).args(["config", "set", "qa.registry.path", "docs/qa/alternate.yaml"])
+        .assert().success();
+    let other_registry = json();
+    assert!(other_registry["debt_summary"]["previous_total"].is_null(), "{other_registry}");
+    assert!(other_registry["debt_summary"]["delta"].is_null(), "{other_registry}");
+}
+
 /// The lib-test probe child does not exercise main.rs's early executable route.
 /// Both real-binary phases must preserve locks owned by this parent process.
 #[cfg(unix)]

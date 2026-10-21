@@ -2,13 +2,15 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | State PASS or FAIL and the problem/debt counts, then identify the registry file. |
-| Scannable | Print one ASCII row per problem or debt item, with the journey/group and stable problem code. |
-| Readable | Each row explains the missing field, reference or tracked file; the final retry command is `cas qa journeys --check`. |
-| Machine output | Global `--json` emits one object with `problems` and `debt` arrays of `{code, subject, message}`, without banners or colour. |
-| Omitted | Successful journeys and traffic snapshots stay in YAML; checking does not execute specs. |
+| First two lines | State FAIL, DEBT or PASS with problem/debt counts, then list debt by kind when present. Debt keeps exit zero when there are no problems. |
+| Scannable | Group debt by stable problem code; show growth against the previous recorded check before registry details. |
+| Readable | Print one `cas qa journeys --check --verbose` command for individual debt rows; errors still name the subject and remedy. |
+| Machine output | Global `--json` preserves `problems` and `debt` arrays and adds `debt_summary` with total, by_kind, previous_total, delta, grew and history_status; absent comparisons are null. |
+| Omitted | Individual debt rows need `--verbose`; successful journeys and traffic snapshots stay in YAML. Checks do not execute specs. |
 
-Rows retain complete paths and identifiers for copying; JSON is the escape for long rows.
+Verbose rows retain complete paths and identifiers; JSON is the escape for long rows.
+The existing cas.db metadata table stores one check receipt per checkout and registry.
+No database is created by checking. Unavailable history is explicit and never means zero.
 Malformed YAML, missing registry and Git errors fail with the underlying cause.
 
 ## Critique

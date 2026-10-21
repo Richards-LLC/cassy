@@ -64,6 +64,15 @@ impl Config {
                         "Invalid boolean for factory.commander_mirror_enabled".into()
                     ))?;
             }
+            "hub.transport_mode" => {
+                let mode = match value {
+                    "auto" => HubTransportMode::Auto,
+                    "required" => HubTransportMode::Required,
+                    "loopback" => HubTransportMode::Loopback,
+                    _ => return Err(MemError::Parse("hub.transport_mode must be auto, required or loopback".into())),
+                };
+                self.hub.get_or_insert_with(Default::default).transport_mode = Some(mode);
+            }
             "hub.tailscale_serve" => {
                 self.hub
                     .get_or_insert_with(Default::default)

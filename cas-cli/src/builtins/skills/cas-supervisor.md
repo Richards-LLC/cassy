@@ -48,7 +48,7 @@ Own the next action from the highest true rung each turn:
 3. **Integration gated** — checks and [epic flow walk](references/epic-flow-walk.md) receipted.
 4. **PR queued** — reviewed epic in its protected merge path.
 5. **On main** — validated tree on the default branch.
-6. **Released and deployed** — publication and production verified.
+6. **Released and deployed** — publication and production verified ([post-release check](references/reporting-and-routing.md#post-release-check)).
 
 ## Operating flow
 

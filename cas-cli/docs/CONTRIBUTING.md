@@ -592,6 +592,16 @@ Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
 omitted, but not both. The proposer claims only `mine`; acceptance claims only
 the recipient's share. Existing expiry, cancel and start guards apply.
 
+Assignments and starts of a peer's split children name the peer and split and
+refuse the change, including `force=true`. To take over one child, a live
+registered supervisor uses `task action=update id=<child> assignee=<worker>
+supervisor_override=true reason="<agreed takeover reason>"`. This persists a
+decision bound to that worker's registration; only its successful start consumes
+the decision. A different worker, a claim, transfer or pre-assigned spawn cannot
+use it. Cancel or redirect the split to change the ownership agreement instead.
+Accepted splits remain binding until cancelled; their expiry limits acceptance
+of unanswered proposals.
+
 Accept, reject, cancel and expiry carry typed `epic_split_decided` peer intent,
 eligible to wake through the existing mailbox and pane gates. Read
 `factory action=epic_split id=<split> decision=status` (or just `id=<split>`) for
@@ -808,6 +818,47 @@ dispatches. The refusal sends the worker to the supervisor with
 an empty list disables its check. These denials override project proxy credential grants and read-only
 server declarations for every worker harness. The supervisor's configuration
 and environment are preserved. Spawn diagnostics record denied names only.
+
+An explicit Claude `config_dir` can opt in to selected account connectors while
+keeping `--strict-mcp-config`. The account owner provisions a regular file at
+`<config_dir>/cassy-worker-connectors.json` (after `~` expansion), for example:
+
+```json
+{
+  "mcpServers": {
+    "claude.ai Gmail": {
+      "type": "claudeai-proxy",
+      "url": "https://<exact-upstream-from-this-account>/mcp",
+      "id": "<exact-connector-id-from-this-account>"
+    }
+  }
+}
+```
+
+Copy the exact connector name, URL and ID from this account's authorized MCP
+status metadata; the example values are placeholders. The manifest is an
+operator grant of the listed connectors, so keep it owner-only. It accepts
+those three descriptor fields plus optional native `toolPermissions` (a map of
+tool names to `allow`, `ask` or `blocked`), HTTPS URLs without embedded credentials or
+query strings, and names beginning with `claude.ai` followed by a space.
+Other transports, fields, symlinks and
+files over 64 KiB are invalid. A missing or invalid manifest leaves strict
+CAS-only launch working and emits a one-line notice, also available in
+`CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE`. Configured supervisor-only connectors
+and deployment connectors Vercel/Neon are omitted. Claude's managed restrictions
+and connector-disable settings still apply; the manifest cannot override them.
+When the account has organization tool controls, provision their exact native
+`toolPermissions` map too and refresh it when those controls change. Cassy
+preserves supplied ceilings; a status export without that metadata does not
+prove the account's tool restrictions are preserved.
+
+Only an explicit account parameter reads this file. Host/requester account
+inheritance, default workers, supervisors and Codex do not import it. Cassy
+copies no credentials and fetches no connector metadata; Claude authenticates
+using the selected account. Operator verification must confirm tool discovery
+on the actual Claude version and absence of denied/other-account tools before
+relying on this path. A visible connector does not enforce read-only use.
+The `inherit` mode above retains its existing semantics and ignores manifests.
 
 The existing protected-operator-token policy removes inherited `NEON_API_KEY`
 and `VERCEL_TOKEN` from workers by default, even though `supervisor_only_env`
@@ -2295,6 +2346,28 @@ its assignee, delivery anchors and immutable merge facts preserved. It supports
 task-only investigation proofs as well as merged code deliveries. Ordinary close
 proofs still apply: declaring `no-code` never hides delivered code. Correct only
 one of methodology, work target, proof targets or risk in each update.
+
+A registered supervisor's first `verification action=add` may omit
+`dispatch_id` when exactly one unexpired active dispatch exists for the task.
+Child verifiers retain their sealed handoff binding; explicit IDs remain
+supported. Terminal or expired dispatches are never inferred or silently
+replaced: supervisor recovery must name the exact expired dispatch. Verifier
+spawn briefs carry the dispatch ID directly.
+
+A merged parked delivery gets an exact target-bound verification dispatch before
+its content check can refuse close. This lets the independent verifier record a
+verdict while integration proof still blocks close; an approval never waives
+missing delivery content. After a failed review, a supervisor can use
+`task action=request_changes` from AwaitingMerge or Blocked with a recorded
+parked delivery. It preserves the assignee and historical merge facts and
+invalidates the declined proof before the next implementation cycle.
+
+Re-parking a rejected QA delivery opens the next round automatically within the
+configured round limit. Cassy reuses the prior reviewer only when its current
+registration is live in this factory, independent of the implementer, and has
+no assigned active work or lease. The reviewer gets a new QA task assignment
+and still has to start/claim the round. Busy/unavailable reviewers leave the
+normal supervisor spawn handoff in place; maximum-round escalation remains.
 
 A passed or waived independent QA round remains bound to its reviewed tip after
 a squash merge. Close proves that the integrated receipt carries the same trees

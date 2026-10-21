@@ -387,6 +387,13 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
 - Message each worker to re-close its own task
 - Apply the closure pass before reassigning workers
 
+### Supervisor-run fixture scripts
+
+When a walk needs records a worker can't create (accounts, tokens or data in a shared environment whose credentials the supervisor holds), the worker drafts a guarded script in its worktree and the supervisor runs it:
+
+1. The script checks the target host against the allowed environment and exits otherwise, refuses on a colliding record instead of overwriting it, writes its outputs mode 600 under the task artifact directory, and prints sanitized errors with no secrets or tokens.
+2. The supervisor reviews the script against those four guards, runs it from the worker's worktree (the shared checkout may lack the file), and sends the worker the output path.
+
 ## Phase 4: Complete
 
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
@@ -443,5 +450,5 @@ Fix a recurring failure on the highest rung that fits — a default or auto-fix,
    its refusal names the destination and its success receipt carries a loud trunk-push warning.
    `force=true` will not authorize trunk.
    If the tracked merge cannot act, stop and ask the operator to resolve it; do not use an untracked merge path.
-7. Close the epic and post release notes.
+7. Close the epic and post release notes; a deployed product's notes wait for a clean [post-release check](reporting-and-routing.md#post-release-check).
 8. Shut down the epic's workers by name: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`

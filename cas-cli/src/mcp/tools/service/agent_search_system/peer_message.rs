@@ -477,7 +477,18 @@ impl CasService {
             .map_err(|ambiguous| Self::error(ErrorCode::INVALID_PARAMS, ambiguous))?
         {
             Some(peer) => Some((peer.clone(), false)),
-            None => crate::cloud::peers::ended_target(&ended, target).map(|old| (old.clone(), true)),
+            // Historical sessions use the same selectors as live account
+            // peers, including project and project@machine. Multiple ended
+            // sessions are history, so name the most recently seen match;
+            // slot_holder still decides whether a live successor is safe.
+            None => ended
+                .iter()
+                .filter(|old| {
+                    peer_mailbox::resolve_user_peer_target(std::slice::from_ref(*old), target)
+                        .is_ok_and(|peer| peer.is_some())
+                })
+                .max_by_key(|old| old.last_heartbeat)
+                .map(|old| (old.clone(), true)),
         };
         let Some((addressed, was_ended)) = addressed else {
             let reason = if explicit {

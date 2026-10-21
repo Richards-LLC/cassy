@@ -22,12 +22,11 @@ impl Config {
             "slack.stakeholder_contacts" => Some(serde_json::to_string(
                 &self.slack.as_ref().cloned().unwrap_or_default().stakeholder_contacts
             ).expect("serializable stakeholder policies")),
+            "hub.transport_mode" => Some(
+                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().as_str().into(),
+            ),
             "hub.tailscale_serve" => Some(
-                self.hub
-                    .as_ref()
-                    .and_then(|hub| hub.tailscale_serve)
-                    .unwrap_or(true)
-                    .to_string(),
+                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
             ),
             "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             "slack.transport" => Some(

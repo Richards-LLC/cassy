@@ -147,7 +147,9 @@ neither exists.
 > macOS. The helper now reports runtime turnover as **unverified** and sends no
 > process signals on macOS. After an update, manually quit and restart running
 > `cas serve` clients, factory daemons, and registered servers with their owners.
-> Check `cas hub service status` and restart the hub service if it is running.
+> The helper restarts a running hub itself with `cas hub restart` and reports the
+> result as "Hub turnover" in its summary; if that says FAILED, run
+> `cas hub status`.
 
 ```zsh
 cas-update --sync-only

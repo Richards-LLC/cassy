@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use cas::hub::HubRuntimePaths;
 use serde_json::Value;
 
 fn fixture_tailscale(home: &Path, path: &OsStr) -> PathBuf {
@@ -228,6 +229,7 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     assert_eq!(receipt["stop"]["stopped"], true, "{receipt}");
     assert_eq!(receipt["stop"]["pid"], initial["pid"], "{receipt}");
     assert_eq!(receipt["start"]["version"], initial["version"], "{receipt}");
+    assert_eq!(receipt["start"]["already_satisfied"], false, "{receipt}");
     assert_ne!(receipt["start"]["pid"], initial["pid"], "{receipt}");
 
     let failed_restart = cas_command(home.path(), &path)
@@ -301,12 +303,13 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             line.starts_with("Detached restart:")
                 || line.starts_with("Stop keys:")
                 || line.starts_with("Stop also has")
+                || line.starts_with("Start also has")
         })
         .collect::<Vec<_>>();
     assert_eq!(
         restart_help_lines.len(),
-        3,
-        "restart help should render its three concise contract lines: {help_text}"
+        4,
+        "restart help should render its four concise contract lines: {help_text}"
     );
     for line in restart_help_lines {
         assert!(
@@ -328,16 +331,22 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         String::from_utf8_lossy(&stop.stderr)
     );
 
-    // The existing debug-only lock-release barrier keeps the old hub's lock
-    // held after its record disappears. Race two actual restart commands in
-    // that widened window until one observes the concurrent winner.
-    let max_race_attempts = 12;
-    let mut satisfied_attempt = None;
-    for attempt in 1..=max_race_attempts {
+    // Force both restart parents past their old-hub stop and into launch before
+    // releasing either new hub. Holding their result observers then makes one
+    // parent deterministically see the peer's ready record. Other passes hold
+    // the winner in startup and before record publication to exercise both
+    // early-exit paths.
+    for (hold_startup, hold_publication) in [(false, false), (true, false), (false, true)] {
         let race_home = private_home();
         let barrier = race_home.path().join("restart-race-barrier");
         std::fs::create_dir_all(&barrier).expect("create restart race barrier");
+        let session = format!(
+            "cas-3dc8-test-{}-{hold_startup}-{hold_publication}",
+            std::process::id()
+        );
         let initial = cas_command(race_home.path(), &path)
+            .env("CAS_AGENT_ROLE", "worker")
+            .env("CAS_FACTORY_SESSION", &session)
             .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
             .args([
                 "--json",
@@ -351,24 +360,42 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             .expect("start hub for concurrent restart race");
         assert!(
             initial.status.success(),
-            "race attempt {attempt} hub start failed: {}",
+            "race hub start failed: {}",
             String::from_utf8_lossy(&initial.stderr)
         );
+        let initial: Value =
+            serde_json::from_slice(&initial.stdout).expect("race hub start JSON");
 
-        let mut first_restart = cas_command(race_home.path(), &path);
-        first_restart
-            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
-            .args([
-                "--json",
-                "hub",
-                "--no-tailscale-serve",
-                "restart",
-                "--port",
-                "0",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let first = first_restart.spawn().expect("spawn first restart racer");
+        let spawn_restart = |name: &str| {
+            let mut command = cas_command(race_home.path(), &path);
+            command
+                .env("CAS_AGENT_ROLE", "worker")
+                .env("CAS_FACTORY_SESSION", &session)
+                .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+                .env("CAS_TEST_HUB_LAUNCH_BARRIER", &barrier)
+                .args([
+                    "--json",
+                    "hub",
+                    "--no-tailscale-serve",
+                    "restart",
+                    "--port",
+                    "0",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if hold_startup {
+                command.env("CAS_TEST_HUB_STARTUP_BARRIER", &barrier);
+            } else if hold_publication {
+                command.env("CAS_TEST_HUB_RECORD_PUBLICATION_BARRIER", &barrier);
+                command.env("CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER", &barrier);
+            } else {
+                command.env("CAS_TEST_HUB_READY_BARRIER", &barrier);
+            }
+            command
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn {name} concurrent restart: {error}"))
+        };
+        let mut first = Some(spawn_restart("first"));
 
         let marker = barrier.join("record-removed-lock-held");
         let marker_deadline = Instant::now() + Duration::from_secs(10);
@@ -377,40 +404,313 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         }
         if !marker.exists() {
             let _ = std::fs::write(barrier.join("release"), b"release\n");
-            let _ = first.wait_with_output();
-            panic!("race attempt {attempt} old hub did not reach the release barrier");
+            let _ = std::fs::write(barrier.join("release-launchers"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+            let _ = first.take().unwrap().wait_with_output();
+            panic!("old hub did not reach the deterministic release barrier");
         }
 
-        let mut second_restart = cas_command(race_home.path(), &path);
-        second_restart
-            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
-            .args([
-                "--json",
-                "hub",
-                "--no-tailscale-serve",
-                "restart",
-                "--port",
-                "0",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let second = second_restart.spawn().expect("spawn second restart racer");
-        std::thread::sleep(Duration::from_millis(250));
-        std::fs::write(barrier.join("release"), b"release\n")
-            .expect("release old hub lock barrier");
-        let outputs = [
-            first
-                .wait_with_output()
-                .expect("wait for first restart racer"),
-            second
-                .wait_with_output()
-                .expect("wait for second restart racer"),
-        ];
-        let mut observed = false;
+        let waiter_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiters = std::fs::read_dir(&barrier)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("restart-stop-waiter-")
+                })
+                .count();
+            if waiters >= 1 || Instant::now() >= waiter_deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut second = Some(spawn_restart("second"));
+        let waiter_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiters = std::fs::read_dir(&barrier)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("restart-stop-waiter-")
+                })
+                .count();
+            if waiters >= 2 || Instant::now() >= waiter_deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let waiters = std::fs::read_dir(&barrier)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("restart-stop-waiter-")
+            })
+            .count();
+        std::fs::write(barrier.join("release"), b"release\n").unwrap();
+
+        let wait_for_markers = |prefix: &str, expected: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let markers = std::fs::read_dir(&barrier)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+                    .map(|entry| entry.path())
+                    .collect::<Vec<_>>();
+                if markers.len() >= expected || Instant::now() >= deadline {
+                    return markers;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let launchers = wait_for_markers("launcher-", 2);
+        if launchers.len() < 2 {
+            let _ = std::fs::write(barrier.join("release-launchers"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+            let _ = first.take().unwrap().wait_with_output();
+            let _ = second.take().unwrap().wait_with_output();
+            panic!("both restarts did not launch before the barrier: {launchers:?}");
+        }
+        std::fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
+        let monitors = wait_for_markers("monitor-", 2);
+        if monitors.len() < 2 {
+            let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+            let _ = first.take().unwrap().wait_with_output();
+            let _ = second.take().unwrap().wait_with_output();
+            panic!("both restart result observers did not reach the barrier: {monitors:?}");
+        }
+
+        let paths = HubRuntimePaths::new(race_home.path().join(".cas/hub"));
+        let winner_pid = if hold_startup {
+            let startup_markers = wait_for_markers("hub-starting-", 1);
+            if startup_markers.len() != 1 {
+                let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!("expected one lock-owning startup marker: {startup_markers:?}");
+            }
+            let record = paths
+                .read_process_record()
+                .expect("starting hub process record");
+            assert_eq!(
+                record.pid,
+                startup_markers[0]
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_start_matches("hub-starting-")
+                    .parse::<u32>()
+                    .unwrap(),
+                "startup barrier belongs to the recorded lock owner"
+            );
+            assert!(
+                paths
+                    .lock_holders()
+                    .iter()
+                    .any(|holder| holder.pid == record.pid),
+                "starting record must own the machine lock"
+            );
+            std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+            let loser_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if first
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().unwrap().is_some())
+                    || second
+                        .as_mut()
+                        .is_some_and(|child| child.try_wait().unwrap().is_some())
+                {
+                    break;
+                }
+                if Instant::now() >= loser_deadline {
+                    let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+                    let _ = first.take().unwrap().wait_with_output();
+                    let _ = second.take().unwrap().wait_with_output();
+                    panic!("losing launch did not exit while the winner was held starting");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            record.pid
+        } else if hold_publication {
+            let pending = wait_for_markers("hub-record-pending-", 1);
+            if pending.len() != 1 {
+                let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!("expected one hub held before publishing its process record: {pending:?}");
+            }
+            let winner_pid = pending[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .trim_start_matches("hub-record-pending-")
+                .parse::<u32>()
+                .unwrap();
+            assert!(
+                paths.read_process_record().is_err(),
+                "the publication barrier must precede the winning process record"
+            );
+            std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+            let peer_waiters = wait_for_markers("peer-record-wait-", 1);
+            if peer_waiters.len() != 1 {
+                let _ = std::fs::write(barrier.join("release-monitors"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!("losing restart did not observe the unpublished peer record");
+            }
+            std::fs::write(barrier.join("release-hub-record"), b"release\n").unwrap();
+            let record_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if paths.read_process_record().is_ok_and(|record| record.pid == winner_pid) {
+                    break;
+                }
+                if Instant::now() >= record_deadline {
+                    let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                    let _ = first.take().unwrap().wait_with_output();
+                    let _ = second.take().unwrap().wait_with_output();
+                    panic!("winning hub did not publish its process record");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::write(barrier.join("release-peer-record-wait"), b"release\n").unwrap();
+            winner_pid
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut running_pid = None;
+            while running_pid.is_none() && Instant::now() < deadline {
+                let status = cas_command(race_home.path(), &path)
+                    .args(["--json", "hub", "status"])
+                    .output()
+                    .expect("read ready winner while observers are held");
+                running_pid = serde_json::from_slice::<Value>(&status.stdout)
+                    .ok()
+                    .filter(|value| value["running"] == true)
+                    .and_then(|value| value["record"]["pid"].as_u64())
+                    .map(|pid| pid as u32);
+                if running_pid.is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            assert!(
+                running_pid.is_some(),
+                "no ready hub reached the observer barrier"
+            );
+            running_pid.unwrap()
+        };
+        std::fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+        if !hold_startup && !hold_publication {
+            let ready_observers = wait_for_markers("ready-observer-", 2);
+            std::fs::write(barrier.join("release-ready-observers"), b"release\n").unwrap();
+            if ready_observers.len() < 2 {
+                let _ = first.take().unwrap().wait_with_output();
+                let _ = second.take().unwrap().wait_with_output();
+                panic!(
+                    "both restarts must observe the peer's ready record: {ready_observers:?}"
+                );
+            }
+        }
+        let mut first_output = None;
+        let mut second_output = None;
+        if hold_startup || hold_publication {
+            // Capture the loser only after its peer record has been published;
+            // the publication-gap case must attribute this already-exited child.
+            let loser_deadline = Instant::now() + Duration::from_secs(10);
+            let (loser_index, output) = loop {
+                if first
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().unwrap().is_some())
+                {
+                    break (0, first.take().unwrap().wait_with_output().unwrap());
+                }
+                if second
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().unwrap().is_some())
+                {
+                    break (1, second.take().unwrap().wait_with_output().unwrap());
+                }
+                if Instant::now() >= loser_deadline {
+                    let _ = std::fs::write(barrier.join("release-hub-startup"), b"release\n");
+                    let _ = std::fs::write(barrier.join("release-hub-record"), b"release\n");
+                    let _ = std::fs::write(barrier.join("release-peer-record-wait"), b"release\n");
+                    let _ = first.take().map(|child| child.wait_with_output());
+                    let _ = second.take().map(|child| child.wait_with_output());
+                    panic!("losing restart did not report while its peer owned the machine lock");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            std::fs::write(barrier.join("release-hub-startup"), b"release\n").unwrap();
+            if loser_index == 0 {
+                first_output = Some(output);
+            } else {
+                second_output = Some(output);
+            }
+        }
+
+        if let Some(child) = first.take() {
+            first_output = Some(child.wait_with_output().expect("wait first restart"));
+        }
+        if let Some(child) = second.take() {
+            second_output = Some(child.wait_with_output().expect("wait second restart"));
+        }
+        let mut outputs = Vec::new();
+        if let Some(output) = first_output {
+            outputs.push(output);
+        }
+        if let Some(output) = second_output {
+            outputs.push(output);
+        }
+        assert_eq!(outputs.len(), 2, "both restart outcomes must be captured");
+        assert_eq!(
+            waiters, 2,
+            "both restarts must reach the stop wait, startup-held={hold_startup}"
+        );
+
+        let status = cas_command(race_home.path(), &path)
+            .args(["--json", "hub", "status"])
+            .output()
+            .expect("read hub after concurrent restarts");
+        let running: Value = serde_json::from_slice(&status.stdout).expect("hub status JSON");
+        assert_eq!(running["running"], true, "{running}");
+        assert_eq!(running["record"]["pid"], winner_pid, "{running}");
+        let cleanup = cas_command(race_home.path(), &path)
+            .env("CAS_AGENT_ROLE", "worker")
+            .env("CAS_FACTORY_SESSION", &session)
+            .args(["--json", "hub", "stop"])
+            .output()
+            .expect("stop concurrent restart fixture");
+        assert!(
+            cleanup.status.success(),
+            "race cleanup failed: {}",
+            String::from_utf8_lossy(&cleanup.stderr)
+        );
+
+        let mut launched_starts = 0;
+        let mut satisfied_starts = 0;
+        let mut errors = 0;
         for output in &outputs {
             let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
                 panic!(
-                    "race attempt {attempt} did not emit one JSON value: {error}; stdout={} stderr={}",
+                    "restart did not emit one JSON value: {error}; stdout={} stderr={}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 )
@@ -420,47 +720,63 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(keys, expected_stop_keys, "race attempt {attempt}: {value}");
+            assert_eq!(keys, expected_stop_keys, "{value}");
             if output.status.success() {
-                assert!(
-                    value["start"].is_object(),
-                    "race attempt {attempt}: {value}"
-                );
+                assert!(value["start"].is_object(), "{value}");
+                assert_eq!(value["start"]["pid"], winner_pid, "{value}");
+                match value["start"]["already_satisfied"].as_bool() {
+                    Some(false) => launched_starts += 1,
+                    Some(true) => satisfied_starts += 1,
+                    None => panic!("restart has no start disposition: {value}"),
+                }
             } else {
-                assert_eq!(value["status"], "error", "race attempt {attempt}: {value}");
-            }
-            if stop["already_satisfied"] == true {
-                assert_eq!(stop["stopped"], false, "race attempt {attempt}: {value}");
-                assert!(stop["pid"].is_null(), "race attempt {attempt}: {value}");
+                errors += 1;
+                assert_eq!(value["status"], "error", "{value}");
                 assert!(
-                    stop["tailscale_serve_removed"].is_null(),
-                    "race attempt {attempt}: {value}"
+                    value["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains(&format!(
+                            "another cas hub instance won the machine lock (pid {winner_pid})"
+                        )),
+                    "losing restart error must name the running winner: {value}"
                 );
-                assert!(
-                    stop["tailscale_warning"].is_null(),
-                    "race attempt {attempt}: {value}"
-                );
-                observed = true;
             }
         }
-        let cleanup = cas_command(race_home.path(), &path)
-            .args(["--json", "hub", "stop"])
-            .output()
-            .expect("stop concurrent restart fixture");
-        assert!(
-            cleanup.status.success(),
-            "race attempt {attempt} cleanup failed: {}",
-            String::from_utf8_lossy(&cleanup.stderr)
-        );
-        if observed {
-            satisfied_attempt = Some(attempt);
-            break;
+        if hold_startup || hold_publication {
+            assert_eq!(
+                launched_starts, 1,
+                "exactly one restart reports launching the held winner"
+            );
+            assert_eq!(errors, 1, "the losing launch must report its winner");
+        } else {
+            assert_eq!(
+                launched_starts, 1,
+                "exactly one restart launched the ready hub"
+            );
+            assert_eq!(
+                satisfied_starts, 1,
+                "the peer adopter must be flagged satisfied"
+            );
+            assert_eq!(errors, 0, "ready peer adoption must be a success");
+        }
+
+        if let Some(cgroup) = initial["cgroup"].as_str().map(Path::new)
+            && let Some(parent) = cgroup.parent()
+        {
+            let prefix = format!("cas-server-{session}-hub-");
+            let leftovers = std::fs::read_dir(parent)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
+            assert!(
+                leftovers.is_empty(),
+                "restart launch scopes were left behind: {leftovers:?}"
+            );
         }
     }
-    assert!(
-        satisfied_attempt.is_some(),
-        "two concurrent restarts did not exercise already_satisfied in {max_race_attempts} attempts"
-    );
 }
 
 #[cfg(target_os = "linux")]
@@ -483,9 +799,10 @@ fn factory_worker_hub_record_uses_its_joined_server_scope() {
     let record: Value = serde_json::from_slice(&start.stdout).expect("worker hub start JSON");
     if cgroup_delegation_available() {
         let cgroup = record["cgroup"].as_str().expect("worker hub record cgroup");
+        let pid = record["pid"].as_u64().expect("worker hub pid");
         assert!(
-            cgroup.contains("/cas-server-") && cgroup.ends_with("-hub"),
-            "worker hub must record its joined cas-server scope: {cgroup}"
+            cgroup.contains("/cas-server-") && cgroup.ends_with(&format!("-hub-{pid}")),
+            "worker hub must record its generation-specific cas-server scope: {cgroup}"
         );
     } else {
         assert!(

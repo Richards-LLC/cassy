@@ -4918,22 +4918,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unavailable_code_ci_remains_advisory_cas_a9bd() {
+    fn missing_commit_ci_refuses_before_code_fallback_cas_e718() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+        let (repo, code_sha, tip) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        crate::test_paths::warm_stub(&fake_gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n");
-        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
-        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-        assert!(
-            receipt.contains(&format!("code validation not confirmed for {code_sha}")),
-            "{receipt}"
-        );
-        assert!(receipt.contains("HTTP 422"), "{receipt}");
-        assert!(receipt.contains("advisory"), "{receipt}");
-        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        for error in ["HTTP 422: No commit found for SHA", "HTTP 404: Not Found"] {
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{error}' >&2; exit 1 ;;\n*/{code_sha}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
+            ));
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            for override_requested in [false, true] {
+                let refusal = admit_branch_ci(&state, override_requested, Some("operator reason"))
+                    .expect_err("an unpushed tip cannot use an older green code receipt or an override");
+                assert!(refusal.to_ascii_lowercase().contains("push first"), "{refusal}");
+                assert!(refusal.contains(&tip), "{refusal}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -5073,22 +5074,6 @@ mod tests {
     }
 
     #[test]
-    fn no_commit_http_422_is_lookup_misconfiguration_cas_28c8() {
-        let state = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
-            gh_output(
-                false,
-                "exit status: 1",
-                br#"{"message":"No commit found for SHA"}"#,
-                "HTTP 422: No commit found for SHA",
-            )
-        });
-        let receipt = describe_branch_ci_state("factory/fox", &state);
-        assert!(receipt.contains("CI lookup misconfiguration"), "{receipt}");
-        assert!(receipt.contains("origin"), "{receipt}");
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-    }
-
-    #[test]
     fn delivery_docs_paths_match_ci_classifier_cas_a9bd() {
         for path in ["docs/guide.md", "README.md", "scripts/ci_tiers/README.md"] {
             assert!(super::ci_docs_path(path), "{path}");
@@ -5162,13 +5147,13 @@ mod tests {
     }
 
     #[test]
-    fn mocked_branch_ci_lookup_distinguishes_no_pr_from_gh_failure() {
+    fn mocked_branch_ci_lookup_distinguishes_no_checks_from_gh_failure() {
         let no_pr = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
             gh_output(
-                false,
-                "exit status: 1",
-                br#"{"message":"Not Found"}"#,
-                "HTTP 404: Not Found\n",
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[]}"#,
+                "",
             )
         });
         let no_pr_receipt = describe_branch_ci_state("factory/fox", &no_pr);
@@ -5177,7 +5162,7 @@ mod tests {
             "{no_pr_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("no CI checks found for deadbeef (no PR for branch)"),
+            no_pr_receipt.contains("no CI checks found for deadbeef (no check runs for sha)"),
             "{no_pr_receipt}"
         );
         assert!(
@@ -6361,13 +6346,23 @@ mod cas_7ce6_parked_merge_source_tests {
     fn stacked_work_on_top_prefers_the_exact_delivery_branch() {
         let (repo, anchor) = stacked_lane();
         let path = repo.path();
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let ops = GitOperations::new(path.to_path_buf());
-        commit(path, "stacked-next-task");
-        assert_eq!(
-            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
-            Ok(None),
-            "no delivery branch: the containing source merges as before"
-        );
+        // Parked A is published; B is local-only. The production source
+        // guard must refuse B even though it still contains A (cas-e718).
+        git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
+        let tip = commit(path, "stacked-next-task");
+        let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
+        let before = git(path, &["rev-parse", "main"]);
+        let refusal = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
+            .expect_err("local work after park must not replace the reviewed source");
+        assert!(refusal.contains(&anchor), "{refusal}");
+        assert!(refusal.contains(&tip), "{refusal}");
+        assert_eq!(git(path, &["rev-parse", "main"]), before);
         git(path, &["branch", "factory/w-cas-park", &anchor]);
         assert_eq!(
             parked_merge_source(&ops, "factory/w", "cas-park", &anchor),

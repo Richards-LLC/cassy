@@ -11,6 +11,16 @@
 Verbose rows retain complete paths and identifiers; JSON is the escape for long rows.
 The existing cas.db metadata table stores one check receipt per checkout and registry.
 No database is created by checking. Unavailable history is explicit and never means zero.
+
+## Integration upkeep status and enforcement
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Registry coverage verdict, then the measured integration ref as origin/target@sha. |
+| Scannable | Three artifact rows show CODEMAP structural changes, overview relevant changes, and registry validation/ownership issues; curation debt stays separate. |
+| Readable | Config saves warn only when a gate changes into enforce with positive measured drift; they name the artifact, count and status command. |
+| Machine output | --status preserves coverage fields and adds upkeep; config set preserves key/old_value/new_value and adds warnings in the same JSON document. Unknown drift is null, never zero. |
+| Omitted | No new qa status command, remote fetch, or persistent drift counter; individual freshness commands remain available. |
 Malformed YAML, missing registry and Git errors fail with the underlying cause.
 
 ## Critique

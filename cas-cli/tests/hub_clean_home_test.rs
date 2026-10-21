@@ -2532,10 +2532,6 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
     assert!(human.contains("Fix: cas claude login main"), "{human}");
     assert!(human.contains("path: ~/.codex"), "{human}");
     assert!(human.contains("Fix: cas codex login main"), "{human}");
-    assert!(
-        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
-        "{human}"
-    );
 
     let mut json_command = cas_command(home.path(), path);
     #[cfg(target_os = "linux")]
@@ -2583,6 +2579,10 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
         assert!(failed_probe.contains("cas hub start --tailscale-serve"), "{failed_probe}");
         assert!(failed_probe.contains("cas hub status"), "{failed_probe}");
     }
+    assert!(
+        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
+        "{human}"
+    );
 }
 
 #[cfg(unix)]

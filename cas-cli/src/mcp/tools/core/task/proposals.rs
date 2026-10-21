@@ -349,10 +349,13 @@ impl CasCore {
         proposal: &TaskProposal,
         target_project: &str,
     ) -> Result<cas_types::Task, McpError> {
-        let mut task = materialize_accepted_proposal(proposal, target_project)
-            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-        let trusted_provenance =
-            crate::cloud::syncer::take_rendered_provenance(&mut task.notes, true);
+        let (mut task, rendered_from_provenance) =
+            materialize_accepted_proposal(proposal, target_project)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        let trusted_provenance = crate::cloud::syncer::take_rendered_provenance(
+            &mut task.notes,
+            rendered_from_provenance,
+        );
         let task_store = open_task_store_local(&self.cas_root)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         match task_store.get(&task.id) {
@@ -558,7 +561,7 @@ impl CasCore {
 fn materialize_accepted_proposal(
     proposal: &TaskProposal,
     target_project: &str,
-) -> Result<cas_types::Task, String> {
+) -> Result<(cas_types::Task, bool), String> {
     if proposal.state != "accepted" {
         return Err("Cloud accepted response did not contain state=accepted.".to_string());
     }
@@ -644,8 +647,9 @@ fn materialize_accepted_proposal(
         serde_json::to_value(&proposal.provenance)
             .map_err(|error| format!("Could not encode proposal provenance: {error}"))?,
     );
-    crate::cloud::syncer::render_task_proposal_provenance(&mut encoded);
+    let rendered_from_provenance = crate::cloud::syncer::render_task_proposal_provenance(&mut encoded);
     serde_json::from_value(encoded)
+        .map(|task| (task, rendered_from_provenance))
         .map_err(|error| format!("Cloud accepted response task was invalid: {error}"))
 }
 
@@ -896,7 +900,7 @@ mod tests {
         }))
         .unwrap();
 
-        let task = materialize_accepted_proposal(&proposal, "target-project").unwrap();
+        let (task, _) = materialize_accepted_proposal(&proposal, "target-project").unwrap();
         assert_eq!(task.id, "cas-0123456789abcdef");
         assert_eq!(task.title, "Accepted work");
         assert_eq!(task.status, TaskStatus::Open);
@@ -952,7 +956,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let accepted = materialize_accepted_proposal(&proposal, TARGET).unwrap();
+        let (accepted, _) = materialize_accepted_proposal(&proposal, TARGET).unwrap();
         let mut unattested = accepted.clone();
         unattested.notes.clear();
         for (project, task, has_acceptance, starts) in [
@@ -1050,7 +1054,7 @@ mod tests {
             "target_repo": null,
             "target_branch": null
         }));
-        let task = materialize_accepted_proposal(&proposal, "target-project")
+        let (task, _) = materialize_accepted_proposal(&proposal, "target-project")
             .expect("an older client's null fields decode");
         assert_eq!(task.title, "Wire the relay retry");
         assert_eq!(
@@ -1063,7 +1067,7 @@ mod tests {
 
         // The retry: the accept route echoes the already-materialized row,
         // nulls and all, and it decodes the same way and stores locally.
-        let again = materialize_accepted_proposal(&proposal, "target-project").unwrap();
+        let (again, _) = materialize_accepted_proposal(&proposal, "target-project").unwrap();
         assert_eq!(again.id, task.id);
         let temp = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -1130,7 +1134,7 @@ mod tests {
             all_null.len()
         );
         let proposal = accepted_proposal_with_task(serde_json::Value::Object(all_null));
-        let task = materialize_accepted_proposal(&proposal, "target-project")
+        let (task, _) = materialize_accepted_proposal(&proposal, "target-project")
             .expect("nulls for every Option or defaulted field decode");
         let base = cas_types::Task::new(String::new(), String::new());
         assert_eq!(task.id, "cas-0123456789abcdef");

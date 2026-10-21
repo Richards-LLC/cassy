@@ -3437,6 +3437,52 @@ pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
 }
 
 impl SqlitePromptQueueStore {
+    /// Read consumed direct supervisor messages without changing delivery state.
+    /// The timestamp is the recipient's surfacing time, not enqueue/processing
+    /// time: a queued answer may only reach the worker after its checkpoint.
+    /// Transport reservations and handoffs alone do not prove body receipt.
+    pub fn received_supervisor_messages_since(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
+        if limit == 0 || recipient.is_empty() || factory_session.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at,
+                    q.summary, q.priority, q.acked_at, q.urgent, q.factory_session,
+                    q.origin_agent_id, q.origin_kind, q.operator_label,
+                    q.operator_device_id, q.operator_device_label, q.operator_scopes,
+                    q.operator_verified, q.recipient_device_id, q.kind, q.attachments,
+                    seen.seen_at
+               FROM prompt_queue q
+               JOIN prompt_queue_recipient_seen seen ON seen.prompt_id = q.id
+               JOIN agents a ON a.id = q.origin_agent_id
+              WHERE q.target = ?1 AND seen.recipient = ?1
+                AND q.factory_session = ?2 AND a.factory_session = ?2
+                AND q.origin_kind = 'registered_agent' AND a.role = 'supervisor'
+                AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}
+                AND julianday(seen.seen_at) >= julianday(?3)
+              ORDER BY julianday(seen.seen_at) DESC, q.id DESC LIMIT ?4"
+        ))?;
+        let rows = stmt
+            .query_map(
+                params![recipient, factory_session, since.to_rfc3339(), limit as i64],
+                |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(prompt, at)| {
+                let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
+                Ok((prompt, at))
+            })
+            .collect()
+    }
+
     /// Remove the empty diagnostic artifact left by older installations/tools.
     /// All live queue tables are in cas.db. Never discard data, SQLite recovery
     /// sidecars, symlinks, or directories, and don't let cleanup block delivery.
@@ -10071,7 +10117,47 @@ mod tests {
         let writer = SqlitePromptQueueStore::open(temp.path()).unwrap();
         writer.init().unwrap();
         writer.enqueue("supervisor", "worker", "retained").unwrap();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "resume-supervisor".into(),
+            "lead".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("resume-session".into());
+        agents.register(&supervisor).unwrap();
+        let since = Utc::now() - chrono::Duration::minutes(1);
+        let id = writer
+            .enqueue_urgent_with_outcome(
+                "lead",
+                "worker",
+                "retained answer",
+                Some("resume-session"),
+                None,
+                None,
+                false,
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: supervisor.id.clone(),
+                }),
+            )
+            .unwrap()
+            .id();
+        writer
+            .record_recipient_surfaced(id, "worker", SurfacingSource::InboxPoll)
+            .unwrap();
+        writer.mark_processed(id).unwrap();
+        writer.ack(id).unwrap();
         let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        let history = reader
+            .received_supervisor_messages_since("worker", "resume-session", since, 10)
+            .unwrap();
+        assert_eq!(
+            history.iter().map(|(row, _)| row.id).collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(history[0].1 >= since);
+        assert!(writer.recipient_receipt(id, "worker").unwrap() == Some(SurfacingSource::InboxPoll));
         assert_eq!(reader.pending_count().unwrap(), 1);
         assert!(reader.enqueue("supervisor", "worker", "forbidden").is_err());
         assert_eq!(writer.pending_count().unwrap(), 1);

@@ -25440,6 +25440,60 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-b0a5: an amended commit hook anchor is now unreachable, while the
+    /// replacement task tip is pushed. Both a first park and a re-close must
+    /// bind to that pushed tip instead of preserving the orphaned SHA.
+    #[tokio::test]
+    async fn cas_b0a5_park_replaces_orphaned_anchor_with_pushed_amended_tip() {
+        for status in [TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+            let fixture = unpushed_anchor_fixture(status, AnchorChoice::Local);
+            let repo = fixture.dir.path();
+            let orphaned_anchor = fixture.local.clone();
+            git(
+                repo,
+                &["commit", "--amend", "-q", "-m", "fix: amended after commit hook"],
+            );
+            let pushed_tip = rev_parse_local(repo, &fixture.branch);
+            assert_ne!(
+                pushed_tip, orphaned_anchor,
+                "amend must rewrite the recorded commit"
+            );
+            git(repo, &["push", "-q", "--force", "origin", &fixture.branch]);
+            git(repo, &["fetch", "-q", "origin"]);
+            let remote = format!("origin/{}", fixture.branch);
+            assert_eq!(rev_parse_local(repo, &remote), pushed_tip);
+            assert!(!git_commit_is_ancestor(repo, &orphaned_anchor, &remote));
+            let refs = git_command(
+                repo,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "--contains",
+                    &orphaned_anchor,
+                ],
+            )
+            .output()
+            .unwrap();
+            assert!(refs.status.success());
+            assert!(
+                String::from_utf8_lossy(&refs.stdout).trim().is_empty(),
+                "the pre-amend anchor must not be reachable from any ref"
+            );
+
+            let (is_error, text) = close_text(&fixture).await;
+            assert_eq!(is_error, Some(true), "{text}");
+            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            let stored = fixture.store.get(&fixture.task_id).unwrap();
+            assert_eq!(stored.status, TaskStatus::AwaitingMerge, "{text}");
+            assert_eq!(
+                stored.deliverables.factory_branch_anchor.as_deref(),
+                Some(pushed_tip.as_str()),
+                "status {status:?}: {}",
+                stored.notes
+            );
+        }
+    }
+
     #[tokio::test]
     async fn ordinary_reopen_keeps_unreviewed_merge_request_actionable_cas_1cc7() {
         use crate::prompt_revalidation::{

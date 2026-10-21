@@ -40548,6 +40548,50 @@ mod zero_change_close_tests {
         );
     }
 
+    #[test]
+    fn cas41cd_approved_verification_merge_receipt_survives_reclaim() {
+        let dir = init_worker_repo();
+        let repo = dir.path();
+
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("unrelated.rs"), "pub fn unrelated() {}\n").unwrap();
+        git(repo, &["add", "unrelated.rs"]);
+        git(repo, &["commit", "-q", "-m", "chore: unrelated historical change"]);
+        let unrelated = head_sha(repo);
+
+        git(repo, &["checkout", "-q", "factory/test-worker"]);
+        git(repo, &["merge", "--ff-only", "main"]);
+        std::fs::write(repo.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+        git(repo, &["add", "delivery.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix: completed delivery"]);
+        let delivery = head_sha(repo);
+
+        // Simulate the supervisor's squash merge: the resulting target commit
+        // has the delivered tree effect but is not the worker's branch commit.
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", "--no-commit", &delivery]);
+        git(repo, &["commit", "-q", "-m", "supervisor merge: deliver completed work"]);
+        let merged_receipt = head_sha(repo);
+
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-41cd".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+
+        validate_task_commit_receipt(repo, &merged_receipt, "main", &window)
+            .expect("an approved delivery's supervisor merge receipt must survive a re-claim");
+
+        let reason = validate_task_commit_receipt(repo, &unrelated, "main", &window)
+            .expect_err("an unrelated historical commit must not survive the re-claim");
+        assert!(reason.contains("predates this task work cycle"), "{reason}");
+    }
+
     /// The relaxation is bounded by attribution: a merged commit that neither
     /// names the task nor is a recorded task commit stays rejected.
     #[test]

@@ -182,8 +182,8 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     let initial = cas_command(home.path(), &path)
         .args([
             "--json",
-            "--no-tailscale-serve",
             "hub",
+            "--no-tailscale-serve",
             "start",
             "--port",
             "0",
@@ -200,8 +200,8 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
     let restart = cas_command(home.path(), &path)
         .args([
             "--json",
-            "--no-tailscale-serve",
             "hub",
+            "--no-tailscale-serve",
             "restart",
             "--port",
             "0",

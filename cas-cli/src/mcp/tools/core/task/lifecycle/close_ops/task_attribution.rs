@@ -496,7 +496,7 @@ pub(super) fn diff_stat(
 /// Return the paths carried by the same task-attributed delivery ranges used
 /// by the close diff stat. Risk proof must not fall back to an unrelated
 /// branch-wide diff: a proof narrower than this set is a hard close failure.
-pub(super) fn paths(
+pub(crate) fn paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -545,7 +545,7 @@ fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<Stri
 
 /// Reviewable paths from selected task ranges. An empty result is meaningful
 /// when the task only merged history or changed whitespace/deletions.
-pub(crate) fn qa_paths(
+pub(super) fn qa_paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,

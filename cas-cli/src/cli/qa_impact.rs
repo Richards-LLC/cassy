@@ -128,7 +128,7 @@ fn task_report(cas_root: &Path, id: &str, qa: &crate::config::QaConfig) -> Resul
         .or_else(|| crate::qa_pass::branch_tip(repo, &branch))
         .ok_or_else(|| anyhow!("task {id} has no readable delivery head"))?;
     let target = close_ops::freshest_target_ref(repo, &context.target_branch);
-    let paths = close_ops::task_attribution::qa_paths(repo, &target, &window, Some(&head))
+    let paths = close_ops::task_attribution::paths(repo, &target, &window, Some(&head))
         .ok_or_else(|| anyhow!("task {id} delivery paths could not be attributed"))?;
     let base = close_ops::task_attribution::delivery_base(repo, &target, &window, Some(&head));
     let mut changes = match &base {

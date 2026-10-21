@@ -59,7 +59,7 @@ enum BranchCiState {
         sha: String,
         reason: String,
     },
-    LookupMisconfiguration {
+    MissingCommit {
         sha: String,
         reason: String,
     },
@@ -87,6 +87,13 @@ fn admit_branch_ci(
     override_requested: bool,
     reason: Option<&str>,
 ) -> Result<bool, String> {
+    // Missing remote commits are not absent checks or a transport outage.
+    // No override can turn an unpublished source into a CI-reviewed delivery.
+    if let BranchCiState::MissingCommit { sha, reason } = state {
+        return Err(format!(
+            "PUSH FIRST: refusing worktree_merge for {sha}: {reason}. Push this commit first, confirm the origin repository and access, then retry after CI finishes. Missing-commit CI cannot be overridden. No merge was attempted."
+        ));
+    }
     if override_requested && reason.is_none_or(|reason| reason.trim().is_empty()) {
         return Err(
             "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
@@ -252,6 +259,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
         BranchCiState::Red { .. }
         | BranchCiState::CodePending { .. }
         | BranchCiState::UnvalidatedCode { .. }
+        | BranchCiState::MissingCommit { .. }
         | BranchCiState::CodeValidationUnconfirmed { .. } => return state,
         BranchCiState::Green { sha, .. } => {
             return BranchCiState::UnvalidatedCode {
@@ -273,8 +281,7 @@ fn require_code_validation(state: BranchCiState) -> BranchCiState {
                     .unwrap_or_default(),
             ),
         ),
-        BranchCiState::Unknown { sha, reason }
-        | BranchCiState::LookupMisconfiguration { sha, reason } => (sha, reason),
+        BranchCiState::Unknown { sha, reason } => (sha, reason),
         BranchCiState::GhFailure {
             sha,
             status,
@@ -409,11 +416,15 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
         }
     };
     let tip_output = fetch_branch_ci(&tip, cwd, &repo, &binary);
+    let tip_has_code_checks = has_code_check_runs(&tip_output);
+    let tip_state = classify_branch_ci_response(branch, &tip, tip_output);
     let state = match code_sha {
-        None => classify_branch_ci_response(branch, &tip, tip_output),
+        // An older green code receipt cannot publish a missing docs tip.
+        _ if matches!(&tip_state, BranchCiState::MissingCommit { .. }) => tip_state,
+        None => tip_state,
         Some(code_sha) => {
-            let state = if code_sha == tip || has_code_check_runs(&tip_output) {
-                classify_branch_ci_response(branch, &tip, tip_output)
+            let state = if code_sha == tip || tip_has_code_checks {
+                tip_state
             } else {
                 classify_branch_ci_response(
                     branch,
@@ -479,17 +490,12 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         let stderr = first_stderr_line(&output.stderr);
         let details =
             format!("{}\n{}", stderr, String::from_utf8_lossy(&output.stdout)).to_ascii_lowercase();
-        if details.contains("422") && details.contains("no commit found") {
-            return BranchCiState::LookupMisconfiguration {
+        if details.contains("422") || details.contains("404")
+            || details.contains("no commit found") || details.contains("not found")
+        {
+            return BranchCiState::MissingCommit {
                 sha: sha.to_string(),
-                reason: "CI lookup misconfiguration: No commit found for SHA (HTTP 422); check origin repository resolution and whether the commit was pushed".to_string(),
-            };
-        }
-        if details.contains("404") || details.contains("not found") {
-            return BranchCiState::NoChecks {
-                sha: sha.to_string(),
-                reason: "no PR for branch".to_string(),
-                stderr: (!stderr.is_empty()).then_some(stderr),
+                reason: format!("GitHub could not find the commit: {stderr}"),
             };
         }
         return BranchCiState::GhFailure {
@@ -846,17 +852,17 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "code CI receipt unconfirmed (advisory)",
             "unavailable",
         ),
-        BranchCiState::LookupMisconfiguration { sha, reason } => (
+        BranchCiState::MissingCommit { sha, reason } => (
             sha,
             reason.clone(),
-            "CI lookup misconfiguration (advisory)",
+            "commit not found (merge refused; push first)",
             "unavailable",
         ),
     };
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: a code delivery is refused while its CI is pending; red CI and documentation-only success for code deliveries require an explicit supervisor override; unavailable and no-checks receipts remain advisory.\n\n",
+         Merge policy: missing commits must be pushed first and cannot be overridden; a code delivery is refused while its CI is pending; red CI and documentation-only success for code deliveries require an explicit supervisor override; unavailable and no-checks receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }
@@ -1411,8 +1417,8 @@ fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
 ///   `source` no longer contains the anchor (the worker moved it on to its
 ///   next task), or when `source` has moved past the anchor while the
 ///   delivery branch sits exactly on it (stacked work on top).
-/// - `Err`: `source` does not contain the anchor and no delivery branch
-///   does either, so merging it would not deliver this task.
+/// - `Err`: neither source nor its delivery branch sits exactly on the
+///   anchor. Containing the anchor is insufficient: later work was not parked.
 ///
 /// An anchor or source that does not resolve here is left to the existing
 /// checks.
@@ -1436,13 +1442,7 @@ fn parked_merge_source(
         let local = git.resolve_commit(&format!("refs/heads/{candidate}"));
         let remote = git.resolve_commit(&format!("refs/remotes/origin/{candidate}"));
         let found = local.clone().or(remote);
-        let usable = found.as_deref().is_some_and(|found| {
-            if contains_anchor {
-                found == anchor_sha
-            } else {
-                git.is_ancestor(&anchor_sha, found)
-            }
-        });
+        let usable = found.as_deref() == Some(anchor_sha.as_str());
         if usable {
             if local.is_none() {
                 git.create_branch_from(candidate, found.as_deref().unwrap_or_default())
@@ -1454,7 +1454,9 @@ fn parked_merge_source(
         }
     }
     if contains_anchor {
-        return Ok(None);
+        return Err(format!(
+            "PARKED DELIVERY SOURCE MOVED: {source} @ {tip} has advanced past {task_id}'s parked branch_tip {anchor_sha}. Re-park the pushed, validated source before merging, or use a delivery branch at the exact parked tip. No merge was attempted."
+        ));
     }
     Err(format!(
         "⚠️ PARKED DELIVERY NOT ON SOURCE: {source} @ {} does not contain {task_id}'s reviewed \
@@ -1504,6 +1506,11 @@ impl CasCore {
         let Some(tip) = git.resolve_commit(source) else {
             return original;
         };
+        // A descendant is new work (including a local target-sync merge),
+        // not the same-patch rewritten delivery supported by cas-e833.
+        if git.is_ancestor(anchor, &tip) {
+            return original;
+        }
         let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
         } else {
@@ -3784,13 +3791,19 @@ impl CasCore {
 
         // cas-369f: force (dirty) ≠ cleanup (remove). System-B factory
         // workers default to preserving the worktree mid-session.
-        let do_cleanup =
+        let mut do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
+        let parked_source_tip = transactional_delivery.as_ref()
+            .map(|(receipt, _)| receipt.commit_sha.clone())
+            .or_else(|| scoped_task.as_ref()
+                .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
+            .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
         let ci_source = remote_source.as_ref()
             .map(|source| source.anchor.as_str())
+            .or(parked_source_tip.as_deref())
             .unwrap_or(worktree.branch.as_str());
         let branch_ci_lookup = lookup_branch_ci(ci_source, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_lookup(&worktree.branch, &branch_ci_lookup);
@@ -3889,6 +3902,7 @@ impl CasCore {
             .is_none()
             .then(|| remote_source.as_ref()
                 .map(|source| source.anchor.clone())
+                .or_else(|| parked_source_tip.clone())
                 .or_else(|| manager.git().resolve_commit(&worktree.branch)))
             .flatten();
 
@@ -3980,6 +3994,21 @@ impl CasCore {
                 return Ok(Self::success(format!("{receipt}{reconcile_note}")));
             }
 
+            // CI lookup/reconciliation may take time while the worker keeps
+            // working. A pre-lookup check alone must not authorize a new tip.
+            if let Some(anchor) = parked_source_tip.as_deref()
+                && manager.git().resolve_commit(&worktree.branch).as_deref() != Some(anchor)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "PARKED DELIVERY SOURCE MOVED: {} no longer matches parked branch_tip {anchor}. Re-park the pushed, validated source before retrying. No merge was attempted.",
+                        worktree.branch,
+                    )),
+                    data: None,
+                });
+            }
+
             // A parked pushed ref is independent of the worker's next task.
             // Only the preserving path may bypass the source checkout gate;
             // exact origin/anchor agreement is verified inside the manager.
@@ -4043,10 +4072,21 @@ impl CasCore {
                     );
                 }
                 result
-            } else if transactional_delivery.is_some() {
-                // Persisted delivery state must separate a successful Git
-                // merge from destructive cleanup.
-                manager.merge_preserving_worktree(&mut worktree, force, do_cleanup)
+            } else if let Some(source_sha) = parked_source_tip.as_deref() {
+                // The receipt names what CI reviewed. Keep branch identity
+                // intact while every Git merge operation consumes that SHA.
+                manager.merge_preserving_worktree_at(&mut worktree, force, do_cleanup, source_sha)
+                    .and_then(|commit| {
+                        if do_cleanup && transactional_delivery.is_none() {
+                            if manager.git().resolve_commit(&worktree.branch).as_deref() != Some(source_sha) {
+                                do_cleanup = false;
+                                pushed_source_note.push_str("\nCleanup deferred: source branch advanced after validation; worker worktree and branch retained.");
+                            } else {
+                                manager.cleanup_merged_worktree(&mut worktree)?;
+                            }
+                        }
+                        Ok(commit)
+                    })
             } else {
                 manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
             };
@@ -4339,11 +4379,18 @@ impl CasCore {
             // next call can reconcile the exact receipt from target ancestry;
             // if it stops before removal, the next call safely retries cleanup.
             if do_cleanup && source_worktree_live {
-                manager
-                    .cleanup_merged_worktree(&mut worktree)
-                    .map_err(|error| {
-                        worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch)
-                    })?;
+                if manager.git().resolve_commit(&worktree.branch).as_deref()
+                    != Some(receipt.commit_sha.as_str())
+                {
+                    do_cleanup = false;
+                    pushed_source_note.push_str("\nCleanup deferred: source branch advanced after validation; worker worktree and branch retained.");
+                } else {
+                    manager
+                        .cleanup_merged_worktree(&mut worktree)
+                        .map_err(|error| {
+                            worktree_merge_mcp_error(error, &worktree.branch, &worktree.parent_branch)
+                        })?;
+                }
             }
 
             if let Some(task_id) = task_id {
@@ -4925,22 +4972,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unavailable_code_ci_remains_advisory_cas_a9bd() {
+    fn missing_commit_ci_refuses_before_code_fallback_cas_e718() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+        let (repo, code_sha, tip) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        crate::test_paths::warm_stub(&fake_gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n");
-        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
-        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-        assert!(
-            receipt.contains(&format!("code validation not confirmed for {code_sha}")),
-            "{receipt}"
-        );
-        assert!(receipt.contains("HTTP 422"), "{receipt}");
-        assert!(receipt.contains("advisory"), "{receipt}");
-        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        for error in ["HTTP 422: No commit found for SHA", "HTTP 404: Not Found"] {
+            crate::test_paths::warm_stub(&fake_gh, &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{error}' >&2; exit 1 ;;\n*/{code_sha}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
+            ));
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
+            for override_requested in [false, true] {
+                let refusal = admit_branch_ci(&state, override_requested, Some("operator reason"))
+                    .expect_err("an unpushed tip cannot use an older green code receipt or an override");
+                assert!(refusal.to_ascii_lowercase().contains("push first"), "{refusal}");
+                assert!(refusal.contains(&tip), "{refusal}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -5080,22 +5128,6 @@ mod tests {
     }
 
     #[test]
-    fn no_commit_http_422_is_lookup_misconfiguration_cas_28c8() {
-        let state = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
-            gh_output(
-                false,
-                "exit status: 1",
-                br#"{"message":"No commit found for SHA"}"#,
-                "HTTP 422: No commit found for SHA",
-            )
-        });
-        let receipt = describe_branch_ci_state("factory/fox", &state);
-        assert!(receipt.contains("CI lookup misconfiguration"), "{receipt}");
-        assert!(receipt.contains("origin"), "{receipt}");
-        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-    }
-
-    #[test]
     fn delivery_docs_paths_match_ci_classifier_cas_a9bd() {
         for path in ["docs/guide.md", "README.md", "scripts/ci_tiers/README.md"] {
             assert!(super::ci_docs_path(path), "{path}");
@@ -5169,44 +5201,41 @@ mod tests {
     }
 
     #[test]
-    fn mocked_branch_ci_lookup_distinguishes_no_pr_from_gh_failure() {
-        let no_pr = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
+    fn mocked_branch_ci_lookup_distinguishes_no_checks_from_gh_failure() {
+        let no_checks = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
             gh_output(
-                false,
-                "exit status: 1",
-                br#"{"message":"Not Found"}"#,
-                "HTTP 404: Not Found\n",
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[]}"#,
+                "",
             )
         });
-        let no_pr_receipt = describe_branch_ci_state("factory/fox", &no_pr);
+        let no_checks_receipt = describe_branch_ci_state("factory/fox", &no_checks);
         assert!(
-            no_pr_receipt.contains("repos/<unresolved-repository>/commits/deadbeef/check-runs"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("repos/<unresolved-repository>/commits/deadbeef/check-runs"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("no CI checks found for deadbeef (no PR for branch)"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("no CI checks found for deadbeef (no check runs for sha)"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("Admission path: no CI receipt (advisory)"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("Admission path: no CI receipt (advisory)"),
+            "{no_checks_receipt}"
         );
         assert!(
-            no_pr_receipt.contains("Receipt id: none"),
-            "{no_pr_receipt}"
+            no_checks_receipt.contains("Receipt id: none"),
+            "{no_checks_receipt}"
         );
+        assert_eq!(admit_branch_ci(&no_checks, false, None), Ok(false));
         assert!(
-            no_pr_receipt.contains("HTTP 404: Not Found"),
-            "{no_pr_receipt}"
-        );
-        assert!(
-            format!("{no_pr_receipt}{CI_ADVISORY_POLICY_NOTICE}")
+            format!("{no_checks_receipt}{CI_ADVISORY_POLICY_NOTICE}")
                 .contains("Merge policy: merge proceeded because CI is advisory."),
-            "{no_pr_receipt}"
+            "{no_checks_receipt}"
         );
         assert!(
-            !no_pr_receipt.contains("CI state unknown"),
-            "{no_pr_receipt}"
+            !no_checks_receipt.contains("CI state unknown"),
+            "{no_checks_receipt}"
         );
 
         let auth_failure = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {
@@ -6366,20 +6395,55 @@ mod cas_7ce6_parked_merge_source_tests {
     /// the parked task's name when its delivery branch sits on the anchor.
     #[test]
     fn stacked_work_on_top_prefers_the_exact_delivery_branch() {
-        let (repo, anchor) = stacked_lane();
-        let path = repo.path();
-        let ops = GitOperations::new(path.to_path_buf());
-        commit(path, "stacked-next-task");
-        assert_eq!(
-            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
-            Ok(None),
-            "no delivery branch: the containing source merges as before"
-        );
-        git(path, &["branch", "factory/w-cas-park", &anchor]);
-        assert_eq!(
-            parked_merge_source(&ops, "factory/w", "cas-park", &anchor),
-            Ok(Some("factory/w-cas-park".to_string()))
-        );
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for local_sync in [false, true] {
+            let (repo, anchor) = stacked_lane();
+            let path = repo.path();
+            let ops = GitOperations::new(path.to_path_buf());
+            // Parked A is published; B is local-only. Include the incident's
+            // target-sync merge, which must not be rebound as a same-patch rebase.
+            git(path, &["update-ref", "refs/remotes/origin/factory/w", &anchor]);
+            let tip = if local_sync {
+                git(path, &["checkout", "-q", "main"]);
+                commit(path, "target-update");
+                git(path, &["checkout", "-q", "factory/w"]);
+                git(path, &["merge", "--no-ff", "-m", "local target sync", "main"]);
+                git(path, &["rev-parse", "HEAD"])
+            } else {
+                commit(path, "stacked-next-task")
+            };
+            let mut task = cas_types::Task::new("cas-park".into(), "parked delivery".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+            let core = crate::mcp::CasCore::with_daemon(path.join(".cas"), None, None);
+            let before = git(path, &["rev-parse", "main"]);
+            let refusal = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
+                .expect_err("local work after park must not replace the reviewed source");
+            assert!(refusal.contains(&anchor), "{refusal}");
+            assert!(refusal.contains(&tip), "{refusal}");
+            assert_eq!(git(path, &["rev-parse", "main"]), before);
+            git(path, &["branch", "factory/w-cas-park", &anchor]);
+            let source = core.parked_merge_source_for_task(&store, path, "factory/w", "main", &task)
+                .unwrap().expect("an exact delivery branch remains usable");
+            assert_eq!(git(path, &["rev-parse", &source]), anchor);
+            git(path, &["checkout", "-q", "main"]);
+            let manager = crate::worktree::WorktreeManager::new(path, crate::worktree::WorktreeConfig {
+                auto_merge: true,
+                ..Default::default()
+            }).unwrap();
+            // Simulate movement after preflight: branch still names B, but
+            // Git must consume the reviewed SHA, without changing branch identity.
+            let mut worktree = crate::types::Worktree::new(
+                "w".into(), "factory/w".into(), "main".into(), path.to_path_buf(),
+            );
+            let branch = worktree.branch.clone();
+            manager.merge_preserving_worktree_at(&mut worktree, false, false, &anchor).unwrap();
+            assert_eq!(worktree.branch, branch);
+            assert!(path.join("parked").is_file());
+            assert_eq!(git(path, &["rev-parse", "main^2"]), anchor);
+            assert!(!ops.is_ancestor(&tip, "main"), "unreviewed B must not be integrated");
+        }
     }
 
     /// cas-7ce6 (the cas-06f5 symptom): a source that lacks the task's

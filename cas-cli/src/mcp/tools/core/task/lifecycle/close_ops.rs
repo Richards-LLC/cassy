@@ -2,6 +2,7 @@ use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
+mod docs_upkeep;
 mod proof_claims;
 #[cfg(test)]
 mod loaded_proof_tests;

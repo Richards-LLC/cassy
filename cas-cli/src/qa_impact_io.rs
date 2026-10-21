@@ -4,6 +4,16 @@ use crate::qa_registry::Registry;
 use anyhow::{Context, anyhow, ensure};
 use std::process::Command;
 
+/// Proven catalog/registry drift, distinct from unavailable snapshot inputs.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "legacy selector returned journey {journey} missing from {registry}; align the catalog and registry"
+)]
+pub(crate) struct CatalogDrift {
+    journey: String,
+    registry: String,
+}
+
 pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(args)
@@ -156,11 +166,13 @@ pub(super) fn analyze(
             .collect::<Vec<_>>();
         let ids = catalog_ids(&tree, &paths, base)?;
         for id in &ids {
-            ensure!(
-                registry.journeys.iter().any(|j| j.id == *id),
-                "legacy selector returned journey {id} missing from {}; align the catalog and registry",
-                qa.registry.path
-            );
+            if !registry.journeys.iter().any(|j| j.id == *id) {
+                return Err(CatalogDrift {
+                    journey: id.clone(),
+                    registry: qa.registry.path.clone(),
+                }
+                .into());
+            }
         }
         Some(ids.into_iter().collect::<std::collections::BTreeSet<_>>())
     } else {

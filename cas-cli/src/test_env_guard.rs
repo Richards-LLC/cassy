@@ -68,6 +68,13 @@ pub(crate) fn is_scrubbed_ambient_env_key(key: &str) -> bool {
         return false;
     }
     key.starts_with("CAS_")
+        // Provider credentials are ambient operator state too (cas-6f45).
+        // Include account-suffixed token names used by Violet and its legacy
+        // aliases, without keeping a separate list of provider brands.
+        || key.ends_with("_API_KEY")
+        || key.ends_with("_TOKEN")
+        || key.contains("_TOKEN_")
+        || key.ends_with("_VERCEL_BYPASS")
         || matches!(
             key,
             "CLAUDE_CONFIG_DIR"
@@ -194,6 +201,15 @@ impl TestEnvGuard {
         guard.temp_home = Some(temp);
         guard.temp_home_path = Some(path.clone());
         guard.set("HOME", &path);
+        // XDG lookups take precedence over HOME. Redirect all three scopes so
+        // config, credential stores and caches cannot escape this fixture.
+        for (key, directory) in [
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_DATA_HOME", ".local/share"),
+            ("XDG_CACHE_HOME", ".cache"),
+        ] {
+            guard.set(key, path.join(directory));
+        }
         guard.pin_cas_root_under_home();
         guard
     }
@@ -282,8 +298,9 @@ impl TestEnvGuard {
     /// Keep test fixtures independent from the factory process that launched
     /// the test binary. `CAS_*` variables other than the watchdog budget and
     /// protected-store tripwires are ambient Cassy state; account-home
-    /// variables are the non-CAS part of the factory contract. Repository-local
-    /// Git variables would redirect fixture writes into the caller's checkout.
+    /// variables and provider keys/tokens are the non-CAS part of the factory
+    /// contract. Repository-local Git variables would redirect fixture writes
+    /// into the caller's checkout.
     /// Tests that need one of these values set it explicitly after constructing
     /// the guard; Drop restores the caller's environment.
     fn scrub_ambient_environment(&mut self) {

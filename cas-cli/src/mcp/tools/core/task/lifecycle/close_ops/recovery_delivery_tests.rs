@@ -512,6 +512,37 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
     );
     let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
     assert_ne!(rebased, before_rebase);
+    // Context in the body cannot turn a sibling's subject into our delivery.
+    // Keep the task-owned row last so the real close below delivers that tip.
+    let active = tasks.get(TASK).unwrap();
+    for (message, advances) in [
+        (
+            format!("fix(cas-abcd): sibling change\n\nContext: {TASK} (cas-4fcb regression)"),
+            false,
+        ),
+        (format!("fix({TASK}): reviewed correction"), true),
+    ] {
+        git(&f.worker_path, &["commit", "-q", "--amend", "-m", &message]);
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &active,
+            f.dir.path(),
+            "main",
+            Some(BRANCH),
+            Some(&tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(if advances {
+                tip.as_str()
+            } else {
+                before_rebase.as_str()
+            }),
+            "delivery ownership for {message:?}",
+        );
+    }
+    let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(
         f.dir.path(),
         &[

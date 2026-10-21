@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security — workers cannot read operator credential stores
+
+- **Neon and Vercel stores hidden from workers** — Was: a factory worker could read the operator's Neon or Vercel credential files through a script, a piped shell or variable indirection that the command guard could not parse. → Now: on Linux, workers start with those store directories masked by an empty read-only view, so no command inside the worker can read them; supervisors are unaffected. A host that cannot provide the mask refuses the worker with a remedy; macOS still relies on the command guard.
+
 ## [3.67.0] - 2026-10-20
 
 ### Fixed — messages arrive with an acknowledgement

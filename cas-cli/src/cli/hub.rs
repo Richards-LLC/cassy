@@ -1168,10 +1168,7 @@ fn required_transport_refusal(
         message.push_str(issue);
     }
     message.push_str(&format!(
-        "\nSelect a daemon with TAILSCALE_SOCKET or run `{loopback}`."
-    ));
-    message.push_str(&format!(
-        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}."
+        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}. Or run `{loopback}`."
     ));
     message
 }

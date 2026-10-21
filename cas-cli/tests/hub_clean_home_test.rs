@@ -127,12 +127,10 @@ fn reserve_unlistened_loopback_port() -> (u16, OwnedFd) {
     );
     let port = u16::from_be(bound.sin_port);
     let endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    // A bound socket that is not listening may time out instead of returning
-    // ConnectionRefused on macOS; this target must simply be unreachable.
-    let connection = TcpStream::connect_timeout(&endpoint, Duration::from_millis(100));
     assert!(
-        connection.is_err(),
-        "reserved loopback target must not accept connections"
+        TcpStream::connect_timeout(&endpoint, Duration::from_millis(100))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused),
+        "reserved loopback target must be connection-refused"
     );
     (port, socket)
 }

@@ -1101,6 +1101,29 @@ fn delivery_range_before_and_after_merge() {
         (Some(vec!["app.css".to_string()]), Some(vec!["app.css".to_string()])),
         "both QA gates must measure the squash delivery itself"
     );
+    // cas-420af: a fast-forward can integrate an entire delivery, rather
+    // than one squash. Its recorded base must retain all three commits even
+    // after unrelated target work follows it.
+    let ff_base = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/ff"]);
+    commit(&fx.repo, "first.html", 9);
+    commit(&fx.repo, "second.css", 8);
+    let ff_head = commit(&fx.repo, "third.md", 7);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--ff-only", "factory/ff"]);
+    commit(&fx.repo, "later.rs", 6);
+    let (from, to) = delivery_range(&fx.repo, &ff_head, "main").unwrap();
+    assert_eq!(
+        (
+            crate::qa_pass::integrated_paths(&fx.repo, &ff_head, "main"),
+            range_paths(&fx.repo, &from, &to),
+        ),
+        (
+            Some(vec!["first.html".into(), "second.css".into(), "third.md".into()]),
+            Some(vec!["first.html".into(), "second.css".into(), "third.md".into()]),
+        ),
+        "both QA gates must retain the whole FF delivery from recorded base {ff_base}"
+    );
     assert_eq!(delivery_range(&fx.repo, &integration, "main"), Some(integration_range));
     assert_eq!(
         crate::qa_pass::integrated_paths(&fx.repo, &tip, "main").unwrap(),

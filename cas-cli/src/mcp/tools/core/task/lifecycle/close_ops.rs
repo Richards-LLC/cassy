@@ -18639,7 +18639,12 @@ impl EpicGitSnapshot {
         if !is_safe_git_refname(requested) || !is_safe_git_refname(parent_branch) {
             return None;
         }
-        let commit_ref = self.read_ref(requested).read_ref()?.to_string();
+        // Summary rows can measure an already-validated receipt SHA directly.
+        let commit_ref = if self.resolved_anchors.contains(requested) {
+            requested.to_string()
+        } else {
+            self.read_ref(requested).read_ref()?.to_string()
+        };
         let parent_ref = if self.ref_exists(parent_branch) {
             parent_branch.to_string()
         } else {
@@ -19203,7 +19208,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             let cap = EPIC_CHILD_PROOF_CAP;
             epic_measurement::Scope::new(cap)
         });
-        // The table's stranded count is a live Git measurement of the
+        // A closed child's ancestry-only summary measures its immutable
+        // receipt, so a reused lane's later work cannot re-strand it.
+        // The full view's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
         // not a substitute for the branch state the operator needs to
@@ -19211,7 +19218,12 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // branch receipt at all.
         #[cfg(test)]
         epic_measurement::test_load::delay();
-        let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
+        let checked_refs: Vec<&str> = if options.summary
+            && t.status == TaskStatus::Closed
+            && resolved_anchor.is_some()
+        {
+            resolved_anchor.into_iter().collect()
+        } else if fallback_branches.is_empty() {
             resolved_anchor.into_iter().collect()
         } else {
             fallback_branches.iter().map(String::as_str).collect()
@@ -19227,7 +19239,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut checked_ref_reads = Vec::new();
         let mut any_ref_resolved = false;
         for commit in checked_refs {
-            let read = git_snapshot.read_ref(commit);
+            let read = if options.summary && resolved_anchor == Some(commit) {
+                CheckedRefRead::Local {
+                    requested: commit.to_string(),
+                }
+            } else {
+                git_snapshot.read_ref(commit)
+            };
             if let Some(refname) = read.read_ref() {
                 any_ref_resolved = true;
                 let count = git_snapshot
@@ -37648,7 +37666,7 @@ mod epic_status_gate_tests {
     /// re-strand epic 1.
     #[test]
     fn epic_close_uses_child_anchor_when_worker_branch_is_reused() {
-        let dir = init_epic_repo(&[("worker", 1)]);
+        let dir = init_epic_repo(&[("worker", 1), ("pending", 1)]);
         let p = dir.path();
         let task_a_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
 
@@ -37677,7 +37695,7 @@ mod epic_status_gate_tests {
         let task = epic("cas-epic-1");
         let req = base_req(&task.id);
 
-        let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a]);
+        let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a.clone()]);
         assert!(
             matches!(
                 out,
@@ -37685,6 +37703,37 @@ mod epic_status_gate_tests {
             ),
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
+        );
+
+        let mut pending = child("cas-unmerged", TaskStatus::Closed, Some("pending"));
+        pending.deliverables.factory_branch_anchor =
+            Some(epic_git_stdout(p, &["rev-parse", "factory/pending"]));
+        let children = [task_a, pending];
+        for summary in [false, true] {
+            let collection = collect_epic_branch_statuses_with_options(
+                &children,
+                "main",
+                p,
+                EpicStatusOptions {
+                    summary,
+                    ..EpicStatusOptions::full_unbounded()
+                },
+            );
+            assert_eq!(
+                collection.statuses[0].unmerged_count, 0,
+                "a merged child's receipt excludes later lane work (summary={summary})"
+            );
+            assert!(
+                collection.statuses[1].unmerged_count > 0,
+                "the other child's own unmerged anchor must remain visible (summary={summary})"
+            );
+        }
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(&task, &req, "main", p, &children),
+                EpicCloseGateOutcome::Reject(_)
+            ),
+            "genuinely unmerged child work must still block epic close"
         );
     }
 

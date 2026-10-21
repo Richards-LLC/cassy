@@ -2831,6 +2831,14 @@ impl FactoryApp {
             .into_iter()
             .collect::<Vec<_>>();
 
+        // SessionEnd can delete these registrations before the final director
+        // refresh. Keep the exact session-scoped IDs now so reminder cleanup
+        // does not have to recover them from a name-only snapshot afterward.
+        let matching_agent_ids = matching_agents
+            .iter()
+            .map(|matching| matching.id.clone())
+            .collect::<Vec<_>>();
+
         // Snapshot task state AFTER release — should be free of this worker's
         // Open/InProgress/Blocked bindings. Remaining non-Closed work (e.g.
         // AwaitingMerge) still blocks worktree reclaim.
@@ -2902,7 +2910,7 @@ impl FactoryApp {
         let _ = self.refresh_data();
 
         // Update event detector
-        self.remove_worker_from_event_detector(name);
+        self.remove_worker_from_event_detector_with_known_ids(name, &matching_agent_ids);
 
         // Update pane grid for navigation
         self.pane_grid = PaneGrid::new(&self.worker_names, &self.supervisor_name, self.is_tabbed);

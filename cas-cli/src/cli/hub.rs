@@ -1696,6 +1696,26 @@ fn start_with_output_resolved(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    if let Ok(record) = paths.read_process_record()
+        && record_is_ready(&paths, &record)
+        && running_hub_satisfies_request(
+            &record,
+            args,
+            tailscale_serve,
+            tailscale_port,
+            env!("CARGO_PKG_VERSION"),
+            tailscale_cli_available(&paths),
+        )
+    {
+        let already_satisfied = record.pid != launcher_pid;
+        if already_satisfied {
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+        }
+        return Ok(HubStartOutcome {
+            record,
+            already_satisfied,
+        });
+    }
     let error = anyhow::anyhow!(
         "cas hub did not become ready; inspect {}",
         paths.log_path().display()

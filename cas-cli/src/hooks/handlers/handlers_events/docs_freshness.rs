@@ -262,16 +262,32 @@ impl UpkeepReport {
                 ) => Some(total_changes),
             });
         }
-        match super::project_overview::check_freshness_at(measurement) {
-            Ok(staleness) => report.product_overview.observe(match staleness {
-                None => Some(0),
-                Some(ProjectOverviewStaleness::Missing) => None,
-                Some(
-                    ProjectOverviewStaleness::Stale { total_changes, .. }
-                    | ProjectOverviewStaleness::SignificantlyStale { total_changes, .. },
-                ) => Some(total_changes),
-            }),
-            Err(error) => report.product_overview.detail = Some(error.to_string()),
+        let watch_warning = measurement
+            .read(super::project_overview::DOC_PATH)
+            .and_then(|overview| {
+                let config = measurement
+                    .read(".cas/config.toml")
+                    .or_else(|| std::fs::read_to_string(measurement.store.join("config.toml")).ok())
+                    .and_then(|text| super::project_overview::config_section(&text));
+                super::project_overview::resolve_watch_targets(config, Some(&overview), || {
+                    measurement.tracked()
+                })
+                .warning
+            });
+        if let Some(warning) = watch_warning {
+            report.product_overview.detail = Some(warning);
+        } else {
+            match super::project_overview::check_freshness_at(measurement) {
+                Ok(staleness) => report.product_overview.observe(match staleness {
+                    None => Some(0),
+                    Some(ProjectOverviewStaleness::Missing) => None,
+                    Some(
+                        ProjectOverviewStaleness::Stale { total_changes, .. }
+                        | ProjectOverviewStaleness::SignificantlyStale { total_changes, .. },
+                    ) => Some(total_changes),
+                }),
+                Err(error) => report.product_overview.detail = Some(error.to_string()),
+            }
         }
         let Some(tracked) = git(
             &measurement.root,

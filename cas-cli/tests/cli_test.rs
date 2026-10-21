@@ -213,7 +213,7 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
         "[factory]\nepic_base_branch = 'main'\n[upkeep]\ncodemap = 'observe'\nproduct_overview = 'observe'\n[qa.registry]\nenforce = 'observe'\n",
     );
     let overview =
-        "# Product\n<!-- cas:project-overview\n[project_overview]\nwatch_dirs = ['pages']\n-->\n";
+        "# Product\n<!-- cas:project-overview\nwatch_dirs = ['pages']\n-->\n";
     let registry = "version: 1\nupdated: '2026-10-21'\nsurfaces: ['pages/**']\ninvariants:\n  FLOW: {statement: Arrived, check: Read state}\njourneys:\n  - id: home\n    status: live\n    entry: {url: /, trigger: Open}\n    steps: [Arrive]\n    owners: ['pages/base.ts']\n    invariants: [FLOW]\n    traffic: {share_pct: 100, basis: all visits}\n";
     write(".claude/CODEMAP.md", "# Map\n- pages/: entry routes\n");
     write("docs/PRODUCT_OVERVIEW.md", overview);

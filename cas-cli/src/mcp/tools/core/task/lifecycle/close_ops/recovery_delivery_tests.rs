@@ -488,10 +488,18 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
     let conflict = std::process::Command::new("git")
         .args(["rebase", "main"])
         .current_dir(&f.worker_path)
+        .env("GIT_COMMITTER_NAME", "CAS Test")
+        .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap();
     assert!(!conflict.status.success(), "fixture must conflict");
-    assert!(f.worker_path.join(".git").is_file());
+    assert!(
+        String::from_utf8_lossy(&conflict.stdout)
+            .contains("CONFLICT (add/add): Merge conflict in review.txt"),
+        "unexpected rebase stop: {conflict:?}"
+    );
     std::fs::write(
         f.worker_path.join("review.txt"),
         "target update plus reviewed correction\n",

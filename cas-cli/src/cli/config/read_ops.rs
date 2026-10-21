@@ -295,6 +295,39 @@ fn reset_config_value(
     Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
 }
 
+#[derive(serde::Serialize)]
+struct EnforcementWarning {
+    artifact: &'static str,
+    drift_count: usize,
+    unit: &'static str,
+    measured_ref: String,
+}
+
+fn enforcement_warning(
+    config: &Config,
+    key: &str,
+    old: &str,
+    value: &str,
+    cas_root: &Path,
+) -> Option<EnforcementWarning> {
+    if value != "enforce"
+        || !matches!(old, "off" | "observe")
+        || upkeep_observe_marker_for_set(key).is_none()
+    {
+        return None;
+    }
+    use crate::hooks::handlers::handlers_events::docs_freshness::{Measurement, UpkeepReport};
+    let report = UpkeepReport::at(&Measurement::integration_for_store(cas_root), &config.qa());
+    let artifact = report.for_key(key)?;
+    let count = artifact.drift_count.filter(|count| *count > 0)?;
+    Some(EnforcementWarning {
+        artifact: artifact.name,
+        drift_count: count,
+        unit: artifact.unit,
+        measured_ref: report.measured_ref,
+    })
+}
+
 fn execute_set_internal(
     config: &mut Config,
     key: &str,
@@ -310,11 +343,16 @@ fn execute_set_internal(
         InvocationContext::from_process,
     )?;
 
+    // Measurement is best effort after the successful save, outside its config lock.
+    let warnings: Vec<_> = enforcement_warning(config, key, &old_value, value, cas_root)
+        .into_iter()
+        .collect();
     if cli.json {
         let json = serde_json::json!({
             "key": key,
             "old_value": old_value,
-            "new_value": value
+            "new_value": value,
+            "warnings": warnings
         });
         println!("{}", serde_json::to_string(&json)?);
     } else {
@@ -346,6 +384,17 @@ fn execute_set_internal(
                 fmt.write_muted(&format!("was: {old_value}"))?;
                 fmt.newline()?;
             }
+        }
+        for warning in &warnings {
+            fmt.write_raw(&format!(
+                "WARNING: {} drift: {} {}",
+                warning.artifact, warning.drift_count, warning.unit
+            ))?;
+            fmt.newline()?;
+            fmt.write_raw(&crate::cli::qa::measured_ref_line(&warning.measured_ref))?;
+            fmt.newline()?;
+            fmt.write_raw("Review: cas qa journeys --status --json")?;
+            fmt.newline()?;
         }
     }
     Ok(())

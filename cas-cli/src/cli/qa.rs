@@ -12,6 +12,15 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use super::Cli;
+use crate::hooks::handlers::handlers_events::docs_freshness::{Measurement, UpkeepReport};
+
+pub(crate) fn measured_ref_line(reference: &str) -> String {
+    let prefix = "Measured ref: ";
+    format!(
+        "{prefix}{}",
+        crate::ui::widgets::truncate(reference, 80 - prefix.len())
+    )
+}
 
 #[derive(Serialize)]
 struct DebtSummary {
@@ -137,7 +146,7 @@ pub enum QaCommand {
         /// Add new journeys while preserving curated entries
         #[arg(long, requires = "seed")]
         merge: bool,
-        /// Show registry coverage and curation debt
+        /// Show registry coverage and integration upkeep drift
         #[arg(long)]
         status: bool,
     },
@@ -179,13 +188,37 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                 } else {
                     crate::qa_seed::status(&project_root, &qa)?
                 };
+                let upkeep = status.then(|| {
+                    UpkeepReport::at(
+                        &Measurement::integration_at(&project_root, cas_root.unwrap_or(&local_cas)),
+                        &qa,
+                    )
+                });
                 if cli.json {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
+                    let mut value = serde_json::to_value(&result)?;
+                    if let Some(upkeep) = &upkeep {
+                        value["upkeep"] = serde_json::to_value(upkeep)?;
+                    }
+                    println!("{}", serde_json::to_string_pretty(&value)?);
                 } else {
                     let verdict = if !result.present {
                         "MISSING"
                     } else if !result.valid {
                         "INVALID"
+                    } else if upkeep.as_ref().is_some_and(|report| {
+                        report
+                            .artifacts()
+                            .iter()
+                            .any(|artifact| artifact.drift_count.is_some_and(|count| count > 0))
+                    }) {
+                        "DRIFT"
+                    } else if upkeep.as_ref().is_some_and(|report| {
+                        report
+                            .artifacts()
+                            .iter()
+                            .any(|artifact| artifact.drift_count.is_none())
+                    }) {
+                        "UNKNOWN"
                     } else if result.debt_count > 0 || !result.unowned_surfaces.is_empty() {
                         "DEBT"
                     } else {
@@ -195,6 +228,29 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                         "{verdict}: {} journey(s), {} added",
                         result.journeys, result.added
                     );
+                    if let Some(upkeep) = &upkeep {
+                        let line = measured_ref_line(&upkeep.measured_ref);
+                        println!("{line}");
+                        for artifact in upkeep.artifacts() {
+                            match artifact.drift_count {
+                                Some(count) => {
+                                    println!("{}: {count} {}", artifact.name, artifact.unit)
+                                }
+                                None => println!("{}: {}", artifact.name, artifact.state),
+                            }
+                            if let Some(debt) = artifact.debt_count {
+                                println!("  Curation debt: {debt} (separate from drift)");
+                            }
+                            if cli.verbose
+                                && let Some(detail) = &artifact.detail
+                            {
+                                println!("  {detail}");
+                            }
+                        }
+                        if line != format!("Measured ref: {}", upkeep.measured_ref) {
+                            println!("Full ref: cas qa journeys --status --json");
+                        }
+                    }
                     println!(
                         "Next: cas qa journeys --{}",
                         if result.present { "check" } else { "seed" }

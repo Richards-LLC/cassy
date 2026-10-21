@@ -303,7 +303,39 @@ carry `seeded: true` and need review before they describe verified user behavior
 No source or product context means seeding refuses instead of inventing a journey.
 
 `cas qa journeys --status` reports missing/invalid registries, journey and seed
-counts, debt, and unowned surfaces. `--json` returns the same data as one object.
+counts, debt, and unowned surfaces for the checkout. It also reports upkeep drift
+for CODEMAP, PRODUCT_OVERVIEW, and the journey registry at the integration ref:
+
+```bash
+cas qa journeys --status
+cas qa journeys --status --json
+```
+
+`Measured ref: origin/<target>@<sha>` names the exact fetched snapshot. This
+report keeps the integration ref even when the checkout is ahead or behind it;
+it does not fetch. A long human ref is shortened with `--json` as the full-ref
+escape. JSON retains coverage fields and adds `upkeep`, with `measured_ref` and
+`codemap`, `product_overview`, and `registry` objects. Each artifact has `path`,
+`state`, nullable `drift_count`, and an explicit `unit`. Missing artifacts and
+unavailable refs are not zero drift. The existing individual freshness commands
+retain their worker-aware behavior, including local changes ahead of integration.
+
+CODEMAP counts structural change records since its last committed update;
+PRODUCT_OVERVIEW counts relevant change records using its declared watch targets.
+Registry drift counts validation problems plus unowned surface files in the
+integration snapshot; its `debt_count` is separate. These are upkeep inventories,
+not predictions that every existing issue will block a delivery. A known positive
+count gives the status verdict `DRIFT`; unavailable counts give `UNKNOWN` when no
+positive count is known. Local missing/invalid registry verdicts still apply.
+
+Changing `upkeep.codemap`, `upkeep.product_overview`, or `qa.registry.enforce`
+from `off`/`observe` to `enforce` saves the setting, then warns about positive
+drift for that artifact, naming the same measured ref and status command. Zero,
+unknown, repeated `enforce`, and `strict` to `enforce` writes do not produce that
+warning. Failure to measure never turns a successful save into a failure.
+Config `--json` preserves `key`, `old_value`, and `new_value`, and adds `warnings`
+as an array in the same document. Tracked registry enforcement remains authoritative.
+
 `cas doctor` includes a journey-registry row; a missing registry points to the seed
 command. Neither status nor doctor runs journey specs or installs gates.
 

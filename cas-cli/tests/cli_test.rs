@@ -218,6 +218,186 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     );
 }
 
+#[test]
+fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "upkeep fixture")
+            .env("GIT_COMMITTER_NAME", "upkeep fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let write = |path: &str, body: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    let commit = || {
+        git(&["add", ".claude/CODEMAP.md", "docs", "pages"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
+        git(&["rev-parse", "HEAD"])
+    };
+    git(&["init", "-q", "-b", "main"]);
+    cas_cmd(root)
+        .current_dir(root)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    write(
+        ".cas/config.toml",
+        "[factory]\nepic_base_branch = 'main'\n[upkeep]\ncodemap = 'observe'\nproduct_overview = 'observe'\n[qa.registry]\nenforce = 'observe'\n",
+    );
+    let overview =
+        "# Product\n<!-- cas:project-overview\nwatch_dirs = ['pages']\n-->\n";
+    let registry = "version: 1\nupdated: '2026-10-21'\nsurfaces: ['pages/**']\ninvariants:\n  FLOW: {statement: Arrived, check: Read state}\njourneys:\n  - id: home\n    status: live\n    entry: {url: /, trigger: Open}\n    steps: [Arrive]\n    owners: ['pages/base.ts']\n    invariants: [FLOW]\n    traffic: {share_pct: 100, basis: all visits}\n";
+    write(".claude/CODEMAP.md", "# Map\n- pages/: entry routes\n");
+    write("docs/PRODUCT_OVERVIEW.md", overview);
+    write("docs/qa/journeys.yaml", registry);
+    write("pages/base.ts", "export {};\n");
+    let baseline = commit();
+    write("pages/new.ts", "export {};\n");
+    let integrated = commit();
+    git(&["update-ref", "refs/remotes/origin/main", &integrated]);
+    git(&["reset", "--hard", &baseline]);
+    let status = || {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "journeys", "--status", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let report = status();
+    let measured = format!("origin/main@{integrated}");
+    assert_eq!(report["upkeep"]["measured_ref"], measured, "{report}");
+    for artifact in ["codemap", "product_overview", "registry"] {
+        assert_eq!(
+            report["upkeep"][artifact]["drift_count"], 1,
+            "{artifact}: {report}"
+        );
+    }
+    let human = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "journeys", "--status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(human)
+            .unwrap()
+            .contains(&format!("Measured ref: {measured}"))
+    );
+    for (index, key) in [
+        "upkeep.codemap",
+        "upkeep.product_overview",
+        "qa.registry.enforce",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if index == 0 {
+            cas_cmd(root)
+                .current_dir(root)
+                .args(["config", "set", key, "enforce"])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"));
+        } else {
+            let output = cas_cmd(root)
+                .current_dir(root)
+                .args(["config", "set", key, "enforce", "--json"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(saved["warnings"][0]["drift_count"], 1, "{saved}");
+            assert_eq!(saved["warnings"][0]["measured_ref"], measured, "{saved}");
+        }
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "enforce", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let repeated: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            repeated["warnings"],
+            serde_json::json!([]),
+            "repeated write: {repeated}"
+        );
+    }
+    git(&["reset", "--hard", &integrated]);
+    write(
+        ".claude/CODEMAP.md",
+        "# Map\n- pages/: base and new routes\n",
+    );
+    write(
+        "docs/PRODUCT_OVERVIEW.md",
+        &format!("{overview}\nNew route documented.\n"),
+    );
+    write(
+        "docs/qa/journeys.yaml",
+        &registry.replace("'pages/base.ts'", "'pages/**'"),
+    );
+    let curated = commit();
+    git(&["update-ref", "refs/remotes/origin/main", &curated]);
+    // An ahead worker must not substitute its unintegrated drift for this report.
+    write("pages/worker-only.ts", "export {};\n");
+    commit();
+    let clean = status();
+    assert_eq!(
+        clean["upkeep"]["measured_ref"],
+        format!("origin/main@{curated}")
+    );
+    for (key, artifact) in [
+        ("upkeep.codemap", "codemap"),
+        ("upkeep.product_overview", "product_overview"),
+        ("qa.registry.enforce", "registry"),
+    ] {
+        assert_eq!(clean["upkeep"][artifact]["drift_count"], 0, "{clean}");
+        cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "observe"])
+            .assert()
+            .success();
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "enforce", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            saved["warnings"],
+            serde_json::json!([]),
+            "zero drift: {saved}"
+        );
+    }
+}
+
 /// The lib-test probe child does not exercise main.rs's early executable route.
 /// Both real-binary phases must preserve locks owned by this parent process.
 #[cfg(unix)]

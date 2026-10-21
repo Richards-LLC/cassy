@@ -1258,8 +1258,9 @@ fn handle_pre_tool_use_inner(
     Ok(HookOutput::empty())
 }
 
-/// Accept a literal check/targeted nextest plus a simple log/background suffix, never compound
-/// commands, shell substitutions, toolchains, environment overrides or wrappers.
+/// Accept a literal check/targeted nextest plus a simple log/background suffix.
+/// The sole env prefix is the complete fixed provider-isolation profile; never
+/// accept general wrappers, shell substitutions, toolchains or build overrides.
 fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>)> {
     let command = command.trim();
     if command.contains(['\n', '\r']) { return None; }

@@ -1175,6 +1175,13 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+    // Bootstrap/admission keep their inherited identity and credentials. Only
+    // the final Cargo/test child receives this fixed isolation profile.
+    if let Some(directory) = isolated_test_env {
+        for key in ISOLATED_TEST_CREDENTIALS { command.env_remove(key); }
+        command.env("XDG_CONFIG_HOME", directory);
+        println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
+    }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
         config.worker_memory_high_gib,

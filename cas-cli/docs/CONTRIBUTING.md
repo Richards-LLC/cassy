@@ -1390,6 +1390,21 @@ An omitted target selects `--lib`; `--test` must name one explicit harness from
 positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
 Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
 environment prefixes, compound commands, repeated packages and broader flags.
+For a credential-free CI reproduction, first create a private config directory.
+The hook also accepts this complete fixed profile before a named nextest command
+(use an existing, literal absolute path without shell expansion):
+
+```bash
+env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+```
+
+The hook carries this as runner metadata, including detached execution. The
+runner removes those six credentials and sets XDG only on the final Cargo/test
+child, after Cassy credential bootstrap and normal builder admission. Parent
+identity, private targets, memory limits and clean-tip receipts remain in force.
+Other environment wrappers, partial profiles, identity/build overrides and shell
+substitutions remain refused; this profile is for targeted tests, not checks.
+
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.

@@ -362,7 +362,7 @@ fn cas_9efb_live_target_suppresses_relay_with_origin_prefixed_target() {
 /// only the GitHub response is replaced, using a real bare Git remote.
 #[test]
 fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
-    for outcome in ["pending", "merged", "superseded"] {
+    for outcome in ["pending", "merged", "superseded", "refs_converged", "refs_diverged"] {
         let mut f = Fixture::new();
         if outcome == "pending" {
             std::fs::write(
@@ -377,6 +377,9 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
             task.deliverables.factory_branch_anchor =
                 Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
             store.update(&task).unwrap();
+        }
+        if outcome == "refs_converged" {
+            git(f.repo.path(), &["branch", "-f", "epic/test", "factory/merge-w"]);
         }
         let mut prompt = f.relay().pop().expect("settled CI builds a merge signal");
         let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
@@ -410,6 +413,15 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
             task.status = TaskStatus::Open;
             store.update(&task).unwrap();
         }
+        if outcome == "refs_converged" {
+            // An unpushed local merge was reset; both refs now agree that a merge is needed.
+            assert!(prompt.merge_alert.as_ref().unwrap().push_required);
+            git(f.repo.path(), &["branch", "-f", "epic/test", "origin/epic/test"]);
+        } else if outcome == "refs_diverged" {
+            // The local merge just landed, but origin still needs the push.
+            assert!(!prompt.merge_alert.as_ref().unwrap().push_required);
+            git(f.repo.path(), &["branch", "-f", "epic/test", "factory/merge-w"]);
+        }
         let deliver = f
             .app
             .deliverability_request()
@@ -430,6 +442,16 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
                 );
                 // pin: this heading asks the supervisor to merge and must disappear on supersession.
                 assert!(!prompt.text.contains("MERGE REQUIRED"), "{}", prompt.text);
+            }
+            "refs_converged" | "refs_diverged" => {
+                assert!(deliver, "a pending merge or push still releases");
+                let push_required = outcome == "refs_diverged";
+                // pin: live evidence must add/remove ref-disagreement and push-only instructions together.
+                assert_eq!(prompt.text.contains("Git ref disagreement detected:"), push_required, "{}", prompt.text);
+                // pin: Push required means the local merge exists; that instruction must disappear after reset.
+                assert_eq!(prompt.text.contains("2. Push required:"), push_required, "{}", prompt.text);
+                // pin: the alternative action is an actual merge, not another push-only instruction.
+                assert_eq!(prompt.text.contains("2. Merge factory/merge-w into epic/test"), !push_required, "{}", prompt.text);
             }
             _ => {
                 assert!(deliver, "a genuinely outstanding merge still releases");

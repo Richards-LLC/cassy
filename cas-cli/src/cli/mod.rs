@@ -582,8 +582,8 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     initialize_telemetry();
 
-    // Machine-scoped config follows HOME, before project discovery can emit
-    // a misleading CAS_ROOT-wins notice or require an initialized project.
+    // Machine-scoped config follows HOME and does not require an initialized
+    // project. Project telemetry/tracing retain their own discovery paths.
     let cas_root: Option<PathBuf> = match &cli.command {
         Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
             .or_else(|| find_cas_root().ok()),

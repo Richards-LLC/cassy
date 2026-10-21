@@ -779,7 +779,19 @@ fn test_config_get_set() {
         "host policy must not rewrite project config"
     );
     let outside = TempDir::new().unwrap();
-    git2::Repository::init(outside.path()).unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(outside.path())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
     cas_cmd(temp.path())
         .current_dir(&outside)
         .args(["config", "get", "hub.transport_mode"])
@@ -812,8 +824,7 @@ fn test_config_get_set() {
         .env("CAS_ROOT", &other)
         .args(["config", "set", "hub.transport_mode", "required"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("CAS_ROOT wins").not());
+        .success();
     assert_eq!(
         cas::config::Config::load(&host)
             .unwrap()

@@ -144,6 +144,20 @@ class Announce(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("bullet spans more than two lines", result.stderr)
 
+    def test_line_limit_matches_the_hub_counting_links_by_label(self):
+        bodies = list(BODIES)
+        link = "<https://github.com/Richards-LLC/cassy/releases/tag/v9.99.8|the release>"
+        bodies[1] = BODIES[1] + "\n\nInstall: " + "x" * 270 + " from " + link + "."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        bodies[1] = BODIES[1] + " Later " + "é" * 229 + "."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("body user-reply line 1 is 301 characters; the Violet hub refuses lines over 300", result.stderr)
+
     def test_validate_rejects_a_multiline_token(self):
         bodies = list(BODIES)
         bodies[3] += "\n\n{{UNKNOWN\nVALUE}}"

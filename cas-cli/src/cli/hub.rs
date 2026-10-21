@@ -2985,7 +2985,11 @@ fn finish_update_hub_verification(
 }
 
 fn format_update_transport_warning(warning: &str) -> String {
-    format!("cas update: {warning}")
+    if let Some(cause) = warning.strip_prefix("Tailscale Serve inactive: ") {
+        format!("cas update: Tailscale Serve inactive:\n  {cause}")
+    } else {
+        format!("cas update: {warning}")
+    }
 }
 
 fn capture_update_hub_evidence(paths: &HubRuntimePaths, reason: &str) {

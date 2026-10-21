@@ -481,15 +481,15 @@ fn migration_id<'p>(pattern: &str, path: &'p str) -> Option<&'p str> {
     id
 }
 
-/// Migration ids that `tip` adds since its merge base with `target`:
-/// `git diff --name-only --diff-filter=A <merge-base> <tip> -- <paths>`.
+/// The resolved `tip` and the migration ids it adds since its merge base with
+/// `target`: `git diff --name-only --diff-filter=A <merge-base> <tip> -- <paths>`.
 /// Renames count as additions.
 fn added_migrations(
     root: &Path,
     paths: &[String],
     target: &str,
     tip: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<(String, Vec<String>), String> {
     let rev = |name: &str| {
         git(
             root,
@@ -521,7 +521,7 @@ fn added_migrations(
         .collect();
     ids.sort();
     ids.dedup();
-    Ok(ids)
+    Ok((tip, ids))
 }
 
 /// Merge admission for `[qa.release.migrations]`: every migration `tip` adds
@@ -537,13 +537,12 @@ pub fn check_migrations(
     let Some(migrations) = config.migrations.as_ref().filter(|m| !m.paths.is_empty()) else {
         return Ok(Vec::new());
     };
-    let ids = added_migrations(root, &migrations.paths, target, tip)
+    let (tip_sha, ids) = added_migrations(root, &migrations.paths, target, tip)
         .map_err(|detail| MigrationRefusal::StatusUnknown(format!("cannot list added migrations: {detail}")))?;
     if ids.is_empty() {
         return Ok(ids);
     }
     let name = Verb::Migrations.as_str();
-    let tip_sha = resolve_commit(root, tip).unwrap_or_else(|| tip.to_owned());
     let data = call(
         root,
         config,

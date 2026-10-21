@@ -35,9 +35,9 @@ class CandidateVersionTests(unittest.TestCase):
         # Git, lifetime leases, artifact manifests and teardown remain real.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            repo, scratch, tools = root / "repo", root / "scratch", root / "tools"
+            repo, scratch, tools = root / "repo", root / "scratch/base", root / "tools"
             for path in (repo, scratch, tools):
-                path.mkdir()
+                path.mkdir(parents=True)
             def git(*args):
                 return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
             git("init", "-q")
@@ -80,7 +80,7 @@ Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
                 result = candidate['build'](repo, revision, destination)
             record = json.loads(target_record.read_text())
             target = Path(record['target'])
-            self.assertTrue(target.is_relative_to(scratch), str(target))
+            self.assertTrue(target.is_relative_to(scratch.parent), str(target))
             self.assertTrue(record['owner'], 'compiler target must hold bounded-cache provenance')
             self.assertFalse(target.exists(), 'candidate output must be pruned after artifact copy')
             self.assertEqual((destination / 'cas').read_bytes(), binary.read_bytes())

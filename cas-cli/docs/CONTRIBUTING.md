@@ -1337,6 +1337,10 @@ attempt does not remove unmanaged scratch directories or run full factory GC.
 Worker shutdown and replacement also retire safe terminal or parked-and-pushed
 targets, copying proof logs to durable artifacts before removal. In-progress,
 unpushed or unverifiable work keeps its target and checkout.
+QA candidate builds use a private bounded target inside their owned release
+scratch directory. Candidate artifacts are copied out before that directory is
+removed; existing shared supervisor targets remain review-only. Interrupted
+candidate directories use the release-scratch GC naming and ownership protocol.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |

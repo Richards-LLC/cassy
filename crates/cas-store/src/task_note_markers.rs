@@ -26,11 +26,13 @@ pub fn is_reserved_line(line: &str) -> bool {
 
 /// Exact text delimited by line boundaries, including multi-line receipts.
 pub(crate) fn contains_complete_lines(notes: &str, text: &str) -> bool {
-    notes.match_indices(text).any(|(start, _)| {
-        let end = start + text.len();
-        (start == 0 || notes.as_bytes()[start - 1] == b'\n')
-            && (end == notes.len() || notes.as_bytes()[end] == b'\n')
-    })
+    std::iter::once(0)
+        .chain(notes.match_indices('\n').map(|(offset, _)| offset + 1))
+        .any(|start| {
+            notes[start..]
+                .strip_prefix(text)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+        })
 }
 
 fn provenance_blocks(notes: &str) -> Vec<Range<usize>> {

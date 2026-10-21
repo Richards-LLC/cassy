@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural navigation at the v54 release freeze (`51b91ea82`). Regenerate with `/codemap` when modules move.
+> Structural navigation at the v55 release freeze (`00473c402`). Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -58,6 +58,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/cli/update/bindings.rs`, `cas-cli/src/cli/update/discovery_probe.rs` - update binding checks and bounded workspace discovery.
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed-file inventory, Git reconciliation, and locking.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - config commands, accessors, metadata registry, and operator policy.
+- `cas-cli/src/cli/qa.rs`, `cas-cli/src/cli/qa_impact.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/config/upkeep.rs` - `cas qa journeys|impact|post-release` commands and upkeep stage config.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations and integration handlers.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/` - session/tool policy and native hook dispatch.
 - `cas-cli/src/cloud/`, `cas-cli/src/cloud/syncer/` - peer operations, store sync, and identity reconciliation.

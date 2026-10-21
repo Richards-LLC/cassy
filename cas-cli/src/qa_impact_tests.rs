@@ -274,3 +274,38 @@ fn qa_impact_legacy_catalog_preserves_qa_pass_selection_at_head() {
         Some("hub-web/e2e/reply.journey.ts")
     );
 }
+
+#[test]
+fn qa_impact_registry_preserves_catalog_imports_and_css_hunks() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "scripts/journeys-for-diff.py", include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py"
+    )));
+    let mut catalog = String::from("## hub-web\n\n- **Surface-wide:** `hub-web/src/styles.css`\n\n");
+    let mut yaml = String::from("version: 1\nupdated: '2026-10-21'\nselection: legacy_catalog\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n");
+    for (id, name) in [("HUB-J1", "reply"), ("HUB-J2", "theme")] {
+        catalog.push_str(&format!("### {id} · {name}\n\n- **Entry:** `/commander/`\n- **Touches:** `hub-web/src/{name}.ts`\n- **Suite:** `hub-web/e2e/{name}.journey.ts`\n\n"));
+        yaml.push_str(&format!("  - id: {id}\n    name: Curated {name}\n    status: live\n    entry: {{url: /commander/, trigger: Open}}\n    steps: [Arrive]\n    owners: ['hub-web/src/{name}.ts', 'hub-web/src/styles.css']\n    invariants: [INV]\n    traffic: {{share_pct: null}}\n    spec: hub-web/e2e/{name}.journey.ts\n"));
+        write(repo, &format!("hub-web/src/{name}.ts"), &format!("export const value = '<div class=\"{name}-card\">ok</div>';"));
+        write(repo, &format!("hub-web/e2e/{name}.journey.ts"), &format!("test('{id} {name}', () => {{}});"));
+    }
+    write(repo, "docs/qa/journeys.md", &catalog);
+    write(repo, crate::qa_registry::DEFAULT_PATH, &yaml);
+    write(repo, "hub-web/src/leaf.ts", "export const leaf = 1;");
+    write(repo, "hub-web/src/reply.ts", "import './leaf'; export const value = '<div class=\"reply-card\">ok</div>';");
+    write(repo, "hub-web/src/styles.css", ".reply-card { color: blue; }\n.theme-card { color: green; }\n");
+    let base = commit(repo);
+    write(repo, "hub-web/src/styles.css", ".reply-card { color: red; }\n.theme-card { color: green; }\n");
+    let head = commit(repo);
+    // Both the selector and its data must come from the reviewed head.
+    write(repo, "scripts/journeys-for-diff.py", "raise Exception('checkout drift')");
+    for path in ["hub-web/src/styles.css", "hub-web/src/leaf.ts"] {
+        let report = analyze(repo, &QaConfig::default(), &[Change::modified(path)], Some(&base), Some(&head)).unwrap();
+        assert_eq!(report.source, "registry");
+        assert!(report.registry.valid);
+        assert_eq!(report.journeys.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), ["HUB-J1"], "{path}");
+        assert_eq!(report.journeys[0].name, "Curated reply");
+        assert_eq!(report.journeys[0].invariants[0].id, "INV");
+    }
+}

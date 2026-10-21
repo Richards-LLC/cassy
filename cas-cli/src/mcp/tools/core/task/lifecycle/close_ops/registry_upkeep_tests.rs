@@ -303,6 +303,17 @@ fn registry_upkeep_observe_persists_would_refusal_and_off_skips() {
     f.qa.registry.enforce = RegistryEnforcement::Off;
     f.run(&head).unwrap();
     assert_eq!(f.store.get(&f.task.id).unwrap().notes, notes);
+
+    // A tracked policy is authoritative, including over a local off shortcut.
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &format!("enforce: enforce\n{YAML}"));
+    let enforced = commit(f.repo.path());
+    assert!(f.run(&enforced).unwrap_err().contains("UNOWNED USER-FACING FILE"));
+    // Resolve at the delivered head; a different checkout policy cannot relax it.
+    write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &format!("enforce: off\n{YAML}"));
+    assert!(f.run(&enforced).unwrap_err().contains("UNOWNED USER-FACING FILE"));
+    let disabled = commit(f.repo.path());
+    f.qa.registry.enforce = RegistryEnforcement::Strict;
+    f.run(&disabled).unwrap();
 }
 
 #[test]

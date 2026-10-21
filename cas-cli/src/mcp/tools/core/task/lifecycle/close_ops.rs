@@ -18611,7 +18611,7 @@ impl EpicGitSnapshot {
     }
 
     fn read_ref(&self, requested: &str) -> CheckedRefRead {
-        if self.ref_exists(requested) {
+        if self.ref_exists(requested) || self.resolved_anchors.contains(requested) {
             return CheckedRefRead::Local {
                 requested: requested.to_string(),
             };
@@ -19203,7 +19203,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             let cap = EPIC_CHILD_PROOF_CAP;
             epic_measurement::Scope::new(cap)
         });
-        // The table's stranded count is a live Git measurement of the
+        // A closed child's ancestry-only summary measures its immutable
+        // receipt, so a reused lane's later work cannot re-strand it.
+        // The full view's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
         // not a substitute for the branch state the operator needs to
@@ -19211,7 +19213,12 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // branch receipt at all.
         #[cfg(test)]
         epic_measurement::test_load::delay();
-        let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
+        let checked_refs: Vec<&str> = if options.summary
+            && t.status == TaskStatus::Closed
+            && resolved_anchor.is_some()
+        {
+            resolved_anchor.into_iter().collect()
+        } else if fallback_branches.is_empty() {
             resolved_anchor.into_iter().collect()
         } else {
             fallback_branches.iter().map(String::as_str).collect()

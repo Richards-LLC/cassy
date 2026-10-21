@@ -5534,7 +5534,7 @@ mod tests {
         let project = Project::new();
         let release = release_config(&[
             ("adapter", "./scripts/qa/fake-adapter"),
-            ("env", "FAKE_MIGRATIONS"),
+            ("env", "FAKE_MIGRATIONS,FAKE_ERROR_KIND"),
             ("integration_branch", "staging"),
             ("migrations.paths", "db/migrations/*/migration.sql"),
             ("migrations.env", "staging"),
@@ -5561,6 +5561,7 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(admit(&green, "main", false, None), Ok((false, None)));
+        assert!(admit(&green, "staging", true, Some(" ")).is_err());
         let (kind, _) = admit(&red, "staging", true, Some("CI flake reviewed")).unwrap_err();
         assert_eq!(kind, "migration_refused", "a red-CI override must not accept the migration");
         let (ci_override, accepted) = admit(
@@ -5583,6 +5584,16 @@ mod tests {
                 && note.ends_with("into staging: applied by hand"),
             "{note}"
         );
+
+        // A reason naming one class does not accept another.
+        env.set("FAKE_ERROR_KIND", "rate_limited");
+        let (kind, refusal) = admit(&green, "staging", true, Some("MIGRATION PENDING applied by hand"))
+            .unwrap_err();
+        assert!(
+            kind == "migration_refused" && refusal.starts_with("MIGRATION STATUS UNKNOWN"),
+            "{refusal}"
+        );
+        env.remove("FAKE_ERROR_KIND");
 
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
         assert_eq!(admit(&green, "staging", false, None), Ok((false, None)));

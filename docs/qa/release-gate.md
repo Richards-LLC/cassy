@@ -266,10 +266,11 @@ refuses with "No merge was attempted":
 | An id is `pending` or `unknown`, or missing from `data` | `MIGRATION PENDING: <ids> on <env>` |
 | `external`, `rate_limited` or `insufficient` error, or a timeout | `MIGRATION STATUS UNKNOWN` |
 | `invalid` or `internal` error, or a malformed response | `MIGRATION ADAPTER BUG` |
-| The delivery range cannot be diffed locally | `MIGRATION STATUS UNKNOWN` |
+| Local git cannot diff the delivery range | `MIGRATION CHECK FAILED` |
 
 Each refusal names its next step: apply the migration, retry when the
-adapter can report status, or fix the adapter or its configuration.
+adapter can report status, fix the adapter or its configuration, or fetch the
+target and tip so local git can diff them.
 
 A registered supervisor may override a refusal with `supervisor_override=true`,
 `task_id` and a `reason` that names the refusal class, for example

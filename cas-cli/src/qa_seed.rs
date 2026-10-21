@@ -152,17 +152,18 @@ fn discover(root: &Path, qa: &QaConfig, files: &[String]) -> Result<Registry> {
         seeded_from: vec!["tracked source routes".into()],
         ..Default::default()
     };
-    let mut surfaces: BTreeSet<String> = qa
+    let configured_surfaces: Vec<String> = qa
         .user_facing_paths
         .iter()
         .chain(&qa.api_paths)
         .filter(|glob| {
-            files
-                .iter()
-                .any(|file| qa_registry::matches_path([glob.as_str()], file))
+            files.iter().any(|file| {
+                qa_registry::matches_path([glob.strip_prefix('!').unwrap_or(glob.as_str())], file)
+            })
         })
         .cloned()
         .collect();
+    let mut surfaces = BTreeSet::new();
     let calls = regex::Regex::new(
         r#"(?:\b(?:router|app)\.(get|post|put|patch|delete|head|options)|\.(route))\s*\(\s*["']([^"']+)["']"#,
     )?;
@@ -222,7 +223,14 @@ fn discover(root: &Path, qa: &QaConfig, files: &[String]) -> Result<Registry> {
             );
         }
     }
-    registry.surfaces = Some(surfaces.into_iter().collect());
+    // Config filters are ordered: sorting them would discard negative exclusions.
+    let mut combined = configured_surfaces;
+    for surface in surfaces {
+        if !combined.contains(&surface) {
+            combined.push(surface);
+        }
+    }
+    registry.surfaces = Some(combined);
     // Own helper and configured surface files even when no route syntax can be inferred.
     for file in files {
         if qa_registry::matches_path(registry.effective_surfaces(qa), file)
@@ -459,6 +467,12 @@ pub fn seed(root: &Path, qa: &QaConfig, merge: bool) -> Result<Status> {
                         (None, None) => {
                             new.id == old.id || new.name.is_some() && new.name == old.name
                         }
+                        (None, Some(_)) => {
+                            !new.owners.globs().is_empty()
+                                && new.owners.globs().iter().all(|file| {
+                                    qa_registry::matches_path(existing.owner_globs(old), file)
+                                })
+                        }
                         _ => false,
                     })
             })
@@ -493,6 +507,9 @@ pub fn seed(root: &Path, qa: &QaConfig, merge: bool) -> Result<Status> {
         // Same-directory rename prevents an interrupted write from truncating curation.
         let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(root))?;
         std::io::Write::write_all(&mut temp, output.as_bytes())?;
+        if let Ok(metadata) = fs::metadata(&path) {
+            temp.as_file().set_permissions(metadata.permissions())?;
+        }
         temp.persist(&path).map_err(|error| error.error)?;
     } else {
         use std::io::Write;
@@ -578,6 +595,13 @@ mod tests {
             ".claude/CODEMAP.md",
             "# Map\n- `src/` — Account interface\n- `api/` - Account API\n",
         );
+        write(&repo, "styles/public.css", "body {}");
+        write(&repo, "styles/private.css", "body {}");
+        write(
+            &repo,
+            ".cas/config.toml",
+            "[qa]\nuser_facing_paths = ['**/*.vue', '**/*.svelte', '**/*.tsx', '**/*.css', '!styles/private.css']\n",
+        );
         git(&repo, &["add", "."]);
         env.set_current_dir(&repo);
         journeys(&["--status", "--json"]).unwrap();
@@ -632,6 +656,7 @@ mod tests {
             "api/accounts.controller.ts",
             "server/routes.ts",
             "src/components/Button.tsx",
+            "styles/public.css",
         ] {
             assert!(
                 qa_registry::matches_path(registry.effective_surfaces(&Default::default()), file),
@@ -645,6 +670,10 @@ mod tests {
                 "unowned {file}"
             );
         }
+        assert!(!qa_registry::matches_path(
+            registry.effective_surfaces(&Default::default()),
+            "styles/private.css"
+        ));
         let bytes = fs::read(repo.join(qa_registry::DEFAULT_PATH)).unwrap();
         assert!(
             journeys(&["--seed"]).is_err(),
@@ -663,7 +692,12 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--initial-branch=main"]);
         write(&repo, "pages/signup.vue", "<template>Signup</template>");
-        let curated = "version: 1\nupdated: '2026-10-20'\nsurfaces: ['pages/**']\njourneys:\n  # Keep this hand-curated entry, including its formatting.\n  - id: curated-signup\n    status: live\n    name: 'Create an account'\n    entry: {url: /signup, trigger: Join}\n    owners: ['pages/signup.vue']\n    steps: [Join, Confirm]\n    invariants: [ACCOUNT]\n    traffic: {share_pct: 70, basis: new accounts}\ninvariants:\n  ACCOUNT: {statement: Account exists, check: Read account}\n";
+        let curated = "version: 1\nupdated: '2026-10-20'\nsurfaces: ['pages/**']\njourneys:\n  # Keep this hand-curated entry, including its formatting.\n  - id: curated-signup\n    status: live\n    name: 'Create an account'\n    entry: {url: /signup, trigger: Join}\n    owners: ['pages/signup.vue', 'components/**']\n    steps: [Join, Confirm]\n    invariants: [ACCOUNT]\n    traffic: {share_pct: 70, basis: new accounts}\ninvariants:\n  ACCOUNT: {statement: Account exists, check: Read account}\n";
+        write(
+            &repo,
+            "components/Shared.tsx",
+            "export const Shared = () => null;",
+        );
         write(&repo, qa_registry::DEFAULT_PATH, curated);
         git(&repo, &["add", "."]);
         env.set_current_dir(&repo);

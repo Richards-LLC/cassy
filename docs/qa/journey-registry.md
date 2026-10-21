@@ -38,7 +38,8 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `surfaces` | Optional files requiring ownership; absent inherits `qa.user_facing_paths` plus `qa.api_paths`. An explicit empty list selects none. |
 | `kinds` | Optional allowed journey kinds; absent accepts free text. |
 | `owner_groups` | Optional `name: {description, globs: [...]}` shared ownership map. |
-| `invariants` | Optional `ID: {statement, check, bug?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
+| `invariants` | Optional `ID: {statement, check, bug?, pending_checker?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
+| `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
 | `fixtures` | Optional `name: {description, provider}` map. When present, journey fixture references must resolve. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `journeys` | Required non-empty list. |
@@ -58,6 +59,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `owners` | Required for live journeys unless a referenced group supplies globs. Accepts a glob list or `{backend: [...], frontend: [...]}` map; map sides flatten in key order. |
 | `owner_groups` | Optional list of header group names; groups resolve to shared globs. |
 | `invariants` | Required non-empty list for curated live journeys; each id must resolve. |
+| `manual_checks` | Optional list of header `manual_checks` ids; each id must resolve. |
 | `fixtures` | Optional fixture names; validated when the header declares fixtures. |
 | `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. |
 | `spec` | Optional tracked automated journey file. |
@@ -91,6 +93,33 @@ Keep the Markdown narrative, stable IDs and YAML metadata aligned when a journey
 changes. Extend YAML owners when source dependencies change; the semantic selector
 tracks imports dynamically. cas-src deliberately leaves new, uncatalogued source
 files unowned so G2 requires ownership or an explicit decision in that delivery.
+
+### Pending checkers and manual checks
+
+`pending_checker: {owner, due: YYYY-MM-DD}` declares a criterion whose checker
+is not written yet. `--check` reports it as `pending_checker` debt naming the
+owner and due date, and fails with `overdue_checker` once the due date has
+passed. A missing owner or invalid date fails as `pending_checker`. This lets
+a docs-only change declare a criterion without a red build, while keeping the
+missing checker visible and owned.
+
+Each `manual_checks` entry is its own debt line, coded by reason:
+`manual_human_judgment`, `manual_checker_unwritten` (with the owner and due
+date; overdue fails like any pending checker), or `manual_unclassified` when
+`reason` is absent. An unknown reason fails as `manual_reason`.
+
+```yaml
+invariants:
+  INV-ONE-RUN:
+    statement: One Draft click starts one paid run
+    check: Count runs and debits after a double click
+    pending_checker: {owner: qa-team, due: "2026-11-15"}
+manual_checks:
+  MANUAL-CAROUSEL-READS:
+    statement: Slide cards read in order at 390px
+    check: Compare View Content to the source carousel
+    reason: human_judgment
+```
 
 ## Example
 

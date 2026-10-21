@@ -229,17 +229,29 @@ fn has_store(cas_root: &Path) -> bool {
 /// list/get and cleanup reads historical: this projection never cancels a
 /// split or releases a claim. Callers still apply their split-state policy.
 pub(crate) fn current_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
+    projected_epic_splits(cas_root, false)
+}
+
+/// Overlap also reserves the original shares while claim cleanup is pending.
+/// Keep that historical coverage out of ordinary ownership/renewal projections.
+fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
     let splits = list_epic_splits(cas_root)
         .map_err(|error| format!("epic split store: {error}"))?;
     if splits.is_empty() {
         return Ok(splits);
     }
-    let tasks = crate::store::open_task_store(cas_root)
+    // Ownership reads must not replay a failed outbox repair and lose a live
+    // binding while local task/parent rows remain perfectly readable.
+    let tasks = crate::store::open_task_store_local(cas_root)
         .map_err(|error| format!("could not open the task store: {error}"))?;
     let mut terminal_epics = std::collections::HashMap::new();
     let mut parents = std::collections::HashMap::new();
     let mut current = Vec::new();
     for mut split in splits {
+        if include_cleanup && split.cleanup_pending {
+            current.push(split);
+            continue;
+        }
         let terminal = match terminal_epics.get(&split.epic_id) {
             Some(terminal) => *terminal,
             None => {
@@ -704,7 +716,7 @@ fn local_check(cas_root: &Path) -> Result<impl Fn(&str) -> bool, String> {
 /// accepted splits also reserve, while expired incoming proposals do not.
 fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(EpicSplit, String)>, String> {
     let now = Utc::now();
-    let splits = current_epic_splits(cas_root)?;
+    let splits = projected_epic_splits(cas_root, true)?;
     Ok(splits
         .into_iter()
         .filter(|split| Some(split.id.as_str()) != except)

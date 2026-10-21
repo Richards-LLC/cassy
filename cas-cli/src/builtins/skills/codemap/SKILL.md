@@ -1,6 +1,6 @@
 ---
 name: codemap
-description: Use when the user asks for a codemap, or when .claude/CODEMAP.md is missing or stale.
+description: Use when the user asks for a codemap, when .claude/CODEMAP.md is missing or stale, or when task close refuses with CODEMAP DRIFT.
 metadata:
   managed_by: cas
 ---
@@ -132,6 +132,7 @@ If the store is not initialized in this project, the command says so and there i
 
 - **Missing:** `.claude/CODEMAP.md` does not exist → SessionStart fires a `severity="high"` banner. Nothing is blocked. Generate from scratch.
 - **Stale:** SessionStart reports structural changes since CODEMAP.md was last updated → regenerate, keep-blocks survive. Only once staleness reaches `SignificantlyStale` does PreToolUse gate a supervisor's `task create` / `spawn_workers`; a missing CODEMAP never does.
+- **Drift at park (G5):** task close refuses `CODEMAP DRIFT`, naming paths this delivery deleted or renamed that the map names, or new directories under a directory the map enumerates. Edit only those rows in the same branch (drop or rename the path, add the directory with a one-liner), commit, and retry close; this is a targeted edit, not a regeneration. When the map stays true (the path was never worth mapping, or is generated), record `task action=notes note_type=decision notes="codemap unchanged: <reason>"` instead. A new file inside a mapped directory is advisory only.
 - **Manual:** user invokes `/codemap` or asks to refresh the codemap.
 - **After refactors:** modules were added, removed, or renamed across more than a handful of files.
 

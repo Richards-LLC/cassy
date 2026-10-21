@@ -3090,6 +3090,54 @@ impl CasCore {
         )))
     }
 
+    /// Resolve worker ownership synchronously so candidate Task values do not
+    /// enlarge the async merge future or its transactional callers' stacks.
+    fn parked_delivery_for_worker(&self, id: &str) -> Result<(Box<cas_types::Task>, String), McpError> {
+        let agents = self.open_agent_store()?;
+        let token = id.strip_prefix("factory/").unwrap_or(id);
+        let worker = agents.get(token).ok().map(|agent| agent.name)
+            .unwrap_or_else(|| token.to_string());
+        let mut parked = Vec::new();
+        for task in self.open_task_store()?.list(Some(cas_types::TaskStatus::AwaitingMerge))
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Cannot resolve parked merge tasks: {error}")),
+                data: None,
+            })?
+        {
+            match authorize_explicit_task_for_system_b_worker(&task, &worker, agents.as_ref()) {
+                Ok(()) => parked.push(task),
+                Err(error) if error.code == ErrorCode::INTERNAL_ERROR => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if parked.len() != 1 {
+            let mut ids = parked.iter().map(|task| task.id.as_str()).collect::<Vec<_>>();
+            ids.sort_unstable();
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "AMBIGUOUS PARKED DELIVERY: worker {worker} has {} parked tasks ({}). Supply task_id=<task> and its recorded delivery branch. No merge was attempted.",
+                    parked.len(), if ids.is_empty() { "none".into() } else { ids.join(", ") },
+                )),
+                data: None,
+            });
+        }
+        let task = parked.pop().expect("one parked task");
+        if task.deliverables.parked_branch.as_deref().is_none_or(|branch| branch.trim().is_empty())
+            || task.deliverables.factory_branch_anchor.as_deref().is_none_or(|sha| sha.trim().is_empty())
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "PARKED DELIVERY INCOMPLETE: task {} needs its recorded branch and branch_tip. Re-park the delivery or supply task_id explicitly. No merge was attempted.", task.id,
+                )),
+                data: None,
+            });
+        }
+        Ok((Box::new(task), worker))
+    }
+
     /// Resolve a remote-only delivery through task and supervisor authority.
     /// The real pushed branch is materialized locally for the existing CI/QA
     /// gates; divergent local refs are never overwritten.
@@ -3099,6 +3147,7 @@ impl CasCore {
         task: Option<&cas_types::Task>,
         id: &str,
         cleanup: Option<bool>,
+        worker_hint: Option<&str>,
     ) -> Result<Option<RemoteMergeSource>, McpError> {
         let Some(task) = task.filter(|task| {
             task.status == cas_types::TaskStatus::AwaitingMerge
@@ -3112,7 +3161,8 @@ impl CasCore {
         ) else {
             return Ok(None);
         };
-        let (assignee, canonical_branch) = system_b_merge_source(branch, Some(&task.id));
+        let (branch_worker, canonical_branch) = system_b_merge_source(branch, Some(&task.id));
+        let assignee = worker_hint.unwrap_or(&branch_worker).to_string();
         // Live local workers retain their existing merge/dirty-tree policy.
         if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
             return Ok(None);
@@ -3260,7 +3310,7 @@ impl CasCore {
         // cas-bebc (GH #1023 finding 9): never integrate another live factory
         // session's worker branch or task from this session.
         let mut scoped_task =
-            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
+            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok()).map(Box::new);
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
             |agents, caller, now| {
@@ -3268,7 +3318,7 @@ impl CasCore {
                     agents,
                     caller,
                     id,
-                    scoped_task.as_ref(),
+                    scoped_task.as_deref(),
                     now,
                 )
             },
@@ -3279,6 +3329,52 @@ impl CasCore {
                 data: None,
             });
         }
+        let worktree_store = open_worktree_store(&cas_root).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to open worktree store: {e}")),
+            data: None,
+        })?;
+
+        let system_a = match worktree_store.get(id) {
+            Ok(wt) => Some(wt),
+            Err(_) => worktree_store.get_by_branch(id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to get worktree: {e}")),
+                data: None,
+            })?,
+        };
+
+        // A worker-only request must bind one parked task before repository,
+        // target, source and containment resolution. A stale lane is not a
+        // delivery receipt. Tracked System-A epic worktrees remain explicit.
+        let implicit_delivery = if task_id.is_none()
+            && system_a.as_ref().is_none_or(|worktree| {
+                worktree.epic_id.is_none() || worktree.branch.starts_with("factory/")
+            })
+        {
+            Some(self.parked_delivery_for_worker(id)?)
+        } else {
+            None
+        };
+        let task_id = task_id.or_else(|| implicit_delivery.as_ref().map(|(task, _)| task.id.as_str()));
+        if let Some((task, _)) = implicit_delivery.as_ref() {
+            scoped_task = Some(task.clone());
+            // The inferred receipt can reveal a foreign owner that the bare
+            // input could not identify. Keep session authority ahead of effects.
+            if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
+                &cas_root,
+                |agents, caller, now| crate::factory_session_scope::foreign_owner_of_merge(
+                    agents, caller, id, scoped_task.as_deref(), now,
+                ),
+            ) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(owner.refusal(&format!("worktree_merge of {id}"), &caller)),
+                    data: None,
+                });
+            }
+        }
+
         // cas-9c34: the supervisor is acting on this task's merge request,
         // whatever this attempt's outcome; it is read.
         if let Some(task_id) = task_id
@@ -3346,12 +3442,6 @@ impl CasCore {
             )));
         }
 
-        let worktree_store = open_worktree_store(&cas_root).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to open worktree store: {e}")),
-            data: None,
-        })?;
-
         // Resolve an explicit task target before constructing any git-bound
         // object. The manager owns preflight, checkout, merge, and cleanup,
         // so constructing it from the spawn repo would mutate the wrong
@@ -3403,17 +3493,11 @@ impl CasCore {
             data: None,
         })?;
 
-        let system_a = match worktree_store.get(id) {
-            Ok(wt) => Some(wt),
-            Err(_) => worktree_store.get_by_branch(id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to get worktree: {e}")),
-                data: None,
-            })?,
-        };
-
         let remote_source = if system_a.is_none() {
-            self.prepare_remote_merge_source(&manager, scoped_task.as_ref(), id, cleanup)?
+            self.prepare_remote_merge_source(
+                &manager, scoped_task.as_deref(), id, cleanup,
+                implicit_delivery.as_ref().map(|(_, worker)| worker.as_str()),
+            )?
         } else {
             None
         };
@@ -3445,7 +3529,10 @@ impl CasCore {
 
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
             match system_a {
-                Some(wt) => {
+                Some(mut wt) => {
+                    if let Some((task, _)) = implicit_delivery.as_ref() {
+                        wt.branch = task.deliverables.parked_branch.clone().expect("validated parked branch");
+                    }
                     let source_worktree_live = is_git_worktree(&wt.path);
                     (wt, false, source_worktree_live, String::new(), false)
                 }
@@ -3454,6 +3541,9 @@ impl CasCore {
                     // path, but has its own Git ref (GH #1040).
                     let (assignee, source_branch) = remote_source.as_ref()
                         .map(|source| (source.assignee.clone(), source.branch.clone()))
+                        .or_else(|| implicit_delivery.as_ref().map(|(task, worker)| (
+                            worker.clone(), task.deliverables.parked_branch.clone().expect("validated parked branch"),
+                        )))
                         .unwrap_or_else(|| system_b_merge_source(id, task_id));
                     let path = manager.worktree_path_for_worker(&assignee);
                     let source_worktree_live = is_git_worktree(&path);
@@ -3594,11 +3684,11 @@ impl CasCore {
             }
             // Later dirty-checkout and merge-intent handling use the same
             // durable anchor that the source guard just validated.
-            scoped_task = Some(store.get(task_id).map_err(|error| McpError {
+            scoped_task = Some(Box::new(store.get(task_id).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Cannot reload parked delivery after source validation: {error}")),
                 data: None,
-            })?);
+            })?));
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -3824,7 +3914,7 @@ impl CasCore {
         // for unfinished CI or let a docs-only tip mask earlier code.
         let parked_source_tip = transactional_delivery.as_ref()
             .map(|(receipt, _)| receipt.commit_sha.clone())
-            .or_else(|| scoped_task.as_ref()
+            .or_else(|| scoped_task.as_deref()
                 .and_then(|task| task.deliverables.factory_branch_anchor.clone()))
             .map(|tip| manager.git().resolve_commit(&tip).unwrap_or(tip));
         let ci_source = remote_source.as_ref()
@@ -4051,7 +4141,7 @@ impl CasCore {
             // exact origin/anchor agreement is verified inside the manager.
             let parked_anchor = transactional_delivery.as_ref()
                 .map(|(receipt, _)| receipt.commit_sha.as_str())
-                .or_else(|| scoped_task.as_ref()
+                .or_else(|| scoped_task.as_deref()
                     .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
                     .and_then(|task| task.deliverables.factory_branch_anchor.as_deref()));
             let dirty_pushed_anchor = if !force && !do_cleanup && source_worktree_live {

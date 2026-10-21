@@ -648,10 +648,31 @@ journeys:
     #[test]
     fn qa_registry_gabber_fixture_validates() {
         let dir = repo(GABBER);
-        let report = check(dir.path(), Path::new(DEFAULT_PATH)).unwrap();
+        let key = "qa.registry.path";
+        let custom_path = "docs/qa/custom.yaml";
+        let mut config = crate::config::Config::default();
+        assert_eq!(config.get(key).as_deref(), Some(DEFAULT_PATH));
+        assert!(crate::config::meta::registry().get(key).is_some());
+        config.set(key, custom_path).unwrap();
+        assert!(config.list().contains(&(key.into(), custom_path.into())));
+        let cas_dir = dir.path().join(".cas");
+        std::fs::create_dir(&cas_dir).unwrap();
+        config.save(&cas_dir).unwrap();
+        let config = crate::config::Config::load(&cas_dir).unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(custom_path));
+        std::fs::rename(dir.path().join(DEFAULT_PATH), dir.path().join(custom_path)).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "--all"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let report = check(dir.path(), Path::new(&config.qa().registry.path)).unwrap();
         assert!(report.problems.is_empty(), "{:?}", report.problems);
         assert!(report.debt.is_empty());
-        let registry = load(&dir.path().join(DEFAULT_PATH)).unwrap();
+        let registry = load(&dir.path().join(custom_path)).unwrap();
         assert_eq!(
             registry.journeys[0].owners.globs(),
             ["server/auth/**", "pages/[id].vue"]

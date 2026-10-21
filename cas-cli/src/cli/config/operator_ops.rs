@@ -568,6 +568,12 @@ large_artifact_dir = \"before\"\n",
                 "staging.staging_dir" => "roundtrip-staging-dir",
                 "staging.large_artifact_dir" => "roundtrip-large-artifact-dir",
                 "factory.write_roots" => "~/Downloads",
+                "llm.supervisor.harness" => "codex",
+                "llm.supervisor.model" => "roundtrip-supervisor-model",
+                "llm.supervisor.reasoning_effort" => "medium",
+                "llm.worker.harness" => "claude",
+                "llm.worker.model" => "roundtrip-worker-model",
+                "llm.worker.reasoning_effort" => "high",
                 _ => registry.get(key).expect("registered key metadata").default,
             };
 

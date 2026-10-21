@@ -1131,6 +1131,7 @@ mod tests {
     #[test]
     fn cas_337b_artifacts_do_not_inherit_foreign_home_store() {
         let mut env = TestEnvGuard::temp_home();
+        env.remove("CAS_ROOT");
         let operator = TempDir::new().unwrap();
         let host_store = operator.path().join("operator-home/.cas");
         let artifacts = host_store.join("artifacts/task/qa");

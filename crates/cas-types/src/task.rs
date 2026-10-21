@@ -771,8 +771,8 @@ impl<'de> Deserialize<'de> for TaskDeliverables {
     }
 }
 
-/// Maximum serialized size of the structured task execution state. The state
-/// is a bounded resume surface, not an append-only transcript.
+/// Maximum serialized size of hand-written task resume fields. Automatic
+/// qa_impact has a separate bounded allowance; neither is a transcript.
 pub const TASK_EXECUTION_STATE_MAX_BYTES: usize = 16 * 1024;
 // Full diff impact can exceed the hand-written resume-state budget. Keep a
 // separate finite allowance so large owned diffs retain all journey matches.

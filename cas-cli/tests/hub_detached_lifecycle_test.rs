@@ -478,9 +478,10 @@ fn factory_worker_hub_record_uses_its_joined_server_scope() {
     let record: Value = serde_json::from_slice(&start.stdout).expect("worker hub start JSON");
     if cgroup_delegation_available() {
         let cgroup = record["cgroup"].as_str().expect("worker hub record cgroup");
+        let pid = record["pid"].as_u64().expect("worker hub pid");
         assert!(
-            cgroup.contains("/cas-server-") && cgroup.ends_with("-hub"),
-            "worker hub must record its joined cas-server scope: {cgroup}"
+            cgroup.contains("/cas-server-") && cgroup.ends_with(&format!("-hub-{pid}")),
+            "worker hub must record its generation-specific cas-server scope: {cgroup}"
         );
     } else {
         assert!(

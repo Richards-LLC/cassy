@@ -1598,7 +1598,11 @@ fn start_with_output_resolved(
         }
     };
     let cgroup = factory_worker_session().and_then(|session| {
-        crate::ui::factory::cgroup::join_shared_scope(&session, "hub", launcher_pid)
+        crate::ui::factory::cgroup::join_shared_scope(
+            &session,
+            &format!("hub-{launcher_pid}"),
+            launcher_pid,
+        )
     });
     drop(launch_guard);
     let launch_metadata = cgroup

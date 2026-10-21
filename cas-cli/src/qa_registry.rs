@@ -521,8 +521,10 @@ impl Registry {
                     );
                 }
             }
+            // A null share is unmeasured debt: there is no count for a basis
+            // to describe, which keeps gabber's `{share_pct: null}` rows valid.
             if let Some(traffic) = &journey.traffic {
-                if traffic.basis.trim().is_empty() {
+                if traffic.share_pct.is_some() && traffic.basis.trim().is_empty() {
                     report.problem(
                         "traffic_basis",
                         id,
@@ -720,6 +722,24 @@ journeys:
                     ),
                 vec![],
                 vec!["seeded"],
+            ),
+            (
+                "unmeasured share needs no basis",
+                GABBER.replace(
+                    "{share_pct: 80, basis: New accounts, source: Analytics}",
+                    "{share_pct: null}",
+                ),
+                vec![],
+                vec!["unmeasured_traffic"],
+            ),
+            (
+                "measured share needs a basis",
+                GABBER.replace(
+                    "{share_pct: 80, basis: New accounts, source: Analytics}",
+                    "{share_pct: 80}",
+                ),
+                vec!["traffic_basis"],
+                vec![],
             ),
         ];
         for (name, yaml, problems, debt) in cases {

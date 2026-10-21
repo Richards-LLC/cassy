@@ -57,7 +57,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `owner_groups` | Optional list of header group names; groups resolve to shared globs. |
 | `invariants` | Required non-empty list for curated live journeys; each id must resolve. |
 | `fixtures` | Optional fixture names; validated when the header declares fixtures. |
-| `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. Non-empty `basis` names what was counted. |
+| `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. |
 | `spec` | Optional tracked automated journey file. |
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |

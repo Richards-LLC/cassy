@@ -1062,6 +1062,65 @@ mod tests {
     }
 
     #[test]
+    fn cas_2aab_freshness_uses_worktree_task_target_instead_of_stale_store() {
+        use crate::store::{SqliteTaskStore, TaskStore};
+        use crate::types::{Task, TaskStatus, WorkTarget};
+        use std::process::Command;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let repo = fixture.path().join("main");
+        let worker = fixture.path().join("worker");
+        let cas_root = repo.join(".cas");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"upkeep-fixture\"\n[factory]\nepic_base_branch = \"main\"\n").unwrap();
+        std::fs::write(repo.join(".claude/CODEMAP.md"), "# Initial map\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["add", ".claude"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-qb", "staging"]);
+        std::fs::create_dir(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"), "# Product\n<!-- cas:project-overview\ndomain_paths = []\nwatch_dirs = [\"src\"]\n-->\n").unwrap();
+        std::fs::write(repo.join(".claude/CODEMAP.md"), "# Current map\n").unwrap();
+        git(&["add", "docs", ".claude"]);
+        git(&["commit", "-qm", "document product"]);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-qm", "one relevant change"]);
+        git(&["update-ref", "refs/remotes/origin/staging", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+        git(&["worktree", "add", "-qb", "factory/upkeep-worker", worker.to_str().unwrap(), "main"]);
+        let store = SqliteTaskStore::open(&cas_root).unwrap();
+        store.init().unwrap();
+        let mut task = Task::new("cas-fixture".into(), "Upkeep fixture".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("upkeep-worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:upkeep-fixture".into(),
+            target_branch: "staging".into(),
+        });
+        store.add(&task).unwrap();
+        env.set("CAS_ROOT", &cas_root);
+        env.set("CAS_AGENT_NAME", "upkeep-worker");
+        env.set_current_dir(&worker);
+
+        let evaluation = evaluate_codemap_freshness(&cas_root).unwrap();
+        assert_eq!(evaluation.evaluated_ref, "origin/staging");
+        assert!(matches!(evaluation.staleness, Some(CodemapStaleness::Stale { total_changes: 1, .. })));
+        let overview = super::super::project_overview::check_freshness(&worker, None).unwrap();
+        assert!(matches!(overview, Some(super::super::project_overview::ProjectOverviewStaleness::Stale { total_changes: 1, .. })), "{overview:?}");
+    }
+
+    #[test]
     fn test_codemap_freshness_prefers_fresh_origin_default_over_stale_checkout() {
         use std::fs;
         use std::process::Command;

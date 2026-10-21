@@ -1641,6 +1641,12 @@ fn start_with_output_resolved(
         )
     });
     drop(launch_guard);
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "launcher",
+        "release-launchers",
+        launcher_pid,
+    )?;
     let launch_metadata = cgroup
         .as_deref()
         .map(|path| path.to_string_lossy().into_owned())
@@ -1649,6 +1655,12 @@ fn start_with_output_resolved(
         terminate_failed_launch(&mut child, cgroup.as_deref());
         return Err(error.into());
     }
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "monitor",
+        "release-monitors",
+        launcher_pid,
+    )?;
 
     let deadline = Instant::now() + hub_launch_timeout(tailscale_serve);
     while Instant::now() < deadline {
@@ -1937,6 +1949,12 @@ fn serve_foreground_logged(
             nofile_limit,
         };
         paths.write_process_record(&record)?;
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STARTUP_BARRIER",
+            "hub-starting",
+            "release-hub-startup",
+            record.pid,
+        )?;
         let mut startup_guard = HubStartupGuard::new(paths.clone(), tailscale_manager.clone());
 
         let (tailscale_listener, tailscale, transport_warning) = if tailscale_serve {
@@ -2136,6 +2154,46 @@ async fn serve_with_bounded_connection_drain(
             }
         }
     }
+}
+
+#[cfg(debug_assertions)]
+fn hold_hub_test_barrier(
+    environment: &str,
+    marker: &str,
+    release: &str,
+    pid: u32,
+) -> Result<()> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let Some(root) = std::env::var_os(environment) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root)?;
+    fs::write(
+        root.join(format!("{marker}-{pid}")),
+        format!("{}\n", std::process::id()),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join(release).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::ensure!(
+        root.join(release).exists(),
+        "test hub barrier {environment} timed out"
+    );
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn hold_hub_test_barrier(
+    _environment: &str,
+    _marker: &str,
+    _release: &str,
+    _pid: u32,
+) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(debug_assertions)]

@@ -38,9 +38,9 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `surfaces` | Optional files requiring ownership; absent inherits `qa.user_facing_paths` plus `qa.api_paths`. An explicit empty list selects none. |
 | `kinds` | Optional allowed journey kinds; absent accepts free text. |
 | `owner_groups` | Optional `name: {description, globs: [...]}` shared ownership map. |
-| `invariants` | Optional `ID: {statement, check, bug?, pending_checker?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
-| `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
-| `fixtures` | Optional `name: {description, provider}` map. When present, journey fixture references must resolve. |
+| `invariants` | Optional `ID: {statement, check, bug?, pending_checker?, definition?, labeled?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
+| `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
+| `fixtures` | Optional `name: {description, provider, labels?}` map. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `journeys` | Required non-empty list. |
 
@@ -165,6 +165,35 @@ manual_checks:
     statement: Slide cards read in order at 390px
     check: Compare View Content to the source carousel
     reason: human_judgment
+```
+
+### Labeled criteria
+
+Some criteria cannot be graded by one universal rule. "Every slide with text
+has an on-screen text block" stalls on a photo carousel whose jersey names and
+numbers read as text but are not authored overlays. Mark such a criterion
+`labeled: true`, give it a `definition` of what counts, and record the expected
+value on each fixture under `labels`. Gates and QA ledgers grade the observed
+value against the fixture's label.
+
+`--check` fails a labeled criterion with no `definition` (`missing_definition`)
+and a label keyed by an unknown criterion (`unknown_label`). Each fixture a
+journey pairs with a labeled criterion but which has no label for it is
+`unlabeled_fixture` debt. Unlabeled criteria are unaffected.
+
+```yaml
+invariants:
+  INV-SLIDE-TEXT:
+    statement: Every slide with authored text has onScreenTextBlocks
+    check: Compare Stage 1 onScreenTextBlocks to the labeled slides
+    definition: Authored overlay text only; text inside the photo does not count
+    labeled: true
+fixtures:
+  jersey-carousel:
+    description: Ten-slide photo carousel; jersey names on slides 5 and 9
+    provider: frozen
+    labels:
+      INV-SLIDE-TEXT: {authored_text_slides: [2]}
 ```
 
 ## Example

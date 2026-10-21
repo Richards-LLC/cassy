@@ -1895,66 +1895,124 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 
 #[tokio::test]
 async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
-    let repo = GitRepo::new();
-    let mut env = test_env();
-    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
-    disable_system_a(&cas_root);
+    for origin_only in [false, true] {
+        let repo = GitRepo::new();
+        let mut env = test_env();
+        let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+        disable_system_a(&cas_root);
 
-    // The epic branch is a real branch in this repo (created off main) so
-    // merge_and_cleanup can actually check it out.
-    Command::new("git")
-        .args(["branch", "epic/foo"])
-        .current_dir(&repo.root)
-        .output()
-        .unwrap();
+        run_git(&["branch", "epic/foo"], &repo.root);
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        if origin_only {
+            run_git(
+                &["init", "--bare", remote.path().to_str().unwrap()],
+                &repo.root,
+            );
+            run_git(
+                &["remote", "add", "origin", remote.path().to_str().unwrap()],
+                &repo.root,
+            );
+            run_git(&["push", "origin", "main", "epic/foo"], &repo.root);
+            // A peer publishes target-only work that the receiver's main does not have.
+            let peer = remote.path().join("peer");
+            run_git(
+                &[
+                    "clone",
+                    "-b",
+                    "epic/foo",
+                    remote.path().to_str().unwrap(),
+                    peer.to_str().unwrap(),
+                ],
+                &repo.root,
+            );
+            run_git(&["config", "user.email", "peer@example.test"], &peer);
+            run_git(&["config", "user.name", "Peer"], &peer);
+            std::fs::write(peer.join("peer-target.txt"), "peer target content\n").unwrap();
+            run_git(&["add", "peer-target.txt"], &peer);
+            run_git(&["commit", "-m", "peer advances epic"], &peer);
+            run_git(&["push", "origin", "epic/foo"], &peer);
+            run_git(&["branch", "-D", "epic/foo"], &repo.root);
+            run_git(
+                &["update-ref", "-d", "refs/remotes/origin/epic/foo"],
+                &repo.root,
+            );
+            assert!(
+                !Command::new("git")
+                    .args(["show-ref", "--verify", "--quiet", "refs/heads/epic/foo"])
+                    .current_dir(&repo.root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
 
-    // cas-bd5f: task must belong to alice (matching worker/task/epic).
-    let (_epic_id, worker_task_id) =
-        create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
+        // cas-bd5f: task must belong to alice (matching worker/task/epic).
+        let (_epic_id, worker_task_id) =
+            create_epic_and_worker_task(&cas_root, "epic/foo", Some("alice"));
 
-    let wt_path = cas_root.join("worktrees").join("alice");
-    repo.add_worktree(&wt_path, "factory/alice");
-    std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
-    run_git(&["add", "."], &wt_path);
-    run_git(&["commit", "-m", "alice work"], &wt_path);
+        let wt_path = cas_root.join("worktrees").join("alice");
+        repo.add_worktree(&wt_path, "factory/alice");
+        std::fs::write(wt_path.join("alice-work.txt"), "alice's work").unwrap();
+        run_git(&["add", "."], &wt_path);
+        run_git(&["commit", "-m", "alice work"], &wt_path);
 
-    env.set_current_dir(&repo.root);
+        env.set_current_dir(&repo.root);
 
-    let svc = make_service(cas_root);
-    let mut req = coord_req("worktree_merge");
-    req.id = Some("factory/alice".to_string());
-    req.task_id = Some(worker_task_id);
-    let result = svc
-        .coordination(Parameters(req))
-        .await
-        .expect("coordination call should succeed");
-    let text = get_text(&result);
+        let original_head = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+        let svc = make_service(cas_root);
+        let mut req = coord_req("worktree_merge");
+        req.id = Some("factory/alice".to_string());
+        req.task_id = Some(worker_task_id);
+        let result = svc
+            .coordination(Parameters(req))
+            .await
+            .expect("coordination call should succeed");
+        let text = get_text(&result);
 
-    assert!(
-        text.contains("Merged worktree") && text.contains("epic/foo"),
-        "must merge into the task's epic branch (epic/foo), not trunk.\nGot:\n{text}"
-    );
-    assert!(
-        !text.contains("Merged worktree system-b-alice to main")
-            && !text.contains("Merged worktree system-b-alice to master"),
-        "must NOT merge to trunk when the task has a parent epic.\nGot:\n{text}"
-    );
-    assert!(
-        text.contains("[resolved via:"),
-        "the resolved target and why must be surfaced in the success message.\nGot:\n{text}"
-    );
+        assert!(
+            text.contains("Merged worktree") && text.contains("epic/foo"),
+            "must merge into the task's epic branch (epic/foo), not trunk.\nGot:\n{text}"
+        );
+        assert!(
+            !text.contains("Merged worktree system-b-alice to main")
+                && !text.contains("Merged worktree system-b-alice to master"),
+            "must NOT merge to trunk when the task has a parent epic.\nGot:\n{text}"
+        );
+        assert!(
+            text.contains("[resolved via:"),
+            "the resolved target and why must be surfaced in the success message.\nGot:\n{text}"
+        );
 
-    // The epic branch itself must now contain the worker's content — proves
-    // the merge landed on the right branch, not just that the message says so.
-    let epic_tree = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "epic/foo"])
-        .current_dir(&repo.root)
-        .output()
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&epic_tree.stdout).contains("alice-work.txt"),
-        "epic/foo must contain the merged worker content"
-    );
+        // The epic branch itself must now contain the worker's content — proves
+        // the merge landed on the right branch, not just that the message says so.
+        let epic_tree = Command::new("git")
+            .args(["ls-tree", "-r", "--name-only", "epic/foo"])
+            .current_dir(&repo.root)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&epic_tree.stdout).contains("alice-work.txt"),
+            "epic/foo must contain the merged worker content"
+        );
+        assert_eq!(
+            git_stdout(&repo.root, &["rev-parse", "HEAD"]),
+            original_head
+        );
+        if origin_only {
+            assert!(
+                String::from_utf8_lossy(&epic_tree.stdout).contains("peer-target.txt"),
+                "the peer's origin-only target commit must survive the merge"
+            );
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", "epic/foo"]),
+                git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+            );
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
+                git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
+            );
+        }
+    }
 }
 
 #[tokio::test]

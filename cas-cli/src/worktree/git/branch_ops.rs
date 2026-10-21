@@ -166,6 +166,9 @@ pub enum TargetReconcile {
     NoRemote,
     /// Local and remote already name the same commit.
     AlreadyCurrent { sha: String },
+    /// Origin resolved, but a missing local target could not be created or
+    /// configured. The caller must refuse before merge preflight.
+    PreparationFailed { reason: String },
     /// The local target was strictly behind and has been advanced.
     FastForwarded {
         from: String,
@@ -801,7 +804,8 @@ impl GitOperations {
     /// than turning a completed merge into an error. The push is a plain
     /// (non-force) push, so git itself refuses to clobber a diverged remote
     /// and the divergence is reported instead.
-    /// Bring the local target branch up to `origin/<target>` before a merge.
+    /// Bring the local target branch up to `origin/<target>` before a merge,
+    /// creating it from the fetched origin commit when it is absent locally.
     ///
     /// GH #703: `worktree_merge` merged into a target whose origin had already
     /// advanced, so the push could only ever be rejected. Reconciling first
@@ -837,10 +841,48 @@ impl GitOperations {
         }
 
         let remote_ref = format!("origin/{target}");
-        let (Some(local), Some(remote)) =
-            (self.resolve_commit(target), self.resolve_commit(&remote_ref))
-        else {
+        let Some(remote) = self.resolve_commit(&remote_ref) else {
             return TargetReconcile::NoRemote;
+        };
+        let local_ref = format!("refs/heads/{target}");
+        if self.resolve_commit(&local_ref).is_none() {
+            // A peer may have published this epic without ever creating it in
+            // this clone. Pin the fetched commit; never use the current HEAD,
+            // and never force an existing local branch to match origin.
+            let prepared = (|| -> Result<()> {
+                if self.create_branch_from(target, &remote)? {
+                    // The start point is an immutable commit, so record its
+                    // origin upstream explicitly without changing fetch scope.
+                    for (key, value) in [
+                        (format!("branch.{target}.remote"), "origin".to_string()),
+                        (
+                            format!("branch.{target}.merge"),
+                            format!("refs/heads/{target}"),
+                        ),
+                    ] {
+                        let output = Command::new("git")
+                            .args(["config", "--local", &key, &value])
+                            .current_dir(&self.repo_root)
+                            .output()?;
+                        if !output.status.success() {
+                            return Err(GitError::CommandFailed(first_line(
+                                &String::from_utf8_lossy(&output.stderr),
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = prepared {
+                return TargetReconcile::PreparationFailed {
+                    reason: first_line(&error.to_string()),
+                };
+            }
+        }
+        let Some(local) = self.resolve_commit(&local_ref) else {
+            return TargetReconcile::PreparationFailed {
+                reason: format!("local target {local_ref} is unresolved after creation"),
+            };
         };
         if local == remote {
             return TargetReconcile::AlreadyCurrent { sha: local };

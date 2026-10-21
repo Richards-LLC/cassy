@@ -4648,8 +4648,8 @@ impl FactoryDaemon {
                 Ok(()) => return,
                 Err(prompts) => {
                     // No job lanes: re-check on this pass, as before.
-                    for prompt in prompts {
-                        if !self.app.prompt_is_still_deliverable(&prompt) {
+                    for mut prompt in prompts {
+                        if !self.app.refresh_prompt_for_delivery(&mut prompt) {
                             log_dropped_stale_prompt(&prompt);
                             continue;
                         }
@@ -4717,8 +4717,8 @@ impl FactoryDaemon {
             self.inject_rechecked_batch(batch, store_worker).await;
         }
         for pending in unchecked {
-            for prompt in pending.prompts {
-                if !self.app.prompt_is_still_deliverable(&prompt) {
+            for mut prompt in pending.prompts {
+                if !self.app.refresh_prompt_for_delivery(&mut prompt) {
                     log_dropped_stale_prompt(&prompt);
                     continue;
                 }

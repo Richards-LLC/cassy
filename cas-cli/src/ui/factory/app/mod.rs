@@ -1789,8 +1789,9 @@ impl FactoryApp {
         (delivery_events, prompts, sweep_data)
     }
 
-    /// Re-check a state-bearing prompt at the narrowest point before transport
-    /// injection. Batch revalidation happens earlier in the tick; a worker
+    /// Refresh a state-bearing prompt and its body at the narrowest point before
+    /// transport injection. The caller must deliver this same mutated prompt.
+    /// Batch revalidation happens earlier in the tick; a worker
     /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
     /// merge this alert is asking for may all land after that snapshot and
     /// before this prompt's turn in the delivery loop. The merge case is not
@@ -1802,10 +1803,9 @@ impl FactoryApp {
     /// cached data. The daemon runs the same check as a `RevalidateFresh` job
     /// ([`DeliverabilityRequest`], cas-223f); this synchronous form reads on
     /// the caller's thread.
-    pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
-        let mut current = prompt.clone();
+    pub(crate) fn refresh_prompt_for_delivery(&self, prompt: &mut Prompt) -> bool {
         self.deliverability_request()
-            .read(self.director_stores.as_ref(), std::slice::from_mut(&mut current))
+            .read(self.director_stores.as_ref(), std::slice::from_mut(prompt))
             .first()
             .copied()
             .unwrap_or(true)

@@ -1046,6 +1046,37 @@ fn fresh_merge_alert_tip_evidence(
     result
 }
 
+fn merge_alert_evidence_line(e: &MergeAlertEvidence, target: &str) -> String {
+    let disagreement = e
+        .ref_disagreement
+        .as_deref()
+        .map(|details| {
+            format!(
+                "Git ref disagreement detected: {details}. Using {} after re-reading both refs.\n",
+                e.checked_epic_ref
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "Live evidence: {} unmerged commit(s) on {} vs {} (checked {} at {}).\n{}",
+        e.unmerged_count, e.factory_branch, target, e.checked_epic_ref, e.epic_sha, disagreement
+    )
+}
+
+fn merge_alert_action_line(factory_branch: &str, target: &str, push_required: bool) -> String {
+    if push_required {
+        format!(
+            "2. Push required: the local {target} already contains {factory_branch}, \
+             but origin does not. Push {target} to origin; do not repeat the local merge."
+        )
+    } else {
+        format!(
+            "2. Merge {factory_branch} into {target} (FF preferred; else \
+             `git merge --no-ff {factory_branch}` on {target})"
+        )
+    }
+}
+
 /// Build the released signal from the original tip and live target/task state.
 /// Called only from delivery jobs: all store/Git reads stay off the control lane.
 pub(crate) fn refresh_ci_merge_signal(
@@ -1057,13 +1088,25 @@ pub(crate) fn refresh_ci_merge_signal(
     let Some(original) = prompt.merge_alert.clone() else {
         return prompt_is_still_deliverable(prompt, data, repo_root);
     };
-    let task = cas_dir.join("cas.db").is_file().then(|| {
-        crate::store::open_task_store_local(cas_dir)
-            .ok().and_then(|store| store.get(&original.task_id).ok())
-    }).flatten();
+    let task = cas_dir
+        .join("cas.db")
+        .is_file()
+        .then(|| {
+            crate::store::open_task_store_local(cas_dir)
+                .ok()
+                .and_then(|store| store.get(&original.task_id).ok())
+        })
+        .flatten();
     if let Some(task) = &task {
-        if task.deliverables.declined_factory_anchors().contains(&original.factory_tip)
-            || task.deliverables.factory_branch_anchor.as_ref().is_some_and(|anchor| anchor != &original.factory_tip)
+        if task
+            .deliverables
+            .declined_factory_anchors()
+            .contains(&original.factory_tip)
+            || task
+                .deliverables
+                .factory_branch_anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor != &original.factory_tip)
         {
             prompt.text = format!(
                 "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
@@ -1076,24 +1119,50 @@ pub(crate) fn refresh_ci_merge_signal(
                 "CI-completed merge signal superseded before release");
             return true;
         }
-        if task.status != TaskStatus::AwaitingMerge { return false; }
+        if task.status != TaskStatus::AwaitingMerge {
+            return false;
+        }
     }
     let (_, snapshot_target, _) = resolve_merge_target_for_task(data, &original.task_id);
-    let target = task.as_ref().and_then(|task| task.deliverables.work_target.as_ref())
-        .map(|target| target.target_branch.as_str()).or(snapshot_target.as_deref());
-    let Some(target) = target else { return true; };
+    let target = task
+        .as_ref()
+        .and_then(|task| task.deliverables.work_target.as_ref())
+        .map(|target| target.target_branch.as_str())
+        .or(snapshot_target.as_deref());
+    let Some(target) = target else {
+        return true;
+    };
     match fresh_merge_alert_tip_evidence(
-        repo_root, &original.task_id, &original.factory_branch, target, Some(&original.factory_tip),
+        repo_root,
+        &original.task_id,
+        &original.factory_branch,
+        target,
+        Some(&original.factory_tip),
     ) {
         MergeAlertFreshness::Stale | MergeAlertFreshness::Unavailable => false,
         MergeAlertFreshness::Fresh(current) => {
-            prompt.text = prompt.text.replace(
-                &format!("(checked {} at {})", original.checked_epic_ref, original.epic_sha),
-                &format!("(checked {} at {})", current.checked_epic_ref, current.epic_sha),
-            ).replace(
-                &format!("Live evidence: {} unmerged commit(s)", original.unmerged_count),
-                &format!("Live evidence: {} unmerged commit(s)", current.unmerged_count),
-            );
+            // Render every field derived from live Git evidence together.
+            // Preserve the CI identity, liveness and response instructions.
+            let mut text = String::with_capacity(prompt.text.len());
+            for line in prompt.text.split_inclusive('\n') {
+                if line.starts_with("Live evidence: ") {
+                    text.push_str(&merge_alert_evidence_line(&current, target));
+                } else if line.starts_with("Git ref disagreement detected: ") {
+                    // Included above only when it is still true in current evidence.
+                } else if line.starts_with("2. Push required: ") || line.starts_with("2. Merge ") {
+                    text.push_str(&merge_alert_action_line(
+                        &current.factory_branch,
+                        target,
+                        current.push_required,
+                    ));
+                    if line.ends_with('\n') {
+                        text.push('\n');
+                    }
+                } else {
+                    text.push_str(line);
+                }
+            }
+            prompt.text = text;
             prompt.merge_alert = Some(current);
             true
         }
@@ -1400,30 +1469,9 @@ fn merge_required_idle_prompt_text(
         .close_rejected_reason
         .as_deref()
         .unwrap_or("MERGE REQUIRED");
-    let evidence_line = match evidence {
-        Some(e) => {
-            let disagreement = e
-                .ref_disagreement
-                .as_deref()
-                .map(|details| {
-                    format!(
-                        "Git ref disagreement detected: {details}. Using {} after re-reading both refs.\n",
-                        e.checked_epic_ref
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "Live evidence: {} unmerged commit(s) on {} vs {} (checked {} at {}).\n{}",
-                e.unmerged_count,
-                e.factory_branch,
-                target,
-                e.checked_epic_ref,
-                e.epic_sha,
-                disagreement
-            )
-        }
-        None => String::new(),
-    };
+    let evidence_line = evidence
+        .map(|e| merge_alert_evidence_line(e, target))
+        .unwrap_or_default();
     // cas-6db4: a protected default branch only takes pull requests through
     // the merge queue; merging into it locally and pushing is refused. The
     // worker's push hook already lets a push_branch delivery publish its
@@ -1448,17 +1496,9 @@ fn merge_required_idle_prompt_text(
             task.task_id, task.task_title, task.task_status, task.task_id
         );
     }
-    let merge_step = if evidence.is_some_and(|e| e.push_required) {
-        format!(
-            "2. Push required: the local {target} already contains {factory_branch}, \
-             but origin does not. Push {target} to origin; do not repeat the local merge."
-        )
-    } else {
-        format!(
-            "2. Merge {factory_branch} into {target} (FF preferred; else \
-             `git merge --no-ff {factory_branch}` on {target})"
-        )
-    };
+    let merge_step = merge_alert_action_line(
+        &factory_branch, target, evidence.is_some_and(|e| e.push_required),
+    );
 
     format!(
         "⚠️ MERGE REQUIRED — supervisor action needed (not a task completion).\n\

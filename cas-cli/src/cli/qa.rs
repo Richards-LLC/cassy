@@ -1,11 +1,117 @@
 //! Project QA commands; registry checking uses the shared in-process validator.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Subcommand};
+use rusqlite::OptionalExtension;
+use serde::Serialize;
 
 use super::Cli;
+
+#[derive(Serialize)]
+struct DebtSummary {
+    total: usize,
+    by_kind: BTreeMap<String, usize>,
+    previous_total: Option<usize>,
+    delta: Option<i64>,
+    grew: Option<bool>,
+    history_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_error: Option<String>,
+}
+
+impl DebtSummary {
+    fn record(
+        report: &crate::qa_registry::ValidationReport,
+        project: &Path,
+        registry: &Path,
+        cas_root: &Path,
+    ) -> Self {
+        let mut summary = Self {
+            total: report.debt.len(),
+            by_kind: BTreeMap::new(),
+            previous_total: None,
+            delta: None,
+            grew: None,
+            history_status: "unavailable",
+            history_error: None,
+        };
+        for debt in &report.debt {
+            *summary.by_kind.entry(debt.code.clone()).or_default() += 1;
+        }
+        match summary.record_previous(project, registry, cas_root) {
+            Ok(()) => summary.history_status = "recorded",
+            Err(error) => summary.history_error = Some(format!("{error:#}")),
+        }
+        summary
+    }
+
+    /// Reuse the project's metadata receipt, without initializing a store or schema.
+    /// Serialize concurrent checks so each compares with the preceding recorded run.
+    fn record_previous(&mut self, project: &Path, registry: &Path, cas_root: &Path) -> Result<()> {
+        let key = format!(
+            "qa_journeys_check:{}",
+            serde_json::to_string(&(
+                project.canonicalize()?,
+                project.join(registry).canonicalize()?
+            ))?
+        );
+        let mut connection = rusqlite::Connection::open_with_flags(
+            cas_root.join("cas.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .context("open existing project database for journey check history")?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous: Option<String> = transaction
+            .query_row("SELECT value FROM metadata WHERE key = ?1", [&key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let previous_total = previous
+            .map(|raw| -> Result<usize> {
+                let receipt: serde_json::Value = serde_json::from_str(&raw)?;
+                anyhow::ensure!(
+                    receipt["version"] == 1,
+                    "unsupported journey check receipt version"
+                );
+                let total = receipt["total"]
+                    .as_u64()
+                    .context("journey check receipt has no debt total")?;
+                Ok(usize::try_from(total)?)
+            })
+            .transpose()?;
+        let delta = previous_total
+            .map(|previous| -> Result<i64> {
+                Ok(i64::try_from(self.total)? - i64::try_from(previous)?)
+            })
+            .transpose()?;
+        let receipt = serde_json::json!({
+            "version": 1,
+            "checked_at": chrono::Utc::now(),
+            "total": self.total,
+            "by_kind": self.by_kind,
+            "previous_total": previous_total,
+        });
+        transaction.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, serde_json::to_string(&receipt)?],
+        )?;
+        transaction.commit()?;
+        self.previous_total = previous_total;
+        self.delta = delta;
+        self.grew = delta.map(|change| change > 0);
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct CheckReport<'a> {
+    #[serde(flatten)]
+    validation: &'a crate::qa_registry::ValidationReport,
+    debt_summary: DebtSummary,
+}
 
 #[derive(Subcommand)]
 pub enum QaCommand {
@@ -56,7 +162,12 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             if *seed || *status {
                 let result = if *seed {
                     let result = crate::qa_seed::seed(&project_root, &qa, *merge)?;
-                    crate::config::refresh_upkeep(cas_root.unwrap_or(&local_cas), env!("CARGO_PKG_VERSION"), true, false)?;
+                    crate::config::refresh_upkeep(
+                        cas_root.unwrap_or(&local_cas),
+                        env!("CARGO_PKG_VERSION"),
+                        true,
+                        false,
+                    )?;
                     result
                 } else {
                     crate::qa_seed::status(&project_root, &qa)?
@@ -92,21 +203,66 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             }
             let registry_path = qa.registry.path;
             let report = crate::qa_registry::check(&project_root, Path::new(&registry_path))?;
+            let debt_summary = DebtSummary::record(
+                &report,
+                &project_root,
+                Path::new(&registry_path),
+                cas_root.unwrap_or(&local_cas),
+            );
             if cli.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&CheckReport {
+                        validation: &report,
+                        debt_summary,
+                    })?
+                );
             } else {
-                let verdict = if report.problems.is_empty() {
-                    "PASS"
-                } else {
+                let verdict = if !report.problems.is_empty() {
                     "FAIL"
+                } else if !report.debt.is_empty() {
+                    "DEBT"
+                } else {
+                    "PASS"
                 };
                 println!(
                     "{verdict}: {} problem(s), {} debt item(s)",
                     report.problems.len(),
                     report.debt.len()
                 );
+                if !debt_summary.by_kind.is_empty() {
+                    println!("Debt by kind:");
+                    for (kind, count) in &debt_summary.by_kind {
+                        println!("  {kind}: {count}");
+                    }
+                }
+                match (debt_summary.previous_total, debt_summary.delta) {
+                    (Some(previous), Some(delta)) if delta > 0 => println!(
+                        "Debt grew: +{delta} since previous check ({previous} -> {})",
+                        debt_summary.total
+                    ),
+                    (Some(previous), Some(delta)) => println!(
+                        "Debt change: {delta:+} since previous check ({previous} -> {})",
+                        debt_summary.total
+                    ),
+                    _ if debt_summary.history_status == "recorded" => {
+                        println!("Debt change: first recorded check");
+                    }
+                    _ => println!("Debt history unavailable; current check was not recorded."),
+                }
+                if !report.debt.is_empty() || debt_summary.history_error.is_some() {
+                    println!("Details: cas qa journeys --check --verbose");
+                }
                 println!("Registry: {registry_path}");
+                if cli.verbose
+                    && let Some(error) = &debt_summary.history_error
+                {
+                    println!("History: {error}");
+                }
                 for (label, rows) in [("ERROR", &report.problems), ("DEBT", &report.debt)] {
+                    if label == "DEBT" && !cli.verbose {
+                        continue;
+                    }
                     for row in rows {
                         println!(
                             "{label} {} [{}]: {}",

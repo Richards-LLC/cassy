@@ -241,13 +241,16 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
             TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", cwd)]);
         let root = dir.path().join(".cas");
         std::fs::create_dir(&root).unwrap();
+        let isolated = format!(
+            "env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME={cwd}/target/private-xdg cargo nextest run -p cas --lib -E 'test(one)' > target/tests.log 2>&1 &"
+        );
         for command in [
             "cargo nextest run -p cas -E 'test(hooks::handlers)'",
             "cargo nextest run -p cas --lib -E 'test(=module::name)'",
             "cargo nextest run -p cas --test integration_factory -E 'test(worker)'",
             "cargo nextest run -p cas --lib -E 'test(one) | test(two)' > target/tests.log 2>&1 &",
             "cargo nextest run -p cas --lib -E 'test(one) & test(two)' > target/tests.log 2>&1 &",
-        ] {
+        ].into_iter().chain(std::iter::once(isolated.as_str())) {
             let mut request = input(command, "worker");
             request.cwd = cwd.into();
             let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
@@ -261,7 +264,15 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
                 rewritten.contains("factory worker-check --cas-root"),
                 "{rewritten}"
             );
-            let expected = command.strip_prefix("cargo ").unwrap();
+            let cargo_command = if command.starts_with("env ") {
+                assert!(rewritten.contains("--isolated-test-env"), "{rewritten}");
+                assert!(rewritten.contains(&format!("{cwd}/target/private-xdg")), "{rewritten}");
+                assert!(!rewritten.starts_with("env "), "runtime bootstrap must remain unmodified");
+                command.split_once(" cargo ").unwrap().1
+            } else {
+                command.strip_prefix("cargo ").unwrap()
+            };
+            let expected = cargo_command;
             // pin: Filter literals survive unchanged while retry logs append.
             let expected = expected.strip_suffix(" &").unwrap_or(expected)
                 .replace(" > target/tests.log", " >> target/tests.log");

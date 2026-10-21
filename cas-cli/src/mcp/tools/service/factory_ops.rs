@@ -6656,15 +6656,22 @@ impl CasService {
 
         // cas-75a8 (GH #1296): task-named simulators, read-only here.
         if crate::task_simulators::supported() {
-            let tasks = crate::store::open_task_store(&self.inner.cas_root)
-                .and_then(|store| store.list(None).map_err(Into::into))
-                .unwrap_or_default();
-            out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
-                &crate::task_simulators::Simctl::default(),
-                &tasks,
-                &crate::task_ownership::KnownProjects::load(&self.inner.cas_root),
-                chrono::Utc::now(),
-            )));
+            let cas_root = self.inner.cas_root.clone();
+            // simctl and isolated ownership children wait synchronously (up
+            // to 10s per store); none of that work belongs on the async runtime.
+            let text = tokio::task::spawn_blocking(move || {
+                let tasks = crate::store::open_task_store(&cas_root)
+                    .and_then(|store| store.list(None).map_err(Into::into))
+                    .unwrap_or_default();
+                crate::task_simulators::render(&crate::task_simulators::inventory(
+                    &crate::task_simulators::Simctl::default(),
+                    &tasks,
+                    &crate::task_ownership::KnownProjects::load(&cas_root),
+                    chrono::Utc::now(),
+                ))
+            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Simulator inventory worker failed: {error}")))?;
+            out.push_str(&text);
         }
 
         if !live_viktor_watches.is_empty() {
@@ -7400,24 +7407,32 @@ impl CasService {
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
         if crate::task_simulators::supported() {
-            let simctl = crate::task_simulators::Simctl::default();
-            // Every task, not only closed ones, so an open task's device is
-            // named as kept rather than as unknown.
-            let simulators = crate::store::open_task_store(&self.inner.cas_root)
-                .map_err(anyhow::Error::from)
-                .and_then(|store| store.list(None).map_err(anyhow::Error::from))
-                .and_then(|tasks| {
-                    let others = crate::task_ownership::KnownProjects::load(&self.inner.cas_root);
-                    crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
-                });
-            output.push_str(&crate::task_simulators::render(&simulators));
-            if artifact_authorized && let Ok(simulators) = &simulators {
-                let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
-                output.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
-                for failure in failed {
-                    output.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+            let cas_root = self.inner.cas_root.clone();
+            // Keep inventory, ownership probes and any authorized simctl
+            // deletes together on the blocking pool, with the same gates.
+            let text = tokio::task::spawn_blocking(move || {
+                let simctl = crate::task_simulators::Simctl::default();
+                // Every task, not only closed ones, so an open task's device
+                // is named as kept rather than as unknown.
+                let simulators = crate::store::open_task_store(&cas_root)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|store| store.list(None).map_err(anyhow::Error::from))
+                    .and_then(|tasks| {
+                        let others = crate::task_ownership::KnownProjects::load(&cas_root);
+                        crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                    });
+                let mut text = crate::task_simulators::render(&simulators);
+                if artifact_authorized && let Ok(simulators) = &simulators {
+                    let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
+                    text.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
+                    for failure in failed {
+                        text.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+                    }
                 }
-            }
+                text
+            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Simulator cleanup worker failed: {error}")))?;
+            output.push_str(&text);
         }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(

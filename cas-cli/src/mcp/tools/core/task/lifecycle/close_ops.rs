@@ -7963,24 +7963,6 @@ impl CasCore {
         };
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
-        // cas-255b: assignment is not delivery. A worker-created helper may
-        // never allocate a factory branch, while HEAD is an earlier UI merge.
-        // Only a positively measured empty task range can avoid the delivery
-        // gates; receipts, durable commits and unknowable Git state retain them.
-        let empty_delivery = recovery_branch.is_none()
-            && (close_repo_verified || worker_worktree_path.is_some())
-            && task_has_no_delivery(
-                worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path()),
-                &task,
-                &resolved_parent_branch,
-                delivery_receipt,
-                commit_receipt_window.as_ref(),
-            );
-        if empty_delivery {
-            append_close_decision_note(task_store.as_ref(), &mut task,
-                "No task delivery: no recorded code evidence or task-attributed commits; QA and factory-branch delivery gates do not apply. Verification remains required when enabled.");
-        }
-
         // cas-0cd5: the implementer's QA evidence must be valid for the
         // delivered head before the delivery may park for merge (and before
         // its post-merge re-close can finish). Runs ahead of the merge gate
@@ -7993,7 +7975,6 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
-            && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             let evidence_repo = if close_repo_verified {
@@ -8090,7 +8071,6 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
-            && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             self.prepare_merged_verification_dispatch(
@@ -9373,7 +9353,6 @@ impl CasCore {
         // keeps normal close aligned with direct update-to-closed: neither
         // may select a process-cwd or merely most-recent worker checkout.
         let declared_hook_evidence = if !close_disposition.requires_delivery_gates()
-            || empty_delivery
             || task.execution_note.as_deref() == Some("no-code")
         {
             None
@@ -9703,7 +9682,7 @@ impl CasCore {
         );
         let effective_has_reviewable = receipt_has_reviewable
             || task.execution_note.as_deref() == Some("value-only")
-            || if parked_head.is_some() || no_code_without_own_commits || empty_delivery {
+            || if parked_head.is_some() || no_code_without_own_commits {
                 false
             } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
@@ -10135,7 +10114,6 @@ impl CasCore {
         // accepted or validated at this boundary.
         if close_disposition.requires_delivery_gates()
             && !effective_has_reviewable
-            && !empty_delivery
             && !bypass_close_gates
             && external_verification_receipt.is_none()
             && let Some(worker_wt) = worker_worktree_path.as_ref()
@@ -14384,37 +14362,6 @@ pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &s
     }
     let tree = |commit: &str| resolve_branch_sha(repo, &format!("{commit}^{{tree}}"));
     matches!((tree(tip), tree(first_parent)), (Some(tip), Some(first)) if tip != first)
-}
-
-/// cas-255b: an undeclared helper can have no delivery at all. Never infer
-/// that from a missing branch alone: require both the ownership checks on
-/// every known lane and a readable, empty task range in the closing checkout.
-/// A resolvable lane with any unmerged work still needs explicit delivery proof.
-/// Existing methodologies and all recorded delivery evidence keep their gates.
-fn task_has_no_delivery(
-    repo: &std::path::Path,
-    task: &Task,
-    target: &str,
-    receipt: Option<&str>,
-    window: Option<&TaskCommitReceiptWindow>,
-) -> bool {
-    task.execution_note.is_none()
-        && task.branch.is_none()
-        && handoff_prior_holders(&task.notes).is_empty()
-        && !has_recorded_code_delivery(task)
-        && task_delivery_branch(repo, task).is_none_or(|lane| {
-            matches!(
-                known_unmerged_factory_commits(repo, &lane,
-                    &preferred_diff_target_ref_for_delivery(repo, target, task.delivery_mode)),
-                KnownUnmergedCount::KnownZero,
-            )
-        })
-        && window.is_some_and(|window| {
-            window.identity.known_commits.is_empty()
-                && task_without_own_commits_judged(repo, task, target, receipt, false)
-                && task_attribution::paths(repo, target, window, None)
-                    .is_some_and(|paths| paths.is_empty())
-        })
 }
 
 /// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.

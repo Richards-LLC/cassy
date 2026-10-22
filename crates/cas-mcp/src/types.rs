@@ -317,7 +317,7 @@ pub struct TaskRequest {
     pub reason: Option<String>,
 
     /// Explicit per-attempt declaration for a helper with no Git delivery.
-    #[schemars(description = "For close: declare no delivery for this attempt. Requires a non-empty reason and registered caller; Cassy must prove no recorded delivery, task commits or unmerged lane work. Skips QA/factory-branch delivery gates only; verification still applies. Cannot combine with other close receipts or dispositions.")]
+    #[schemars(description = "close: declare no delivery; needs a reason, a registered caller and proof of no delivery, task commits or unmerged lane work. Skips delivery gates only; verification still applies; excludes other close receipts.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub no_delivery: Option<bool>,
 
@@ -530,14 +530,14 @@ pub struct TaskRequest {
 
     /// Execution note (for create, update, and no-code close) - methodology used to execute this task
     #[schemars(
-        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only allows edits to existing values but refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task and requires external_ref proof at close. On close only no-code is accepted, and only when the stored methodology is empty or no-code; its portable external_ref is validated and saved before verification dispatch, or with an already-approved close. Empty string clears it on update."
+        description = "Execution methodology: test-first, characterization-first, additive-only, value-only or no-code. value-only edits existing values and refuses added, deleted, copied or renamed files at close. no-code marks an operations/artifact task needing external_ref proof at close. Close accepts only no-code, when the stored methodology is empty or no-code; its portable external_ref is validated and saved before verification dispatch or with an already-approved close. Empty string clears it on update."
     )]
     #[serde(default)]
     pub execution_note: Option<String>,
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "Update only, supervisor: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it). One correction kind per call. Methodology corrections also cover task-only investigation proofs; switching to no-code needs a portable external_ref, inline or already stored. Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On a no-code task, target_repo=\"\" clears a stale code anchor. Needs a non-empty reason; invalidates the stale proof cycle, logs a decision note and reopens the task (not as review-failed). Close proofs still apply."
+        description = "Update only, supervisor, one kind per call: fix target_repo/target_branch after MERGE REQUIRED, strictly widen proof_targets, correct a mistaken risk on a merged or close-ready delivery, or correct execution_note (\"\" clears it; also for task-only investigation proofs; no-code needs a portable external_ref, inline or stored). Works in AwaitingMerge, InProgress and Blocked; merged deliveries stay immutable. On no-code, target_repo=\"\" clears a stale code anchor. Needs a reason; invalidates the stale proof cycle, logs a decision and reopens (not review-failed). Close proofs still apply."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,

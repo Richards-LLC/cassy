@@ -1484,7 +1484,11 @@ fn release_obsolete_split_claims(
                 Some(parent) => parent != split.epic_id,
                 None => only_task.is_some(),
             };
-            if split.is_binding(now) && !moved {
+            // Nonbinding is not terminal: an incoming pending proposal has
+            // not claimed anything yet, but its shares must survive acceptance.
+            let terminal = matches!(split.state, SplitState::Rejected | SplitState::Cancelled | SplitState::Expired)
+                || split.is_expired(now);
+            if !terminal && !moved {
                 continue;
             }
 

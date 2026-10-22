@@ -41,6 +41,10 @@ pub const EPIC_SPLIT_SCHEMA_STATEMENTS: &[&str] = &[
         expiry_notice_pending INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE INDEX IF NOT EXISTS idx_epic_splits_state ON epic_splits(state, epic_id)",
+];
+
+/// Additive release ledger, shared by lazy repair and migration m286.
+pub const EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS epic_split_releases (
         split_id TEXT NOT NULL,
         task_id TEXT NOT NULL,
@@ -198,7 +202,7 @@ fn open_conn(cas_dir: &Path) -> Result<std::sync::Arc<std::sync::Mutex<Connectio
     let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
     {
         let guard = crate::shared_db::lock_connection(&conn)?;
-        for statement in EPIC_SPLIT_SCHEMA_STATEMENTS {
+        for statement in EPIC_SPLIT_SCHEMA_STATEMENTS.iter().chain(EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS) {
             guard.execute(statement, [])?;
         }
         let ddl: String = guard.query_row(

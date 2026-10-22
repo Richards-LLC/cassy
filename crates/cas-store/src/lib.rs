@@ -134,7 +134,8 @@ pub use delegation_receipt_store::{
     SqliteDelegationReceiptStore,
 };
 pub use epic_split_store::{
-    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
+    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS,
+    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
     SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
     insert_epic_split, list_epic_splits, list_epic_split_child_releases,
     mark_epic_split_child_released, open_epic_splits, pending_epic_split_work,

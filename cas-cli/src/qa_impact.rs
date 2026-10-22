@@ -45,6 +45,9 @@ pub struct Impact {
     pub ignored: Vec<String>,
     pub upkeep: Upkeep,
     pub warnings: Vec<String>,
+    /// GH #1346: the registry's QA safety policy, when declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<crate::qa_registry::Safety>,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +178,7 @@ fn impact_for_selected_changes(
         ignored: vec![],
         upkeep: Upkeep::default(),
         warnings: vec![],
+        safety: registry.and_then(|r| r.safety.clone()),
     };
     let labels = codemap_labels(codemap);
     let files: BTreeSet<&str> = changes
@@ -256,7 +260,7 @@ fn impact_for_selected_changes(
                 spec: journey.spec.clone(),
                 known_failure: journey.known_failure.clone(),
                 matches,
-                evidence_required: evidence_required(journey),
+                evidence_required: evidence_required(journey, report.safety.as_ref()),
             });
         }
         let seeded = registry.journeys.iter().filter(|j| j.seeded).count();
@@ -344,27 +348,36 @@ fn sort_journeys(journeys: &mut [JourneyImpact]) {
     });
 }
 
-fn evidence_required(journey: &crate::qa_registry::Journey) -> String {
-    match journey.status.as_str() {
-        "dark" => "prove it stays unreachable".into(),
-        "dead" => "none (NOT A ROUTE)".into(),
+fn evidence_required(
+    journey: &crate::qa_registry::Journey,
+    safety: Option<&crate::qa_registry::Safety>,
+) -> String {
+    let entry = journey
+        .entry
+        .as_ref()
+        .map(|e| e.url.as_str())
+        .unwrap_or("<entry not declared>");
+    let invariants = if journey.invariants.is_empty() {
+        "<no invariants declared>".into()
+    } else {
+        journey.invariants.join(", ")
+    };
+    let fixtures = if journey.fixtures.is_empty() {
+        "none declared".into()
+    } else {
+        journey.fixtures.join(", ")
+    };
+    match (journey.status.as_str(), safety) {
+        ("dark", _) => "prove it stays unreachable".into(),
+        ("dead", _) => "none (NOT A ROUTE)".into(),
+        (_, Some(safety)) if safety.fixture_only() => format!(
+            "walk {entry} against stubs; prove zero non-loopback requests; check {invariants} on the stubbed responses; fixtures: {fixtures}"
+        ),
+        (_, Some(safety)) if safety.mode == "production-read-back" => format!(
+            "walk {entry} on production with a fresh persona; read back {invariants} from the system of record without writing; fixtures: {fixtures}"
+        ),
         _ => format!(
-            "walk {} on staging with a fresh persona; read back {} from the system of record; fixtures: {}",
-            journey
-                .entry
-                .as_ref()
-                .map(|e| e.url.as_str())
-                .unwrap_or("<entry not declared>"),
-            if journey.invariants.is_empty() {
-                "<no invariants declared>".into()
-            } else {
-                journey.invariants.join(", ")
-            },
-            if journey.fixtures.is_empty() {
-                "none declared".into()
-            } else {
-                journey.fixtures.join(", ")
-            }
+            "walk {entry} on staging with a fresh persona; read back {invariants} from the system of record; fixtures: {fixtures}"
         ),
     }
 }

@@ -122,7 +122,10 @@ fn qa_impact_orders_status_share_id_and_ignores_paths() {
         ),
         ("src/flow.ts", "src/**", "owner_groups.core")
     );
-    assert!(first.evidence_required.contains("INV"));
+    assert_eq!(
+        first.evidence_required,
+        "walk /flow on staging with a fresh persona; read back INV from the system of record; fixtures: none declared"
+    );
     assert_eq!(
         report.journeys[4].evidence_required,
         "prove it stays unreachable"
@@ -131,6 +134,43 @@ fn qa_impact_orders_status_share_id_and_ignores_paths() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["version"], 1);
     assert_eq!(json["journeys"][0]["invariants"][0]["check"], "Read state");
+}
+
+#[test]
+fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/deals.ts", "deals");
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-22'\nsafety: {mode: fixture-only, forbidden_hosts: [quickbooks.api.intuit.com], protected_credentials: [QBO_REFRESH_TOKEN]}\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n",
+    );
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified("src/deals.ts")],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert!(report.registry.valid);
+    let note = crate::mcp::tools::core::task::lifecycle::qa_impact::render(
+        &serde_json::to_value(&report).unwrap(),
+    );
+    assert!(
+        note.contains("walk /deals against stubs; prove zero non-loopback requests"),
+        "{note}"
+    );
+    assert!(
+        note.contains("quickbooks.api.intuit.com") && note.contains("QBO_REFRESH_TOKEN"),
+        "{note}"
+    );
+    assert!(
+        !note.contains("staging") && !note.contains("system of record"),
+        "{note}"
+    );
 }
 
 #[test]

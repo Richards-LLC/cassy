@@ -24,6 +24,8 @@ use crate::cli::Cli;
 use super::FactoryArgs;
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUIRED_BACKEND_FAILURE: &str =
+    "Missing required backend(s). Fix them; rerun `cas factory doctor`.";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DoctorRow {
@@ -95,9 +97,7 @@ pub(super) fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&Path>) ->
     }
 
     if report.has_required_failure() {
-        anyhow::bail!(
-            "factory doctor found missing required backend(s); fix the issue above and rerun `cas factory doctor`"
-        );
+        anyhow::bail!("{REQUIRED_BACKEND_FAILURE}");
     }
     Ok(())
 }
@@ -905,6 +905,17 @@ mod tests {
         );
         assert!(!at_120.contains("--json"), "{at_120}");
         assert_eq!(serde_json::to_string(&report).unwrap(), json_before);
+        let failure = format!("[ERROR] {REQUIRED_BACKEND_FAILURE}");
+        assert!(
+            failure.chars().count() <= 80,
+            "{} cells: {failure}",
+            failure.chars().count()
+        );
+        assert!(
+            !failure.contains("above"),
+            "footer can precede the report: {failure}"
+        );
+        assert!(failure.contains("`cas factory doctor`"));
     }
 
     #[test]

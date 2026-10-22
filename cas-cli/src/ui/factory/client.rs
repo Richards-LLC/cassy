@@ -15,6 +15,7 @@ use ghostty_vt::KeyModifiers as GhosttyKeyModifiers;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 /// Attach to an existing factory session via Unix socket
@@ -48,6 +49,75 @@ pub fn attach(session_name: Option<String>) -> anyhow::Result<()> {
 const CONTROL_PREFIX: &[u8] = b"\x1b]777;";
 const CONTROL_SUFFIX: u8 = 0x07; // BEL
 
+// A signal handler cannot use crossterm's locks or buffered terminal I/O.
+// Wake the bounded client loop instead; it restores before exiting.
+static CLIENT_EXIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn record_client_exit_signal(signal: libc::c_int) {
+    CLIENT_EXIT_SIGNAL.store(signal, Ordering::Relaxed);
+}
+
+/// Restore on every return and panic unwind, including partial setup failures.
+/// Signal dispositions belong only to this attach, not later CLI operations.
+struct ClientTerminalGuard {
+    previous_handlers: Vec<(libc::c_int, libc::sigaction)>,
+    raw_enabled: bool,
+}
+
+impl ClientTerminalGuard {
+    fn enter() -> io::Result<Self> {
+        let mut guard = Self {
+            previous_handlers: Vec::new(),
+            raw_enabled: false,
+        };
+        CLIENT_EXIT_SIGNAL.store(0, Ordering::Relaxed);
+        for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            // Install before changing the terminal; Drop rolls back any partial
+            // registration. The handler performs only a lock-free atomic store.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = record_client_exit_signal as *const () as libc::sighandler_t;
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            guard.previous_handlers.push((signal, previous));
+        }
+        enable_raw_mode()?;
+        guard.raw_enabled = true;
+        execute!(
+            io::stdout(),
+            crossterm::event::EnableBracketedPaste,
+            crossterm::event::EnableMouseCapture
+        )?;
+        Ok(guard)
+    }
+
+    fn exit_signal(&self) -> i32 {
+        CLIENT_EXIT_SIGNAL.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ClientTerminalGuard {
+    fn drop(&mut self) {
+        if self.raw_enabled {
+            // Attempt every reset even if restoring termios or output fails.
+            let _ = execute!(
+                io::stdout(),
+                crossterm::event::DisableMouseCapture,
+                crossterm::event::DisableBracketedPaste,
+                terminal::LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
+            let _ = disable_raw_mode();
+        }
+        // Keep signal interception until the terminal is safe again.
+        for (signal, previous) in self.previous_handlers.iter().rev() {
+            unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+        }
+    }
+}
+
 /// Attach via Unix socket (local daemon mode)
 ///
 /// The daemon renders the full TUI and broadcasts raw terminal output.
@@ -75,12 +145,7 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
 
     // Enable raw mode + mouse capture for scroll events.
     // Native text selection still works via Shift+click/drag in most terminals.
-    enable_raw_mode()?;
-    execute!(
-        io::stdout(),
-        crossterm::event::EnableBracketedPaste,
-        crossterm::event::EnableMouseCapture
-    )?;
+    let terminal_guard = ClientTerminalGuard::enter()?;
 
     // Send initial terminal size as control sequence
     if let Ok((cols, rows)) = terminal::size() {
@@ -103,7 +168,6 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
 
     let mut stdout = io::stdout();
     let mut read_buf = [0u8; 4096];
-    let quit = std::sync::atomic::AtomicBool::new(false);
 
     // Client-side resize debounce: coalesce rapid resize events before sending
     let mut pending_resize: Option<(u16, u16)> = None;
@@ -113,7 +177,7 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
     let mut mouse_captured = true;
     const CLIENT_RESIZE_DEBOUNCE_MS: u64 = 50;
     // Main loop
-    while !quit.load(std::sync::atomic::Ordering::Relaxed) {
+    while terminal_guard.exit_signal() == 0 {
         // Read from socket (non-blocking)
         match stream.read(&mut read_buf) {
             Ok(0) => {
@@ -135,8 +199,16 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
         }
 
         // Poll for terminal events
-        if event::poll(Duration::from_millis(10))? {
-            match event::read()? {
+        let polled = event::poll(Duration::from_millis(10));
+        if terminal_guard.exit_signal() != 0 {
+            break;
+        }
+        if polled? {
+            let event = event::read();
+            if terminal_guard.exit_signal() != 0 {
+                break;
+            }
+            match event? {
                 Event::Key(key) => {
                     // Ctrl+Q = detach this client (do not shut down daemon)
                     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -239,17 +311,12 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
         }
     }
 
-    // Restore terminal
-    let _ = execute!(
-        io::stdout(),
-        crossterm::event::DisableMouseCapture,
-        crossterm::event::DisableBracketedPaste
-    );
-    disable_raw_mode()?;
-
-    // Leave alternate screen and show cursor
-    print!("\x1b[?1049l\x1b[?25h");
-    let _ = io::stdout().flush();
+    let signal = terminal_guard.exit_signal();
+    drop(terminal_guard);
+    if signal != 0 {
+        // process::exit does not run destructors: restore explicitly above.
+        std::process::exit(128 + signal);
+    }
 
     Ok(())
 }

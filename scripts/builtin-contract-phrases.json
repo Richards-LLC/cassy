@@ -4385,6 +4385,14 @@
         {
           "text": "Epic verification owner gate",
           "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        },
+        {
+          "text": "Reject findings rated high or above",
+          "reason": "GH1341: the installed verifier must treat high/critical impact as a rejection, not a warning; this is a verdict-policy contract consumed by the model."
+        },
+        {
+          "text": "reproduced silent failure of this task's own behaviour",
+          "reason": "GH1341: realistic silent failure is a separate rejection condition regardless of its assigned impact rating."
         }
       ],
       "absent": [

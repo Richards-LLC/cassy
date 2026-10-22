@@ -143,6 +143,38 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     }
 }
 
+/// cas-ba56: the real park path accepts a parent's capped selection when
+/// its delivery changes a sibling test mounted by #[path] and a child module.
+#[tokio::test]
+async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    std::fs::create_dir_all(f.worker_path.join("crates/widget/src/gear")).unwrap();
+    for (path, body) in [
+        ("gear.rs", "pub fn turn() {}\nmod blocked;\n#[cfg(test)]\n#[path = \"gear_tests.rs\"]\nmod tests;\n"),
+        ("gear_tests.rs", "#[test] fn turns() { super::turn(); super::blocked::blocked(); }\n"),
+        ("gear/blocked.rs", "pub fn blocked() {}\n"),
+    ] {
+        std::fs::write(f.worker_path.join("crates/widget/src").join(path), body).unwrap();
+    }
+    git(&f.worker_path, &["add", "."]);
+    git(&f.worker_path, &["commit", "-q", "-m", "test(cas-br01): parent selection covers mounted tests and child"]);
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let updated = call(&f.worker, serde_json::json!({
+        "action": "update", "id": ID, "proof_targets": ["widget gear"],
+    })).await;
+    assert_eq!(f.task().proof_targets, ["widget gear"], "{updated}");
+    let head = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &head, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "parent tests cover delivery",
+    })).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+}
+
 /// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input
 /// change, but can be rebound across a docs-only commit without rerunning.
 #[tokio::test]

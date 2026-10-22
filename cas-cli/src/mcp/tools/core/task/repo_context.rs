@@ -1382,7 +1382,7 @@ mod tests {
                 repo_selector: "project:healthy".to_string(),
                 target_branch: "main".to_string(),
             };
-            let cas_root = healthy.join(".cas");
+            let cas_root = fixtures.join("linked/.cas");
             let first = std::thread::scope(|scope| {
                 let peer = scope.spawn(|| resolve_repo_context(&cas_root, &target));
                 let first = resolve_repo_context(&cas_root, &target)
@@ -1391,8 +1391,7 @@ mod tests {
                 first
             });
             assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
-            let first_calls = std::fs::read_to_string(&calls).expect("blocked root was probed");
-            assert_eq!(first_calls.lines().count(), 1, "overlapping callers share one probe");
+            assert!(!calls.exists(), "a matching worker checkout must bypass host scanning");
             std::fs::write(
                 healthy.join(".cas/config.toml"),
                 "[project]\ncanonical_id = \"healthy-renamed\"\n",
@@ -1405,9 +1404,18 @@ mod tests {
             let second = resolve_repo_context(&cas_root, &renamed).unwrap();
             assert_eq!(second.repo_root, first.repo_root);
             assert_eq!(second.repo_selector, renamed.repo_selector);
+            let missing = WorkTarget {
+                repo_selector: "project:missing".to_string(),
+                ..renamed
+            };
+            for _ in 0..2 {
+                let error = resolve_repo_context(&cas_root, &missing).unwrap_err();
+                assert!(error.contains("WORK TARGET REPOSITORY UNAVAILABLE"), "{error}");
+                assert!(!error.contains("MISMATCH"), "an incomplete scan cannot prove a mismatch");
+            }
             assert_eq!(
-                std::fs::read_to_string(&calls).unwrap(),
-                first_calls,
+                std::fs::read_to_string(&calls).unwrap().lines().count(),
+                1,
                 "a timed-out root must not start another probe while negatively cached"
             );
             return;
@@ -1432,6 +1440,13 @@ mod tests {
                 "[project]\ncanonical_id = \"healthy\"\n",
             )
             .unwrap();
+            std::fs::write(healthy.join("base"), "base").unwrap();
+            git(&healthy, &["add", "base"]);
+            git(&healthy, &["-c", "user.name=Cassy", "-c", "user.email=cas@example.com",
+                "commit", "-q", "-m", "base"]);
+            let linked = fixtures.path().join("linked");
+            git(&healthy, &["worktree", "add", "-q", "-b", "factory/worker", linked.to_str().unwrap()]);
+            std::fs::create_dir(linked.join(".cas")).unwrap();
             let fifo = if mode == "config" {
                 blocked.join(".cas/config.toml")
             } else {
@@ -1590,7 +1605,7 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             repo_selector: "remote:github.com/org/shared".to_string(),
             target_branch: "main".to_string(),
         };
-        let ambiguous = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap_err();
+        let ambiguous = resolve_repo_context(fixtures.path(), &target).unwrap_err();
         assert!(ambiguous.contains("AMBIGUOUS WORK TARGET"));
         assert!(ambiguous.contains("known-repos bind --repo"));
 

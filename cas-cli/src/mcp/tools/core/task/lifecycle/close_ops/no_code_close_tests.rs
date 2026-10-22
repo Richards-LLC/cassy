@@ -349,7 +349,10 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         ).unwrap();
         let pending = call(
             &f.worker,
-            serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
+            serde_json::json!({
+                "action": "close", "id": id, "reason": "Simulator released",
+                "no_delivery": true,
+            }),
         ).await;
         assert!(pending.contains("VERIFICATION"), "{pending}");
         assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
@@ -366,12 +369,33 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         cas_store::resolve_verification_dispatch_with_conn(
             &conn, &dispatch.id, "nocode-supervisor-session", None, true,
         ).unwrap();
-        let response = call(
+        let ordinary = call(
             &f.worker,
             serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
         ).await;
+        assert_ne!(
+            f.task(id).status, TaskStatus::Closed,
+            "empty measurements and an earlier declaration must not waive an ordinary close: {ordinary}"
+        );
+        let missing_reason = call(
+            &f.worker,
+            serde_json::json!({"action": "close", "id": id, "no_delivery": true}),
+        ).await;
+        assert!(missing_reason.contains("NO DELIVERY"), "{missing_reason}");
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{missing_reason}");
+        let response = call(
+            &f.worker,
+            serde_json::json!({
+                "action": "close", "id": id, "reason": "Simulator released",
+                "no_delivery": true,
+            }),
+        ).await;
         assert_closed_without_lane(&f, id, &response);
         assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        assert!(f.task(id).execution_note.is_none());
+        assert!(f.task(id).external_ref.is_none());
+        assert!(f.task(id).notes.contains("No delivery declared"));
+        assert!(f.task(id).notes.contains("nocode-worker-session"));
         assert!(cas_store::list_qa_passes(&f.cas_dir(), id).unwrap().is_empty());
 
         if lane_exists {
@@ -383,6 +407,15 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
             std::fs::write(worker_path.join("app.css"), "body { color: blue; }\n").unwrap();
             git(&worker_path, &["add", "app.css"]);
             git(&worker_path, &["commit", "-q", "-m", "Change stylesheet"]);
+            let declared = call(
+                &f.worker,
+                serde_json::json!({
+                    "action": "close", "id": code_id, "reason": "Stylesheet changed",
+                    "no_delivery": true,
+                }),
+            ).await;
+            assert!(declared.contains("NO DELIVERY"), "{declared}");
+            assert_eq!(f.task(code_id).status, TaskStatus::InProgress, "{declared}");
             let refused = call(
                 &f.worker,
                 serde_json::json!({"action": "close", "id": code_id, "reason": "Stylesheet changed"}),

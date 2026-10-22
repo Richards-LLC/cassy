@@ -1569,7 +1569,10 @@ mod tests {
         .save_to_cas_dir(root)
         .unwrap();
         let key = crate::cloud::peer_claims::claim_key(project, task_id);
-        let lock = crate::types::TaskLease::new(key.clone(), owner_id.to_string(), 600);
+        let mut lock = serde_json::to_value(crate::types::TaskLease::new(
+            key.clone(), owner_id.to_string(), 600,
+        )).unwrap();
+        lock["id"] = serde_json::json!("fixture-lock");
         let renew_lock = lock.clone();
         Mock::given(method("GET"))
             .and(path(format!("/api/agents/tasks/{key}/lock")))

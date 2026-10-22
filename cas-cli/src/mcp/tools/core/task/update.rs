@@ -3553,7 +3553,10 @@ mod epic_move_work_target_tests {
         .unwrap();
 
         let key = crate::cloud::peer_claims::claim_key(project, &child.id);
-        let lock = cas_types::TaskLease::new(key.clone(), owner.id.clone(), 600);
+        let mut lock = serde_json::to_value(cas_types::TaskLease::new(
+            key.clone(), owner.id.clone(), 600,
+        )).unwrap();
+        lock["id"] = serde_json::json!("fixture-lock");
         Mock::given(method("GET"))
             .and(path(format!("/api/agents/tasks/{key}/lock")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

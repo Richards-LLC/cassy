@@ -138,6 +138,7 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
 fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
     // Two repositories share task JSON and a real bare origin, but not refs.
     // Cover both creation routes; neither may lose the originating host in sync.
+    let mut failures = Vec::new();
     for adopted in [false, true] {
         with_fixture(|f| {
             let core = crate::mcp::CasCore::with_daemon(f.root.clone(), None, None);
@@ -154,7 +155,7 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                     request,
                     if adopted { f.repo.to_str() } else { None },
                     if adopted {
-                        Some("epic/peer-only")
+                        Some("epic/$(touch${IFS}SUBSTITUTED)")
                     } else {
                         None
                     },
@@ -199,7 +200,13 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let peer_root = crate::store::init_cas_dir(&peer).unwrap();
             std::fs::copy(f.root.join("config.toml"), peer_root.join("config.toml")).unwrap();
             let peer_tasks = open_task_store_cached(&peer_root).unwrap();
-            let wire = serde_json::to_vec(&epic).unwrap();
+            // A different host owns the peer clone in production. Retain the
+            // real create assertion, then inject the synced display label.
+            let host = format!("source-{}", crate::cloud::device::DeviceConfig::hostname().unwrap());
+            let mut shared_epic = epic.clone();
+            shared_epic.deliverables.epic_branch_origin.as_mut().unwrap().host =
+                format!("\u{1b}{host}\r\n\t\u{85}");
+            let wire = serde_json::to_vec(&shared_epic).unwrap();
             let shared: cas_types::Task = serde_json::from_slice(&wire).unwrap();
             peer_tasks.add(&shared).unwrap();
             peer_tasks
@@ -221,11 +228,14 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .err()
                 .expect("unpublished peer lane must not be recreated")
                 .to_string();
-            let host = crate::cloud::device::DeviceConfig::hostname().unwrap();
-            assert!(
-                error.contains(&format!("epic branch not published by {host}")),
-                "{error}"
-            );
+            if !error.contains(&format!("epic branch not published by {host}"))
+                || error.lines().count() != 3
+                || error.chars().any(|c| c.is_control() && c != '\n') {
+                failures.push(format!("synced host was not sanitized: {error:?}"));
+            }
+            if error.contains("spawn refused:") {
+                failures.push(format!("shared readiness diagnostic names spawn: {error}"));
+            }
             assert!(!error.contains("deleted epic lane"), "{error}");
             for repo in [&peer, &f.origin] {
                 assert!(
@@ -243,32 +253,25 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             }
             // pin: the terminal fixture is the actual spawn diagnostic after
             // normalizing host/ref identity, not a separately authored renderer.
-            assert_eq!(
-                format!(
-                    "{}\n",
-                    error
-                        .replace(&host, "soundwave")
-                        .replace(branch, "epic/peer")
-                ),
-                include_str!("../../../../../../docs/design/cli/epic-peer-publication.capture.txt")
-            );
-            let command = error
-                .split("publish on ")
-                .nth(1)
-                .unwrap()
-                .split('`')
-                .nth(1)
-                .unwrap();
-            let published = std::process::Command::new("sh")
-                .args(["-c", command])
-                .current_dir(&f.repo)
-                .output()
-                .unwrap();
-            assert!(
-                published.status.success(),
-                "printed publish remedy failed: {}",
-                String::from_utf8_lossy(&published.stderr)
-            );
+            let normalized = format!("{}\n", error.replace(&host, "soundwave").replace(branch, "epic/peer"));
+            let expected = include_str!("../../../../../../docs/design/cli/epic-peer-publication.capture.txt")
+                .replace("spawn refused: ", "").replace('`', "");
+            if normalized != expected {
+                failures.push(format!("diagnostic capture mismatch: {normalized:?}"));
+            }
+            if let Some(command) = error.lines().find(|line| line.starts_with("git push ")) {
+                // Paste the entire displayed line, without stripping any markup.
+                let published = std::process::Command::new("sh").args(["-c", command])
+                    .current_dir(&f.repo).output().unwrap();
+                assert!(published.status.success(), "printed publish remedy failed: {}",
+                    String::from_utf8_lossy(&published.stderr));
+            } else {
+                failures.push(format!("remedy is not a standalone shell line: {error}"));
+                // Continue fixture setup so RED also checks published adoption.
+                // The aggregated failure below remains authoritative.
+                git(&f.repo, &["push", "origin", branch]);
+            }
+            assert!(!f.repo.join("SUBSTITUTED").exists(), "paste executed a branch token");
             assert_eq!(git(&f.origin, &["rev-parse", branch]), tip);
             let prep = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
                 .expect("published remedy must make peer spawn ready");
@@ -276,8 +279,23 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let checkout = work.base_ref.as_deref().unwrap_or(&work.parent_branch);
             assert_eq!(git(&peer, &["rev-parse", checkout]), tip);
             assert_eq!(git(&f.repo, &["rev-parse", branch]), tip);
+            if !adopted {
+                git(&f.repo, &["push", "origin", "main:refs/heads/epic/published"]);
+                let request = serde_json::from_value(serde_json::json!({
+                    "title": "Adopt existing published lane", "task_type": "epic", "risk": "none"
+                })).unwrap();
+                tokio::runtime::Runtime::new().unwrap().block_on(core.cas_task_create_with_target(
+                    request, f.repo.to_str(), Some("epic/published"), true,
+                )).unwrap();
+                let published = core.open_task_store().unwrap().list(None).unwrap()
+                    .into_iter().find(|task| task.title == "Adopt existing published lane").unwrap();
+                if published.deliverables.epic_branch_origin.is_some() {
+                    failures.push("adopter was stamped as the published lane's origin host".into());
+                }
+            }
         });
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

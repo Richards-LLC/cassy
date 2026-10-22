@@ -180,7 +180,9 @@ all, is `OWED`, and the gate names each owed row or PR and its cause.
 first-parent history: `Merge pull request #N` merges and squash subjects
 ending in `(#N)`. It maps each PR's diff to journeys through `cas qa impact`.
 A PR that no row exercises keeps the gate OWED until a manual row records
-`covers_prs: [N]`.
+`covers_prs: [N]`. Every other first-parent commit is a direct push and its
+own coverage unit, `push <sha7>`. It is owed the same way until a row
+exercises it or a manual row records `covers_commits: [<sha7>]`.
 
 **Sealing.** Sealing rehashes every media file and refuses a link or any path
 outside `media/`. It derives the gate, runs the evidence secret scan over the
@@ -195,18 +197,29 @@ is refused. A changed `pack.json` stops the receipt satisfying close, exactly
 as a changed `LEDGER.md` does.
 
 **Slack.** The Violet bundle posts `pack.json`, with the summary as its
-comment, and then each media file in that thread. Every file is rechecked
+comment, and then each image or video in that thread. Other media (traces,
+logs, archives) can carry credentials. They are never uploaded; the summary
+names them by local path. Every file is rechecked
 against the pack digest and is at most 25 MiB. Video over the limit is
 re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
 fits. If re-encoding fails or the video is still too large, it stays
 local-only and the row's frames carry the evidence.
 
 **PR comment.** Cassy keeps one comment per PR, marked
-`<!-- cassy:release-gate -->`, and edits it in place.
+`<!-- cassy:release-gate -->`, and edits it in place. A body over 65,000
+characters (GitHub's limit is 65,536) is cut at a line and ends with a
+pointer to the pack.
 
 **Retention.** `qa.release.retention_days` (default 30) deletes old media
 files only inside each pack's own `media/`. Links are never followed or
-deleted, and `pack.json` stays as the record.
+deleted.
+
+`pack.json` stays as the record, and its bytes never change, so a batch
+receipt bound to them stays valid. Before deleting a pack entry, retention
+records its path and digest in `pruned.json` beside the pack, atomically.
+Loading accepts a missing entry only when `pruned.json` records it with the
+pack's own digest. It refuses a record the pack does not list. An entry whose
+file changed is not pruned, so loading keeps refusing it.
 
 ## Independent runs: `independence_key`
 

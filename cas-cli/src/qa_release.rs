@@ -951,6 +951,7 @@ mod tests {
             readbacks: Vec::new(),
             manual_minutes: None,
             covers_prs: Vec::new(),
+            covers_commits: Vec::new(),
         }
     }
 
@@ -992,9 +993,10 @@ mod tests {
         project.commit("apps/api/promo.ts", "v1");
         project.git(&["checkout", "-q", "main"]);
         project.git(&["merge", "-q", "--no-ff", "feature", "-m", "Merge pull request #13 from acme/feature"]);
-        let head = project.git(&["rev-parse", "HEAD"]);
+        let push = project.commit("apps/api/hotfix.ts", "pushed straight to staging");
+        let head = push.clone();
         let prs = coverage::candidate_prs(project.root(), &base, &head).unwrap();
-        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), [12, 13]);
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), [Some(12), Some(13), None]);
         let registry: crate::qa_registry::Registry =
             serde_yaml::from_str("journeys:\n  - id: checkout\n    status: live\n    owners: ['apps/web/checkout/**']\n").unwrap();
         let qa = crate::config::QaConfig::default();
@@ -1007,6 +1009,11 @@ mod tests {
         let mut manual = row("promo-manual", "promo", RowVerdict::Pass);
         manual.covers_prs = vec![13];
         pack.rows.push(manual);
+        pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
+        let gate = pack.derive_gate();
+        let pushed = format!("push {}", &push[..7]);
+        assert_eq!((gate.verdict, gate.owed[0].subject.as_str()), (GateVerdict::Owed, pushed.as_str()));
+        pack.rows[1].covers_commits = vec![push[..7].to_string()];
         pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
         assert_eq!(pack.derive_gate().verdict, GateVerdict::Clean);
 
@@ -1076,7 +1083,9 @@ mod tests {
         // pin: post order (pack.json first) and the transcode/local-only split are the Slack contract.
         assert_eq!(sources, ["pack.json", "media/frame.png", "media/fits.mp4 (transcoded)"]);
         let local: Vec<&str> = bundle.local_only.iter().map(|m| m.path.as_str()).collect();
-        assert_eq!(local, ["media/huge.mp4", "media/trace.zip"]);
+        assert_eq!(local, ["media/huge.mp4"]);
+        let linked: Vec<&str> = bundle.linked.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(linked, ["media/trace.zip"], "only images and video are uploaded");
 
         // Violet is a fake; only the Slack upload URL is a loopback double.
         struct FakeViolet {
@@ -1111,7 +1120,10 @@ mod tests {
             let options = PostOptions { channel: "qa".into(), ..Default::default() };
             let receipts = post_pack(&violet, &bundle, "gate OWED", &options).await.unwrap();
             let calls = violet.calls.lock().unwrap().clone();
-            assert_eq!(calls[0]["initial_comment"], "gate OWED");
+            assert_eq!(
+                calls[0]["initial_comment"],
+                "gate OWED\nKept local (not uploaded): media/trace.zip, media/huge.mp4"
+            );
             assert!(calls[2..].iter().all(|call| call["reply_to"] == "m1"), "{calls:?}");
             receipts
         });
@@ -1142,6 +1154,12 @@ mod tests {
         let comments = github.0.lock().unwrap().clone();
         assert_eq!(comments.len(), 2);
         assert!(comments[1].1.contains("release gate: FAILED"), "{}", comments[1].1);
+        let mut long = pack.clone();
+        long.rows = (0..3000).map(|i| row(&format!("cell-{i:04}-{}", "x".repeat(40)), "matrix", verdict::RowVerdict::Fail { reason: "band".into() })).collect();
+        long.gate = long.derive_gate();
+        let capped = comment::render_comment(&long);
+        assert!(capped.chars().count() <= comment::MAX_CHARS && capped.starts_with(comment::MARKER));
+        assert!(capped.ends_with("pack.json` in the project's artifacts.\n"), "{}", &capped[capped.len() - 200..]);
 
         // Retention touches only regular files under each pack's media dir.
         let outside = tempfile::tempdir().unwrap();
@@ -1149,11 +1167,25 @@ mod tests {
         std::fs::write(&kept, b"x").unwrap();
         std::os::unix::fs::symlink(&kept, dir.join("media/link.png")).unwrap();
         assert!(prune_media(release.path(), 30, chrono::Utc::now()).is_empty(), "nothing is 30 days old yet");
+        let sealed = Pack::load(&dir).unwrap();
+        let sealed_bytes = std::fs::read(dir.join("pack.json")).unwrap();
         let later = chrono::Utc::now() + chrono::Duration::days(31);
         let deleted = prune_media(release.path(), 30, later);
         assert!(deleted.iter().any(|p| p.ends_with("media/frame.png")), "{deleted:?}");
         assert!(kept.exists() && dir.join("media/link.png").symlink_metadata().is_ok());
-        assert!(dir.join("pack.json").exists());
+        assert_eq!(std::fs::read(dir.join("pack.json")).unwrap(), sealed_bytes, "pack.json bytes never change");
+        assert_eq!(Pack::load(&dir).unwrap().gate, sealed.gate, "a pruned pack still loads");
+        assert_eq!(slack_bundle(&dir, limit, &FakeTranscoder).unwrap().pruned.len(), 4);
+        let record = std::fs::read_to_string(dir.join(pack::PRUNED_FILE)).unwrap();
+        std::fs::write(dir.join(pack::PRUNED_FILE), record.replacen(&sealed.media[0].sha256, &"0".repeat(64), 1)).unwrap();
+        assert!(matches!(Pack::load(&dir), Err(pack::PackError::Media(_))), "pruned.json claiming another digest");
+        std::fs::write(dir.join(pack::PRUNED_FILE), &record).unwrap();
+        let mut resealed = Pack::load(&dir).unwrap();
+        std::fs::write(dir.join("media/frame.png"), b"recaptured").unwrap();
+        resealed.add_media(&dir, "media/frame.png").unwrap();
+        resealed.seal(&dir).unwrap();
+        assert!(Pack::load(&dir).is_ok(), "a reseal (C6) reconciles pruned.json");
+        assert!(!pack::pruned(&dir).unwrap().iter().any(|p| p.path == "media/frame.png"));
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

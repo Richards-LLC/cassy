@@ -18,6 +18,8 @@ use std::path::{Component, Path, PathBuf};
 pub const SCHEMA_VERSION: u32 = 1;
 pub const PACK_FILE: &str = "pack.json";
 pub const MEDIA_DIR: &str = "media";
+/// Media retention removed, beside `pack.json`, whose bytes never change.
+pub const PRUNED_FILE: &str = "pruned.json";
 
 /// Why a pack cannot be sealed or read.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +65,9 @@ pub struct Row {
     /// PRs a manual row was recorded to cover.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub covers_prs: Vec<u64>,
+    /// Direct pushes (commit SHAs, at least 7 hex) a manual row covers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers_commits: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +76,36 @@ pub struct SuiteTiming {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// A media file retention deleted: the digest it had, so the pack stays
+/// loadable and a receipt bound to `pack.json` bytes stays valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pruned {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub pruned_at: DateTime<Utc>,
+}
+
+/// The entries retention removed from the pack in `dir` (empty when none).
+pub fn pruned(dir: &Path) -> Result<Vec<Pruned>, PackError> {
+    match std::fs::read_to_string(dir.join(PRUNED_FILE)) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| PackError::Io(format!("{PRUNED_FILE}: {e}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(PackError::Io(error.to_string())),
+    }
+}
+
+/// Records `entries` as pruned in `dir` (atomically, before their deletion).
+pub(super) fn record_pruned(dir: &Path, entries: &[Pruned]) -> Result<(), PackError> {
+    let mut all = pruned(dir)?;
+    all.extend(entries.iter().filter(|e| !all.iter().any(|p| p.path == e.path)).cloned().collect::<Vec<_>>());
+    let text = serde_json::to_string_pretty(&all).map_err(|e| PackError::Io(e.to_string()))?;
+    let temp = dir.join(format!(".{PRUNED_FILE}.{}", std::process::id()));
+    std::fs::write(&temp, text)
+        .and_then(|()| std::fs::rename(&temp, dir.join(PRUNED_FILE)))
+        .map_err(|e| PackError::Io(e.to_string()))
 }
 
 /// One local media file, relative to the pack directory.
@@ -155,6 +190,7 @@ impl Pack {
     /// Verifies media, derives the gate, scans for secrets (the flag snapshot
     /// included) and writes `pack.json` atomically. Returns its path.
     pub fn seal(&mut self, dir: &Path) -> Result<PathBuf, PackError> {
+        self.reconcile_pruned(dir)?;
         self.verify_media(dir)?;
         self.gate = self.derive_gate();
         let text = serde_json::to_string_pretty(self).map_err(|e| PackError::Io(e.to_string()))?;
@@ -186,9 +222,53 @@ impl Pack {
         Ok(pack)
     }
 
+    /// Sealing is the one writer that may forget a pruned record: a reseal
+    /// (C6 keeps earlier generations in `history/`) keeps only the records
+    /// whose entry it still lists with the same digest and whose file is still
+    /// gone. Loading never reconciles, so a stray record still refuses there.
+    fn reconcile_pruned(&self, dir: &Path) -> Result<(), PackError> {
+        let records = pruned(dir)?;
+        let keep: Vec<Pruned> = records
+            .iter()
+            .filter(|p| {
+                std::fs::symlink_metadata(dir.join(&p.path)).is_err()
+                    && self.media.iter().any(|m| m.path == p.path && m.sha256 == p.sha256 && m.bytes == p.bytes)
+            })
+            .cloned()
+            .collect();
+        if keep.len() == records.len() {
+            return Ok(());
+        }
+        let text = serde_json::to_string_pretty(&keep).map_err(|e| PackError::Io(e.to_string()))?;
+        let temp = dir.join(format!(".{PRUNED_FILE}.{}", std::process::id()));
+        std::fs::write(&temp, text)
+            .and_then(|()| std::fs::rename(&temp, dir.join(PRUNED_FILE)))
+            .map_err(|e| PackError::Io(e.to_string()))
+    }
+
+    /// A present file must match its digest. A missing one is accepted only
+    /// when retention recorded it pruned with that same digest.
     fn verify_media(&self, dir: &Path) -> Result<(), PackError> {
+        let pruned = pruned(dir)?;
+        // Every pruned record must be one of this pack's own entries, exactly.
+        if let Some(stray) = pruned
+            .iter()
+            .find(|p| !self.media.iter().any(|m| m.path == p.path && m.sha256 == p.sha256 && m.bytes == p.bytes))
+        {
+            return Err(PackError::Media(format!("{PRUNED_FILE} records {}, which the pack does not list with that digest", stray.path)));
+        }
         for media in &self.media {
-            let (sha256, bytes) = digest(&media_path(dir, &media.path)?)?;
+            let path = match media_path(dir, &media.path) {
+                Ok(path) => path,
+                Err(_)
+                    if std::fs::symlink_metadata(dir.join(&media.path)).is_err()
+                        && pruned.iter().any(|p| p.path == media.path) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let (sha256, bytes) = digest(&path)?;
             if sha256 != media.sha256 || bytes != media.bytes {
                 return Err(PackError::Media(format!("{} changed since it was recorded", media.path)));
             }

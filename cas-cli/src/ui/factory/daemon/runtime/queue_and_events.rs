@@ -12214,9 +12214,10 @@ fn resolve_reminder_delivery_target(
         return Some(name.clone());
     }
     // Cross-session rows can outlive their original daemon. A replacement
-    // factory may take over only after this project's store says the target
-    // shut down in the factory that created the reminder. Unknown, stale, or
-    // still-active agents leave the row pending.
+    // factory may take over only a supervisor target that shut down in the
+    // factory that created the reminder. A retired worker is not a delegation
+    // to its supervisor: leave that row pending for its actual target. Unknown,
+    // stale, or still-active agents also leave the row pending.
     let agent = crate::store::open_agent_store(cas_dir)
         .ok()?
         .get(&reminder.target_id)
@@ -12226,7 +12227,9 @@ fn resolve_reminder_delivery_target(
     {
         return None;
     }
-    (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+    (agent.role == cas_types::AgentRole::Supervisor
+        && agent.status == cas_types::AgentStatus::Shutdown)
+        .then(|| supervisor_name.to_string())
 }
 
 /// What one reminder pass needs, captured on the loop (cas-223f).

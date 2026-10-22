@@ -131,8 +131,21 @@ pub(crate) fn task_terminal_committed(id: &str) {
 /// target. That is the request's terminal mutation; the task close and
 /// verification dispatch after it are post-commit work.
 pub(crate) fn merge_committed(commit: &str, target: &str, push_state: &str) {
-    // Red: the pre-cas-3937 behaviour, where a merge recorded no commit.
-    let _ = (commit, target, push_state);
+    // The action alone: legacy `coordination action=worktree_merge` calls
+    // forward to the same handler.
+    if let Some(receipt) = current()
+        && receipt.action == "worktree_merge"
+    {
+        let _ = receipt.commit.set(Commit {
+            description: format!(
+                "merge {commit} into {target}; push: {push_state}; the task close and \
+                 verifier dispatch after it may still be running; check task action=show \
+                 before retrying"
+            ),
+            notification_id: None,
+        });
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
 }
 
 impl Receipt {

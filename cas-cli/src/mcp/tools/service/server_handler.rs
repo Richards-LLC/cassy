@@ -509,6 +509,17 @@ impl CasService {
                     let _ = handle.await;
                     log_post_commit(&tool, &watcher_receipt, "finished in the background");
                 });
+                // cas-3937: a factory merge is not a task mutation; name the
+                // call itself, and its committed merge, instead.
+                if tool_name != "task" {
+                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                        "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
+                         remaining work was still running {grace_s:.1}s after the commit and \
+                         finishes in the background. Do not retry.",
+                        action = receipt.action(),
+                        grace_s = grace.as_secs_f64(),
+                    ))]));
+                }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
                     "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \

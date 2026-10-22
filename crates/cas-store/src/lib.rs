@@ -236,7 +236,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_targets, correct_parked_delivery_execution_note,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    get_latest_verification_dispatch,
+    get_latest_verification_dispatch, has_active_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,
     get_verification_dispatch_with_conn, get_verification_for_dispatch,
     inspect_bound_server_verifier_handoff, inspect_verifier_capability,

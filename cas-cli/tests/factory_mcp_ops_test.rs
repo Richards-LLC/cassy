@@ -10902,7 +10902,11 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     git(&["checkout", "-b", "epic/pred"]);
     commit("pred.txt", "pred");
     git(&["checkout", "-b", "epic/succ"]);
-    commit("succ.txt", "succ");
+    let local_successor = commit("succ.txt", "succ");
+    let origin = home.path().join("origin.git");
+    git(&["init", "--bare", origin.to_str().unwrap()]);
+    git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&["push", "origin", "epic/pred", "epic/succ"]);
     add_epic_with_id(&env, "cas-pred", TaskStatus::Open, "epic/pred");
     add_epic_with_id(&env, "cas-succ", TaskStatus::Open, "epic/succ");
     env.task_store()
@@ -10930,19 +10934,63 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
         "{clean}"
     );
 
+    // cas-6a32: inspect the last-fetched tips, not whichever local ref was
+    // encountered first. Keep every outcome so RED exposes all three defects.
+    let mut failures = Vec::new();
+    let remote_predecessor = commit("pred-3.txt", "origin advances further");
+    git(&["push", "origin", "epic/pred"]);
+    git(&["checkout", "main"]);
+    git(&["update-ref", "refs/heads/epic/pred", &advanced]);
+    let furthest = status().await;
+    if !furthest.contains(&remote_predecessor[..12]) || !furthest.contains("lacks 2 of its commit(s)") {
+        failures.push(format!("furthest predecessor gap was understated: {furthest}"));
+    }
+    git(&["branch", "-D", "epic/pred"]);
+    let origin_only = status().await;
+    assert!(origin_only.contains(&remote_predecessor[..12])
+        && origin_only.contains("git merge --no-ff origin/epic/pred"), "{origin_only}");
     git(&["checkout", "epic/succ"]);
-    commit("shared.txt", "successor edit");
+    git(&["merge", "--no-ff", "origin/epic/pred", "-m", "successor includes predecessor"]);
+    let remote_successor = git(&["rev-parse", "HEAD"]);
+    git(&["push", "origin", "epic/succ"]);
+    git(&["checkout", "main"]);
+    git(&["update-ref", "refs/heads/epic/succ", &local_successor]);
+    let current_on_origin = status().await;
+    if current_on_origin.contains("STALE BASE") {
+        failures.push(format!("successor behind origin falsely warned: {current_on_origin}"));
+    }
+    assert_eq!(git(&["rev-parse", "epic/succ"]), local_successor, "status must not advance a local ref");
+    assert_eq!(git(&["rev-parse", "origin/epic/succ"]), remote_successor);
+
+    // Both copies now agree before introducing an actual twelve-file conflict.
+    git(&["update-ref", "refs/heads/epic/succ", &remote_successor]);
+    git(&["branch", "epic/pred", "origin/epic/pred"]);
+    git(&["checkout", "epic/succ"]);
+    for i in 1..12 {
+        std::fs::write(project.join(format!("shared-{i:02}.txt")), "successor edit").unwrap();
+    }
+    commit("shared-00.txt", "successor edit");
+    git(&["push", "origin", "epic/succ"]);
     git(&["checkout", "epic/pred"]);
-    let conflicting = commit("shared.txt", "predecessor edit");
+    for i in 1..12 {
+        std::fs::write(project.join(format!("shared-{i:02}.txt")), "predecessor edit").unwrap();
+    }
+    let conflicting = commit("shared-00.txt", "predecessor edit");
     let successor_before = git(&["rev-parse", "epic/succ"]);
     let refused = status().await;
     // pin: a conflict is refused with its files, never offered as a clean merge (cas-fd4c).
     assert!(
-        refused.contains("MERGE REFUSED") && refused.contains("shared.txt") && refused.contains(&conflicting[..12]),
+        refused.contains("MERGE REFUSED") && refused.contains("shared-00.txt") && refused.contains(&conflicting[..12]),
         "{refused}"
     );
     assert!(!refused.contains("git merge --no-ff"), "{refused}");
     assert_eq!(git(&["rev-parse", "epic/succ"]), successor_before, "epic_status merges nothing");
+    // pin: show eight file names and an omitted count, rather than an unbounded notice.
+    if !refused.contains("shared-07.txt") || refused.contains("shared-08.txt") || !refused.contains("+4 more") {
+        failures.push(format!("conflict preview was not capped: {refused}"));
+    }
+    assert_eq!(git(&["rev-parse", "origin/epic/succ"]), successor_before, "status must not fetch or move origin refs");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// cas-d4fc: a project-level encode chore is visible even without an epic link.

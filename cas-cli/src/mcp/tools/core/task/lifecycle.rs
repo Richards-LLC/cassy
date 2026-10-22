@@ -3559,6 +3559,39 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn sibling_safety_block_does_not_hide_distinct_scope_cas_8bcb() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "boilerplate-planner");
+        let core = CasCore::with_daemon(env.home().join("project"), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut epic = Task::new("cas-safety-epic".into(), "QA journeys".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).unwrap();
+        let safety = "SAFETY: never read backend .env; stub /api/ and abort production hosts.\n\
+                      BUILD: NUXT_SSR=false; use 200.html and tests/auth.setup.ts.\n\
+                      DELIVER: ledger rows PASS or FAIL; all HARD assertions apply.";
+        for (title, scope) in [
+            ("Walk checkout", "Verify checkout-payment on /checkout in pages/checkout.vue."),
+            ("Walk account", "Verify account-profile on /account in pages/account.vue."),
+            ("Walk search", "Verify search-results on /search in pages/search.vue."),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
+        }
+        let mut duplicate = child_request("Inspect payment journey", epic.id);
+        duplicate.description = Some(format!(
+            "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
+        ));
+        let receipt = text(core.cas_task_create(Parameters(duplicate)).await.unwrap());
+        assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
+        assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
+        assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+    }
+
+    #[tokio::test]
     async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
         let mut env = TestEnvGuard::temp_home();
         for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
@@ -5231,12 +5264,9 @@ mod related_recall_response_tests {
     #[tokio::test]
     async fn recent_other_epic_plan_requires_confirmation_before_creating_child() {
         let temp = TempDir::new().expect("temp project");
-        let mut env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_SESSION_ID", Some("planning-supervisor-one")),
-            ("CAS_AGENT_NAME", Some("planning-supervisor-one")),
-            ("CAS_FACTORY_MODE", None),
-            ("CAS_FACTORY_SESSION", None),
-        ]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "planning-supervisor-one");
+        env.set("CAS_AGENT_NAME", "planning-supervisor-one");
         let first = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         first
             .cas_task_create(Parameters(epic_request(
@@ -5284,6 +5314,22 @@ mod related_recall_response_tests {
         store.add_dependency(&legacy).unwrap();
         first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
             .await.expect("anonymous historical metadata is not evidence of another planner");
+
+        // Parallel MCP instances and CLI writes may record either the stable
+        // registration or its harness session; neither is another planner.
+        let parallel = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        parallel.cas_task_create(Parameters(child_request("Own parallel child", epic_id.clone())))
+            .await.expect("the same supervisor's other MCP instance is not a competitor");
+        let agents = first.open_agent_store().unwrap();
+        let mut agent = agents.get("planning-supervisor-one").unwrap();
+        agent.cc_session_id = Some("planning-harness-session".into());
+        agents.update(&agent).unwrap();
+        store.add(&Task::new("cas-own-session".into(), "Session-authored child".into())).unwrap();
+        let mut own_session = Dependency::new("cas-own-session".into(), epic_id.clone(), DependencyType::ParentChild);
+        own_session.created_by = agent.cc_session_id.clone();
+        store.add_dependency(&own_session).unwrap();
+        first.cas_task_create(Parameters(child_request("Own session followup", epic_id.clone())))
+            .await.expect("the caller's harness session alias must not trigger a planning race");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");

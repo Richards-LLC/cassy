@@ -8036,6 +8036,7 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
     let close = worker_service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
@@ -8101,6 +8102,7 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
     task.assignee = Some("someone-else".to_string());
     env.task_store().add(&task).expect("add unrelated task");
     let close = |reason: &str| cas::mcp::tools::TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: task_id.clone(),
         reason: Some(reason.to_string()),
@@ -9406,6 +9408,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
         .service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),

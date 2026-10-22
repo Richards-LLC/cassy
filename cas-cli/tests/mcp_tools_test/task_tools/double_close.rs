@@ -118,6 +118,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
 
     let first_close = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("First closer wins.".to_string()),
@@ -150,6 +151,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
     // Second close with a different reason — must not claim credit or mutate.
     let second_close = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Second closer races.".to_string()),
@@ -221,6 +223,7 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
 
     let first = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Initial close.".to_string()),
@@ -315,6 +318,7 @@ async fn test_racing_close_reports_the_winner_cas_eda0() {
     let racer = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let result = runtime.block_on(loser.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: loser_id,
             reason: Some("Loser closes second.".to_string()),

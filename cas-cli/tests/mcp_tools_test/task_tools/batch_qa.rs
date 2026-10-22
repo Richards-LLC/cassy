@@ -602,6 +602,7 @@ impl Fx {
             .get(id)
             .unwrap();
         let req = TaskCloseRequest {
+            no_delivery: None,
             id: id.into(),
             reason: Some("staging QA complete".into()),
             commit_receipt: task.deliverables.factory_branch_anchor,
@@ -1029,6 +1030,7 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
     fx.record().await;
     let req = TaskCloseRequest {
+        no_delivery: None,
         id: "cas-bq01".into(),
         reason: Some("integrated reviewed batch".into()),
         commit_receipt: Some(merged),
@@ -1055,6 +1057,7 @@ async fn batch_qa_merge_receipt_binds_own_reviewed_anchor_cas_d697() {
         .deliverables
         .factory_branch_anchor;
     let req = TaskCloseRequest {
+        no_delivery: None,
         id: "cas-bq02".into(),
         reason: Some("wrong sibling receipt".into()),
         commit_receipt: sibling,

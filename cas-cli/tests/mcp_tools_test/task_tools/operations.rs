@@ -328,6 +328,7 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
     let started = std::time::Instant::now();
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: Some(narrative.clone()),
             id: epic_id.clone(),
             reason: Some("override incident-shaped epic close".to_string()),
@@ -3202,6 +3203,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("done".to_string()),
@@ -3352,6 +3354,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         .expect("verification add should succeed");
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("peer board shipped".to_string()),
@@ -5819,6 +5822,7 @@ async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
         let close = extract_text(
             recipient
                 .cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     id: task_id.clone(),
                     reason: Some("delivery ready".to_string()),
                     supervisor_override: None,

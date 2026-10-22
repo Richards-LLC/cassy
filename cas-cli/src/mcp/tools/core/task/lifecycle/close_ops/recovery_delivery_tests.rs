@@ -230,6 +230,7 @@ async fn close_output(fixture: &Recovery) -> String {
         fixture
             .core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Recovered final pushed tip".into()),
                 commit_receipt: Some(fixture.final_tip.clone()),
@@ -554,6 +555,7 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
     let output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some(format!("PASS {rebased}: reviewed rebased correction")),
                 commit_receipt: None,
@@ -656,6 +658,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         "main"
     ));
     let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        no_delivery: None,
         id: TASK.into(),
         reason: Some(format!("Lane CI passed for {final_tip}: https://github.com/example/cassy/actions/runs/39049693968 . Re-parking for epic merge.")),
         commit_receipt: None,
@@ -698,6 +701,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let qa_output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Delivery integrated; review still required".into()),
                 commit_receipt: Some(final_tip.clone()),
@@ -717,6 +721,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Final corrected delivery merged into target".into()),
                 commit_receipt: Some(final_tip),

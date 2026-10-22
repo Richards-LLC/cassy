@@ -498,6 +498,7 @@ async fn close_releases_and_other_repositories_never_collide() {
     let closed = alpha
         .core
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: "cas-p003".into(),
             reason: Some("spike answered".into()),

@@ -383,6 +383,41 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         ).await;
         assert!(missing_reason.contains("NO DELIVERY"), "{missing_reason}");
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{missing_reason}");
+        let conflict = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Simulator released",
+            "no_delivery": true, "execution_note": "no-code", "external_ref": PROOF,
+        })).await;
+        assert!(conflict.contains("NO DELIVERY"), "{conflict}");
+        assert!(f.task(id).execution_note.is_none());
+
+        // Deleted branches or an empty current range cannot erase a prior
+        // delivery. Restore the original row so the valid retry is unchanged.
+        let original = f.task(id);
+        let mut historical = original.clone();
+        historical.deliverables.historical_factory_branch_anchors.push(f.foreign_tip.clone());
+        f.put(&historical);
+        let recorded = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Simulator released", "no_delivery": true,
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{recorded}");
+        f.put(&original);
+        let broken_ref = repo.join(".git/refs/heads").join(format!("{LANE}-{id}"));
+        std::fs::create_dir_all(broken_ref.parent().unwrap()).unwrap();
+        std::fs::write(&broken_ref, "unreadable-object\n").unwrap();
+        let unknown = call(&f.worker, serde_json::json!({
+            "action": "close", "id": id, "reason": "Simulator released", "no_delivery": true,
+        })).await;
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "unknown Git state is not absence: {unknown}");
+        std::fs::remove_file(broken_ref).unwrap();
+        if lane_exists {
+            std::fs::write(worker_path.join("app.css"), "body { color: purple; }\n").unwrap();
+            let dirty = call(&f.worker, serde_json::json!({
+                "action": "close", "id": id, "reason": "Simulator released", "no_delivery": true,
+            })).await;
+            assert!(dirty.contains("UNCOMMITTED WORK"), "{dirty}");
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{dirty}");
+            git(&worker_path, &["checkout", "--", "app.css"]);
+        }
         let response = call(
             &f.worker,
             serde_json::json!({
@@ -397,6 +432,26 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         assert!(f.task(id).notes.contains("No delivery declared"));
         assert!(f.task(id).notes.contains("nocode-worker-session"));
         assert!(cas_store::list_qa_passes(&f.cas_dir(), id).unwrap().is_empty());
+
+        // An integrated own commit is still delivery even with an empty tree
+        // delta. Put it outside the recent-50 subject scan to exercise the
+        // full task-life attribution rather than just recent branch claims.
+        if lane_exists {
+            let empty_id = "cas-a94f-empty";
+            f.put(&assigned(empty_id, TaskType::Task, "main"));
+            claim(&f, empty_id);
+            git(&worker_path, &["commit", "-q", "--allow-empty", "-m", "fix(cas-a94f-empty): task work"]);
+            for _ in 0..51 {
+                git(&worker_path, &["commit", "-q", "--allow-empty", "-m", OTHER]);
+            }
+            git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge empty helper delivery"]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            let empty = call(&f.worker, serde_json::json!({
+                "action": "close", "id": empty_id, "reason": "Helper finished", "no_delivery": true,
+            })).await;
+            assert!(empty.contains("NO DELIVERY"), "{empty}");
+            assert_eq!(f.task(empty_id).status, TaskStatus::InProgress, "{empty}");
+        }
 
         if lane_exists {
             // An unnamed unmerged commit is possible task work, even before any
@@ -422,7 +477,34 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
             ).await;
             assert!(refused.contains("QA evidence bundle"), "{refused}");
             assert_eq!(f.task(code_id).status, TaskStatus::InProgress, "{refused}");
+
+            // A clean, merged local lane must not hide the remote's newer
+            // delivery. Keep the real pushed commit while restoring local.
+            git(&worker_path, &["push", "-q", "origin", LANE]);
+            git(&worker_path, &["reset", "--hard", "main"]);
+            let remote = call(&f.worker, serde_json::json!({
+                "action": "close", "id": code_id, "reason": "Stylesheet changed", "no_delivery": true,
+            })).await;
+            assert!(remote.contains("NO DELIVERY"), "{remote}");
+            assert_ne!(f.task(code_id).status, TaskStatus::Closed, "{remote}");
         }
+
+        // A declaration cannot silently retire an existing independent QA
+        // round, even if no code evidence is currently available.
+        let qa_id = "cas-a94f-qa";
+        f.put(&assigned(qa_id, TaskType::Task, "main"));
+        claim(&f, qa_id);
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(&f.cas_dir(), &cas_store::NewQaPass {
+            task_id: qa_id, implementer_agent_id: "nocode-worker-session",
+            branch: LANE, bound_head: &f.foreign_tip,
+            deadline_at: now + chrono::Duration::minutes(10), max_rounds: 2,
+        }, now).unwrap();
+        let qa = call(&f.worker, serde_json::json!({
+            "action": "close", "id": qa_id, "reason": "Simulator released", "no_delivery": true,
+        })).await;
+        assert!(qa.contains("NO DELIVERY") && qa.contains("QA round"), "{qa}");
+        assert_eq!(f.task(qa_id).status, TaskStatus::InProgress, "{qa}");
     }
 }
 

@@ -2112,6 +2112,7 @@ mod squash_close_tests {
         let mut env = TestEnvGuard::temp_home();
         let (dir, core, task, squash) = squash_fixture(&mut env, state);
         let request = TaskCloseRequest {
+            no_delivery: None,
             id: task.id.clone(),
             reason: Some("Squash delivery landed".into()),
             commit_receipt: Some(squash),

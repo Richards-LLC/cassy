@@ -4892,6 +4892,7 @@ mod delivery_audit_text_tests {
     #[test]
     fn negative_result_receipts_name_every_missing_field() {
         let req = crate::mcp::tools::TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: "cas-negative".to_string(),
             reason: None,
@@ -6950,6 +6951,7 @@ impl CasCore {
             return Ok(());
         }
         let req = TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: task.id.clone(),
             reason: None,
@@ -7066,6 +7068,25 @@ impl CasCore {
         }
         if used_deprecated_override_alias {
             tracing::warn!(task_id = %req.id, "{DEPRECATED_BYPASS_WARNING}");
+        }
+
+        // This is a declaration for one attempt, never a sticky methodology
+        // or a new close disposition. Delivered keeps its verification and
+        // dirty-work checks even after absence of delivery has been proven.
+        let no_delivery_declared = req.no_delivery.unwrap_or(false);
+        if no_delivery_declared {
+            if req.reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
+                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: no_delivery=true requires a non-empty reason for this attempt."));
+            }
+            if req.commit_receipt.is_some() || completion_receipt.is_some()
+                || external_verification_receipt.is_some() || negative_result.is_some()
+                || evidence_only.is_some() || inline_execution_note.is_some()
+                || inline_external_ref.is_some() || supervisor_override
+                || req.stranded_branch_override.is_some()
+                || matches!(task.task_type, TaskType::Gate | TaskType::Epic)
+            {
+                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: no_delivery is a separate declaration for individual helpers; cannot combine it with delivery receipts, methodologies, overrides or other close dispositions."));
+            }
         }
 
         // cas-6c50 / GH #243: a measured negative result is a completed
@@ -8121,6 +8142,54 @@ impl CasCore {
         };
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
+        // cas-a94f: empty attribution alone is ambiguous (cas-6b46). Only
+        // an explicit fresh declaration plus positive absence measurements
+        // can exempt a helper from delivery gates. Audit notes grant nothing
+        // on the next attempt, and no methodology or synthetic receipt is set.
+        let empty_delivery = if no_delivery_declared {
+            if recovery_branch.is_some() || !(close_repo_verified || worker_worktree_path.is_some()) {
+                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required."));
+            }
+            let actor = match self.get_registered_agent_id_read_only()
+                .and_then(|id| self.open_agent_store()?.get(&id).map_err(|error|
+                    Self::error(ErrorCode::INVALID_REQUEST, error.to_string())))
+            {
+                Ok(actor) => actor,
+                Err(error) => return Ok(Self::tool_error(format!(
+                    "NO DELIVERY CLOSE REJECTED: registered caller required ({error})."))),
+            };
+            let passes = match cas_store::list_qa_passes(&self.cas_root, &task.id) {
+                Ok(passes) => passes,
+                Err(error) => return Ok(Self::tool_error(format!(
+                    "NO DELIVERY CLOSE REJECTED: QA history is unavailable ({error})."))),
+            };
+            if passes.iter().any(|pass| !pass.is_withdrawn()) {
+                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a recorded QA round still binds this task; a declaration cannot withdraw it."));
+            }
+            match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: a worker delivery receipt is recorded.")),
+                Err(error) => return Ok(Self::tool_error(format!(
+                    "NO DELIVERY CLOSE REJECTED: worker delivery history is unavailable ({error})."))),
+            }
+            let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
+            let measurement = match measure_no_delivery(
+                repo, &task, &resolved_parent_branch, delivery_receipt,
+                commit_receipt_window.as_ref(),
+            ) {
+                Ok(measurement) => measurement,
+                Err(message) => return Ok(Self::tool_error(format!(
+                    "NO DELIVERY CLOSE REJECTED: {message}"))),
+            };
+            append_close_decision_note(task_store.as_ref(), &mut task, &format!(
+                "No delivery declared by {}: {}. {measurement} QA and factory-branch delivery gates do not apply for this attempt; verification and dirty-work checks remain required.",
+                actor.id, req.reason.as_deref().unwrap_or("").trim(),
+            ));
+            true
+        } else {
+            false
+        };
+
         // cas-0cd5: the implementer's QA evidence must be valid for the
         // delivered head before the delivery may park for merge (and before
         // its post-merge re-close can finish). Runs ahead of the merge gate
@@ -8133,6 +8202,7 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
+            && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             let evidence_repo = if close_repo_verified {
@@ -8238,6 +8308,7 @@ impl CasCore {
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
+            && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             self.prepare_merged_verification_dispatch(
@@ -9514,6 +9585,7 @@ impl CasCore {
         // keeps normal close aligned with direct update-to-closed: neither
         // may select a process-cwd or merely most-recent worker checkout.
         let declared_hook_evidence = if !close_disposition.requires_delivery_gates()
+            || empty_delivery
             || task.execution_note.as_deref() == Some("no-code")
         {
             None
@@ -9843,7 +9915,7 @@ impl CasCore {
         );
         let effective_has_reviewable = receipt_has_reviewable
             || task.execution_note.as_deref() == Some("value-only")
-            || if parked_head.is_some() || no_code_without_own_commits {
+            || if parked_head.is_some() || no_code_without_own_commits || empty_delivery {
                 false
             } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
@@ -10276,6 +10348,7 @@ impl CasCore {
         // accepted or validated at this boundary.
         if close_disposition.requires_delivery_gates()
             && !effective_has_reviewable
+            && !empty_delivery
             && !bypass_close_gates
             && external_verification_receipt.is_none()
             && let Some(worker_wt) = worker_worktree_path.as_ref()
@@ -14731,6 +14804,87 @@ pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &s
     }
     let tree = |commit: &str| resolve_branch_sha(repo, &format!("{commit}^{{tree}}"));
     matches!((tree(tip), tree(first_parent)), (Some(tip), Some(first)) if tip != first)
+}
+
+/// Prove absence for a fresh no_delivery declaration, rather than interpreting
+/// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
+/// Inspect both local and origin refs: a merged local lane cannot hide a newer
+/// remote delivery. All measurements use immutable IDs from one ref inventory.
+fn measure_no_delivery(
+    repo: &std::path::Path,
+    task: &Task,
+    target: &str,
+    receipt: Option<&str>,
+    window: Option<&TaskCommitReceiptWindow>,
+) -> Result<String, String> {
+    let delivery = &task.deliverables;
+    if task.execution_note.is_some() || task.branch.is_some() || receipt.is_some()
+        || !handoff_prior_holders(&task.notes).is_empty()
+        || has_recorded_code_delivery(task) || delivery.parked_branch.is_some()
+        || !delivery.handoff_branches.is_empty() || delivery.integration_batch.is_some()
+        || delivery.delivery_pr_number.is_some() || delivery.review_envelope.is_some()
+        || delivery.negative_result.is_some() || delivery.evidence_only.is_some()
+        || delivery.green_merge_commit.is_some() || delivery.merge_conflicted
+        || delivery.declined_factory_branch_anchors.as_ref().is_some_and(|anchors| !anchors.is_empty())
+    {
+        return Err("recorded delivery, methodology or handoff evidence exists; use the ordinary close contract.".into());
+    }
+    let window = window.ok_or("task attribution is unavailable")?;
+    if !window.identity.known_commits.is_empty() {
+        return Err("task-attributed commits are recorded".into());
+    }
+    // A successful inventory distinguishes truly absent refs from failed
+    // existence probes. Every present relevant ref must also resolve/read.
+    let output = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/remotes/origin/"])
+        .current_dir(repo).measurement_output()
+        .map_err(|_| "Git ref inventory is unavailable")?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err("Git ref inventory failed; missing delivery cannot be proven".into());
+    }
+    let inventory = String::from_utf8(output.stdout).map_err(|_| "Git ref inventory is unreadable")?;
+    let mut refs = std::collections::HashMap::new();
+    for line in inventory.lines() {
+        let (name, sha) = line.split_once(' ').ok_or("Git ref inventory is malformed")?;
+        refs.insert(name.to_string(), sha.to_string());
+    }
+    let origin_target = format!("refs/remotes/origin/{target}");
+    let target_ref = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+        && refs.contains_key(&origin_target)
+    {
+        origin_target
+    } else {
+        target.to_string()
+    };
+    let target_sha = resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
+        .ok_or("integration target is unavailable")?;
+    let head = resolve_branch_sha(repo, "HEAD^{commit}").ok_or("checkout HEAD is unavailable")?;
+    let mut measured = vec![("HEAD".to_string(), head.clone())];
+    for candidate in task_delivery_branch_candidates(task) {
+        for reference in [format!("refs/heads/{candidate}"), format!("refs/remotes/origin/{candidate}")] {
+            if let Some(sha) = refs.get(&reference) {
+                measured.push((reference, sha.clone()));
+            }
+        }
+    }
+    for (reference, sha) in &measured {
+        if !matches!(known_unmerged_factory_commits(repo, sha, &target_sha), KnownUnmergedCount::KnownZero) {
+            return Err(format!("{reference}@{sha} has unmerged work or unreadable history"));
+        }
+        if !matches!(task_attribution::branch_task_claims(repo, sha, &window.identity), Some((None, _))) {
+            return Err(format!("{reference}@{sha} contains task commits or unreadable ownership"));
+        }
+        // Check task-life attribution on each measured tip as well as its
+        // recent ownership. A net-empty diff alone never proves no delivery.
+        if task_attribution::has_delivery_commits(repo, &target_sha, window, sha) != Some(false)
+        {
+            return Err(format!("{reference}@{sha} has task delivery commits or unknown attribution"));
+        }
+    }
+    Ok(format!(
+        "Measured repo={} target={target_ref}@{target_sha}; no recorded delivery, task-attributed commits or unmerged commits across [{}].",
+        repo.display(), measured.iter().map(|(reference, sha)| format!("{reference}@{sha}")).collect::<Vec<_>>().join(", "),
+    ))
 }
 
 /// GH #1133, #1147, #1151: whether a `no-code` task has no commit of its own.
@@ -25278,6 +25432,7 @@ mod search_manifest_gate_tests {
 
     fn req_with_manifest(id: &str, manifest_json: Option<&str>) -> TaskCloseRequest {
         TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
@@ -26219,6 +26374,7 @@ mod merge_state_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,
@@ -30984,6 +31140,7 @@ esac
         task.status = TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(delivery.clone());
         let req = TaskCloseRequest {
+            no_delivery: None,
             commit_receipt: Some(delivery.clone()),
             ..base_req(&task.id)
         };
@@ -31085,6 +31242,7 @@ esac
         );
 
         let req = TaskCloseRequest {
+            no_delivery: None,
             commit_receipt: Some(parked_anchor.clone()),
             ..base_req(&task.id)
         };
@@ -35554,6 +35712,7 @@ mod epic_status_gate_tests {
 
     fn base_req(id: &str) -> TaskCloseRequest {
         TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.to_string(),
             reason: None,

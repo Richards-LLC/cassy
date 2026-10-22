@@ -587,7 +587,7 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
             .replace('\\', "/")
     };
     let links = report_link_hrefs(
-        project_config.issue_repo_registry().project.as_deref(),
+        project_config.issue_repo_registry_for_project(&project_root).project.as_deref(),
         &relative(&source_path),
         &relative(&pdf_path),
     );
@@ -885,7 +885,7 @@ fn acquire_sources(
         ));
     }
 
-    let github_repo = config.issue_repo_registry().project;
+    let github_repo = config.issue_repo_registry_for_project(project_root).project;
     let mut release = None;
     let mut issues = Vec::new();
     let mut assets = Vec::new();
@@ -2657,12 +2657,15 @@ impl RendererAssets {
 }
 
 /// An installed renderer is used only when it reads the front matter and the
-/// v2 change map this assembler writes; older copies fall back to the builtin.
+/// v2 change map this assembler writes, and accepts both link overrides passed
+/// by render_html; older copies fall back to the builtin.
 fn renderer_supports_source(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|content| {
             content.contains("front matter needs a closing")
                 && content.contains("['area', 'changes', 'what changed']")
+                && content.contains("--source-href")
+                && content.contains("--pdf-href")
         })
         .unwrap_or(false)
 }

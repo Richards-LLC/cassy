@@ -131,7 +131,12 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
         vec!["init", "-q"],
         vec!["remote", "add", "origin", "git@github.com:example/project.git"],
     ] {
-        assert!(ProcessCommand::new("git").current_dir(project.path()).args(args).status().unwrap().success());
+        assert!(ProcessCommand::new("git")
+            .current_dir(project.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
     }
     fs::write(
         project.path().join("CHANGELOG.md"),
@@ -238,7 +243,8 @@ fn cli_release_report_falls_back_from_renderer_without_link_arguments_cas_692a()
     fs::copy(
         cas::test_paths::workspace_root().join("docs/release-reports/2026-09-08-v3.19.0.md"),
         output.join("v3.19.0.md"),
-    ).unwrap();
+    )
+    .unwrap();
     let installed = project.path().join(".claude/skills/cas-release-report/scripts");
     fs::create_dir_all(&installed).unwrap();
     fs::write(installed.join("render.py"), r#"
@@ -252,10 +258,12 @@ parser.add_argument('--output', required=True)
 parser.add_argument('--project-root')
 args = parser.parse_args()
 raise RuntimeError('obsolete renderer must be replaced by builtin')
-"#).unwrap();
+"#)
+    .unwrap();
     cas_cmd(&project)
         .args(["--json", "release", "report", "3.19.0", "--out", "reports"])
-        .assert().success();
+        .assert()
+        .success();
     let html = fs::read_to_string(output.join("v3.19.0.html")).unwrap();
     assert!(html.contains("data-change-map="), "{html}");
     assert!(html.contains("Markdown source"), "{html}");

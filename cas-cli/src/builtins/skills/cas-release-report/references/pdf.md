@@ -30,7 +30,9 @@ as the running folio only when it is the PDF's title and/or "n / N". It exits no
 finding, when the last page holds only the closing folio, or on a link to a local
 file (a `file://` target or a checkout path), which no reader of the published PDF
 can open. `cas release report` names the source and print edition by their GitHub
-URLs at the release tag when `issues.repo` is set. The template keeps
+URLs on `main` when a GitHub repository is known; reports are committed after
+their release tag is created. Resolve the repository from `issues.repo`, falling
+back to the project's GitHub `origin`. The template keeps
 that folio inside the final section so print never starts a page with it.
 
 Inspect every PNG, including the final page; contact sheets aid scanning but do

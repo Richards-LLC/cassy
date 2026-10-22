@@ -587,8 +587,7 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
             .replace('\\', "/")
     };
     let links = report_link_hrefs(
-        project_config.issue_repo_registry().project.as_deref(),
-        &tag,
+        project_config.issue_repo_registry_for_project(&project_root).project.as_deref(),
         &relative(&source_path),
         &relative(&pdf_path),
     );
@@ -886,7 +885,7 @@ fn acquire_sources(
         ));
     }
 
-    let github_repo = config.issue_repo_registry().project;
+    let github_repo = config.issue_repo_registry_for_project(project_root).project;
     let mut release = None;
     let mut issues = Vec::new();
     let mut assets = Vec::new();
@@ -2389,13 +2388,14 @@ fn is_release_note_section_label(line: &str) -> bool {
 /// The report's "Markdown source" and "Print edition" link targets, given
 /// their repository-relative paths. cas-692a: Chromium prints a relative link
 /// as a file:// URL into the generating checkout, so with a known GitHub
-/// repository both name the files at the release tag. Without one they stay
+/// repository both name the files on main: reports are committed after the
+/// release tag is created. Without one they stay
 /// sibling names; the PDF printer then drops their link targets.
-fn report_link_hrefs(github_repo: Option<&str>, tag: &str, source: &str, pdf: &str) -> (String, String) {
+fn report_link_hrefs(github_repo: Option<&str>, source: &str, pdf: &str) -> (String, String) {
     match github_repo {
         Some(repo) => (
-            format!("https://github.com/{repo}/blob/{tag}/{source}"),
-            format!("https://github.com/{repo}/blob/{tag}/{pdf}"),
+            format!("https://github.com/{repo}/blob/main/{source}"),
+            format!("https://github.com/{repo}/blob/main/{pdf}"),
         ),
         None => {
             let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
@@ -2657,12 +2657,15 @@ impl RendererAssets {
 }
 
 /// An installed renderer is used only when it reads the front matter and the
-/// v2 change map this assembler writes; older copies fall back to the builtin.
+/// v2 change map this assembler writes, and accepts both link overrides passed
+/// by render_html; older copies fall back to the builtin.
 fn renderer_supports_source(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|content| {
             content.contains("front matter needs a closing")
                 && content.contains("['area', 'changes', 'what changed']")
+                && content.contains("--source-href")
+                && content.contains("--pdf-href")
         })
         .unwrap_or(false)
 }
@@ -3198,18 +3201,17 @@ mod tests {
 
     /// cas-692a: Chromium prints a relative link as a file:// URL into the
     /// generating checkout, so a report names its source and print edition
-    /// by their GitHub URLs at the release tag.
+    /// by their GitHub URLs on main, where the post-release report is committed.
     #[test]
-    fn report_links_name_the_tagged_github_files_not_the_checkout_cas_692a() {
+    fn report_links_name_the_main_github_files_not_the_checkout_cas_692a() {
         let (source, pdf) = report_link_hrefs(
             Some("o/r"),
-            "v9.99.1",
             "docs/release-reports/v9.99.1.md",
             "docs/release-reports/v9.99.1.pdf",
         );
         // pin: the exact URL is the link a reader of the published PDF follows.
-        assert_eq!(source, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.md");
-        assert_eq!(pdf, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.pdf");
+        assert_eq!(source, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.md");
+        assert_eq!(pdf, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.pdf");
     }
 
     /// cas-7860: issues are closed by hand minutes after the release PR

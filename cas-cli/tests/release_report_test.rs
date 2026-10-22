@@ -127,6 +127,17 @@ esac
 #[test]
 fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let project = TempDir::new().unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["remote", "add", "origin", "git@github.com:example/project.git"],
+    ] {
+        assert!(ProcessCommand::new("git")
+            .current_dir(project.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
     fs::write(
         project.path().join("CHANGELOG.md"),
         "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Added\n- Worker report improvements (#705)\n\n### Fixed\n- Simpler install (#746)\n\n## [3.18.0] - 2026-08-01\n\n### Changed\n- Older change\n",
@@ -140,10 +151,6 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     .unwrap();
 
     cas_cmd(&project).args(["init", "--yes"]).assert().success();
-    cas_cmd(&project)
-        .args(["config", "set", "issues.repo", "example/project"])
-        .assert()
-        .success();
     let fake_gh = install_fake_gh(&project);
 
     let first = cas_cmd(&project)
@@ -166,6 +173,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(first["html_written"], true);
     assert_eq!(first["issue_count"], 2);
     assert_eq!(first["asset_count"], 1);
+    assert_eq!(first["github_repo"], "example/project");
 
     let source_path = project.path().join("docs/release-reports/v3.19.0.md");
     let html_path = project.path().join("docs/release-reports/v3.19.0.html");
@@ -195,6 +203,11 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert!(html.contains("data-area=\"Sessions\""));
     assert!(html.contains("2 GitHub issues closed with this release"));
     assert!(html.contains("https://github.com/example/project/issues/746"));
+    for extension in ["md", "pdf"] {
+        assert!(html.contains(&format!(
+            "href=\"https://github.com/example/project/blob/main/docs/release-reports/v3.19.0.{extension}\""
+        )), "{html}");
+    }
 
     let second = cas_cmd(&project)
         .env("GH_BIN", &fake_gh)
@@ -217,6 +230,43 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(second["issue_count"], 2);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
     assert_eq!(fs::read_to_string(&html_path).unwrap(), html);
+}
+
+/// A managed renderer installed before link overrides must not reject a new
+/// binary's arguments. Exercise selection and rendering through the CLI.
+#[cfg(unix)]
+#[test]
+fn cli_release_report_falls_back_from_renderer_without_link_arguments_cas_692a() {
+    let project = TempDir::new().unwrap();
+    let output = project.path().join("reports");
+    fs::create_dir_all(&output).unwrap();
+    fs::copy(
+        cas::test_paths::workspace_root().join("docs/release-reports/2026-09-08-v3.19.0.md"),
+        output.join("v3.19.0.md"),
+    )
+    .unwrap();
+    let installed = project.path().join(".claude/skills/cas-release-report/scripts");
+    fs::create_dir_all(&installed).unwrap();
+    fs::write(installed.join("render.py"), r#"
+# Previous managed renderer supports these source formats:
+# front matter needs a closing
+# ['area', 'changes', 'what changed']
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('source')
+parser.add_argument('--output', required=True)
+parser.add_argument('--project-root')
+args = parser.parse_args()
+raise RuntimeError('obsolete renderer must be replaced by builtin')
+"#)
+    .unwrap();
+    cas_cmd(&project)
+        .args(["--json", "release", "report", "3.19.0", "--out", "reports"])
+        .assert()
+        .success();
+    let html = fs::read_to_string(output.join("v3.19.0.html")).unwrap();
+    assert!(html.contains("data-change-map="), "{html}");
+    assert!(html.contains("Markdown source"), "{html}");
 }
 
 /// cas-7860: the release PR's issues are closed by hand minutes after it

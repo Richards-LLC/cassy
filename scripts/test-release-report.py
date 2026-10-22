@@ -337,8 +337,8 @@ class PdfCheckTests(unittest.TestCase):
         self.assertIn('local file link', launch.stderr)
         uri = run({'kind': pymupdf.LINK_URI, 'uri': 'file:///home/x/docs/release-reports/v9.99.1.pdf'})
         self.assertNotEqual(uri.returncode, 0)
-        tagged = 'https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.md'
-        self.assertEqual(run({'kind': pymupdf.LINK_URI, 'uri': tagged}).returncode, 0)
+        published = 'https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.md'
+        self.assertEqual(run({'kind': pymupdf.LINK_URI, 'uri': published}).returncode, 0)
 
 if __name__ == '__main__':
     unittest.main()

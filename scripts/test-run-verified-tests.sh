@@ -51,7 +51,8 @@ stub="$(make_stub green-nextest 0 <<'EOF'
 EOF
 )"
 expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
-    env CARGO="${stub}" "${guard}" nextest run -p cas --lib module
+    env CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib module
 
 count_file="${tmpdir}/count"
 expect pass 'PASS: 2 test(s) passed' 'embedded guard exports count in supplied worktree' \
@@ -97,8 +98,12 @@ EOF
 chmod +x "${tmpdir}/sample"
 expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
     env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
-    CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
     "${guard}" nextest run -p cas --lib -E 'test(stalled)'
+expect pass 'phase=--list PID=' 'stalled discovery names phase and child PID' \
+    grep -F 'phase=--list PID=' "${tmpdir}/stalled.log"
+expect pass 'fake libtest stack: StdoutLock::write' 'stalled discovery logs a child sample' \
+    grep -F 'fake libtest stack: StdoutLock::write' "${tmpdir}/stalled.log"
 
 stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure

@@ -40,7 +40,128 @@ fi
 
 echo "Running: ${CARGO} $*"
 echo
-(cd "${REPO_ROOT}" && "${CARGO}" "$@" 2>&1) | tee "${log}"
+if [[ "${1:-}" == nextest && "${2:-}" == run && -n "${CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS:-}" ]]; then
+    # The capped worker runner sets this bound. Cargo may compile for much
+    # longer; start the clock only after its Finished line, and disarm it when
+    # nextest announces that the named tests are Starting.
+    (cd "${REPO_ROOT}" && python3 - "${CARGO}" "$@" <<'PY'
+import os
+import re
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+cargo, *args = sys.argv[1:]
+limit = float(os.environ["CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS"])
+if limit <= 0:
+    sys.exit("nextest discovery timeout must be positive")
+child = subprocess.Popen(
+    [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT, start_new_session=True,
+)
+selector = selectors.DefaultSelector()
+selector.register(child.stdout, selectors.EVENT_READ)
+finished = re.compile(r"(?m)^\s*Finished\b")
+starting = re.compile(r"(?m)^\s*Starting\s+\d+\s+tests?\b")
+window = ""
+discovery_at = None
+tests_started = False
+
+def emit(message):
+    os.write(1, (message + "\n").encode(errors="replace"))
+
+def listing_child(root):
+    try:
+        rows = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+            text=True, timeout=2, check=True,
+        ).stdout.splitlines()
+        parents = {}
+        for row in rows:
+            pid, ppid = map(int, row.split()[:2])
+            parents[pid] = ppid
+        depths = {root: 0}
+        for _ in range(len(parents)):
+            newer = {pid: depths[ppid] + 1 for pid, ppid in parents.items()
+                     if ppid in depths and pid not in depths}
+            if not newer:
+                break
+            depths.update(newer)
+        # A libtest --list process is below Cargo/nextest in this tree.
+        return max(depths, key=depths.get)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return root
+
+def capture_sample(pid):
+    sample = shutil.which("sample")
+    if not sample:
+        emit(f"nextest discovery sample unavailable for PID {pid}: sample command missing")
+        return
+    with tempfile.TemporaryDirectory(prefix="cas-nextest-sample-") as directory:
+        report = os.path.join(directory, "sample.txt")
+        try:
+            result = subprocess.run(
+                [sample, str(pid), "1", "-file", report],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=6, check=False,
+            )
+            emit(f"--- nextest discovery sample: PID {pid}, sample exit {result.returncode} ---")
+            if os.path.exists(report):
+                with open(report, "rb") as source:
+                    while chunk := source.read(65536):
+                        os.write(1, chunk)
+            else:
+                os.write(1, result.stdout)
+            emit("--- end nextest discovery sample ---")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            emit(f"nextest discovery sample failed for PID {pid}: {error}")
+
+while True:
+    events = selector.select(0.1)
+    for key, _ in events:
+        chunk = os.read(key.fd, 65536)
+        if not chunk:
+            selector.unregister(key.fileobj)
+            break
+        os.write(1, chunk)
+        window = (window + chunk.decode(errors="replace"))[-8192:]
+        clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", window)
+        if discovery_at is None and finished.search(clean):
+            discovery_at = time.monotonic()
+        if starting.search(clean):
+            tests_started = True
+    if discovery_at is not None and not tests_started:
+        elapsed = time.monotonic() - discovery_at
+        if elapsed >= limit:
+            pid = listing_child(child.pid)
+            emit(f"FAIL: nextest discovery timeout: phase=--list PID={pid} runner_PID={child.pid} elapsed={elapsed:.1f}s limit={limit:g}s")
+            capture_sample(pid)
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            sys.exit(124)
+    if not selector.get_map():
+        break
+sys.exit(child.wait() if child.returncode is None else child.returncode)
+PY
+    ) | tee "${log}"
+else
+    (cd "${REPO_ROOT}" && "${CARGO}" "$@" 2>&1) | tee "${log}"
+fi
 cargo_status="${PIPESTATUS[0]}"
 
 # Cargo and nextest color their summary lines in CI.  Preserve the requested

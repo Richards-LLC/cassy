@@ -8194,21 +8194,30 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_zero_pull_as_one_quiet_line() {
-        for team_tasks in [0, 1] {
-            let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
-            if team_tasks > 0 {
-                summary.merge_team_pull(&crate::cloud::SyncResult {
-                    pulled_tasks: team_tasks,
-                    ..Default::default()
-                });
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        for (locale, expected) in [
+            ("C.UTF-8", [
+                "[OK] Pull complete · nothing newer · personal only\n",
+                "[OK] Pull complete · team 1 task · team + personal\n",
+            ]),
+            ("C", [
+                "[OK] Pull complete - nothing newer - personal only\n",
+                "[OK] Pull complete - team 1 task - team + personal\n",
+            ]),
+        ] {
+            env.set("LC_ALL", locale);
+            for (team_tasks, expected) in expected.into_iter().enumerate() {
+                let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+                if team_tasks > 0 {
+                    summary.merge_team_pull(&crate::cloud::SyncResult {
+                        pulled_tasks: team_tasks,
+                        ..Default::default()
+                    });
+                }
+                let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+                render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+                assert_eq!(tf.output(), expected, "locale={locale}");
             }
-            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-            assert_eq!(tf.output(), if team_tasks == 0 {
-                "[OK] Pull complete · nothing newer · personal only\n"
-            } else {
-                "[OK] Pull complete · team 1 task · team + personal\n"
-            });
         }
     }
 

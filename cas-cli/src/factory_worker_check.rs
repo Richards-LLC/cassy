@@ -6,11 +6,83 @@ use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_worker_wait_signal(signum: libc::c_int) {
+    WORKER_WAIT_SIGNAL.store(signum, Ordering::Relaxed);
+}
+
+/// Signal handling applies only while this worker Cargo command is owned.
+#[cfg(unix)]
+struct WorkerWaitSignals(Vec<(libc::c_int, libc::sigaction)>);
+
+#[cfg(unix)]
+impl WorkerWaitSignals {
+    fn install() -> std::io::Result<Self> {
+        let mut guard = Self(Vec::new());
+        WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);
+        for signum in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = record_worker_wait_signal as *const () as libc::sighandler_t;
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            if unsafe { libc::sigaction(signum, &action, &mut previous) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            guard.0.push((signum, previous));
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WorkerWaitSignals {
+    fn drop(&mut self) {
+        for (signum, previous) in self.0.iter().rev() {
+            unsafe { libc::sigaction(*signum, previous, std::ptr::null_mut()) };
+        }
+        WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_worker_command(child: &mut std::process::Child) -> Result<std::process::ExitStatus> {
+    use std::time::{Duration, Instant};
+
+    let group = child.id() as libc::pid_t;
+    loop {
+        let signum = WORKER_WAIT_SIGNAL.swap(0, Ordering::Relaxed);
+        if signum != 0 {
+            // The group leader remains unreaped through both signals, so its
+            // PGID cannot be reused while its Python supervisor clears Cargo.
+            unsafe { libc::killpg(group, signum) };
+            std::thread::sleep(Duration::from_millis(800));
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if let Some(status) = child.try_wait()? {
+                    return Ok(status);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            bail!("worker command PID {group} did not exit after SIGKILL");
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckReceipt {
@@ -1838,12 +1910,24 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             command.env(variable, runner);
         }
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(unix)]
+    let worker_signals = WorkerWaitSignals::install()?;
     let mut child = command
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
     drop(admission);
+    #[cfg(unix)]
+    let status = wait_for_worker_command(&mut child)?;
+    #[cfg(not(unix))]
     let status = child.wait()?;
+    #[cfg(unix)]
+    drop(worker_signals);
     drop(slot);
     if !status.success() {
         bail!(
@@ -1896,6 +1980,87 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn term_to_worker_check_parent_cleans_cargo_descendants() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        const NAME: &str = "factory_worker_check::tests::term_to_worker_check_parent_cleans_cargo_descendants";
+        const FIXTURE: &str = "CAS_WORKER_TERM_PARENT_FIXTURE";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = PathBuf::from(root);
+            let mut command = Command::new("bash");
+            command.arg("-c").arg(include_str!("../../scripts/run-verified-tests.sh"))
+                .arg("worker-verified-tests")
+                .args(["nextest", "run", "-p", "cas", "--lib"])
+                .env("VERIFIED_TEST_REPO_ROOT", &root)
+                .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
+                .env("PID_FILE", root.join("pids"))
+                .env("CARGO", root.join("fake-cargo.py"))
+                .stdout(Stdio::null()).stderr(Stdio::null());
+            command.process_group(0);
+            let signals = WorkerWaitSignals::install().unwrap();
+            let mut child = command.spawn().unwrap();
+            let status = wait_for_worker_command(&mut child).unwrap();
+            drop(signals);
+            assert!(!status.success(), "TERM must stop the worker command");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let fake = root.path().join("fake-cargo.py");
+        std::fs::write(&fake, r#"#!/usr/bin/env python3
+import os, pathlib, subprocess, sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+pathlib.Path(os.environ['PID_FILE']).write_text(f'{os.getpid()} {child.pid}')
+print('    Finished `test` profile in 0.01s', flush=True)
+child.wait()
+"#).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(FIXTURE, root.path())
+            .stdout(Stdio::null()).stderr(Stdio::inherit())
+            .spawn().unwrap();
+        let marker = root.path().join("pids");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Vec<i32> = marker.exists()
+            .then(|| std::fs::read_to_string(&marker).unwrap())
+            .unwrap_or_default().split_whitespace()
+            .map(|pid| pid.parse().unwrap()).collect();
+        if pids.len() == 2 {
+            unsafe { libc::kill(parent.id() as i32, libc::SIGTERM) };
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while status.is_none() && Instant::now() < deadline {
+            status = parent.try_wait().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if status.is_none() {
+            let _ = parent.kill();
+            status = Some(parent.wait().unwrap());
+        }
+        let survivors: Vec<_> = pids.into_iter().filter(|pid| {
+            let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])
+                .output().unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            !state.trim().is_empty() && !state.trim().starts_with('Z')
+        }).collect();
+        for pid in &survivors {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        assert!(marker.exists(), "fake Cargo never reached discovery");
+        assert_eq!(status.unwrap().code(), Some(0), "parent signal fixture failed");
+        assert!(survivors.is_empty(), "Cargo descendants survived: {survivors:?}");
+    }
 
     #[cfg(unix)]
     fn capacity_test_root(base: &Path, cap: usize) -> PathBuf {

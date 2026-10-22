@@ -132,13 +132,13 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&run)?);
     } else {
-        print!("{}", render(&run));
+        print!("{}", render(&run, &run::hand_walk(root, &run)));
     }
     Ok(())
 }
 
 /// The human status: state and freeze first, then counts, then what is owed.
-fn render(run: &Run) -> String {
+fn render(run: &Run, hand_walk: &crate::qa_release::pack::HandWalk) -> String {
     let state = serde_json::to_value(run.state).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
     let mut out = format!("Release gate {} on {}: {state}\n", run::short(&run.sha), run.env);
     if let Some(gate) = &run.gate {
@@ -158,9 +158,8 @@ fn render(run: &Run) -> String {
     let pending: Vec<&str> = run.pending().map(|p| p.id.as_str()).collect();
     let summary: Vec<String> = counts.iter().map(|(word, n)| format!("{n} {word}")).collect();
     out.push_str(&format!("Rows: {} planned; {}{}\n", run.plan.len(), summary.join(", "), if pending.is_empty() { String::new() } else { format!("; {} without a verdict", pending.len()) }));
-    let manual: u32 = run.rows.iter().filter_map(|r| r.manual_minutes).sum();
-    if manual > 0 {
-        out.push_str(&format!("Manual minutes: {manual}\n"));
+    if let Some(summary) = hand_walk.summary(3) {
+        out.push_str(&format!("Hand-walk debt: {summary}\n"));
     }
     for row in &run.rows {
         if !matches!(row.verdict.word(), "PASS" | "NOT_A_ROUTE") {

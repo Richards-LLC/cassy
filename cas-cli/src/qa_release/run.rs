@@ -305,6 +305,13 @@ fn config(cas_root: &Path) -> Result<ReleaseConfig> {
         .context("No qa.release.adapter configured; set qa.release.adapter first")
 }
 
+/// The run's hand-walk debt: manual minutes per journey with each journey's
+/// automation owner (an unreadable registry leaves every owner unknown).
+pub fn hand_walk(cas_root: &Path, run: &Run) -> pack::HandWalk {
+    let registry = registry(cas_root).ok().map(|(registry, _)| registry);
+    pack::HandWalk::measure(&run.rows, registry.as_ref())
+}
+
 fn registry(cas_root: &Path) -> Result<(Registry, crate::config::QaConfig)> {
     let qa = crate::config::Config::load(cas_root)?.qa.unwrap_or_default();
     let path = project_root(cas_root)?.join(&qa.registry.path);
@@ -1038,6 +1045,7 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         pack.fixtures = run.fixtures.clone();
         pack.resources = Some(run.resources.clone());
         pack.suites = run.suites.clone();
+        pack.hand_walk = Some(pack::HandWalk::measure(&pack.rows, Some(&registry))).filter(|h| h.rows > 0);
         let current = dir.join(pack::PACK_FILE);
         if current.exists() {
             let history = dir.join("history");

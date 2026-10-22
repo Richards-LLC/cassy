@@ -81,6 +81,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `fixtures` | Optional fixture names; validated when the header declares fixtures. |
 | `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. |
 | `spec` | Optional tracked automated journey file. |
+| `automation` | Optional `{owner, task?, due?}`: who automates the journey while it is hand-walked (no `spec`). See [hand-walk debt](#hand-walk-debt). |
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
@@ -186,6 +187,26 @@ manual_checks:
     statement: Slide cards read in order at 390px
     check: Compare View Content to the source carousel
     reason: human_judgment
+```
+
+### Hand-walk debt
+
+A live journey with no `spec` is walked by hand. `--check` reports it as one
+of two debt lines:
+
+- `hand_walk` names `automation.owner`, plus the `task` and `due` date when
+  they are set.
+- `hand_walk_unowned` means the journey has no `automation` owner.
+
+A `due` date is checked like a pending checker's: an invalid date fails as
+`pending_checker`, and a past one fails as `overdue_checker`. The release gate
+measures each manual row's minutes against the same owner. See
+[release gate](release-gate.md#hand-walk-minutes).
+
+```yaml
+journeys:
+  - id: promo-redeem
+    automation: {owner: qa-team, task: cas-1234, due: "2026-12-01"}
 ```
 
 ### Labeled criteria

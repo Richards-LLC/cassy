@@ -985,7 +985,9 @@ mod tests {
                 } else if key == "qa.deployed_origins" {
                     candidates.push("https://example.com".into());
                 } else if key == "slack.stakeholder_contacts" {
-                    candidates.push("[]".into());
+                    candidates.push(
+                        r#"[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":60,"mode":"warn"}]"#.into(),
+                    );
                 } else if key.starts_with("issues.") {
                     candidates.push("example/repo".into());
                 }

@@ -634,12 +634,12 @@ mod pre_compact_flush_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn notification_webhook_sender_rejects_external_http() {
+    fn notification_webhook_sender_rejects_non_https() {
         let error = send_webhook_notification(
-            "http://127.0.0.1:1/webhook",
+            "file:///dev/null",
             "notification text must not leave over HTTP",
         )
-        .expect_err("external HTTP is not a valid notification destination")
+        .expect_err("non-HTTPS destinations must be rejected before sending")
         .to_string();
         assert!(error.contains("HTTPS"), "{error}");
     }

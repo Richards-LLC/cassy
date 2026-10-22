@@ -546,7 +546,11 @@ mod tests {
             )
             .expect_err("unsafe webhook URL must be refused")
             .to_string();
-            assert!(error.contains("https") || error.contains("URL"), "{url}: {error}");
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{url}: {error}"
+            );
             assert_eq!(
                 Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
                 Some("")

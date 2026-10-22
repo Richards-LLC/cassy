@@ -503,10 +503,13 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
 async fn h1_death_05_receipts_distinguish_exit_and_signal_and_reject_stale_epoch() {
     let temp = private_tempdir();
     let store = DaemonExitEvidenceStore::new(temp.path());
+    // A made-up PID/epoch can match a real process on a Linux shard. Own this
+    // identity for the test's lifetime so the replacement epoch is truly stale.
+    let pid = std::process::id();
     let identity = DaemonIdentity {
         session: "factory-a".into(),
-        pid: 100,
-        pid_starttime: 200,
+        pid,
+        pid_starttime: crate::mcp::daemon::read_pid_starttime(pid).unwrap_or_default(),
     };
     store
         .write(&DaemonExitReceipt {
@@ -543,7 +546,7 @@ async fn h1_death_05_receipts_distinguish_exit_and_signal_and_reject_stale_epoch
     );
 
     let replacement_epoch = DaemonIdentity {
-        pid_starttime: identity.pid_starttime + 1,
+        pid_starttime: identity.pid_starttime.wrapping_add(1),
         ..identity
     };
     assert!(store.read_matching(&replacement_epoch).is_none());

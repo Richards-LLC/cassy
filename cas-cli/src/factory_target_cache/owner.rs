@@ -402,7 +402,8 @@ pub(crate) const LEASE_FD_ENV: &str = "CAS_TARGET_LEASE_FD";
 /// check. Cargo, rustc and build scripts keep the inherited output lease
 /// (cas-f96d); a test binary, and anything it leaks, must not, or a leaked
 /// fake server would lock the worktree out (EAGAIN) until killed.
-pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/sh
+pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/bash
+# Bash is required here: dash mishandles dynamically selected fds >= 10 in eval.
 # cas-4ad0: close the inherited worker target lease before a test binary runs.
 case "${CAS_TARGET_LEASE_FD:-}" in
   ''|*[!0-9]*) ;;
@@ -642,7 +643,11 @@ mod tests {
         use std::io::BufRead;
         let (_temp, root, worker) = fixture();
         let runner = write_release_runner(&root.join("worker-check-slots")).unwrap();
+        let fd_guards: Vec<_> = (0..16)
+            .map(|_| fs::File::open("/dev/null").unwrap())
+            .collect();
         let lease = acquire(&root, &worker).unwrap().unwrap();
+        assert!(lease.fd() >= 10, "fd guards must force a two-digit lease fd");
         let lock_path = lease.lock_path.clone();
         // The runner execs the "test binary", which leaks a sleeping child.
         let mut command = std::process::Command::new(&runner);
@@ -667,6 +672,7 @@ mod tests {
             "a leaked test grandchild still holds the lease"
         );
         assert!(!holders.contains(&(grandchild as u32)), "{holders:?}");
+        drop(fd_guards);
     }
 
     /// cas-4ad0: a held lease refuses with the lock path and the holder PID,

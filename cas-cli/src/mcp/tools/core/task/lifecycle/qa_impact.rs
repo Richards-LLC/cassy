@@ -210,16 +210,37 @@ struct Row<'a> {
     cells: Vec<&'a str>,
 }
 
-/// Ledger rows outside code fences. Only the verdict column is read: a
-/// table's `verdict` header column, else the eight-column ledger grammar's
-/// fifth cell, else a compact `| ID | verdict |` row's second cell. A compact
-/// list row reads `- ID: verdict`.
+/// Header names of a ledger table's verdict column, in priority order: the
+/// evidence ledger's `verdict`, the independent-QA journeys table's `Run`, and
+/// short `Result` or `Status` tables.
+const VERDICT_HEADERS: [&str; 4] = ["verdict", "run", "result", "status"];
+
+fn table_cells(line: &str) -> Vec<&str> {
+    line.trim_matches('|')
+        .split('|')
+        .map(|c| c.trim().trim_matches('`').trim())
+        .collect()
+}
+
+fn separator(cells: &[&str]) -> bool {
+    cells
+        .iter()
+        .all(|c| c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':')))
+}
+
+/// Ledger rows outside code fences. Only the verdict column is read. A table
+/// header (the row above a `|---|` separator, or a row with a `Verdict` cell)
+/// names it by [`VERDICT_HEADERS`]; a headed table without one has no verdict
+/// column. Only a headerless row falls back by position: the fifth cell of a
+/// row with five or more cells, else the second. A list row reads
+/// `- ID: verdict`.
 fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
+    let lines: Vec<&str> = ledger.lines().map(str::trim).collect();
     let mut fenced = false;
-    let mut column = None;
+    // `Some(column)` inside a headed table; `None` before any header.
+    let mut header: Option<Option<usize>> = None;
     let mut rows = Vec::new();
-    for line in ledger.lines() {
-        let line = line.trim();
+    for (index, line) in lines.iter().copied().enumerate() {
         if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
             continue;
@@ -228,7 +249,7 @@ fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
             continue;
         }
         if !line.contains('|') {
-            column = None;
+            header = None;
             let row = line.trim_start_matches("- ");
             if let Some((id, verdict)) = row.split_once(':') {
                 let (id, verdict) = (id.trim(), verdict.trim());
@@ -240,17 +261,23 @@ fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
             }
             continue;
         }
-        let cells: Vec<_> = line
-            .trim_matches('|')
-            .split('|')
-            .map(|c| c.trim().trim_matches('`').trim())
-            .collect();
-        if let Some(index) = cells.iter().position(|c| c.eq_ignore_ascii_case("verdict")) {
-            column = Some(index);
+        let cells = table_cells(line);
+        if separator(&cells) {
             continue;
         }
-        let index = column.unwrap_or(if cells.len() >= 5 { 4 } else { 1 });
-        if let Some(verdict) = cells.get(index).copied() {
+        let above_separator = lines
+            .get(index + 1)
+            .is_some_and(|next| next.contains('|') && separator(&table_cells(next)));
+        if above_separator || cells.iter().any(|c| c.eq_ignore_ascii_case("verdict")) {
+            header = Some(
+                VERDICT_HEADERS
+                    .iter()
+                    .find_map(|name| cells.iter().position(|c| c.eq_ignore_ascii_case(name))),
+            );
+            continue;
+        }
+        let column = header.unwrap_or(Some(if cells.len() >= 5 { 4 } else { 1 }));
+        if let Some(verdict) = column.and_then(|column| cells.get(column).copied()) {
             rows.push(Row {
                 id: cells[0],
                 verdict,

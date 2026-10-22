@@ -514,6 +514,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
         ("advisory-no-checks", "no-checks", Some("approved"), true),
+        ("advisory-pending-docs", "pending", Some("approved"), true),
         ("red-override", "failure", None, false),
     ] {
         let mut env = TestEnvGuard::temp_home();
@@ -544,6 +545,13 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
             );
             path
+        } else if conclusion == "pending" {
+            let path = cas_root.join("pending-ci-gh");
+            cas::test_paths::warm_stub(
+                &path,
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"in_progress\",\"conclusion\":null}]}\\n'\n",
+            );
+            path
         } else {
             ci_check_run::ci_concluded(&cas_root, conclusion)
         };
@@ -569,8 +577,10 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         );
         let worker_path = cas_root.join("worktrees").join(&worker);
         repo.add_worktree(&worker_path, &format!("factory/{worker}"));
-        std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
-        run_git(&["add", "delivered.txt"], &worker_path);
+        let delivered_path = if conclusion == "pending" { "docs/delivery.md" } else { "delivered.txt" };
+        std::fs::create_dir_all(worker_path.join("docs")).unwrap();
+        std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
+        run_git(&["add", delivered_path], &worker_path);
         run_git(&["commit", "-m", "parked delivery"], &worker_path);
 
         let task_store = open_task_store(&cas_root).unwrap();
@@ -647,9 +657,22 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
+        let admission = match conclusion {
+            "success" => "green",
+            "failure" => "override",
+            _ => "advisory",
+        };
+        let stored = serde_json::to_value(&after_merge.deliverables).unwrap();
+        assert_eq!(stored["merge_ci_admission"], admission, "{row}: {merged}");
+        let roundtrip: cas::types::TaskDeliverables = serde_json::from_value(stored).unwrap();
+        assert_eq!(serde_json::to_value(roundtrip).unwrap()["merge_ci_admission"], admission);
+        let shown = get_text(&supervisor.task(Parameters(task_req(serde_json::json!({
+            "action": "show", "id": task.id,
+        })))).await.expect("show merged task"));
+        assert!(shown.contains(&format!("CI admission: {admission}")), "{row}: {shown}");
 
         if let Some(verdict) = verdict {
-            if row == "advisory-no-checks" {
+            if admission == "advisory" {
                 assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
             }
             assert_eq!(
@@ -677,7 +700,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
             }
         } else {
-            assert_eq!(after_merge.deliverables.green_merge_commit, None, "{row}: {merged}");
+            assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
+            assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(), "override must not auto-close or dispatch verification");
         }
 
         let worker_prompts: Vec<String> = cas::store::open_prompt_queue_store(&cas_root)
@@ -698,6 +722,10 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             !closes || !worker_prompts.iter().any(|p| p.contains("Retry task close")),
             "{row}: no worker close retry once Cassy closed: {worker_prompts:?}"
         );
+        if closes && admission == "advisory" {
+            assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");
+            assert!(!worker_prompts.iter().any(|p| p.contains("with green CI")), "{worker_prompts:?}");
+        }
     }
 }
 

@@ -624,12 +624,17 @@ impl TaskStore for SyncingTaskStore {
 
     /// cas-eda0: `green_merge_commit` is local merge coordination consumed by
     /// this machine's verdict path; it rides the next ordinary upsert.
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[task_id])
             .map_err(queue_error_before_local_commit)?;
-        let recorded = self.inner.record_green_merge(task_id, merge_commit)?;
+        let recorded = self.inner.record_merge_admission(task_id, merge_commit, admission)?;
         if recorded {
             crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         }

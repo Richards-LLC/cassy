@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod blocked;
 pub mod fixtures;
 pub mod flags;
 
@@ -862,7 +863,7 @@ mod tests {
         env.set("FAKE_ERROR_KIND", "external");
         assert!(matches!(
             run(&journey, &subjects).unwrap(),
-            Outcome::BlockedExternal { provider: Some(p), .. } if p == "fake-health"
+            Outcome::BlockedExternal(blocked) if blocked.provider == "fake-health"
         ));
     }
 

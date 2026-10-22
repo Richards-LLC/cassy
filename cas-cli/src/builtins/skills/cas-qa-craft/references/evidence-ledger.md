@@ -22,7 +22,10 @@ user-facing), `fixture` (harness, emulator, or mock), `real-build` (the actual
 binary or site), `eyewitness` (a human report recorded verbatim), or
 `eyewitness/telemetry` (one valid finding emitted by the configured read-only
 sweep). A weaker label than the cell requires is `NOT EXERCISED`, never `PASS`;
-`partial` is not a verdict. Each run cell has one screenshot or terminal
+`partial` is not a verdict. A cell an external provider blocked (5xx, 429,
+402) is `BLOCKED_EXTERNAL` with evidence `blocked: provider=<provider>
+error=<error>`; it stays owed, never PASS or FAIL, and the gate refuses until
+it is re-walked. Each run cell has one screenshot or terminal
 capture and a short observed result. Telemetry rows use the saved sweep stdout
 as their evidence path and include all six parsed fields in `observed`.
 

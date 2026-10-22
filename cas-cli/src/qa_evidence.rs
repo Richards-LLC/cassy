@@ -2026,8 +2026,10 @@ fn validate_ledger_receipt(
             command,
         ));
     }
+    use crate::qa_release::blocked::{self, BlockedExternal};
     let mut has_pass = false;
     let mut deferred = Vec::new();
+    let mut owed = Vec::new();
     for line in body.lines() {
         let cells: Vec<&str> = line
             .trim()
@@ -2037,6 +2039,27 @@ fn validate_ledger_receipt(
             .collect();
         // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
         has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
+        if cells.get(4) == Some(&blocked::VERDICT) {
+            let Some(blocked) = cells
+                .get(6)
+                .and_then(|cell| BlockedExternal::from_evidence(cell))
+            else {
+                return Err(EvidenceRefusal::new(
+                    format!(
+                        "invalid {} row {}: expected evidence `blocked: provider=<provider> error=<error>`",
+                        blocked::VERDICT,
+                        cells[0]
+                    ),
+                    command,
+                ));
+            };
+            owed.push(format!(
+                "row {} (cell {}) is {blocked}",
+                cells[0],
+                cells.get(1).copied().unwrap_or_default()
+            ));
+            continue;
+        }
         if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {
             continue;
         }
@@ -2063,6 +2086,23 @@ fn validate_ledger_receipt(
             owner: owner.into(),
             ledger: ledger.clone(),
         });
+    }
+    if !owed.is_empty() {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "owed: {}: neither PASS nor FAIL, so {} still owed",
+                owed.join("; "),
+                if owed.len() == 1 {
+                    "the cell is"
+                } else {
+                    "the cells are"
+                }
+            ),
+            format!(
+                "re-walk each owed cell once its provider recovers and record PASS or FAIL in {} (cas-qa-craft references/evidence-ledger.md)",
+                ledger.display()
+            ),
+        ));
     }
     if !has_pass && deferred.is_empty() {
         return Err(EvidenceRefusal::new(

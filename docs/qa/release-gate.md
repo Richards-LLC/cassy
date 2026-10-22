@@ -238,6 +238,13 @@ generation once.
   generation is final. If a later file fails, it is recorded as `partial`
   with the permalink and the missing files, noted once, and never retried.
   Only failures before the top-level message retry.
+- **Duplicate window:** if Slack accepts the top-level message but its
+  response is lost, the attempt counts as a transient failure and may retry.
+  The message can then appear twice. Retries are spaced by the backoff and
+  end at the first recorded success or a permanent refusal, so the number of
+  duplicates is bounded.
+- **The one exception:** moving a corrupt `slack.json` aside forgets what was
+  posted, so the current generation can post again.
 - **Backoff:** only throttling and unavailability retry, with a persisted
   backoff of 30 s doubling to a 30-minute cap. Any other refusal (policy,
   audience, channel, a changed pack) stops posting for that generation. Run

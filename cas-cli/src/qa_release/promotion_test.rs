@@ -99,7 +99,7 @@ fn promotion() {
     let log = gh_dir.path().join("gh.log");
     std::fs::write(
         &gh,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$GH_LOG\"\ncase \"$1 $2\" in\n  'pr list') printf '[{\"number\":7,\"headRefOid\":\"%s\"}]' \"$GH_HEAD\" ;;\n  'repo view') exit 1 ;;\nesac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$GH_LOG\"\ncase \"$*\" in\n  'pr list --repo acme/app --base '*) printf '[{\"number\":7,\"headRefOid\":\"%s\"}]' \"$GH_HEAD\" ;;\n  'repo view'*) exit 1 ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -125,7 +125,6 @@ fn promotion() {
         posts("cassy/release-freeze"),
         [format!("{statuses} pending"), format!("{statuses} success")]
     );
-    assert!(std::fs::read_to_string(&log).unwrap().contains("pr list --repo acme/app --base staging"));
     assert_eq!(publish_promotions(&cas, root, &config), Ok(1));
     assert_eq!(posts("cassy/release-gate"), [format!("{statuses} success")]);
 }

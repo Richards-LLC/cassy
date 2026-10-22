@@ -45,9 +45,26 @@ if [[ "${1:-}" == nextest && "${2:-}" == run && -n "${CAS_WORKER_NEXTEST_DISCOVE
     # The capped worker runner sets this bound. Cargo may compile for much
     # longer; start the clock only after its Finished line, and disarm it when
     # nextest announces that the named tests are Starting.
-    (cd "${REPO_ROOT}" && python3 - "${CARGO}" "$@" <<'PY'
+    runner_pid=
+    pending_wrapper_signal=
+    forward_wrapper() {
+        local signum="$1" status="$2"
+        if [[ -z "${runner_pid}" ]]; then
+            pending_wrapper_signal="${signum}:${status}"
+            return
+        fi
+        trap - TERM INT HUP
+        kill -s "${signum}" "${runner_pid}" 2>/dev/null || true
+        wait "${runner_pid}" 2>/dev/null || true
+        exit "${status}"
+    }
+    trap 'forward_wrapper TERM 143' TERM
+    trap 'forward_wrapper INT 130' INT
+    trap 'forward_wrapper HUP 129' HUP
+    (cd "${REPO_ROOT}" && exec python3 - "${CARGO}" "$@" <<'PY'
 import os
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -70,7 +87,11 @@ discovery_at = None
 tests_started = False
 
 def emit(message):
-    os.write(1, (message + "\n").encode(errors="replace"))
+    write((message + "\n").encode(errors="replace"))
+
+def write(data):
+    os.write(1, data)
+    os.write(3, data)
 
 def listing_child(root):
     try:
@@ -111,30 +132,73 @@ def capture_sample(pid):
             if os.path.exists(report):
                 with open(report, "rb") as source:
                     while chunk := source.read(65536):
-                        os.write(1, chunk)
+                        write(chunk)
             else:
-                os.write(1, result.stdout)
+                write(result.stdout)
             emit("--- end nextest discovery sample ---")
         except (OSError, subprocess.TimeoutExpired) as error:
             emit(f"nextest discovery sample failed for PID {pid}: {error}")
 
 watched_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+exit_queue = None
+exit_seen = False
+last_ps_probe = 0.0
+
+def leader_exited():
+    global exit_queue, exit_seen, last_ps_probe
+    if child.returncode is not None:
+        return True
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    # macOS system Python 3.9 lacks waitid. kqueue observes exit without
+    # reaping, leaving the child PID/PGID reserved until group cleanup ends.
+    if exit_seen:
+        return True
+    if exit_queue is not None:
+        try:
+            if exit_queue.control(None, 1, 0):
+                exit_seen = True
+                return True
+        except OSError:
+            exit_queue.close()
+            exit_queue = None
+        else:
+            return False
+    # Other Python/OS combinations can still observe the unreaped zombie.
+    now = time.monotonic()
+    if now - last_ps_probe < 0.2:
+        return False
+    last_ps_probe = now
+    try:
+        state = subprocess.run(
+            ["ps", "-p", str(child.pid), "-o", "stat="],
+            capture_output=True, text=True, timeout=1,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    exit_seen = state.startswith("Z")
+    return exit_seen
+
+def signal_group(signum):
+    # An unreaped session leader reserves its PID/PGID until group cleanup ends.
+    if child.returncode is not None:
+        return
+    try:
+        os.killpg(child.pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 def stop_child(signum):
     # The process group belongs only to this Popen child and its descendants.
-    try:
-        os.killpg(child.pid, signum)
-    except ProcessLookupError:
-        pass
-    try:
-        child.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
-        pass
-    # Descendants may ignore the signal even if their parent already exited.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    if child.returncode is not None:
+        return
+    if not leader_exited():
+        signal_group(signum)
+        deadline = time.monotonic() + 0.5
+        while not leader_exited() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    # Descendants may ignore the signal. The leader is still unreaped here.
+    signal_group(signal.SIGKILL)
     try:
         child.wait(timeout=2)
     except subprocess.TimeoutExpired:
@@ -167,9 +231,21 @@ child = subprocess.Popen(
     [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT, start_new_session=True,
 )
+if not hasattr(os, "waitid") and hasattr(select, "kqueue"):
+    try:
+        exit_queue = select.kqueue()
+        exit_queue.control([
+            select.kevent(child.pid, filter=select.KQ_FILTER_PROC,
+                          flags=select.KQ_EV_ADD, fflags=select.KQ_NOTE_EXIT)
+        ], 0, 0)
+    except (OSError, AttributeError):
+        if exit_queue is not None:
+            exit_queue.close()
+        exit_queue = None
 if pending_signal is not None:
     forward_signal(pending_signal, None)
 selector.register(child.stdout, selectors.EVENT_READ)
+group_cleaned = False
 try:
     while True:
         events = selector.select(0.1)
@@ -178,13 +254,16 @@ try:
             if not chunk:
                 selector.unregister(key.fileobj)
                 break
-            os.write(1, chunk)
+            write(chunk)
             window = (window + chunk.decode(errors="replace"))[-8192:]
             clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", window)
             if discovery_at is None and finished.search(clean):
                 discovery_at = time.monotonic()
             if starting.search(clean):
                 tests_started = True
+        if not group_cleaned and leader_exited():
+            signal_group(signal.SIGKILL)
+            group_cleaned = True
         if discovery_at is not None and not tests_started:
             elapsed = time.monotonic() - discovery_at
             if elapsed >= limit:
@@ -196,9 +275,10 @@ try:
     wait_limit = 5.0
     if discovery_at is not None and not tests_started:
         wait_limit = min(wait_limit, max(0, limit - (time.monotonic() - discovery_at)))
-    try:
-        status = child.wait(timeout=wait_limit)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + wait_limit
+    while not leader_exited() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not leader_exited():
         if discovery_at is not None and not tests_started:
             elapsed = time.monotonic() - discovery_at
             if elapsed >= limit:
@@ -206,17 +286,30 @@ try:
         emit(f"FAIL: nextest process exit timeout after stdout closed: runner_PID={child.pid} limit={wait_limit:g}s")
         stop_child(signal.SIGTERM)
         status = 124
+    else:
+        if not group_cleaned:
+            signal_group(signal.SIGKILL)
+        status = child.wait(timeout=2)
 finally:
     selector.close()
-    if child.poll() is None:
+    if child.returncode is None:
         stop_child(signal.SIGTERM)
+    if exit_queue is not None:
+        exit_queue.close()
 sys.exit(status)
 PY
-    ) | tee "${log}"
+    ) 3>>"${log}" &
+    runner_pid=$!
+    if [[ -n "${pending_wrapper_signal}" ]]; then
+        forward_wrapper "${pending_wrapper_signal%%:*}" "${pending_wrapper_signal##*:}"
+    fi
+    wait "${runner_pid}"
+    cargo_status=$?
+    trap - TERM INT HUP
 else
     (cd "${REPO_ROOT}" && "${CARGO}" "$@" 2>&1) | tee "${log}"
+    cargo_status="${PIPESTATUS[0]}"
 fi
-cargo_status="${PIPESTATUS[0]}"
 
 # Cargo and nextest color their summary lines in CI.  Preserve the requested
 # raw log while parsing an ANSI-free copy.

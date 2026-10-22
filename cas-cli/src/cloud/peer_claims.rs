@@ -1175,8 +1175,7 @@ fn update_pending_claim_releases<R>(
 /// and stays recorded until the Cloud confirms it; the next background
 /// release or the daemon's claim renewal retries one that failed.
 pub fn release_task_claim_in_background(cas_root: &Path, task_id: &str) {
-    // Red: the pre-cas-978d release, inline on the caller.
-    release_task_claim(cas_root, task_id);
+    let _ = release_task_claim_in_background_with(PeerClaims::for_project(cas_root), cas_root, task_id);
 }
 
 pub(crate) fn release_task_claim_in_background_with(

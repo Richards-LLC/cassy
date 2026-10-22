@@ -1195,6 +1195,8 @@ impl CasCore {
         }
         // cas-5f28: the receiver's start takes the cloud claim afresh.
         crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        // cas-978d: and the previous holder's file leases end with its work.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         // Try to claim for target agent (best effort - they may need to claim themselves)
         let claim_result = agent_store.try_claim(

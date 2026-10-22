@@ -101,3 +101,13 @@ mtime and commit; the candidate comes from the capped CLI integration test.
 | Machine contract | 5 | One JSON document preserves existing fields; unknown counts are null and config warnings are an explicit array. |
 
 Scored by true-otter-3 on 2026-10-21; all floors hold.
+
+## Journey status sources (cas-9fffc)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The working registry verdict and problem/debt totals match --check, followed by one check or seed command. |
+| Scannable | Working-tree journey, seeded and unowned counts form one group; integration upkeep forms another beneath its pinned measured ref. |
+| Readable | A one-line notice identifies a working tree that differs from the measured ref; registry upkeep explicitly counts validation and ownership issues and shows their breakdown. |
+| Machine output | --status preserves existing coverage/upkeep fields and adds source=working_tree and differs_from_measured_ref (boolean, null when comparison is unavailable); upkeep.measured_ref labels all nested upkeep figures. |
+| Omitted | No second validation total is hidden in the headline, and integration drift does not alter the working-registry verdict; individual freshness commands remain available. |

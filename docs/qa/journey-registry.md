@@ -306,8 +306,12 @@ carry `seeded: true` and need review before they describe verified user behavior
 No source or product context means seeding refuses instead of inventing a journey.
 
 `cas qa journeys --status` reports missing/invalid registries, journey and seed
-counts, debt, and unowned surfaces for the checkout. It also reports upkeep drift
-for CODEMAP, PRODUCT_OVERVIEW, and the journey registry at the integration ref:
+counts, debt, and unowned surfaces under `Working tree`. Its headline problem
+and debt totals use the same validation as `--check`. A separate `Integration
+upkeep` section reports drift for CODEMAP, PRODUCT_OVERVIEW, and the journey
+registry at the labelled integration ref. Registry upkeep counts validation
+problems plus unowned surface files and displays both counts; curation debt is
+separate. A notice appears when the working tree differs from that ref:
 
 ```bash
 cas qa journeys --status
@@ -317,7 +321,9 @@ cas qa journeys --status --json
 `Measured ref: origin/<target>@<sha>` names the exact fetched snapshot. This
 report keeps the integration ref even when the checkout is ahead or behind it;
 it does not fetch. A long human ref is shortened with `--json` as the full-ref
-escape. JSON retains coverage fields and adds `upkeep`, with `measured_ref` and
+escape. JSON labels coverage fields with `source: "working_tree"` and adds
+`differs_from_measured_ref` (boolean, or null when comparison is unavailable).
+The separate `upkeep` object contains `measured_ref` and
 `codemap`, `product_overview`, and `registry` objects. Each artifact has `path`,
 `state`, nullable `drift_count`, and an explicit `unit`. Missing artifacts and
 unavailable refs are not zero drift. The existing individual freshness commands

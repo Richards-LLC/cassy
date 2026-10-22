@@ -448,7 +448,7 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             .stdout
             .clone();
         let human = String::from_utf8(human).unwrap();
-        assert!(human.starts_with("READY: 0 problem(s), 0 debt item(s) (working tree)\n"), "{human}");
+        assert!(human.starts_with("PASS: 0 problem(s), 0 debt item(s) (working tree)\n"), "{human}");
         assert!(human.contains("Working tree:\n  Journeys: 1  Added: 0\n  Seeded: 0  Unowned surfaces: 0"), "{human}");
         assert!(human.contains("Working tree differs from measured ref."), "{human}");
         let (_, integration) = human.split_once("Integration upkeep:\n").unwrap();
@@ -492,7 +492,7 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
                 .stdout
                 .clone();
             let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
-            assert_eq!(saved["warnings"][0]["drift_count"], 1, "{saved}");
+            assert_eq!(saved["warnings"][0]["drift_count"], if *key == "qa.registry.enforce" { 2 } else { 1 }, "{saved}");
             assert_eq!(saved["warnings"][0]["measured_ref"], measured, "{saved}");
         }
         let output = cas_cmd(root)

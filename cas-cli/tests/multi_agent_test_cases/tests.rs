@@ -151,7 +151,7 @@ fn test_lease_renewal_under_contention() {
 
     // All renewals should succeed (they're from the owner)
     for result in results {
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "owner lease renewal failed: {result:?}");
     }
 }
 

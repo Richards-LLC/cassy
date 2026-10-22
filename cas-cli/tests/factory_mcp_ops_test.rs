@@ -6517,6 +6517,79 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 // gc_cleanup tests
 // =============================================================================
 
+/// A real verdict frees disposable build output immediately, keeping the small
+/// source checkout available for the existing two-hour audit grace period.
+#[tokio::test]
+async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "verdict-target");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-review-target".into(), "review target".into());
+    task.assignee = Some("review-worker".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    std::fs::write(checkout.join("target/debug/output"), b"regenerable").unwrap();
+    drop(managed);
+
+    let verdict = env.service.verification(Parameters(serde_json::from_value(
+        serde_json::json!({"action":"add", "task_id":task.id,
+            "dispatch_id":dispatch.id, "status":"approved", "summary":"Reviewed"}),
+    ).unwrap())).await.unwrap();
+    assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+    assert!(!checkout.join("target").exists(), "resolved review target leaked: {verdict:?}");
+    assert!(checkout.join("README").is_file(), "young review source must remain");
+    assert!(checkout.parent().unwrap().join("owner.json").is_file());
+}
+
+/// Closing a task cannot dispose of an exact dispatch that is still pending,
+/// even with an old, unleased checkout. The public GC must fail closed.
+#[tokio::test]
+async fn test_gc_preserves_active_review_target_cas_f275() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "active-review-target");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-active-review".into(), "active review".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    std::fs::write(checkout.join("target/debug/output"), b"active proof").unwrap();
+    let marker = checkout.parent().unwrap().join("owner.json");
+    drop(managed);
+    let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert_eq!(std::fs::read(checkout.join("target/debug/output")).ok().as_deref(),
+        Some(b"active proof".as_slice()), "active dispatch reclaimed: {}", get_text(&result));
+}
+
 /// A terminal task must not leave a registered proof checkout and its target
 /// behind forever. The fixture uses the managed ownership record, real Git,
 /// SQLite task state and the public factory GC handler.

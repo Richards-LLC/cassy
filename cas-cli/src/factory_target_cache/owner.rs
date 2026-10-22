@@ -402,7 +402,8 @@ pub(crate) const LEASE_FD_ENV: &str = "CAS_TARGET_LEASE_FD";
 /// check. Cargo, rustc and build scripts keep the inherited output lease
 /// (cas-f96d); a test binary, and anything it leaks, must not, or a leaked
 /// fake server would lock the worktree out (EAGAIN) until killed.
-pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/sh
+pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/bash
+# Bash is required here: dash mishandles dynamically selected fds >= 10 in eval.
 # cas-4ad0: close the inherited worker target lease before a test binary runs.
 case "${CAS_TARGET_LEASE_FD:-}" in
   ''|*[!0-9]*) ;;

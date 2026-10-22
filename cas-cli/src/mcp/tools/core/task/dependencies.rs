@@ -106,6 +106,15 @@ impl CasCore {
             })?;
         }
 
+        let split_claim_cleanup = if dep_type == DependencyType::ParentChild {
+            Some(crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &from_task.id,
+            ))
+        } else {
+            None
+        };
+
         // A late blocking edge must re-arm an open (including reopened) task.
         // Non-blocking dependency types never project lifecycle status.
         if dep_type == DependencyType::Blocks
@@ -133,10 +142,9 @@ impl CasCore {
             })?;
         }
 
-        Ok(Self::success(format!(
-            "Added dependency: {}",
-            describe_dependency(&dep)
-        )))
+        let mut response = format!("Added dependency: {}", describe_dependency(&dep));
+        append_split_claim_cleanup(&mut response, split_claim_cleanup);
+        Ok(Self::success(response))
     }
 
     /// Remove a dependency of a specific type between tasks (cas-6009).
@@ -225,6 +233,15 @@ impl CasCore {
             });
         }
 
+        let split_claim_cleanup = if dep_type == DependencyType::ParentChild {
+            Some(crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &req.from_id,
+            ))
+        } else {
+            None
+        };
+
         let removed = Dependency {
             from_id: req.from_id.clone(),
             to_id: req.to_id.clone(),
@@ -232,10 +249,21 @@ impl CasCore {
             created_at: chrono::Utc::now(),
             created_by: None,
         };
-        Ok(Self::success(format!(
-            "Removed dependency: {}",
-            describe_dependency(&removed)
-        )))
+        let mut response = format!("Removed dependency: {}", describe_dependency(&removed));
+        append_split_claim_cleanup(&mut response, split_claim_cleanup);
+        Ok(Self::success(response))
+    }
+}
+
+fn append_split_claim_cleanup(response: &mut String, result: Option<Result<usize, String>>) {
+    match result {
+        Some(Ok(released)) if released > 0 => response.push_str(&format!(
+            "\nReleased {released} obsolete split-derived Cloud claim(s)."
+        )),
+        Some(Err(error)) => response.push_str(&format!(
+            "\n⚠️ Obsolete split Cloud claim cleanup failed: {error}. Check the Cloud claim before starting the task."
+        )),
+        Some(Ok(_)) | None => {}
     }
 }
 

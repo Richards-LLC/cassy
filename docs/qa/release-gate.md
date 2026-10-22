@@ -286,6 +286,22 @@ PR listing reads every page of open PRs. One failed post does not stop the
 others; the error names each failure, and a failed head is retried on the
 next call.
 
+## Hand-walk minutes
+
+A row recorded by hand carries `manual_minutes`. At seal the pack records
+`hand_walk`, which holds:
+
+- the total manual minutes and the number of manual rows;
+- each journey's minutes and rows, most minutes first;
+- each journey's `automation` owner from the registry. A journey without one
+  is unowned.
+
+The PR comment and `cas qa release-gate status` show the total and the three
+costliest journeys, for example:
+`75 manual minutes over 3 rows; top: `checkout` 45 min (owner qa-team, task cas-1234), `promo` 30 min (unowned)`.
+This is debt only and never changes a row or gate verdict. The registry side
+is [hand-walk debt](journey-registry.md#hand-walk-debt).
+
 ## Independent runs: `independence_key`
 
 A product can dedupe a resubmission and answer with the same in-flight

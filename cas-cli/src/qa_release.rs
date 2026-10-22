@@ -1172,10 +1172,13 @@ mod tests {
         let first = comment::publish_comment(&github, "acme/app", 7, &pack).unwrap();
         pack.rows[0].verdict = verdict::RowVerdict::Fail { reason: "total".into() };
         pack.gate = pack.derive_gate();
+        pack.rows[0].manual_minutes = Some(25);
+        pack.hand_walk = Some(pack::HandWalk::measure(&pack.rows, None));
         assert_eq!(comment::publish_comment(&github, "acme/app", 7, &pack).unwrap(), first);
         let comments = github.0.lock().unwrap().clone();
         assert_eq!(comments.len(), 2);
         assert!(comments[1].1.contains("release gate: FAILED"), "{}", comments[1].1);
+        assert!(comments[1].1.contains("**Hand-walk debt** (never changes the verdict): 25 manual minutes over 1 rows; top: `"), "{}", comments[1].1);
         let mut long = pack.clone();
         long.rows = (0..3000).map(|i| row(&format!("cell-{i:04}-{}", "x".repeat(40)), "matrix", verdict::RowVerdict::Fail { reason: "band".into() })).collect();
         long.gate = long.derive_gate();

@@ -198,7 +198,7 @@ pub(crate) fn claim_with(
 pub fn collision_note(relative_path: &str, holder: &str) -> String {
     format!(
         "⚠️ SHARED FILE (cas-8dbe): {relative_path} is being edited by {holder}. Before you change it, \
-         coordinate through your supervisor (`coordination action=message target=supervisor`), which can \
+         coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`), which can \
          reach the other session's supervisor, so both edits do not collide."
     )
 }

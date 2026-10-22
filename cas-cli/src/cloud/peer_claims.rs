@@ -432,6 +432,11 @@ impl PeerClaims {
             Ok(fence) => fence,
             Err(error) => return Acquire::Unavailable(format!("task claim release fence: {error}")),
         };
+        // The async caller may already have timed out while this blocking
+        // work waited for an in-flight release. Do not cancel newer work.
+        if let Err(error) = self.remaining() {
+            return Acquire::Unavailable(error.to_string());
+        }
         if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
             return Acquire::Unavailable("pending claim releases could not be cancelled safely".into());
         }
@@ -1560,6 +1565,60 @@ mod tests {
             }).await.unwrap();
             assert_eq!(held.lock().unwrap().as_ref().unwrap()["id"], "fresh-lock");
             assert!(server.received_requests().await.unwrap().iter().all(|r| !r.url.path().ends_with("/release")));
+
+            // The opposite ordering: retry has already reached Cloud. The
+            // fence must span its GET, POST and settlement before start can
+            // acquire afresh. Channels force the network interleave; the
+            // nonblocking probes prove exclusion without a timing assertion.
+            let (server, dir, claims, held) = fixture(false).await;
+            let fence_path = dir.path().join("claim-release-locks")
+                .join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
+            let (entered, read_entered) = std::sync::mpsc::channel();
+            let (resume, proceed) = std::sync::mpsc::channel();
+            let proceed = Mutex::new(proceed);
+            let read = held.clone();
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let snapshot = read.lock().unwrap().clone();
+                    entered.send(()).unwrap();
+                    proceed.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":snapshot}))
+                }).up_to_n_times(1).with_priority(1).mount(&server).await;
+            let posted_fence = fence_path.clone();
+            let release = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    use fs2::FileExt;
+                    let probe = std::fs::OpenOptions::new().write(true).open(&posted_fence).unwrap();
+                    assert!(probe.try_lock_exclusive().is_err(), "fence must span the release POST");
+                    *release.lock().unwrap() = None;
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success"}))
+                }).with_priority(1).mount(&server).await;
+            tokio::task::spawn_blocking(move || {
+                use fs2::FileExt;
+                let retry = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || release_pending_task_claims(&claims, &root))
+                };
+                read_entered.recv_timeout(Duration::from_secs(10)).unwrap();
+                let probe = std::fs::OpenOptions::new().write(true).open(fence_path).unwrap();
+                let fenced = probe.try_lock_exclusive().is_err();
+                drop(probe);
+                let restart = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || claims.acquire_for_start(
+                        &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    ))
+                };
+                resume.send(()).unwrap();
+                retry.join().unwrap();
+                assert!(matches!(restart.join().unwrap(), Acquire::Claimed));
+                assert!(fenced, "a retry must retain the fence across Cloud reads");
+                assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT));
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
         }
 
         #[tokio::test]

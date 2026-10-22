@@ -505,13 +505,15 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 /// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
 /// closed by Cassy once its verdict approves: no worker re-close, the parked
 /// close reason and the merge SHA are recorded, and the worker hears once.
-/// A rejected verdict or a red-CI override merge never closes it.
+/// A rejected verdict or a red-CI override merge never closes it. A merge
+/// without check runs still starts the close and records its unconfirmed CI.
 #[tokio::test]
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     // (row, CI conclusion, verdict recorded after merge, Cassy closes)
     for (row, conclusion, verdict, closes) in [
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
+        ("advisory-no-checks", "no-checks", Some("approved"), true),
         ("red-override", "failure", None, false),
     ] {
         let mut env = TestEnvGuard::temp_home();
@@ -535,7 +537,16 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             &repo.root,
         );
         let cas_root = init_cas_dir(&repo.root).expect("init CAS");
-        let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
+        let gh = if conclusion == "no-checks" {
+            let path = cas_root.join("no-checks-ci-gh");
+            cas::test_paths::warm_stub(
+                &path,
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
+            );
+            path
+        } else {
+            ci_check_run::ci_concluded(&cas_root, conclusion)
+        };
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
         // cas-3fc8: the insteadOf rewrite also changes `git remote get-url`,
         // so pin the project identity the fixture means.
@@ -638,6 +649,9 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
 
         if let Some(verdict) = verdict {
+            if row == "advisory-no-checks" {
+                assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
+            }
             assert_eq!(
                 after_merge.deliverables.green_merge_commit.as_deref(),
                 Some(merge_sha.as_str()),

@@ -5646,15 +5646,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // same-session supervisors; newer status or ready supersedes
             // either kind, but never a transported action or another worker's.
             let mut stmt = tx.prepare_cached(
-                "SELECT id, prompt FROM prompt_queue
+                "SELECT id, prompt, summary FROM prompt_queue
                  WHERE factory_session = ? AND origin_agent_id = ?
                    AND processed_at IS NULL AND transport_delivered_at IS NULL
                    AND COALESCE(highest_stage, 'enqueued')
-                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                 ORDER BY id",
             )?;
             let pending = stmt
                 .query_map(params![factory_session, origin_agent_id], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             drop(stmt);
@@ -5662,18 +5667,55 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 .chars()
                 .filter(|ch| !matches!(ch, '"' | '<' | '>' | '\n' | '\r'))
                 .collect();
-            let superseded = pending
-                .into_iter()
-                .filter(|(_, old_prompt)| {
-                    old_prompt.ends_with("</cas-worker-action>")
-                        && ["status", "ready"].iter().any(|kind| {
-                            old_prompt.contains(&format!(
-                                "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
-                            ))
-                        })
-                })
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>();
+            let candidates = pending.into_iter().filter(|(_, old_prompt, _)| {
+                old_prompt.ends_with("</cas-worker-action>")
+                    && ["status", "ready"].iter().any(|kind| {
+                        old_prompt.contains(&format!(
+                            "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
+                        ))
+                    })
+            });
+            // cas-6021 (#4206302): coalescing keeps one pending wake, never
+            // fewer messages. Each superseded row's body travels in the newer
+            // row, oldest first, so a question sent just before the worker's
+            // next status still reaches the supervisor. A row whose body would
+            // push the combined message past the cap stays pending on its own.
+            const WORKER_ACTION_FOLD_CAP: usize = 8_000;
+            let body_of = |text: &str| {
+                text.rsplit_once("\n\n<cas-worker-action")
+                    .map_or(text, |(body, _)| body)
+                    .trim()
+                    .to_string()
+            };
+            let new_body = body_of(prompt);
+            let mut carried = Vec::new();
+            let mut carried_len = prompt.len();
+            let mut superseded = Vec::new();
+            for (old_id, old_prompt, old_summary) in candidates {
+                let old_body = body_of(&old_prompt);
+                if old_body.is_empty() || old_body == new_body {
+                    superseded.push(old_id);
+                    continue;
+                }
+                let label = old_summary
+                    .filter(|summary| !summary.trim().is_empty())
+                    .map(|summary| format!(" ({})", summary.trim()))
+                    .unwrap_or_default();
+                let block = format!(
+                    "Earlier message #{old_id}{label}, not yet delivered when this one was sent:\n{old_body}"
+                );
+                if carried_len + block.len() + 7 > WORKER_ACTION_FOLD_CAP {
+                    continue;
+                }
+                carried_len += block.len() + 7;
+                carried.push(block);
+                superseded.push(old_id);
+            }
+            let stored_prompt = if carried.is_empty() {
+                prompt.to_string()
+            } else {
+                format!("{}\n\n---\n\n{prompt}", carried.join("\n\n---\n\n"))
+            };
 
             let origin_kind = origin.kind_str();
             tx.execute(
@@ -5684,7 +5726,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![
                     source,
                     target,
-                    prompt,
+                    stored_prompt,
                     now_text,
                     factory_session,
                     summary,
@@ -5695,7 +5737,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ],
             )?;
             let id = tx.last_insert_rowid();
-            let detail = format!("newer worker action message {id} superseded this pending wake");
+            let detail = format!(
+                "newer worker action message {id} superseded this pending wake and carries its body"
+            );
             for superseded_id in superseded {
                 Self::atomic_stage_stamp_in_tx(
                     &tx,

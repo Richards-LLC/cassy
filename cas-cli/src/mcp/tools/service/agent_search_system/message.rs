@@ -3814,27 +3814,37 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_prompt_queue_store;
 
-        // cas-f9c7: `id` names a message sent to a peer supervisor on another
-        // machine; its receipt lives in the Cassy Cloud peer mailbox.
-        if req.notification_id.is_none()
-            && let Some(peer_message_id) = req.id.clone().filter(|id| !id.trim().is_empty())
-        {
-            return self.peer_message_status(peer_message_id).await;
-        }
-        let notification_id = req.notification_id.ok_or_else(|| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "notification_id required for message_status (the prompt queue message ID), \
-                 or id=<peer message id> for a message sent to a peer supervisor",
-            )
-        })?;
-
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
+        let notification_id = match req.notification_id {
+            Some(id) => id,
+            None => {
+                let Some(given) = req.id.clone().filter(|id| !id.trim().is_empty()) else {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "notification_id required for message_status (the prompt queue message ID), \
+                         or id=<peer message id> for a message sent to a peer supervisor",
+                    ));
+                };
+                // cas-f9c7: `id` names a message sent to a peer supervisor on
+                // another machine; its receipt lives in the Cassy Cloud peer
+                // mailbox. cas-6021: a number this queue holds is its own
+                // message, answered here rather than as a peer 404.
+                match given
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| queue.message_delivery_report(*id).ok().flatten().is_some())
+                {
+                    Some(local) => local,
+                    None => return self.peer_message_status(given).await,
+                }
+            }
+        };
 
         // cas-2c5f: stage-based report is additive; legacy status string is
         // preserved on the first line for older clients/scripts.

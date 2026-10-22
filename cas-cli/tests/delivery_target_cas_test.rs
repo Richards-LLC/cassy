@@ -608,6 +608,11 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
             assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
+            // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
+            assert!(
+                notes.contains("waiting on a gate") && notes.contains("awaiting_merge"),
+                "{row}: {notes}"
+            );
             answer
         } else {
             get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"))

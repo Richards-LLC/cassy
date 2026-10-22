@@ -2755,6 +2755,31 @@ mod status_transition_tests {
         assert!(result.is_err(), "unreadable authority must refuse: {result:?}");
         assert_eq!(stored.priority, Priority::MEDIUM, "refusal must precede task writes");
         assert_eq!(stored.title, task.title);
+
+        // Notes do not acquire priority authority just because a client sends
+        // its current priority too. Compare the persisted, normalized value;
+        // an out-of-range input still writes BACKLOG, not a new priority.
+        for (priority, requested) in [
+            (Priority::MEDIUM, None),
+            (Priority::MEDIUM, Some(2_u8)),
+            (Priority::BACKLOG, Some(u8::MAX)),
+        ] {
+            let mut current = tasks.get(&task.id).unwrap();
+            current.priority = priority;
+            tasks.update(&current).unwrap();
+            let note = format!("progress with unchanged priority {requested:?}");
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": requested, "notes": note,
+            }))
+            .unwrap();
+            core.cas_task_update(Parameters(request))
+                .await
+                .expect("an unchanged priority must not require readable authority");
+            let stored = tasks.get(&task.id).unwrap();
+            assert_eq!(stored.priority, priority);
+            assert_eq!(stored.title, task.title);
+            assert!(stored.notes.contains(&note));
+        }
     }
 
     #[tokio::test]

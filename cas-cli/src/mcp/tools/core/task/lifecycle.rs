@@ -2605,58 +2605,62 @@ impl CasCore {
             }
         }
 
+        let local_claim =
+            agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started"));
+        let won = match &local_claim {
+            Ok(ClaimResult::Success(_)) => true,
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by == &agent_id,
+            _ => false,
+        };
+        if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
+            // A refusal or failed local write leaves no newly acquired claim
+            // behind. Never release a claim retained by another local agent.
+            let (id, agent) = (req.id.clone(), agent_id.clone());
+            let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+        }
+
         let mut start_lease_epoch = None;
-        let claim_info =
-            match agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started")) {
-                Ok(ClaimResult::Success(lease)) => {
-                    start_lease_epoch = Some(lease.epoch);
-                    Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
-                }
-                Ok(ClaimResult::AlreadyClaimed {
-                    held_by,
-                    expires_at,
-                    ..
-                }) => {
-                    if held_by == agent_id {
-                        Some(format!(
-                            " (already claimed by you until {})",
+        let claim_info = match local_claim {
+            Ok(ClaimResult::Success(lease)) => {
+                start_lease_epoch = Some(lease.epoch);
+                Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
+            }
+            Ok(ClaimResult::AlreadyClaimed {
+                held_by,
+                expires_at,
+                ..
+            }) => {
+                if held_by == agent_id {
+                    Some(format!(
+                        " (already claimed by you until {})",
+                        expires_at.format("%H:%M")
+                    ))
+                } else {
+                    // Resolve UUID → friendly name so the supervisor can
+                    // identify the worker without cross-referencing worker_status.
+                    let holder_display = agent_store
+                        .get(&held_by)
+                        .map(|a| format!("{} ({})", a.name, held_by))
+                        .unwrap_or_else(|_| held_by.clone());
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Task is locked by {} until {}",
+                            holder_display,
                             expires_at.format("%H:%M")
-                        ))
-                    } else {
-                        // Resolve UUID → friendly name so the supervisor can
-                        // identify the worker without cross-referencing worker_status.
-                        let holder_display = agent_store
-                            .get(&held_by)
-                            .map(|a| format!("{} ({})", a.name, held_by))
-                            .unwrap_or_else(|_| held_by.clone());
-                        if cloud_claimed && let Some(claims) = peer_claims.clone() {
-                            // The local lease refused; leave no claim of this
-                            // agent's behind. A claim another agent holds was
-                            // never touched (cas-0078).
-                            let (id, agent) = (req.id.clone(), agent_id.clone());
-                            let _ = peer_budget
-                                .run(move || claims.release_own(&id, &agent))
-                                .await;
-                        }
-                        return Err(Self::error(
-                            ErrorCode::INVALID_PARAMS,
-                            format!(
-                                "Task is locked by {} until {}",
-                                holder_display,
-                                expires_at.format("%H:%M")
-                            ),
-                        ));
-                    }
+                        ),
+                    ));
                 }
-                Ok(refused) => return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("Cannot start task: local lease refused: {refused:?}"),
-                )),
-                Err(error) => return Err(Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to claim task before start: {error}"),
-                )),
-            };
+            }
+            Ok(refused) => return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("Cannot start task: local lease refused: {refused:?}"),
+            )),
+            Err(error) => return Err(Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to claim task before start: {error}"),
+            )),
+        };
         // A delayed synchronous release now sees this lease under the same
         // fence. Never expose the Cloud-first/local-later publication gap.
         drop(peer_claim_fence);

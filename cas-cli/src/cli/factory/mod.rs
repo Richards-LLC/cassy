@@ -1184,7 +1184,8 @@ pub enum FactoryGcCommands {
     /// Target-cache reclamation, orphan-process kills, and journey-recording
     /// cleanup require both --force and --no-dry-run.
     ///
-    /// Artifact cleanup requires both flags and artifacts=true.
+    /// Artifact cleanup is available only through the MCP gc_cleanup action
+    /// with artifacts=true.
     Cleanup {
         /// Also reap orphan worker process groups and prune terminal prompts.
         #[arg(long, short = 'f')]

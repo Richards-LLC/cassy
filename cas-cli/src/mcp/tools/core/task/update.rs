@@ -631,6 +631,26 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let requested_status_is_active = req
+            .status
+            .as_deref()
+            .and_then(|status| status.parse::<TaskStatus>().ok())
+            .is_some_and(|status| matches!(status, TaskStatus::InProgress | TaskStatus::Blocked));
+        let priority_touches_active_task = req.priority.is_some()
+            && (matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+                || requested_status_is_active);
+        if priority_touches_active_task
+            && let Some(caller) = self
+                .get_registered_agent_id_read_only()
+                .ok()
+                .and_then(|caller_id| self.open_agent_store().ok()?.get(&caller_id).ok())
+            && caller.role == cas_types::AgentRole::Worker
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on active tasks; a live registered supervisor must change it.",
+            ));
+        }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.
@@ -2533,7 +2553,7 @@ mod status_transition_tests {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
         EpicCloseGateOutcome, run_epic_close_merge_gate,
     };
-    use cas_types::{Agent, Task, TaskStatus, TaskType};
+    use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus, TaskType};
     use tempfile::TempDir;
 
     fn git(repo: &std::path::Path, args: &[&str]) -> String {
@@ -2549,6 +2569,156 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_raise_priority_of_own_in_progress_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+
+        let mut worker = Agent::new_with_role(
+            "priority-worker-id".into(),
+            "priority-worker".into(),
+            AgentRole::Worker,
+        );
+        worker.factory_session = Some("priority-session".into());
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-priority-worker".into(), "worker task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(&task.id, &worker.id, 3600, Some("working"))
+            .unwrap();
+        core.set_agent_id_for_testing(worker.id);
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        let error = core
+            .cas_task_update(Parameters(request))
+            .await
+            .expect_err("a worker must not promote its active task");
+
+        assert!(
+            error.message.contains("priority") && error.message.contains("supervisor"),
+            "{}",
+            error.message
+        );
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_promote_priority_when_starting_or_blocked() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let mut worker = Agent::new_with_role(
+            "priority-transition-worker-id".into(),
+            "priority-transition-worker".into(),
+            AgentRole::Worker,
+        );
+        worker.factory_session = Some("priority-transition-session".into());
+        agents.register(&worker).unwrap();
+        core.set_agent_id_for_testing(worker.id);
+
+        let mut starting = Task::new("cas-priority-starting".into(), "starting task".into());
+        starting.assignee = Some("priority-transition-worker".into());
+        starting.priority = Priority::MEDIUM;
+        tasks.add(&starting).unwrap();
+        let start_request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": starting.id,
+            "status": "in_progress",
+            "priority": 0,
+        }))
+        .unwrap();
+        let start_error = core
+            .cas_task_update(Parameters(start_request))
+            .await
+            .expect_err("a worker cannot combine task start with a priority promotion");
+        assert!(
+            start_error.message.contains("TASK PRIORITY UPDATE REJECTED"),
+            "{}",
+            start_error.message
+        );
+        let unchanged = tasks.get(&starting.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::Open);
+        assert_eq!(unchanged.priority, Priority::MEDIUM);
+
+        let mut blocked = Task::new("cas-priority-blocked".into(), "blocked task".into());
+        blocked.status = TaskStatus::Blocked;
+        blocked.assignee = Some("priority-transition-worker".into());
+        blocked.priority = Priority::MEDIUM;
+        tasks.add(&blocked).unwrap();
+        let blocked_request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": blocked.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        let blocked_error = core
+            .cas_task_update(Parameters(blocked_request))
+            .await
+            .expect_err("a worker cannot promote priority while its task is blocked");
+        assert!(
+            blocked_error.message.contains("TASK PRIORITY UPDATE REJECTED"),
+            "{}",
+            blocked_error.message
+        );
+        let unchanged = tasks.get(&blocked.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::Blocked);
+        assert_eq!(unchanged.priority, Priority::MEDIUM);
+    }
+
+    #[tokio::test]
+    async fn supervisor_can_change_priority_of_in_progress_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+
+        let worker = Agent::new_with_role(
+            "priority-managed-worker-id".into(),
+            "priority-managed-worker".into(),
+            AgentRole::Worker,
+        );
+        agents.register(&worker).unwrap();
+        let supervisor = Agent::new_with_role(
+            "priority-supervisor-id".into(),
+            "priority-supervisor".into(),
+            AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        let mut task = Task::new("cas-priority-managed".into(), "managed task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(&task.id, &worker.id, 3600, Some("working"))
+            .unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(request))
+            .await
+            .expect("a live supervisor can reprioritize active work");
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::CRITICAL);
     }
 
     #[tokio::test]

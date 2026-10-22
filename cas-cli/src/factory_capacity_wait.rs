@@ -145,6 +145,16 @@ fn current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool>
     }))
 }
 
+/// A live task lease can outlast the worker's last admission retry. Keep its
+/// wait record for aging and escalation, but stop reserving queue position
+/// until it retries.
+fn admission_current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool> {
+    if now > wait.next_retry + Duration::seconds(RETRY_SECONDS) {
+        return Ok(false);
+    }
+    current(root, wait, now)
+}
+
 /// Resolve only a registered worker actually holding an InProgress task in
 /// this checkout. Standalone checks have no factory episode to record.
 fn binding(root: &Path, repo: &Path, now: DateTime<Utc>) -> Result<Option<CapacityWait>> {
@@ -217,6 +227,7 @@ pub(crate) fn record_refusal(
     let _lock = lock(root)?;
     if let Some(previous) = read(&path(root, &wait.worker_id))?
         && same_identity(&previous, &wait)
+        && current(root, &previous, now)?
     {
         wait = previous;
     }
@@ -234,6 +245,7 @@ pub(crate) fn priority_refusal(
     root: &Path,
     repo: &Path,
     now: DateTime<Utc>,
+    available_slots: usize,
 ) -> Result<Option<String>> {
     let Some(mut requester) = binding(root, repo, now)? else {
         return Ok(None);
@@ -241,6 +253,7 @@ pub(crate) fn priority_refusal(
     let _lock = lock(root)?;
     if let Some(previous) = read(&path(root, &requester.worker_id))?
         && same_identity(&previous, &requester)
+        && current(root, &previous, now)?
     {
         requester = previous;
     }
@@ -251,8 +264,9 @@ pub(crate) fn priority_refusal(
         now,
     );
     let mut first_ahead: Option<(i32, DateTime<Utc>, String)> = None;
+    let mut ahead_count = 0;
     for (_, wait) in entries(root)? {
-        if wait.worker_id == requester.worker_id || !current(root, &wait, now)? {
+        if wait.worker_id == requester.worker_id || !admission_current(root, &wait, now)? {
             continue;
         }
         let task = match tasks.get(&wait.task_id) {
@@ -271,6 +285,7 @@ pub(crate) fn priority_refusal(
         {
             continue;
         }
+        ahead_count += 1;
         let position = (priority, wait.since.clone(), wait.worker_name);
         if first_ahead.as_ref().is_none_or(|first| {
             compare_position(
@@ -284,6 +299,9 @@ pub(crate) fn priority_refusal(
         }) {
             first_ahead = Some(position);
         }
+    }
+    if available_slots == 0 || ahead_count < available_slots {
+        return Ok(None);
     }
     Ok(first_ahead
         .map(|(priority, _, worker)| format!("queued behind priority=P{priority} worker={worker}")))
@@ -308,7 +326,7 @@ pub(crate) fn admitted(root: &Path, repo: &Path) -> Result<()> {
 /// Read-only view, including stale-lease rejection, shared by status and tests.
 pub(crate) fn view(root: &Path, worker: &str, now: DateTime<Utc>) -> Result<Option<CapacityWait>> {
     match read(&path(root, worker))? {
-        Some(wait) if current(root, &wait, now)? => Ok(Some(wait)),
+        Some(wait) if admission_current(root, &wait, now)? => Ok(Some(wait)),
         _ => Ok(None),
     }
 }
@@ -320,7 +338,7 @@ pub(crate) fn render(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> 
             if session.is_some() && wait.session.as_deref() != session {
                 continue;
             }
-            if !current(root, &wait, now)? {
+            if !admission_current(root, &wait, now)? {
                 continue;
             }
             lines.push(format!(

@@ -643,7 +643,7 @@ mod tests {
             ),
             (
                 "security",
-                "if [ \"$1\" = list-keychains ]; then printf '%s\\n' \"$CLAUDE_TEST_KEYCHAINS\"; else exit \"$CLAUDE_TEST_KEYCHAIN_EXIT\"; fi",
+                "if [ \"$1\" = list-keychains ]; then printf '%s\\n' \"$CLAUDE_TEST_KEYCHAINS\"; else printf '%s' \"$3\" > \"$HOME/keychain-service\"; exit \"$CLAUDE_TEST_KEYCHAIN_EXIT\"; fi",
             ),
         ] {
             let path = bin.join(name);
@@ -720,15 +720,28 @@ mod tests {
         env.set("SSH_CONNECTION", "fixture");
         env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
         env.set("CLAUDE_TEST_EXIT", "1");
-        for (profile, search_list) in [
-            (None, "    \"/Library/Keychains/System.keychain\""),
+        for (profile, search_list, expected_service) in [
+            (None, "    \"/Library/Keychains/System.keychain\"", None),
             (
                 Some("listed-but-locked"),
                 "    \"/Users/fixture/Library/Keychains/login.keychain-db\"",
+                None,
+            ),
+            (
+                Some("profile-e\u{301}"),
+                "    \"/Users/fixture/Library/Keychains/login.keychain-db\"",
+                Some("Claude Code-credentials-789b3bab"),
             ),
         ] {
             env.set("CLAUDE_TEST_KEYCHAINS", search_list);
             let evidence = fixture_claude_probe(&env, profile, 10, true);
+            if let Some(expected_service) = expected_service {
+                assert_eq!(
+                    std::fs::read_to_string(env.home().join("keychain-service")).unwrap(),
+                    expected_service,
+                    "metadata lookup must use the selected profile's NFC path hash"
+                );
+            }
             assert_eq!(evidence.availability, CapabilityAvailability::Unknown);
             // pin: incident #1294 requires this diagnostic instead of login advice.
             assert_eq!(
@@ -778,16 +791,43 @@ mod tests {
         let refreshed = fixture_claude_probe(&env, None, 300_010, false);
         assert_eq!(refreshed.availability, CapabilityAvailability::Unavailable);
         assert_eq!(refreshed.observed_at_ms, 300_010);
+        // An external `claude login` cannot notify this process's cache. Its
+        // logged-out advice must explain the bounded delay before a new probe.
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
+        let after_login = fixture_claude_probe(&env, None, 301_010, false);
+        let login_advice_matches = after_login == refreshed
+            && after_login.remediation.as_deref().is_some_and(|advice| advice.contains("one minute"));
+        let logged_in = fixture_claude_probe(&env, None, 360_010, false);
+        assert_eq!(logged_in.availability, CapabilityAvailability::Available);
         env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
         env.set("CLAUDE_TEST_EXIT", "1");
-        let failed = fixture_claude_probe(&env, None, 360_010, false);
+        let failed = fixture_claude_probe(&env, None, 660_010, false);
         assert_eq!(failed.availability, CapabilityAvailability::Unknown);
-        let repeated = fixture_claude_probe(&env, None, 370_010, false);
+        let repeated = fixture_claude_probe(&env, None, 670_010, false);
         assert_eq!(
             repeated, failed,
             "transient failures must also throttle probes without refreshing evidence"
         );
-        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 4);
+        // The credential-free cache is user-writable: a forged TTL must not
+        // extend either the returned freshness or the normal probe interval.
+        let cache = std::fs::read_dir(env.home().join(".cas/cache/claude-auth"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                serde_json::from_slice::<CapabilityEvidence>(&std::fs::read(path).unwrap())
+                    .unwrap().observed_at_ms == failed.observed_at_ms
+            })
+            .unwrap();
+        let mut forged = failed.clone();
+        forged.ttl_ms = u64::MAX;
+        std::fs::write(&cache, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let clamped = fixture_claude_probe(&env, None, 680_010, false);
+        let expired = fixture_claude_probe(&env, None, 720_010, false);
+        assert!(
+            login_advice_matches && clamped == failed && expired.observed_at_ms == 720_010,
+            "login delay advice={login_advice_matches}; tampered TTL returned {clamped:?}; expiry returned {expired:?}"
+        );
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 6);
     }
 
     #[test]

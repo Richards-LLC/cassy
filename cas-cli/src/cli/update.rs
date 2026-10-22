@@ -105,24 +105,114 @@ fn wrap_builtin_receipt(message: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Violet migration is advisory: keep diagnostics off JSON stdout, while
-/// sharing builtin receipts' lossless wrapping and HOME presentation.
+struct UserVioletWarnings {
+    verbose: bool,
+    warnings: Vec<String>,
+}
+
+std::thread_local! {
+    // Migration emits from nested profile/credential handlers. Scope its
+    // presentation and raw receipt to this synchronous user-update call.
+    static USER_VIOLET_WARNINGS: std::cell::RefCell<Option<UserVioletWarnings>> = const { std::cell::RefCell::new(None) };
+}
+
+struct RestoreUserVioletWarnings(Option<UserVioletWarnings>);
+
+impl Drop for RestoreUserVioletWarnings {
+    fn drop(&mut self) {
+        USER_VIOLET_WARNINGS.with(|slot| { slot.replace(self.0.take()); });
+    }
+}
+
+fn capture_user_violet_warnings(cli: &Cli, violet: impl FnOnce() -> anyhow::Result<()>) -> Vec<String> {
+    let previous = USER_VIOLET_WARNINGS.with(|slot| slot.replace(Some(UserVioletWarnings {
+        verbose: cli.verbose,
+        warnings: Vec::new(),
+    })));
+    let _restore = RestoreUserVioletWarnings(previous);
+    if let Err(error) = violet() {
+        report_update_warning(
+            &format!("Violet update advisory: {error}; continuing builtin sync"),
+            "Retry: cas update --user",
+        );
+    }
+    USER_VIOLET_WARNINGS.with(|slot| std::mem::take(&mut slot.borrow_mut().as_mut().unwrap().warnings))
+}
+
+/// Keep path tokens intact. A compact token preserves its first segment and
+/// leaf; the raw message remains in JSON and the verbose rendering.
+fn wrap_violet_warning(message: &str, width: usize, compact: bool) -> (Vec<String>, bool) {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut shortened = false;
+    for word in message.split_whitespace() {
+        let word = if compact && word.chars().count() > width {
+            shortened = true;
+            let mark = if crate::ui::components::locale_is_utf8() { "…" } else { "..." };
+            let keep = width.saturating_sub(mark.chars().count());
+            let first = if let Some(rest) = word.strip_prefix('/') {
+                format!("/{}/", rest.split('/').next().unwrap_or_default())
+            } else if word.starts_with("~/") {
+                "~/".to_string()
+            } else {
+                word.chars().take(keep / 2).collect()
+            };
+            let first: String = first.chars().take(keep / 2).collect();
+            let tail: String = word.chars().rev().take(keep - first.chars().count()).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail = if word.starts_with('/') || word.starts_with("~/") {
+                tail.find('/').map(|at| &tail[at..]).unwrap_or(&tail)
+            } else {
+                &tail
+            };
+            format!("{first}{mark}{tail}")
+        } else {
+            word.to_string()
+        };
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() { line.push(' '); }
+        line.push_str(&word);
+    }
+    if !line.is_empty() { lines.push(line); }
+    (lines, shortened)
+}
+
 pub(super) fn report_update_warning(message: &str, remedy: &str) {
-    let message = match dirs::home_dir() {
-        Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
-        None => message.to_string(),
+    let verbose = USER_VIOLET_WARNINGS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.as_mut() {
+            Some(context) => {
+                context.warnings.push(format!("{message}\n{remedy}"));
+                context.verbose
+            }
+            // Other callers retain their complete diagnostics.
+            None => true,
+        }
+    });
+    let message = if !verbose {
+        match dirs::home_dir() {
+            Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
+            None => message.to_string(),
+        }
+    } else {
+        message.to_string()
     };
     // `warning: ` occupies nine cells; the outer update phase adds two.
     let width = usize::from(crate::ui::components::terminal_width()).saturating_sub(11);
-    for (index, line) in wrap_builtin_receipt(&message, width).iter().enumerate() {
-        if index == 0 {
-            eprintln!("warning: {line}");
-        } else {
-            eprintln!("         {line}");
-        }
+    let (lines, shortened) = wrap_violet_warning(&message, width, !verbose);
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 { eprintln!("warning: {line}"); }
+        else { eprintln!("         {line}"); }
     }
-    for line in wrap_builtin_receipt(remedy, width) {
+    for line in wrap_violet_warning(remedy, width, !verbose).0 {
         eprintln!("  {line}");
+    }
+    if shortened {
+        for line in wrap_violet_warning("Full paths: cas update --user --verbose", width, false).0 {
+            eprintln!("  {line}");
+        }
     }
 }
 
@@ -3437,12 +3527,7 @@ fn sync_user_builtins_with_discovery(
     violet: impl FnOnce() -> anyhow::Result<()>,
     mut discover: impl FnMut(crate::accounts::Provider, &Path) -> io::Result<Vec<crate::accounts::AccountDir>>,
 ) -> anyhow::Result<()> {
-    if let Err(error) = violet() {
-        report_update_warning(
-            &format!("Violet update advisory: {error}; continuing builtin sync"),
-            "Retry: cas update --user",
-        );
-    }
+    let violet_warnings = capture_user_violet_warnings(cli, violet);
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
     })?;
@@ -3683,8 +3768,9 @@ fn sync_user_builtins_with_discovery(
         let finish_accounts = serde_json::to_string(&finish_accounts)?;
         let account_discovery_warnings = serde_json::to_string(&account_discovery_warnings)?;
         let builtin_warnings = serde_json::to_string(&builtin_warnings)?;
+        let violet_warnings_json = serde_json::to_string(&violet_warnings)?;
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned},"finish_accounts":{finish_accounts},"account_discovery_warnings":{account_discovery_warnings},"builtin_warnings":{builtin_warnings}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned},"finish_accounts":{finish_accounts},"account_discovery_warnings":{account_discovery_warnings},"builtin_warnings":{builtin_warnings},"warnings":{violet_warnings_json}}}"#
         );
     }
 

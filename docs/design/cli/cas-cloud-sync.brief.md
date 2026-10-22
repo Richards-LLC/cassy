@@ -19,6 +19,8 @@
   scope reported an error; incomplete zero-count pulls omit that clause to
   keep the verdict, conflict count and scope within 80 columns.
 - The existing JSON `errors` array carries skipped peer-close diagnostics.
+- Pull summary separators use `Icons::separator_dot(Formatter::unicode())`,
+  matching other CLI summaries: `LC_ALL=C` uses `-`; UTF-8 keeps `·`.
 
 ## Critique
 

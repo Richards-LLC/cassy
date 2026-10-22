@@ -19,7 +19,7 @@ use crate::cloud::{
     maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
-use crate::ui::theme::ActiveTheme;
+use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::store::{
     AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store,
@@ -3606,14 +3606,12 @@ pub(crate) fn render_sync_summary(
                 "personal only".to_string()
             });
             let error_count = summary.errors.len() + summary.team_errors.len();
+            let separator = format!(" {} ", Icons::separator_dot(fmt.unicode()));
+            let details = details.join(&separator);
             let message = if error_count == 0 {
-                format!("Pull complete · {}", details.join(" · "))
+                format!("Pull complete{separator}{details}")
             } else {
-                format!(
-                    "Pull incomplete · {} errors · {}",
-                    error_count,
-                    details.join(" · ")
-                )
+                format!("Pull incomplete{separator}{error_count} errors{separator}{details}")
             };
             if error_count == 0 && !summary.memory_fold_conflicts.is_empty() {
                 render_memory_fold_warning(fmt, summary.memory_fold_conflicts.len())?;
@@ -8194,21 +8192,30 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_zero_pull_as_one_quiet_line() {
-        for team_tasks in [0, 1] {
-            let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
-            if team_tasks > 0 {
-                summary.merge_team_pull(&crate::cloud::SyncResult {
-                    pulled_tasks: team_tasks,
-                    ..Default::default()
-                });
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        for (locale, expected) in [
+            ("C.UTF-8", [
+                "[OK] Pull complete · nothing newer · personal only\n",
+                "[OK] Pull complete · team 1 task · team + personal\n",
+            ]),
+            ("C", [
+                "[OK] Pull complete - nothing newer - personal only\n",
+                "[OK] Pull complete - team 1 task - team + personal\n",
+            ]),
+        ] {
+            env.set("LC_ALL", locale);
+            for (team_tasks, expected) in expected.into_iter().enumerate() {
+                let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+                if team_tasks > 0 {
+                    summary.merge_team_pull(&crate::cloud::SyncResult {
+                        pulled_tasks: team_tasks,
+                        ..Default::default()
+                    });
+                }
+                let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+                render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+                assert_eq!(tf.output(), expected, "locale={locale}");
             }
-            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-            assert_eq!(tf.output(), if team_tasks == 0 {
-                "[OK] Pull complete · nothing newer · personal only\n"
-            } else {
-                "[OK] Pull complete · team 1 task · team + personal\n"
-            });
         }
     }
 

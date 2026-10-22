@@ -152,17 +152,28 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    // pin: Cleanup has three mutation tiers; the flags only gate the higher tiers.
+    // pin: CLI cleanup help documents each actual mutation tier.
     assert!(
-        help.contains("Every run may update stale agent and worktree state, clear dead process-group records, and remove stale skill markers."),
+        help.contains(concat!(
+            "Each run may mark stale agents and missing worktrees, purge dead ",
+            "agent records, clear gone or recycled process-group records, and ",
+            "remove stale skill markers."
+        )),
         "{help}"
     );
     assert!(
-        help.contains("With --force, cleanup also reaps orphan worker process groups and prunes terminal prompt entries."),
+        help.contains(concat!(
+            "--force also reaps orphan worker process groups and prunes ",
+            "terminal prompt entries."
+        )),
         "{help}"
     );
     assert!(
-        help.contains("Target-cache reclamation, orphan-process killing, and journey-recording cleanup require both --force and --no-dry-run."),
+        help.contains(concat!(
+            "Target-cache reclamation, orphan-process kills, and ",
+            "journey-recording cleanup require both --force and --no-dry-run. ",
+            "MCP artifact deletion requires the same flags plus artifacts=true."
+        )),
         "{help}"
     );
 

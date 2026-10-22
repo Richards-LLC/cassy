@@ -1150,16 +1150,24 @@ pub enum FactoryGcCommands {
     Report,
     /// Run the same cleanup as coordination gc_cleanup.
     ///
-    /// Cleanup defaults to a dry run. Actual mutation requires both --force
-    /// and --no-dry-run.
+    /// Each run may mark stale agents and missing worktrees, purge dead agent
+    /// records, clear gone or recycled process-group records, and remove stale
+    /// skill markers.
+    ///
+    /// --force also reaps orphan worker process groups and prunes terminal
+    /// prompt entries.
+    ///
+    /// Target-cache reclamation, orphan-process kills, and journey-recording
+    /// cleanup require both --force and --no-dry-run. MCP artifact deletion
+    /// requires the same flags plus artifacts=true.
     Cleanup {
-        /// Authorize cleanup actions that require explicit force consent.
+        /// Also reap orphan worker process groups and prune terminal prompts.
         #[arg(long, short = 'f')]
         force: bool,
-        /// Explicitly keep cleanup in preview mode (the default).
+        /// Keep cache, orphan-process, and journey cleanup in preview mode.
         #[arg(long, conflicts_with = "no_dry_run")]
         dry_run: bool,
-        /// Apply eligible cleanup instead of only previewing it.
+        /// Authorize cache, orphan-process, and journey cleanup with --force.
         #[arg(long = "no-dry-run", conflicts_with = "dry_run")]
         no_dry_run: bool,
     },

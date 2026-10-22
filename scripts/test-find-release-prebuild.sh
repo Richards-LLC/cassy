@@ -32,9 +32,14 @@ fail=0
 run_lookup() (
     unset SECONDS
     SECONDS=0
-    sleep() { SECONDS=$((SECONDS + $1)); }
+    sleep() {
+        SECONDS=$((SECONDS + $1))
+        if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+            printf '%s\n' "$SECONDS" >"$FAKE_LOOKUP_CLOCK_FILE"
+        fi
+    }
     if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
-        trap 'printf "%s\n" "$SECONDS" >"$FAKE_LOOKUP_CLOCK_FILE"' EXIT
+        printf '0\n' >"$FAKE_LOOKUP_CLOCK_FILE"
     fi
     source "$lookup_script" "$@"
 )

@@ -10,7 +10,8 @@
 #   scripts/run-verified-tests.sh test -p cas --doc
 #
 # CARGO may replace the cargo binary in self-tests.  VERIFIED_TEST_LOG keeps
-# the raw captured output when a caller needs a durable receipt.
+# the raw captured output when a caller needs a durable receipt. The bounded
+# nextest discovery path requires python3, including downstream embedded use.
 
 set -uo pipefail
 
@@ -59,12 +60,9 @@ cargo, *args = sys.argv[1:]
 limit = float(os.environ["CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS"])
 if limit <= 0:
     sys.exit("nextest discovery timeout must be positive")
-child = subprocess.Popen(
-    [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT, start_new_session=True,
-)
+child = None
+pending_signal = None
 selector = selectors.DefaultSelector()
-selector.register(child.stdout, selectors.EVENT_READ)
 finished = re.compile(r"(?m)^\s*Finished\b")
 starting = re.compile(r"(?m)^\s*Starting\s+\d+\s+tests?\b")
 window = ""
@@ -120,43 +118,99 @@ def capture_sample(pid):
         except (OSError, subprocess.TimeoutExpired) as error:
             emit(f"nextest discovery sample failed for PID {pid}: {error}")
 
-while True:
-    events = selector.select(0.1)
-    for key, _ in events:
-        chunk = os.read(key.fd, 65536)
-        if not chunk:
-            selector.unregister(key.fileobj)
+watched_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+def stop_child(signum):
+    # The process group belongs only to this Popen child and its descendants.
+    try:
+        os.killpg(child.pid, signum)
+    except ProcessLookupError:
+        pass
+    try:
+        child.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+    # Descendants may ignore the signal even if their parent already exited.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            emit(f"FAIL: could not reap nextest runner PID {child.pid} after SIGKILL")
+        except BrokenPipeError:
+            pass
+
+def forward_signal(signum, _frame):
+    global pending_signal
+    if child is None:
+        pending_signal = signum
+        return
+    for watched in watched_signals:
+        signal.signal(watched, signal.SIG_IGN)
+    stop_child(signum)
+    sys.exit(128 + signum)
+
+def discovery_timeout(elapsed):
+    pid = listing_child(child.pid)
+    emit(f"FAIL: nextest discovery timeout: phase=--list PID={pid} runner_PID={child.pid} elapsed={elapsed:.1f}s limit={limit:g}s")
+    capture_sample(pid)
+    stop_child(signal.SIGTERM)
+    sys.exit(124)
+
+# Install before launch so a signal received while Popen starts is not lost.
+for watched in watched_signals:
+    signal.signal(watched, forward_signal)
+child = subprocess.Popen(
+    [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT, start_new_session=True,
+)
+if pending_signal is not None:
+    forward_signal(pending_signal, None)
+selector.register(child.stdout, selectors.EVENT_READ)
+try:
+    while True:
+        events = selector.select(0.1)
+        for key, _ in events:
+            chunk = os.read(key.fd, 65536)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                break
+            os.write(1, chunk)
+            window = (window + chunk.decode(errors="replace"))[-8192:]
+            clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", window)
+            if discovery_at is None and finished.search(clean):
+                discovery_at = time.monotonic()
+            if starting.search(clean):
+                tests_started = True
+        if discovery_at is not None and not tests_started:
+            elapsed = time.monotonic() - discovery_at
+            if elapsed >= limit:
+                discovery_timeout(elapsed)
+        if not selector.get_map():
             break
-        os.write(1, chunk)
-        window = (window + chunk.decode(errors="replace"))[-8192:]
-        clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", window)
-        if discovery_at is None and finished.search(clean):
-            discovery_at = time.monotonic()
-        if starting.search(clean):
-            tests_started = True
+    # EOF is not process completion: a child may close stdout and keep the
+    # build-directory lock. Honor the discovery deadline and bound exit cleanup.
+    wait_limit = 5.0
     if discovery_at is not None and not tests_started:
-        elapsed = time.monotonic() - discovery_at
-        if elapsed >= limit:
-            pid = listing_child(child.pid)
-            emit(f"FAIL: nextest discovery timeout: phase=--list PID={pid} runner_PID={child.pid} elapsed={elapsed:.1f}s limit={limit:g}s")
-            capture_sample(pid)
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                child.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                pass
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait()
-            sys.exit(124)
-    if not selector.get_map():
-        break
-sys.exit(child.wait() if child.returncode is None else child.returncode)
+        wait_limit = min(wait_limit, max(0, limit - (time.monotonic() - discovery_at)))
+    try:
+        status = child.wait(timeout=wait_limit)
+    except subprocess.TimeoutExpired:
+        if discovery_at is not None and not tests_started:
+            elapsed = time.monotonic() - discovery_at
+            if elapsed >= limit:
+                discovery_timeout(elapsed)
+        emit(f"FAIL: nextest process exit timeout after stdout closed: runner_PID={child.pid} limit={wait_limit:g}s")
+        stop_child(signal.SIGTERM)
+        status = 124
+finally:
+    selector.close()
+    if child.poll() is None:
+        stop_child(signal.SIGTERM)
+sys.exit(status)
 PY
     ) | tee "${log}"
 else

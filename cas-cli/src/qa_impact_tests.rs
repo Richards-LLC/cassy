@@ -174,6 +174,36 @@ fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
 }
 
 #[test]
+fn qa_impact_marks_a_planned_spec_as_planned_not_reviewable() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/deals.ts", "deals");
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n    spec: tests/deals.spec.ts\n    spec_status: planned\n",
+    );
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified("src/deals.ts")],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    let journey = &report.journeys[0];
+    assert_eq!(journey.spec, None);
+    assert!(
+        journey.evidence_required.ends_with(
+            "; spec tests/deals.spec.ts is planned, not written: no automated coverage yet"
+        ),
+        "{}",
+        journey.evidence_required
+    );
+}
+
+#[test]
 fn qa_impact_labels_unowned_with_longest_codemap_and_falls_back() {
     let temp = repo();
     let repo = temp.path();

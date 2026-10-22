@@ -84,7 +84,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `fixtures` | Optional fixture names; validated when the header declares fixtures. |
 | `traffic` | Required for curated live journeys when the header has a `traffic_snapshot`: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. With no snapshot, an omitted `traffic` is unallocated-share debt. |
 | `spec` | Optional tracked automated journey file. |
-| `spec_status` | Optional `planned`: the `spec` path is a later task's deliverable, so an untracked path is `planned_spec` debt instead of an `untracked_spec` failure. Remove it once the spec is tracked. |
+| `spec_status` | Optional `planned`: the `spec` path is a later task's deliverable, so an untracked path is `planned_spec` debt instead of an `untracked_spec` failure. Remove it once the spec is tracked: a marker left on a tracked spec, or on a journey without `spec`, is `stale_planned_spec` debt. `cas qa journeys --status` lists planned specs not yet written, and `cas qa impact` reports them as planned rather than as a spec to open. |
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |

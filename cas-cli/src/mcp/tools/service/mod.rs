@@ -1983,16 +1983,69 @@ mod tests {
     }
 
     #[test]
-    fn coordination_dispatch_future_stays_small_cas_1567() {
-        // Unboxed, this debug-build future was 101464 bytes (12368 boxed) and
-        // every caller frame copied it. The epic_split cas_0795 journey
-        // overflowed the 2 MiB test thread on Linux.
+    fn tool_dispatch_futures_stay_small_cas_1567() {
+        // Unboxed, coordination_dispatch's debug-build future was 101464 bytes
+        // (12368 boxed). Every caller frame copied it and the epic_split
+        // cas_0795 journey overflowed the 2 MiB test thread on Linux. Keep
+        // the same bound on every MCP tool before another action match grows.
         let dir = TempDir::new().unwrap();
-        let service = CasService::new(CasCore::with_daemon(dir.path().to_path_buf(), None, None), None);
+        let service = CasService::new(
+            CasCore::with_daemon(dir.path().to_path_buf(), None, None),
+            None,
+        );
+        macro_rules! measure {
+            ($tool:ident, $request:tt) => {{
+                let req = serde_json::from_value(serde_json::json!($request)).unwrap();
+                (
+                    stringify!($tool),
+                    std::mem::size_of_val(&service.$tool(Parameters(req))),
+                )
+            }};
+        }
         let req: CoordinationRequest =
             serde_json::from_value(serde_json::json!({"action": "peers"})).unwrap();
-        let size = std::mem::size_of_val(&service.coordination_dispatch(req));
-        assert!(size < 32 * 1024, "coordination_dispatch future is {size} bytes");
+        let sizes = [
+            (
+                "coordination_dispatch",
+                std::mem::size_of_val(&service.coordination_dispatch(req)),
+            ),
+            measure!(memory, {"action": "list"}),
+            measure!(task, {"action": "list"}),
+            measure!(rule, {"action": "list"}),
+            measure!(skill, {"action": "list"}),
+            measure!(coordination, {"action": "peers"}),
+            measure!(factory, {"action": "worker_status"}),
+            measure!(search, {"action": "search"}),
+            measure!(system, {"action": "version"}),
+            measure!(verification, {"action": "list"}),
+            measure!(artifact, {"action": "list"}),
+            measure!(knowledge, {"action": "list"}),
+            measure!(team, {"action": "list"}),
+            measure!(pattern, {"action": "list"}),
+            measure!(spec, {"action": "list"}),
+            measure!(mcp_search, {"code": ""}),
+            measure!(mcp_execute, {"code": ""}),
+        ];
+        let mut measured_tools: Vec<_> = sizes
+            .iter()
+            .filter(|(name, _)| *name != "coordination_dispatch")
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        measured_tools.sort();
+        let mut registered_tools = service.registered_tool_names();
+        registered_tools.sort();
+        assert_eq!(
+            measured_tools, registered_tools,
+            "update the future-size guard when MCP tools change"
+        );
+        let oversized: Vec<_> = sizes
+            .iter()
+            .filter(|(_, size)| *size >= 32 * 1024)
+            .collect();
+        assert!(
+            oversized.is_empty(),
+            "oversized tool futures: {oversized:?}; all sizes: {sizes:?}"
+        );
     }
 }
 

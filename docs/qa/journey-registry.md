@@ -82,6 +82,9 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. |
 | `spec` | Optional tracked automated journey file. |
 | `automation` | Optional `{owner, task?, due?}`: who automates the journey while it is hand-walked (no `spec`). See [hand-walk debt](#hand-walk-debt). |
+| `fixture_set` | Optional tracked `.tsv` or `.jsonl` golden set of `{id, frozen: {sha256, storage_key}, labels}` records. See [golden sets](release-gate.md#golden-sets). |
+| `matrix` | Optional `{axis: [values]}`; each golden-set cell takes one value of every axis. |
+| `runs` | Optional independent runs per golden-set cell (default 1). |
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
@@ -191,15 +194,16 @@ manual_checks:
 
 ### Hand-walk debt
 
-A live journey with no `spec` is walked by hand. `--check` reports it as one
+A journey with no `spec` that is live in staging or prod (its `env_status`
+entry, else `status`) is walked by hand. `--check` reports it as one
 of two debt lines:
 
 - `hand_walk` names `automation.owner`, plus the `task` and `due` date when
   they are set.
 - `hand_walk_unowned` means the journey has no `automation` owner.
 
-A `due` date is checked like a pending checker's: an invalid date fails as
-`pending_checker`, and a past one fails as `overdue_checker`. The release gate
+An invalid `automation.due` fails as `automation`, and a past one fails as
+`overdue_automation`. The release gate
 measures each manual row's minutes against the same owner. See
 [release gate](release-gate.md#hand-walk-minutes).
 

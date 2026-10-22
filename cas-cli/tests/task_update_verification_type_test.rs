@@ -10,9 +10,7 @@ use cas_mcp::types::TaskRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 fn task_request(value: serde_json::Value) -> TaskRequest {
     serde_json::from_value(value).expect("valid public task request")

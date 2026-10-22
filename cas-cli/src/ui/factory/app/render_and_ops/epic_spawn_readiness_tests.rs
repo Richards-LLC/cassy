@@ -161,7 +161,10 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
         Some("epic/{a,b}"),
         Some("epic/a!e"),
         Some("epic/a'quote"),
+        Some("epic/café"),
         Some("epic/control\u{85}label"),
+        Some("epic/invisible\u{202e}label"),
+        Some("epic/invisible\u{200b}label"),
     ] {
         let adopted = adopted_branch.is_some();
         with_fixture(|f| {
@@ -267,8 +270,21 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .err()
                 .expect("unpublished peer lane must not be recreated")
                 .to_string();
-            let control_ref = branch.chars().any(char::is_control);
-            if control_ref {
+            let invisible_label = match branch {
+                "epic/invisible\u{202e}label" => Some("epic/invisible\\u{202e}label"),
+                "epic/invisible\u{200b}label" => Some("epic/invisible\\u{200b}label"),
+                _ => None,
+            };
+            let control_ref = branch.chars().any(char::is_control) || invisible_label.is_some();
+            if let Some(escaped) = invisible_label {
+                assert!(error.contains(escaped), "invisible ref must be visible: {error:?}");
+                assert!(!error.contains(branch), "invisible ref printed literally: {error:?}");
+                assert!(!error.lines().any(|line| line.starts_with("git ")), "invisible ref must not produce executable advice: {error:?}");
+                if branch.contains('\u{202e}') {
+                    // pin: invisible-ref refusal layout is the terminal-QA fixture.
+                    assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-invisible-ref.capture.txt").trim_end());
+                }
+            } else if control_ref {
                 // pin: control-bearing refs require visible identity and manual action, never a command.
                 assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-control-ref.capture.txt").trim_end());
                 if !error.contains("contains control characters") || !error.contains("\\u{85}")

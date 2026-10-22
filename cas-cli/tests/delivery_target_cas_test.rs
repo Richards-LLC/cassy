@@ -33,9 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
@@ -539,8 +537,13 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         let cas_root = init_cas_dir(&repo.root).expect("init CAS");
         let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-        std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
-            .expect("write config");
+        // cas-3fc8: the insteadOf rewrite also changes `git remote get-url`,
+        // so pin the project identity the fixture means.
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n"),
+        )
+        .expect("write config");
         let worker = slug.clone();
         let worker_id = format!("{slug}-worker-session");
         let supervisor_id = format!("{slug}-supervisor-session");
@@ -709,7 +712,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
         "close must retain its configured durable artifact as queryable receipt metadata"
     );
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     assert!(
@@ -1081,7 +1084,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     let state = delivery_state(&fixture);
@@ -1128,7 +1131,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     );
     fixture.repo.arm_post_checkout_drift("cas0a21drift", "main");
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     // The hook must actually have fired, or this regression proves nothing.
@@ -1194,9 +1197,9 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
         &first.repo.root,
     );
 
-    env.set_current_dir(&first.repo.root);
+    let mut env = env.enter_dir(&first.repo.root);
     let first_output = run_merge(&first).await;
-    env.set_current_dir(&second.repo.root);
+    let _env = env.enter_dir(&second.repo.root);
     let second_output = run_merge(&second).await;
 
     assert_eq!(

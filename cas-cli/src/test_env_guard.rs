@@ -289,6 +289,19 @@ impl TestEnvGuard {
         std::env::set_current_dir(path).expect("set test current directory");
     }
 
+    /// cas-3fc8 (rule-026): enter `path` until the returned guard drops.
+    /// Shadow `env` with it (`let mut env = env.enter_dir(..)`), after the
+    /// fixture it enters: it then drops first, even when the test panics, so
+    /// the process leaves that directory before it is deleted and no other
+    /// test in the process sees a deleted current directory. Both moves go
+    /// through [`Self::set_current_dir`].
+    #[allow(dead_code)]
+    pub(crate) fn enter_dir(&mut self, path: impl AsRef<Path>) -> CurrentDirGuard<'_> {
+        let saved = std::env::current_dir().expect("current test directory");
+        self.set_current_dir(path);
+        CurrentDirGuard { env: self, saved }
+    }
+
     fn capture(&mut self, key: &OsStr) {
         if !self.saved.iter().any(|(saved, _)| saved == key) {
             self.saved.push((key.to_os_string(), std::env::var_os(key)));
@@ -311,6 +324,34 @@ impl TestEnvGuard {
         for key in keys {
             self.remove(key);
         }
+    }
+}
+
+/// Restores the current directory saved by [`TestEnvGuard::enter_dir`],
+/// and stands in for the guard it borrows meanwhile.
+#[allow(dead_code)]
+pub(crate) struct CurrentDirGuard<'a> {
+    env: &'a mut TestEnvGuard,
+    saved: std::path::PathBuf,
+}
+
+impl std::ops::Deref for CurrentDirGuard<'_> {
+    type Target = TestEnvGuard;
+    fn deref(&self) -> &TestEnvGuard {
+        self.env
+    }
+}
+
+impl std::ops::DerefMut for CurrentDirGuard<'_> {
+    fn deref_mut(&mut self) -> &mut TestEnvGuard {
+        self.env
+    }
+}
+
+impl Drop for CurrentDirGuard<'_> {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        self.env.set_current_dir(saved);
     }
 }
 

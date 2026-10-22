@@ -515,14 +515,65 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    let temp = TempDir::new().unwrap();
+    for state in ["missing", "existing", "directory"] {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        let mcp_path = temp.path().join(".mcp.json");
+        let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
+        match state {
+            "existing" => std::fs::write(
+                &mcp_path,
+                serde_json::json!({"mcpServers": {"other": other_server}}).to_string(),
+            )
+            .unwrap(),
+            "directory" => std::fs::create_dir(&mcp_path).unwrap(),
+            _ => {}
+        }
 
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("initialized"));
+        let output = cas_cmd(temp.path())
+            .current_dir(&temp)
+            .args(["init", "--no-integrations", "--json"])
+            .output()
+            .unwrap();
+        if state == "directory" {
+            assert!(
+                !output.status.success(),
+                "MCP provisioning failure must fail init"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "failed init must not report initialized"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
+            assert!(
+                mcp_path.is_dir(),
+                "failed init must preserve the obstructing directory"
+            );
+            continue;
+        }
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "initialized");
+        assert_eq!(report["agents"]["claude"], true);
+        assert_eq!(report["hooks_configured"], true);
+        let mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&mcp_path).expect("successful Claude init must create .mcp.json"),
+        )
+        .unwrap();
+        // pin: Claude's MCP launch contract must match the durable server entry.
+        assert_eq!(
+            mcp["mcpServers"]["cas"],
+            serde_json::json!({"command": "cas", "args": ["serve"]})
+        );
+        if state == "existing" {
+            assert_eq!(mcp["mcpServers"]["other"], other_server);
+        }
+    }
 }
 
 #[test]

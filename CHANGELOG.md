@@ -13,6 +13,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Shared ownership hints** — Report owner groups referenced by only one journey as curation debt, naming the sole journey without failing registry validation.
 
+- **Approved replacement branches** — Add supervisor-only MCP task action=rebind_branch with an existing branch and approval reason; validate the active assignment and clean checkout, audit the old branch/tip, and retain Git refs and normal close gates.
+
 ### Changed
 
 - **Failures inside the promise** — Align generated QA instructions and refusal guidance so failures within the stated purpose, acceptance criteria, demo or edited journey invariant remain in scope even when base shares them; rate invariant-evading tests at least Normal in the review guidance.
@@ -31,7 +33,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Clean error output** — Decide top-level and command diagnostic styling from stderr, keeping redirected errors free of terminal color escapes.
 
-- **Visible unsafe paths** — Escape control, bidirectional and Unicode line-separator characters in hook paths and Git refusal details, and avoid copyable remedies for unsafe paths.
+- **Visible unsafe paths** — Escape control and invisible Unicode characters in hook diagnostics, conflict-path lists and Git refusals, and avoid copyable remedies for unsafe paths.
+
+- **Multiline Git details** — Preserve structural line breaks in multi-line Git diagnostics while escaping unsafe characters within each row.
 
 - **Finished notifications** — Keep notification hooks alive for a bounded webhook result and distinguish delivered, failed and unconfirmed sends.
 

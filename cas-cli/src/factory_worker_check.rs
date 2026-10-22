@@ -2957,19 +2957,78 @@ PY"#);
         let p2_wait = execute_at(&root, &args, &repos[0], &fake)
             .unwrap_err()
             .to_string();
-        assert!(p2_wait.contains("priority=P2"), "{p2_wait}");
         let p0_wait = execute_at(&root, &args, &repos[1], &fake)
             .unwrap_err()
             .to_string();
-        assert!(p0_wait.contains("priority=P0"), "{p0_wait}");
         drop(held);
 
         let p2_retried = execute_at(&root, &args, &repos[0], &fake)
-            .unwrap_err()
-            .to_string();
-        assert!(p2_retried.contains("queued behind priority=P0"), "{p2_retried}");
-        execute_at(&root, &args, &repos[1], &fake).unwrap();
-        execute_at(&root, &args, &repos[0], &fake).unwrap();
+            .err()
+            .map(|error| error.to_string());
+        let p0_admitted_first = execute_at(&root, &args, &repos[1], &fake).is_ok();
+        let p2_admitted_after = execute_at(&root, &args, &repos[0], &fake).is_ok();
+
+        // A long-waiting P2 ages into P0 and breaks ties by its earlier wait
+        // time, so a stream of newly queued P0 work cannot starve it forever.
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        execute_at(&root, &args, &repos[0], &fake).unwrap_err();
+        execute_at(&root, &args, &repos[1], &fake).unwrap_err();
+        let p2_wait_path = std::fs::read_dir(root.join("capacity-waits"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|wait| wait["worker_id"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("priority-p2-worker")
+            })
+            .unwrap();
+        let mut p2_wait_record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&p2_wait_path).unwrap()).unwrap();
+        p2_wait_record["since"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339()
+        );
+        std::fs::write(&p2_wait_path, serde_json::to_vec(&p2_wait_record).unwrap()).unwrap();
+        drop(held);
+
+        let p0_aged_p2_block = execute_at(&root, &args, &repos[1], &fake)
+            .err()
+            .map(|error| error.to_string());
+        let p2_aged_admitted = execute_at(&root, &args, &repos[0], &fake).is_ok();
+        let p0_admitted_after_aged_p2 = execute_at(&root, &args, &repos[1], &fake).is_ok();
+
+        let mut failures = Vec::new();
+        if !p2_wait.contains("priority=P2") {
+            failures.push(format!("P2 refusal omitted its priority: {p2_wait}"));
+        }
+        if !p0_wait.contains("priority=P0") {
+            failures.push(format!("P0 refusal omitted its priority: {p0_wait}"));
+        }
+        if !p2_retried
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("P2 retry was not queued behind P0: {p2_retried:?}"));
+        }
+        if !p0_admitted_first || !p2_admitted_after {
+            failures.push("P0 did not go first while P2 later progressed".to_string());
+        }
+        if !p0_aged_p2_block
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("aged P2 did not precede fresh P0: {p0_aged_p2_block:?}"));
+        }
+        if !p2_aged_admitted || !p0_admitted_after_aged_p2 {
+            failures.push("aged P2 or the following P0 failed to make progress".to_string());
+        }
+        assert!(
+            failures.is_empty(),
+            "priority admission failed: {}",
+            failures.join("; ")
+        );
     }
 
     #[cfg(unix)]

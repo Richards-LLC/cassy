@@ -888,6 +888,17 @@ pub fn get_latest_verification_dispatch(
     get_latest_verification_dispatch_with_conn(&conn, task_id)
 }
 
+/// Whether any proof cycle still owns live verification work for this task.
+/// Do not infer this from the latest row: older claimed work can still exist.
+pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result<bool> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM verification_dispatches WHERE task_id = ?1 AND state IN ('pending', 'claimed'))",
+        params![task_id], |row| row.get(0),
+    ).map_err(StoreError::Database)
+}
+
 pub fn get_verification_dispatch_with_conn(
     conn: &Connection,
     dispatch_id: &str,
@@ -4546,10 +4557,14 @@ mod tests {
         )
         .expect("create live dispatch");
 
+        assert!(has_active_verification_dispatch(dir.path(), "cas-timeout-a").unwrap());
+
         let timed_out = timeout_verification_dispatch(dir.path(), "cas-timeout-a", Utc::now())
             .expect("timeout")
             .expect("due dispatch");
         assert_eq!(timed_out.state, VerificationDispatchState::TimedOut);
+        assert!(!has_active_verification_dispatch(dir.path(), "cas-timeout-a").unwrap());
+        assert!(has_active_verification_dispatch(dir.path(), "cas-timeout-b").unwrap());
         assert!(
             timeout_verification_dispatch(dir.path(), "cas-timeout-b", Utc::now())
                 .expect("not due")

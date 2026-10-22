@@ -228,6 +228,15 @@ pub fn create(
 }
 
 fn owner(cas: &Path, directory: &Path) -> Result<Owner> {
+    let record = read_owner(cas, directory)?;
+    ensure!(
+        directory.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new(&record.task_id)),
+        "review task does not match directory"
+    );
+    Ok(record)
+}
+
+fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
     safe_path(directory)?;
     let marker = directory.join("owner.json");
     let metadata = fs::symlink_metadata(&marker)?;
@@ -256,10 +265,6 @@ fn owner(cas: &Path, directory: &Path) -> Result<Owner> {
             && component(&owner.task_id),
         "review owner does not match project"
     );
-    ensure!(
-        directory.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new(&owner.task_id)),
-        "review task does not match directory"
-    );
     Ok(owner)
 }
 
@@ -283,7 +288,7 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
 
 fn eligible(cas: &Path, record: &Owner) -> Result<()> {
     let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
-    let resolved = match &record.dispatch_id {
+    let finished = match &record.dispatch_id {
         Some(id) => {
             let dispatch = cas_store::get_verification_dispatch(cas, id)?;
             ensure!(dispatch.task_id == task.id, "dispatch task mismatch");
@@ -295,15 +300,119 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
                 ),
                 "dispatch still active"
             );
-            dispatch.state == cas_types::VerificationDispatchState::Resolved
+            true
         }
         None => false,
     };
     ensure!(
-        task.is_terminal() || resolved,
+        task.is_terminal() || finished,
         "task and dispatch still active"
     );
+    ensure!(
+        !cas_store::has_active_verification_dispatch(cas, &task.id)?,
+        "task has an active verification dispatch"
+    );
     Ok(())
+}
+
+/// A durable queue outside Git, still under the checkout's private ownership.
+/// Its marker precedes the rename, so a crashed handoff is recoverable by GC.
+fn trash(cas: &Path, directory: &Path) -> Result<Option<PathBuf>> {
+    let path = directory.join("trash");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    safe_path(&path)?;
+    ensure!(metadata.is_dir(), "review trash is not a directory");
+    let source = owner(cas, directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "review trash must be private and owned by this user"
+        );
+    }
+    match fs::symlink_metadata(path.join("owner.json")) {
+        Ok(_) => {
+            let queued = read_owner(cas, &path)?;
+            ensure!(
+                queued.task_id == source.task_id
+                    && queued.dispatch_id == source.dispatch_id
+                    && queued.head == source.head,
+                "trash owner does not match checkout"
+            );
+        }
+        // Older collectors could remove the marker before their process exited.
+        // The private parent still proves ownership; corrupt markers never do.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(&path)? {
+        let name = entry?.file_name();
+        ensure!(
+            name == "owner.json" || name == "target",
+            "unexpected file in review trash"
+        );
+    }
+    safe_path(&path.join("target"))?;
+    if path.join("target").exists() {
+        ensure!(
+            fs::symlink_metadata(path.join("target"))?.is_dir(),
+            "trash target is not a directory"
+        );
+    }
+    Ok(Some(path))
+}
+
+struct CollectorLock(File);
+impl Drop for CollectorLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn collector_lock(cas: &Path, wait: bool) -> Result<Option<CollectorLock>> {
+    let slots = cas.join("worker-check-slots");
+    private_dir(&slots)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let lock = options.open(slots.join("review-trash.lock"))?;
+    if wait {
+        lock.lock_exclusive()?;
+    } else if let Err(error) = lock.try_lock_exclusive() {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        return Err(error.into());
+    }
+    Ok(Some(CollectorLock(lock)))
+}
+
+/// Accounting only: queued output is not free space, including while a build
+/// lease or collector lock prevents this process from deleting it.
+pub(crate) fn pending_reclaim_bytes(cas: &Path) -> u64 {
+    entries(&base(cas))
+        .into_iter()
+        .flat_map(|task| entries(&task))
+        .filter_map(|directory| trash(cas, &directory).ok().flatten())
+        .map(|path| bytes(&path.join("target"), None))
+        .sum()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReclaimMode {
+    Inspect,
+    Collect,
+    Stage,
 }
 
 fn source_is_old(record: &Owner) -> bool {
@@ -345,9 +454,10 @@ fn entries(path: &Path) -> Vec<PathBuf> {
 fn reclaim(
     cas: &Path,
     directory: &Path,
-    clean: bool,
+    mode: ReclaimMode,
     targets_only: bool,
 ) -> Result<(&'static str, u64)> {
+    let clean = mode == ReclaimMode::Collect;
     let lock = lease(directory, false)?;
     let record = owner(cas, directory)?;
     eligible(cas, &record)?;
@@ -408,12 +518,74 @@ fn reclaim(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "review output became live"
     );
+    let queued = trash(cas, directory)?;
+    if mode == ReclaimMode::Stage {
+        // A retry never overwrites an earlier interrupted handoff. The
+        // collector/GC can drain it and any later target under the same guards.
+        if queued.is_some() {
+            return Ok(("target queued; source retained", 0));
+        }
+        let target = checkout.join("target");
+        if !target.exists() {
+            return Ok(("source retained (target absent)", 0));
+        }
+        safe_path(&target)?;
+        ensure!(
+            fs::symlink_metadata(&target)?.is_dir(),
+            "review target is not a directory"
+        );
+        ensure!(
+            git(&checkout, &["ls-files", "--", "target"])?.is_empty(),
+            "review target contains tracked source"
+        );
+        let queue = directory.join("trash");
+        private_dir(&queue)?;
+        write_owner(&queue, &record)?;
+        fs::rename(&target, queue.join("target"))?;
+        // Check after rename as well: process descriptors now resolve through
+        // trash. Restore when possible if a user appeared during the handoff.
+        if eligible(cas, &owner(cas, directory)?).is_err()
+            || crate::factory_target_cache::review_output_in_use(directory, &lock)
+        {
+            let _ = fs::rename(queue.join("target"), &target);
+            return Err(anyhow::anyhow!(
+                "review output became live after rename; retained"
+            ));
+        }
+        return Ok(("target queued; source retained", 0));
+    }
+    let queued_bytes = queued
+        .as_ref()
+        .map_or(0, |path| bytes(&path.join("target"), None));
+    if clean && let Some(path) = &queued {
+        // Keep ownership durable until every payload byte is gone. A verifier
+        // process can exit during recursive deletion, or between these steps.
+        if let Err(error) = fs::remove_dir_all(path.join("target"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = fs::remove_file(path.join("owner.json"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        fs::remove_dir(path)?;
+    }
     if targets_only || !source_is_old(&record) {
         let target = checkout.join("target");
         if !target.exists() {
             return Ok((
-                "source retained (younger than 2 hours or target-only GC)",
-                0,
+                if queued.is_some() {
+                    if clean {
+                        "target reclaimed; source retained"
+                    } else {
+                        "target reclaimable; source retained"
+                    }
+                } else {
+                    "source retained (younger than 2 hours or target-only GC)"
+                },
+                queued_bytes,
             ));
         }
         safe_path(&target)?;
@@ -425,7 +597,7 @@ fn reclaim(
             git(&checkout, &["ls-files", "--", "target"])?.is_empty(),
             "review target contains tracked source"
         );
-        let size = bytes(&target, None);
+        let size = bytes(&target, None).saturating_add(queued_bytes);
         if clean {
             fs::remove_dir_all(&target)?;
         }
@@ -438,7 +610,7 @@ fn reclaim(
             size,
         ));
     }
-    let size = bytes(directory, None);
+    let size = bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 });
     if !clean {
         return Ok(("reclaimable", size));
     }
@@ -467,42 +639,83 @@ fn reclaim(
     Ok(("reclaimed", size))
 }
 
-/// The lifecycle and existing admission GC share the same guarded target-only
-/// pass. No source, registration, durable evidence or active dispatch is removed.
-pub(crate) fn reclaim_targets(cas: &Path, task_id: Option<&str>) -> u64 {
-    let Ok(cas) = cas.canonicalize() else {
-        return 0;
-    };
-    let root = base(&cas);
+fn candidates(cas: &Path, task_id: Option<&str>) -> Vec<PathBuf> {
+    let root = base(cas);
     let tasks = match task_id {
         Some(id) if component(id) => vec![root.join(id)],
-        Some(_) => return 0,
+        Some(_) => return Vec::new(),
         None => entries(&root),
     };
     tasks
         .into_iter()
         .flat_map(|task| entries(&task))
-        .filter(|directory| directory.join("repo/target").exists())
         .filter(|directory| {
-            owner(&cas, directory)
-                .and_then(|record| eligible(&cas, &record))
+            directory.join("repo/target").exists() || directory.join("trash").exists()
+        })
+        .filter(|directory| {
+            owner(cas, directory)
+                .and_then(|record| eligible(cas, &record))
                 .is_ok()
         })
         .take(MAX_RECLAIMS_PER_PASS)
-        .filter_map(|directory| reclaim(&cas, &directory, true, true).ok())
+        .collect()
+}
+
+fn collect_targets(cas: &Path, task_id: Option<&str>) -> u64 {
+    candidates(cas, task_id)
+        .into_iter()
+        .filter_map(|directory| reclaim(cas, &directory, ReclaimMode::Collect, true).ok())
         .map(|(_, size)| size)
         .sum()
 }
 
-/// Wait for the bounded pass off the async executor, after the state transaction
-/// commits. A held lease or unavailable process evidence leaves output for GC.
+/// Admission/GC can recover interrupted handoffs. A busy collector leaves the
+/// queued bytes visible; only actual unlinking contributes to reclaimed bytes.
+pub(crate) fn reclaim_targets(cas: &Path, task_id: Option<&str>) -> u64 {
+    let Ok(cas) = cas.canonicalize() else {
+        return 0;
+    };
+    let Ok(Some(_collector)) = collector_lock(&cas, false) else {
+        return 0;
+    };
+    collect_targets(&cas, task_id)
+}
+
+/// Await bounded guarded renames, never recursive measurement or deletion.
+/// The detached collector holds no build lane while waiting its global turn.
 pub(crate) async fn reclaim_task_targets(cas: &Path, task_id: &str) {
-    let cas = cas.to_path_buf();
+    let Ok(cas) = cas.canonicalize() else {
+        return;
+    };
     let task_id = task_id.to_owned();
-    if let Err(error) =
-        tokio::task::spawn_blocking(move || reclaim_targets(&cas, Some(&task_id))).await
-    {
-        tracing::warn!(%error, "review target cleanup deferred to GC");
+    let staging_root = cas.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+        candidates(&staging_root, Some(&task_id))
+            .into_iter()
+            .filter(|directory| reclaim(&staging_root, directory, ReclaimMode::Stage, true).is_ok())
+            .count()
+    })
+    .await;
+    match staged {
+        Ok(0) => {}
+        Ok(_) => {
+            // A short-lived CLI runtime must not wait for bulk unlinking on
+            // Tokio shutdown. Process exit may interrupt this thread; GC owns
+            // recovery from the durable, ownership-checked queue.
+            if let Err(error) = std::thread::Builder::new()
+                .name("review-trash".into())
+                .spawn(move || match collector_lock(&cas, true) {
+                    Ok(Some(_collector)) => {
+                        collect_targets(&cas, None);
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(%error, "review trash cleanup deferred to GC"),
+                })
+            {
+                tracing::warn!(%error, "review trash worker unavailable; deferred to GC");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "review target handoff deferred to GC"),
     }
 }
 
@@ -515,16 +728,28 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
     let mut reclaimed = 0u64;
     let mut reclaimable = 0u64;
     let mut cleaned = 0usize;
+    let collector = clean
+        .then(|| collector_lock(cas, false).ok().flatten())
+        .flatten();
     for task in entries(&base) {
         for directory in entries(&task) {
             let size = bytes(&directory, None);
-            let mutate = clean && cleaned < MAX_RECLAIMS_PER_PASS;
-            let mut candidate_bytes = 0;
-            let disposition = match reclaim(cas, &directory, mutate, false) {
+            let mutate = collector.is_some() && cleaned < MAX_RECLAIMS_PER_PASS;
+            let pending = trash(cas, &directory)
+                .ok()
+                .flatten()
+                .map_or(0, |path| bytes(&path.join("target"), None));
+            let mut candidate_bytes = pending;
+            let mode = if mutate {
+                ReclaimMode::Collect
+            } else {
+                ReclaimMode::Inspect
+            };
+            let disposition = match reclaim(cas, &directory, mode, false) {
                 Ok((status, bytes)) => {
-                    candidate_bytes = bytes;
-                    reclaimable += bytes;
-                    if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained") {
+                    candidate_bytes = candidate_bytes.max(bytes);
+                    if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained")
+                    {
                         reclaimed += bytes;
                         cleaned += 1;
                     }
@@ -532,13 +757,20 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
                 }
                 Err(error) => format!("retained: {error:#}"),
             };
+            reclaimable += candidate_bytes;
             rows.push(
                 serde_json::json!({"path": directory, "bytes": size, "reclaimable_bytes": candidate_bytes, "disposition": disposition}),
             );
         }
     }
+    let pending = pending_reclaim_bytes(cas);
+    let deferred = if clean && collector.is_none() {
+        "; deletion deferred (collector busy or unavailable)"
+    } else {
+        ""
+    };
     let mut out = format!(
-        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\n",
+        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes{deferred}\n",
         rows.len()
     );
     for row in &rows {
@@ -549,7 +781,7 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
             row["bytes"]
         ));
     }
-    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "dry_run": !clean})));
+    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "pending_reclaim_bytes": pending, "dry_run": !clean})));
     out
 }
 

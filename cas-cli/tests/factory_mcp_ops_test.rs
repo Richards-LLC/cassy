@@ -6502,6 +6502,47 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 // gc_cleanup tests
 // =============================================================================
 
+/// A terminal task must not leave a registered proof checkout and its target
+/// behind forever. The fixture uses the managed ownership record, real Git,
+/// SQLite task state and the public factory GC handler.
+#[tokio::test]
+async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "review-control");
+    let project = env.cas_root.parent().unwrap();
+    let scratch = project.join("scratch");
+    std::fs::write(env.cas_root.join("config.toml"), format!(
+        "[factory]\nscratch_root = {:?}\n", scratch.display().to_string()
+    )).unwrap();
+    let task = Task::new("cas-review-fixture".into(), "review owner".into());
+    env.task_store().add(&task).unwrap();
+    let project_scratch = cas_types::factory_scratch::project_scratch_dir(&scratch, &env.cas_root);
+    let owned = project_scratch.join("verify/cas-review-fixture/fixture");
+    let checkout = owned.join("repo");
+    std::fs::create_dir_all(&owned).unwrap();
+    git_stdout(project, &["worktree", "add", "--detach", checkout.to_str().unwrap(), "HEAD"]);
+    let head = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+    std::fs::write(owned.join("owner.json"), serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "cas_root": env.cas_root.canonicalize().unwrap(),
+        "task_id": task.id, "dispatch_id": null, "head": head,
+        "created_at": "2020-01-01T00:00:00Z"
+    })).unwrap()).unwrap();
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(checkout.is_dir(), "open task checkout must be retained");
+    let mut task = env.task_store().get(&task.id).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    let output = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(!owned.exists(), "terminal managed checkout leaked: {}", get_text(&output));
+    assert!(!git_stdout(project, &["worktree", "list", "--porcelain"]).contains(checkout.to_str().unwrap()),
+        "GC must remove the Git registration as well as the files");
+}
+
 #[tokio::test]
 async fn test_gc_cleanup_without_force() {
     let env = FactoryTestEnv::new();

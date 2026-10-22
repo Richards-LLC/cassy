@@ -1489,6 +1489,15 @@ journeys:
             ),
         ];
         cases.push((
+            "independence key with a space",
+            GABBER.replace(
+                "    fixtures: [fresh]\n",
+                "    fixtures: [fresh]\n    independence_key: \"post audit id\"\n",
+            ),
+            "independence_key",
+            "post audit id",
+        ));
+        cases.push((
             "flag with a space",
             GABBER.replace(
                 "    fixtures: [fresh]\n",

@@ -694,13 +694,18 @@ fn ensure_task_lane_reusable(
         );
     }
     if !status.stdout.is_empty() {
+        let path = worktree_path.to_string_lossy();
+        let [discard] =
+            crate::worktree::GitOperations::git_remedies([&["-C", &path, "checkout", "--", "."]])
+                .map_err(anyhow::Error::msg)?;
+        let worker_name = crate::worktree::GitOperations::visible_git_label(worker_name);
+        let lane = crate::worktree::GitOperations::visible_git_label(lane);
         anyhow::bail!(
             "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}' with \
              uncommitted tracked changes, so a new session cannot take it over. Commit them on \
-             '{lane}' and push, or discard them with `git -C {} checkout -- .`, then retry the \
+             '{lane}' and push, or discard them with `{discard}`, then retry the \
              spawn.",
-            worktree_path.display(),
-            worktree_path.display(),
+            crate::worktree::GitOperations::visible_git_label(&worktree_path.to_string_lossy()),
         );
     }
     let resolve = |reference: &str| {
@@ -717,17 +722,24 @@ fn ensure_task_lane_reusable(
                 .unwrap_or(false)
         };
         if !ancestor(&local, &pushed) && !ancestor(&pushed, &local) {
+            let path = worktree_path.to_string_lossy();
+            let origin_lane = format!("origin/{lane}");
+            let [rebase, reset] = crate::worktree::GitOperations::git_remedies([
+                &["-C", &path, "pull", "--rebase", "origin", lane],
+                &["-C", &path, "reset", "--hard", &origin_lane],
+            ])
+            .map_err(anyhow::Error::msg)?;
+            let lane = crate::worktree::GitOperations::visible_git_label(lane);
+            let worker_name = crate::worktree::GitOperations::visible_git_label(worker_name);
             anyhow::bail!(
                 "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}', \
                  which has diverged from origin/{lane} (local {}, origin {}). Reconcile it \
-                 first: rebase onto the pushed lane with `git -C {} pull --rebase origin {lane}`, \
-                 or keep the pushed lane with `git -C {} reset --hard origin/{lane}`. Then retry \
+                 first: rebase onto the pushed lane with `{rebase}`, \
+                 or keep the pushed lane with `{reset}`. Then retry \
                  the spawn.",
                 worktree_path.display(),
                 &local[..local.len().min(12)],
                 &pushed[..pushed.len().min(12)],
-                worktree_path.display(),
-                worktree_path.display(),
             );
         }
     }
@@ -7189,7 +7201,7 @@ mod spawn_isolation_tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
         without_spawn_disk_floor(&repo);
-        let worktree_path = repo.join(".cas").join("worktrees").join("clever-panther-60");
+        let worktree_path = repo.join(".cas").join("worktrees").join("clever panther's 60");
         std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -7273,6 +7285,9 @@ mod spawn_isolation_tests {
         assert!(error.contains("uncommitted tracked changes"), "{error}");
         assert!(error.contains("factory/clever-panther-60-cas-9db0b"), "{error}");
         assert!(error.contains("checkout -- ."), "{error}");
+        // pin: a real kept-worktree path with spaces and apostrophe must be one argument.
+        let quoted_path = format!("'{}'", worktree_path.to_string_lossy().replace('\'', r"'\''"));
+        assert!(error.contains(&format!("git -C {quoted_path} checkout -- .")), "{error}");
         assert_eq!(
             std::fs::read_to_string(worktree_path.join("lane.txt")).unwrap(),
             "unsaved\n",

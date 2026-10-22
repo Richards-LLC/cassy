@@ -42,9 +42,16 @@ pub(crate) fn explicit_base_note(target_branch: Option<&str>, lane: &str) -> Str
 /// Retain the originating host with the lane, not its host-local path or
 /// current owner (which may already have moved to a peer supervisor).
 pub(crate) fn branch_origin(branch: &str) -> Option<cas_types::EpicBranchOrigin> {
-    crate::cloud::device::DeviceConfig::hostname().map(|host| cas_types::EpicBranchOrigin {
+    let device = crate::cloud::device::DeviceConfig::load().ok().flatten();
+    let device_id = device.as_ref().map(|device| device.device_id.clone())
+        .filter(|id| !id.trim().is_empty());
+    let host = crate::cloud::device::DeviceConfig::hostname()
+        .or_else(|| device.as_ref().and_then(|device| device.name.clone()))
+        .or_else(|| device_id.clone())?;
+    Some(cas_types::EpicBranchOrigin {
         branch: branch.to_string(),
         host,
+        device_id,
     })
 }
 
@@ -265,6 +272,13 @@ pub(crate) fn stale_base_note(
         return String::new();
     };
     let short = &tip[..tip.len().min(12)];
+    let [merge] =
+        match crate::worktree::GitOperations::git_remedies([&["merge", "--no-ff", &source]]) {
+            Ok(commands) => commands,
+            Err(refusal) => return format!("\nSTALE BASE: {refusal}\n"),
+        };
+    let branch = crate::worktree::GitOperations::visible_git_label(branch);
+    let predecessor_branch = crate::worktree::GitOperations::visible_git_label(predecessor_branch);
     let probe = std::process::Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["merge-tree", "--write-tree", "--name-only", "--no-messages", &successor, &tip])
@@ -274,7 +288,7 @@ pub(crate) fn stale_base_note(
         Ok(output) if output.status.code() == Some(0) => format!(
             "\n⚠️ STALE BASE (cas-fd4c): stacked on open epic {predecessor_id} ({predecessor_branch}), \
              which has advanced to {short}; {branch} lacks {lacking} of its commit(s). It merges \
-             cleanly: run `git merge --no-ff {source}` on {branch} and push, so work here builds \
+             cleanly: run `{merge}` on {branch} and push, so work here builds \
              on it.\n"
         ),
         Ok(output) if output.status.code() == Some(1) => {

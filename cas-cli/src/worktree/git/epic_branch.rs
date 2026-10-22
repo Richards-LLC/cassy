@@ -33,6 +33,57 @@ impl EpicBranchReadiness {
 }
 
 impl GitOperations {
+    /// Render copyable Git commands atomically, without shell expansion.
+    /// Callers own Git's option/refspec semantics and any fixed separators.
+    pub(crate) fn git_remedies<const N: usize>(
+        commands: [&[&str]; N],
+    ) -> Result<[String; N], String> {
+        Self::shell_remedies(commands.map(|args| ("git", args)))
+    }
+
+    /// The same atomic policy for a remedy that also needs a shell builtin,
+    /// gh or cas. Command names and separators are supplied by the caller.
+    pub(crate) fn shell_remedies<const N: usize>(
+        commands: [(&str, &[&str]); N],
+    ) -> Result<[String; N], String> {
+        for (program, args) in commands {
+            if let Some(value) = std::iter::once(program)
+                .chain(args.iter().copied())
+                .find(|value| value.chars().any(char::is_control))
+            {
+                return Err(format!(
+                    "branch name contains control characters: {}\nRename it or push it by hand; no copyable command is available.",
+                    Self::visible_git_label(value),
+                ));
+            }
+        }
+        Ok(commands.map(|(program, args)| {
+            std::iter::once(program)
+                .chain(args.iter().copied())
+                .map(|value| {
+                    if !value.is_empty()
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"/._+@-".contains(&byte))
+                    {
+                        value.to_string()
+                    } else {
+                        format!("'{}'", value.replace('\'', "'\\''"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }))
+    }
+
+    /// Display synced labels without sending terminal control characters.
+    pub(crate) fn visible_git_label(value: &str) -> String {
+        value.chars().map(|character| {
+            if character.is_control() { character.escape_default().to_string() }
+            else { character.to_string() }
+        }).collect()
+    }
+
     /// First use, rather than creation, publishes an epic. An absent remote
     /// is verified by ls-remote, never inferred from a failed fetch/cache miss.
     /// Creation uses an empty expected-old lease; an existing remote is never
@@ -102,6 +153,7 @@ impl GitOperations {
     /// The same cached local/origin comparison used by legacy spawn preparation.
     /// Fetch is owned by the observation, so retries here add no network work.
     pub(crate) fn shared_parent_ref(&self, branch: &str) -> Result<Option<String>, String> {
+        let branch_label = Self::visible_git_label(branch);
         if branch.starts_with("origin/") {
             return Ok(self.resolve_commit(branch).map(|_| branch.into()));
         }
@@ -116,6 +168,7 @@ impl GitOperations {
         let Some(local) = local else {
             return Ok(Some(remote_ref));
         };
+        let remote_label = Self::visible_git_label(&remote_ref);
         if local == remote {
             return Ok(Some(branch.into()));
         }
@@ -130,11 +183,11 @@ impl GitOperations {
         }
         if behind == 0 {
             return Err(format!(
-                "local parent '{branch}' ({local}) is ahead of shared '{remote_ref}' ({remote}); refusing unpublished local parent"
+                "local parent '{branch_label}' ({local}) is ahead of shared '{remote_label}' ({remote}); refusing unpublished local parent"
             ));
         }
         Err(format!(
-            "recorded parent '{branch}' and fetched '{remote_ref}' have diverged; refusing to choose a worker base"
+            "recorded parent '{branch_label}' and fetched '{remote_label}' have diverged; refusing to choose a worker base"
         ))
     }
 
@@ -146,6 +199,7 @@ impl GitOperations {
         origin: Option<&cas_types::EpicBranchOrigin>,
     ) -> Result<EpicBranchReadiness, String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        let branch_label = Self::visible_git_label(branch);
         let refname = format!("refs/heads/{branch}");
         let valid = Command::new("git")
             .args(["check-ref-format", &refname])
@@ -154,7 +208,7 @@ impl GitOperations {
             .map_err(|e| e.to_string())?;
         if !valid.status.success() || !branch.starts_with("epic/") {
             return Err(format!(
-                "'{branch}' is not an epic lane eligible for first-use publication"
+                "'{branch_label}' is not an epic lane eligible for first-use publication"
             ));
         }
         let setting = std::env::var("CAS_PUSH_EPIC_BRANCH")
@@ -167,7 +221,7 @@ impl GitOperations {
             Ok(Some(present)) => *present,
             Ok(None) => {
                 return Ok(EpicBranchReadiness::ready(Some(format!(
-                    "EPIC BRANCH LOCAL-ONLY: '{branch}' ({}); origin is not configured; the local tip is unpublished (CAS_PUSH_EPIC_BRANCH={setting}).",
+                    "EPIC BRANCH LOCAL-ONLY: '{branch_label}' ({}); origin is not configured; the local tip is unpublished (CAS_PUSH_EPIC_BRANCH={setting}).",
                     self.resolve_commit(&refname)
                         .unwrap_or_else(|| "missing".into())
                 ))));
@@ -177,12 +231,12 @@ impl GitOperations {
         if remote_present {
             let remote = self
                 .resolve_commit(&format!("origin/{branch}"))
-                .ok_or_else(|| format!("fetched epic '{branch}' has no tracking commit"))?;
+                .ok_or_else(|| format!("fetched epic '{branch_label}' has no tracking commit"))?;
             let Some(local) = self.resolve_commit(&refname) else {
                 self.create_branch_from(branch, &remote)
                     .map_err(|e| e.to_string())?;
                 return Ok(EpicBranchReadiness::ready(Some(format!(
-                    "EPIC BRANCH MATERIALIZED: '{branch}' at published origin tip {remote}."
+                    "EPIC BRANCH MATERIALIZED: '{branch_label}' at published origin tip {remote}."
                 ))));
             };
             if local == remote {
@@ -196,39 +250,41 @@ impl GitOperations {
                 .map_err(|e| e.to_string())?;
             if ahead > 0 && behind > 0 {
                 return Ok(EpicBranchReadiness::preserved(format!(
-                    "EPIC BRANCH DIVERGED: '{branch}' local {local}, origin {remote}; no refs changed or published. Reconcile before relying on this lane."
+                    "EPIC BRANCH DIVERGED: '{branch_label}' local {local}, origin {remote}; no refs changed or published. Reconcile before relying on this lane."
                 )));
             }
             if ahead == 0 {
                 self.advance_local_branch(branch, &local, &remote)?;
                 return Ok(EpicBranchReadiness::ready(Some(format!(
-                    "SPAWN BASE REFRESHED: local '{branch}' ({local}) is {behind} commit(s) behind 'origin/{branch}' ({remote}); local branch FAST-FORWARDED to the published tip."
+                    "SPAWN BASE REFRESHED: local '{branch_label}' ({local}) is {behind} commit(s) behind 'origin/{branch_label}' ({remote}); local branch FAST-FORWARDED to the published tip."
                 ))));
             }
             return Ok(EpicBranchReadiness::ready(Some(format!(
-                "EPIC BRANCH PRESERVED: '{branch}' ({local}) has {ahead} unpublished unique commit(s); existing origin {remote} was not rewritten."
+                "EPIC BRANCH PRESERVED: '{branch_label}' ({local}) has {ahead} unpublished unique commit(s); existing origin {remote} was not rewritten."
             ))));
         }
         if observation.previous_remote {
             return Err(format!(
-                "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
+                "previously published '{branch_label}' is now absent on origin; refusing automatic resurrection"
             ));
         }
         let local = self
             .resolve_commit(&refname)
             .ok_or_else(|| Self::missing_epic_branch_message(branch, origin, false))?;
         if let Some(base) = base {
+            let base_label = Self::visible_git_label(base);
             if !observation.base_fetched {
                 return Err(format!(
-                    "base '{base}' fetch failed; publication is unverified, no local fallback was published"
+                    "base '{base_label}' fetch failed; publication is unverified, no local fallback was published"
                 ));
             }
             let base_ref = self
                 .shared_parent_ref(base)?
-                .ok_or_else(|| format!("base '{base}' unresolved"))?;
-            let base_sha = self
-                .resolve_commit(&base_ref)
-                .ok_or_else(|| format!("base '{base_ref}' unresolved"))?;
+                .ok_or_else(|| format!("base '{base_label}' unresolved"))?;
+            let base_sha = self.resolve_commit(&base_ref).ok_or_else(|| {
+                format!("base '{}' unresolved", Self::visible_git_label(&base_ref))
+            })?;
+            let base_ref_label = Self::visible_git_label(&base_ref);
             if local != base_sha {
                 let unique = self
                     .commits_behind(&base_sha, &local)
@@ -236,20 +292,20 @@ impl GitOperations {
                 if unique == 0 {
                     self.advance_local_branch(branch, &local, &base_sha)?;
                     receipts.push(format!(
-                        "FAST-FORWARDED local '{branch}' from {local} to base '{base_ref}' at {base_sha}"
+                        "FAST-FORWARDED local '{branch_label}' from {local} to base '{base_ref_label}' at {base_sha}"
                     ));
                 } else {
-                    receipts.push(format!("preserved {unique} unique local commit(s) on '{branch}' at {local} unchanged"));
+                    receipts.push(format!("preserved {unique} unique local commit(s) on '{branch_label}' at {local} unchanged"));
                 }
             }
         } else {
             receipts.push(format!(
-                "preserved local '{branch}' at {local} unchanged; no recorded parent"
+                "preserved local '{branch_label}' at {local} unchanged; no recorded parent"
             ));
         }
         let tip = self
             .resolve_commit(&refname)
-            .ok_or_else(|| format!("epic '{branch}' no longer resolves"))?;
+            .ok_or_else(|| format!("epic '{branch_label}' no longer resolves"))?;
         let mut command = Command::new("git");
         command
             .args([
@@ -263,12 +319,12 @@ impl GitOperations {
         let publication =
             Self::run_command_bounded(command, Duration::from_secs(30)).map_err(|e| {
                 format!(
-                    "publication of '{branch}' is unverified: {e}; reconcile origin before retrying"
+                    "publication of '{branch_label}' is unverified: {e}; reconcile origin before retrying"
                 )
             })?;
         if !publication.status.success() {
             return Ok(EpicBranchReadiness::preserved(format!(
-                "EPIC BRANCH UNPUBLISHED: '{branch}' ({initial_tip}); {}expected-absent publication refused: {}. No existing remote ref was rewritten (CAS_PUSH_EPIC_BRANCH={setting}).",
+                "EPIC BRANCH UNPUBLISHED: '{branch_label}' ({initial_tip}); {}expected-absent publication refused: {}. No existing remote ref was rewritten (CAS_PUSH_EPIC_BRANCH={setting}).",
                 if receipts.is_empty() {
                     String::new()
                 } else {
@@ -278,7 +334,7 @@ impl GitOperations {
             )));
         }
         receipts.push(format!(
-            "published '{branch}' to origin at {tip} with an expected-absent lease"
+            "published '{branch_label}' to origin at {tip} with an expected-absent lease"
         ));
         Ok(EpicBranchReadiness::ready(Some(format!(
             "EPIC BRANCH READY: {} (CAS_PUSH_EPIC_BRANCH={setting}; publication deferred until first use when disabled at create).",
@@ -293,9 +349,16 @@ impl GitOperations {
         origin: Option<&cas_types::EpicBranchOrigin>,
         previously_published: bool,
     ) -> String {
+        let [publish, inspect] = match Self::git_remedies([
+            &["push", "origin", branch], &["reflog", "--all"],
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return refusal,
+        };
+        let label = Self::visible_git_label(branch);
         if previously_published {
             return format!(
-                "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
+                "previously published '{label}' is now absent on origin; refusing automatic resurrection"
             );
         }
         let clean_host = |host: &str| {
@@ -312,18 +375,23 @@ impl GitOperations {
         {
             let local_host =
                 crate::cloud::device::DeviceConfig::hostname().map(|host| clean_host(&host));
-            if local_host.as_deref() == Some(host.as_str()) {
+            let local_device = crate::cloud::device::DeviceConfig::load().ok().flatten();
+            let source_here = match origin.and_then(|origin| origin.device_id.as_deref())
+                .filter(|id| !id.trim().is_empty()) {
+                Some(id) => local_device.as_ref().is_some_and(|device| device.device_id == id),
+                None => local_host.as_deref() == Some(host.as_str()),
+            };
+            if source_here {
                 return format!(
-                    "epic branch missing on originating host {host}\nRestore {branch} from a known commit or backup; inspect history:\ngit reflog --all"
+                    "epic branch missing on originating host {host}\nRestore {label} from a known commit or backup; inspect history:\n{inspect}"
                 );
             }
             return format!(
-                "epic branch not published by {host}\nNo local/origin ref; publish on {host}, then retry:\ngit push origin {}",
-                shell_words::quote(branch),
+                "epic branch not published by {host}\nNo local/origin ref; publish on {host}, then retry:\n{publish}",
             );
         }
         format!(
-            "epic branch '{branch}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
+            "epic branch '{label}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
         )
     }
 
@@ -336,13 +404,14 @@ impl GitOperations {
         to: &str,
     ) -> Result<(), String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        let branch_label = Self::visible_git_label(branch);
         let ancestry = Command::new("git")
             .args(["merge-base", "--is-ancestor", from, to])
             .current_dir(&self.repo_root)
             .output()
             .map_err(|error| error.to_string())?;
         if !ancestry.status.success() {
-            return Err(format!("'{branch}' is not eligible for fast-forward"));
+            return Err(format!("'{branch_label}' is not eligible for fast-forward"));
         }
         let checkouts = self.list_worktrees().map_err(|error| error.to_string())?;
         let checkouts: Vec<_> = checkouts
@@ -355,7 +424,7 @@ impl GitOperations {
                 .map_err(|error| error.to_string())?;
             if dirty.is_blocked() {
                 return Err(format!(
-                    "'{branch}' is checked out with tracked changes at {} ({})",
+                    "'{branch_label}' is checked out with tracked changes at {} ({})",
                     checkout.path.display(),
                     dirty.describe_blocking()
                 ));
@@ -374,7 +443,7 @@ impl GitOperations {
                 self.refresh_linked_checkout(&checkout.path, branch, from, to)
             {
                 return Err(format!(
-                    "'{branch}' advanced but checkout {} could not be refreshed: {reason}",
+                    "'{branch_label}' advanced but checkout {} could not be refreshed: {reason}",
                     checkout.path.display()
                 ));
             }

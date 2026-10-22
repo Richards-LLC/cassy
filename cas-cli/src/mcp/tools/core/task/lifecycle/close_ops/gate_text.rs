@@ -108,11 +108,19 @@ pub(crate) fn commit_receipt_recovery_steps(
     parent_branch: &str,
     caller_prefix: &str,
 ) -> String {
+    let [log, show, ancestry] = match crate::worktree::GitOperations::git_remedies([
+        &["log", "--oneline", "--all"],
+        &["show", "--stat", "<sha>"],
+        &["merge-base", "--is-ancestor", "<sha>", parent_branch],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
         "find the SHA of the worker task commit OR the merge commit that carried this \
-         task's work (never an unrelated historical commit; `git log --oneline --all` \
-         lists candidates), verify it with `git show --stat <sha>` and \
-         `git merge-base --is-ancestor <sha> {parent_branch}`, then retry \
+         task's work (never an unrelated historical commit; `{log}` \
+         lists candidates), verify it with `{show}` and \
+         `{ancestry}`, then retry \
          `{caller_prefix}task action=close id={task_id} commit_receipt=<sha>` \
          (full SHA or an unambiguous abbreviation)."
     )
@@ -441,13 +449,19 @@ mod tests {
 
     #[test]
     fn commit_receipt_steps_find_verify_and_retry_with_a_complete_command() {
+        let special = commit_receipt_recovery_steps("cas-r1", "epic/{a,b}!e", "mcp__cs__");
+        // pin: ancestry instructions are copyable argv, including the SHA placeholder.
+        assert!(special.contains("git merge-base --is-ancestor '<sha>' 'epic/{a,b}!e'"), "{special}");
+        let unsafe_ref = commit_receipt_recovery_steps("cas-r1", "epic/control\u{85}label", "mcp__cs__");
+        assert!(unsafe_ref.contains("\\u{85}") && !unsafe_ref.contains("git ")
+            && !unsafe_ref.contains("mcp__cs__task"), "{unsafe_ref:?}");
         let steps = commit_receipt_recovery_steps("cas-r1", "epic/x", "mcp__cs__");
         for required in [
             "worker task commit OR the merge commit",
             "never an unrelated historical commit",
             "git log --oneline --all",
-            "git show --stat <sha>",
-            "git merge-base --is-ancestor <sha> epic/x",
+            "git show --stat '<sha>'",
+            "git merge-base --is-ancestor '<sha>' epic/x",
             "`mcp__cs__task action=close id=cas-r1 commit_receipt=<sha>`",
             "unambiguous abbreviation",
         ] {

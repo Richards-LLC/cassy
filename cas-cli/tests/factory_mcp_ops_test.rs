@@ -11237,15 +11237,15 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     git(&["config", "user.email", "test@cas"]);
     git(&["config", "user.name", "CAS Test"]);
     commit("seed.txt", "seed");
-    git(&["checkout", "-b", "epic/pred"]);
+    git(&["checkout", "-b", "epic/{a,b}!e"]);
     commit("pred.txt", "pred");
     git(&["checkout", "-b", "epic/succ"]);
     let local_successor = commit("succ.txt", "succ");
     let origin = home.path().join("origin.git");
     git(&["init", "--bare", origin.to_str().unwrap()]);
     git(&["remote", "add", "origin", origin.to_str().unwrap()]);
-    git(&["push", "origin", "epic/pred", "epic/succ"]);
-    add_epic_with_id(&env, "cas-pred", TaskStatus::Open, "epic/pred");
+    git(&["push", "origin", "epic/{a,b}!e", "epic/succ"]);
+    add_epic_with_id(&env, "cas-pred", TaskStatus::Open, "epic/{a,b}!e");
     add_epic_with_id(&env, "cas-succ", TaskStatus::Open, "epic/succ");
     env.task_store()
         .add_dependency(&cas::types::Dependency::new(
@@ -11263,12 +11263,12 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     let in_sync = status().await;
     assert!(!in_sync.contains("STALE BASE"), "a successor with every predecessor commit is current: {in_sync}");
 
-    git(&["checkout", "epic/pred"]);
+    git(&["checkout", "epic/{a,b}!e"]);
     let advanced = commit("pred-2.txt", "pred advances");
     let clean = status().await;
     // pin: the receipt must name the predecessor commit and the merge to run (cas-fd4c).
     assert!(
-        clean.contains("STALE BASE") && clean.contains(&advanced[..12]) && clean.contains("git merge --no-ff epic/pred"),
+        clean.contains("STALE BASE") && clean.contains(&advanced[..12]) && clean.contains("git merge --no-ff 'epic/{a,b}!e'"),
         "{clean}"
     );
 
@@ -11276,19 +11276,20 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     // encountered first. Keep every outcome so RED exposes all three defects.
     let mut failures = Vec::new();
     let remote_predecessor = commit("pred-3.txt", "origin advances further");
-    git(&["push", "origin", "epic/pred"]);
+    git(&["push", "origin", "epic/{a,b}!e"]);
     git(&["checkout", "main"]);
-    git(&["update-ref", "refs/heads/epic/pred", &advanced]);
+    git(&["update-ref", "refs/heads/epic/{a,b}!e", &advanced]);
     let furthest = status().await;
     if !furthest.contains(&remote_predecessor[..12]) || !furthest.contains("lacks 2 of its commit(s)") {
         failures.push(format!("furthest predecessor gap was understated: {furthest}"));
     }
-    git(&["branch", "-D", "epic/pred"]);
+    git(&["branch", "-D", "epic/{a,b}!e"]);
     let origin_only = status().await;
+    // pin: origin-only recovery preserves the predecessor ref as one shell argument.
     assert!(origin_only.contains(&remote_predecessor[..12])
-        && origin_only.contains("git merge --no-ff origin/epic/pred"), "{origin_only}");
+        && origin_only.contains("git merge --no-ff 'origin/epic/{a,b}!e'"), "{origin_only}");
     git(&["checkout", "epic/succ"]);
-    git(&["merge", "--no-ff", "origin/epic/pred", "-m", "successor includes predecessor"]);
+    git(&["merge", "--no-ff", "origin/epic/{a,b}!e", "-m", "successor includes predecessor"]);
     let remote_successor = git(&["rev-parse", "HEAD"]);
     git(&["push", "origin", "epic/succ"]);
     git(&["checkout", "main"]);
@@ -11302,14 +11303,14 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
 
     // Both copies now agree before introducing an actual twelve-file conflict.
     git(&["update-ref", "refs/heads/epic/succ", &remote_successor]);
-    git(&["branch", "epic/pred", "origin/epic/pred"]);
+    git(&["branch", "epic/{a,b}!e", "origin/epic/{a,b}!e"]);
     git(&["checkout", "epic/succ"]);
     for i in 1..12 {
         std::fs::write(project.join(format!("shared-{i:02}.txt")), "successor edit").unwrap();
     }
     commit("shared-00.txt", "successor edit");
     git(&["push", "origin", "epic/succ"]);
-    git(&["checkout", "epic/pred"]);
+    git(&["checkout", "epic/{a,b}!e"]);
     for i in 1..12 {
         std::fs::write(project.join(format!("shared-{i:02}.txt")), "predecessor edit").unwrap();
     }

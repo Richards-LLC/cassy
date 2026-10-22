@@ -9469,12 +9469,20 @@ impl SyncFailure {
 ///   reason the pop failed. Saying only "run apply" would send the operator
 ///   into the same wall, so the caveat and its way out are part of the text.
 pub(crate) fn stash_recovery_command(stash_ref: &str) -> String {
+    let [show, apply, list] = match crate::worktree::GitOperations::git_remedies([
+        &["stash", "show", "-p", "--include-untracked", stash_ref],
+        &["stash", "apply", stash_ref],
+        &["stash", "list"],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
-        "git stash show -p --include-untracked {stash_ref}   # what is in it\n    \
-         git stash apply {stash_ref}                          # restore it\n    \
+        "{show}   # what is in it\n    \
+         {apply}                          # restore it\n    \
          # if apply says \"already exists, no checkout\", move that file aside \
          (that collision is why the restore failed) and re-run apply; the stash \
-         entry stays until you drop it by its `git stash list` index"
+         entry stays until you drop it by its `{list}` index"
     )
 }
 
@@ -12169,13 +12177,24 @@ pub(crate) fn shared_checkout_parked_warning(
         .filter(|s| !s.is_empty())
         .unwrap_or("main");
 
+    let [push, switch, ff, add] = match crate::worktree::GitOperations::git_remedies([
+        &["push", "origin", trunk],
+        &["switch", trunk],
+        &["merge", "--ff-only"],
+        &["worktree", "add"],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return Some(refusal),
+    };
+    let branch = crate::worktree::GitOperations::visible_git_label(branch);
+    let trunk = crate::worktree::GitOperations::visible_git_label(trunk);
     Some(format!(
         "\n    ⚠️ SHARED CHECKOUT PARKED ON '{branch}': this is the shared primary checkout, \
          not an isolated worktree, and its HEAD is '{branch}' instead of '{trunk}'. \
-         Any `git merge --ff-only`, `git push origin {trunk}` or release tag run in this \
+         Any `{ff}`, `{push}` or release tag run in this \
          directory targets '{branch}' and reports success while landing nothing on \
          '{trunk}' (GH #120). Remedy: once that work is pushed, restore trunk here with \
-         `git switch {trunk}`, and give the worker `git worktree add` instead of a branch \
+         `{switch}`, and give the worker `{add}` instead of a branch \
          created in place."
     ))
 }
@@ -19251,7 +19270,7 @@ effort = "high"
             head_sha: "0bd4a26".to_string(),
             ahead: 1,
             behind: 0,
-            base_branch: "origin/main".to_string(),
+            base_branch: "origin/main{a,b}!e".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
             pr_url: WorkerPrUrl::None,
@@ -19267,11 +19286,11 @@ effort = "high"
             "the callout must name the parked branch: {out}"
         );
         assert!(
-            out.contains("'main'"),
+            out.contains("'main{a,b}!e'"),
             "the callout must name the trunk it is not on: {out}"
         );
         assert!(
-            out.contains("git switch main"),
+            out.contains("git switch 'main{a,b}!e'"),
             "the callout must state the remedy: {out}"
         );
         assert!(
@@ -20172,6 +20191,8 @@ mod sync_safety_tests {
         );
 
         let line = failure.report_line();
+        // pin: the disambiguating ^0 stash suffix requires shell quoting.
+        assert!(line.contains(&format!("git stash apply '{stash_ref}'")), "{line}");
         assert!(
             line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
             "report line must carry recovery instructions with the ref: {line}"

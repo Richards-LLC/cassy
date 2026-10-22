@@ -6444,7 +6444,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    git(&upstream, &["init", "-q", "-b", "main"]);
+    git(&upstream, &["init", "-q", "-b", "main{a,b}!e"]);
     git(&upstream, &["config", "user.email", "test@test.com"]);
     git(&upstream, &["config", "user.name", "Test"]);
     std::fs::write(upstream.join("seed.txt"), "seed\n").unwrap();
@@ -6513,6 +6513,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         .expect_err("stale assignment must reject the batch");
 
     let message = error.message.to_string();
+    // pin: stale-assignment remedy preserves the actual upstream ref.
+    assert!(message.contains("git rebase 'origin/main{a,b}!e'"), "{message}");
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
     assert!(
         message.contains("no requested task fields were applied"),
@@ -6541,7 +6543,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     }
 
     git(&worker_checkout, &["fetch", "-q", "origin"]);
-    git(&worker_checkout, &["merge", "--ff-only", "origin/main"]);
+    git(&worker_checkout, &["merge", "--ff-only", "origin/main{a,b}!e"]);
     for (assignee, title) in [
         (&worker.name, "Reconcile invoice payments"),
         (&worker.id, "Calibrate satellite antenna"),

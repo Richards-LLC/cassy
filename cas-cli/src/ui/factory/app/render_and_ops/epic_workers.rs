@@ -885,8 +885,14 @@ fn prefer_fresher_base_ref_observed(
                 command, std::time::Duration::from_secs(10),
             ).is_ok_and(|output| output.status.code() == Some(2));
             if absent {
+                let [push] = match crate::worktree::GitOperations::git_remedies([
+                    &["push", "origin", branch],
+                ]) {
+                    Ok(commands) => commands,
+                    Err(refusal) => return refusal,
+                };
                 format!(
-                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; publish before retrying:\n{push}",
                     observed_state(),
                 )
             } else {
@@ -982,8 +988,16 @@ fn ensure_local_spawn_parent(
     }
     let remote = format!("origin/{local}");
     let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
+        let parent_label = crate::worktree::GitOperations::visible_git_label(parent);
+        let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
+        let [fetch] = match crate::worktree::GitOperations::git_remedies([
+            &["fetch", "origin", local],
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return refusal,
+        };
         format!(
-            "spawn base '{parent}' does not resolve locally or as '{remote}' after fetch{}; run `git fetch origin {local}` and create a local branch from '{remote}' before retrying",
+            "spawn base '{parent_label}' does not resolve locally or as '{remote_label}' after fetch{}; fetch and create a local branch from '{remote_label}' before retrying:\n{fetch}",
             fetch_error
                 .map(|error| format!(" ({error})"))
                 .unwrap_or_default()
@@ -992,8 +1006,10 @@ fn ensure_local_spawn_parent(
     git.create_branch_from(local, &remote).map_err(|error| {
         format!("could not create local spawn base '{local}' from '{remote}': {error}")
     })?;
+    let local_label = crate::worktree::GitOperations::visible_git_label(local);
+    let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
     Ok(Some(format!(
-        "SPAWN BASE MATERIALIZED: local '{local}' created from '{remote}' ({}) for worker checkout and merge-back.",
+        "SPAWN BASE MATERIALIZED: local '{local_label}' created from '{remote_label}' ({}) for worker checkout and merge-back.",
         &remote_sha[..remote_sha.len().min(12)]
     )))
 }
@@ -1158,19 +1174,16 @@ fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> R
         .into_iter()
         .find(|checkout| checkout.branch.as_deref() == Some(branch));
     if let Some(checkout) = checkout {
-        return Ok(format!(
-            "git -C {} merge {}",
-            shell_words::quote(&checkout.path.to_string_lossy()),
-            shell_words::quote(parent)
-        ));
+        let [merge] = crate::worktree::GitOperations::git_remedies([
+            &["-C", &checkout.path.to_string_lossy(), "merge", parent],
+        ])?;
+        return Ok(merge);
     }
-    Ok(format!(
-        "git -C {} switch {} && git -C {} merge {}",
-        shell_words::quote(&repo.to_string_lossy()),
-        shell_words::quote(epic),
-        shell_words::quote(&repo.to_string_lossy()),
-        shell_words::quote(parent)
-    ))
+    let [switch, merge] = crate::worktree::GitOperations::git_remedies([
+        &["-C", &repo.to_string_lossy(), "switch", epic],
+        &["-C", &repo.to_string_lossy(), "merge", parent],
+    ])?;
+    Ok(format!("{switch} && {merge}"))
 }
 
 /// Fast-forward an epic's local base ref from the parent branch it recorded
@@ -4634,6 +4647,33 @@ mod spawn_base_tests {
         let error = ensure_local_spawn_parent(&repo, "epic/missing").unwrap_err();
         assert!(error.contains("git fetch origin epic/missing"), "{error}");
         assert!(full_sha(&repo, "epic/missing").is_none());
+        let mut failures = Vec::new();
+        for branch in ["epic/{a,b}", "epic/a!e", "epic/$(touch${IFS}SUBSTITUTED)", "epic/a b", "epic/a'quote", "epic/control\u{85}label"] {
+            let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+            if branch.chars().any(char::is_control) {
+                // pin: no shell command may be printed for a control-bearing ref.
+                if !error.contains("contains control characters") || !error.contains("\\u{85}")
+                    || error.lines().any(|line| line.starts_with("git "))
+                    || error.contains('`') || error.chars().any(|c| c.is_control() && c != '\n')
+                {
+                    failures.push(format!("unsafe control-ref advice: {error:?}"));
+                }
+                continue;
+            }
+            let standalone = error.lines().find(|line| line.starts_with("git fetch "));
+            if standalone.is_none() {
+                failures.push(format!("fetch remedy is not a standalone line: {error}"));
+            }
+            let command = standalone.or_else(|| error.split('`').nth(1)).unwrap();
+            let output = super::spawn_readiness_tests::run_bash_remedy(
+                &repo, command, "git() { printf '%s\\0' \"$@\"; }");
+            let args = output.stdout.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect::<Vec<_>>();
+            if !output.status.success() || args != [b"fetch".as_slice(), b"origin".as_slice(), branch.as_bytes()] {
+                failures.push(format!("bash altered fetch arguments for {branch:?}: {output:?}"));
+            }
+        }
+        assert!(!repo.join("SUBSTITUTED").exists(), "remedy executed branch substitution");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while

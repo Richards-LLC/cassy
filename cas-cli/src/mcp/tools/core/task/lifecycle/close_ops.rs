@@ -14636,11 +14636,15 @@ pub(crate) fn unpushed_delivery_tip(
 }
 
 fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> String {
+    let [push] = match crate::worktree::GitOperations::git_remedies([&["push", "origin", branch]]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
         "CLOSE REFUSED: the delivery tip `{tip}` on `{branch}` is not on origin. \
          The pushed tip is `{pushed}` (`origin/{branch}`). The merge reads the pushed \
          branch, so a local-only commit cannot become this task's delivery anchor. \
-         Push it (`git push origin {branch}`) and close again, or check out the pushed \
+         Push it (`{push}`) and close again, or check out the pushed \
          tip `{pushed}` and close from there."
     )
 }
@@ -14756,6 +14760,8 @@ pub(crate) fn resolve_close_delivery_branch(
     }
     let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let refspec = format!("{own_ref}:refs/heads/{task_branch}");
+    let [push] = crate::worktree::GitOperations::git_remedies([&["push", "origin", &refspec]])?;
     Err(format!(
         "⚠️ DELIVERY BRANCH UNRESOLVED\n\n\
          task close rejected: task {id} has no branch of its own. `{task_branch}` does not \
@@ -14763,7 +14769,7 @@ pub(crate) fn resolve_close_delivery_branch(
          task's delivery ({foreign}) with no commit claiming {id}. Cassy will not measure \
          another task's delivery as this one.\n\n\
          If the current lane tip is {id}'s delivery, publish that exact tip with \
-         `git push origin {own_ref}:refs/heads/{task_branch}`, then retry \
+         `{push}`, then retry \
          `{caller}task action=close id={id}`. Otherwise recover {id}'s actual delivery first; \
          do not publish another task's work under its name.",
         id = task.id,
@@ -15704,12 +15710,41 @@ fn run_factory_branch_merge_gate_for_delivery(
          origin_fetch_attempted={origin_fetch_attempted}."
     );
 
+    let [push, merge, ancestry, pr, wrong_pr] =
+        match crate::worktree::GitOperations::shell_remedies([
+            ("git", &["push", "origin", &factory_branch][..]),
+            ("git", &["merge", "--no-ff", &factory_branch]),
+            (
+                "git",
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &factory_branch,
+                    &origin_parent_branch,
+                ],
+            ),
+            (
+                "gh",
+                &[
+                    "pr",
+                    "create",
+                    "--base",
+                    parent_branch,
+                    "--head",
+                    &factory_branch,
+                ],
+            ),
+            ("gh", &["pr", "create", "--base", parent_branch]),
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return MergeStateGateOutcome::Reject(refusal),
+        };
     let epic_push_state_step = if parent_published_on_origin {
         format!(
             "2. {parent_branch} IS published on origin ({origin_parent_branch} \
              resolves), so pushing it is not the gap — {factory_branch} is simply \
              not merged into the epic tip yet. Do NOT run \
-             `gh pr create --base {parent_branch}` anyway: epic branches integrate \
+             `{wrong_pr}` anyway: epic branches integrate \
              via a supervisor merge (step 4), and the epic ships to main as one PR \
              once complete.\n"
         )
@@ -15717,7 +15752,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         format!(
             "2. {parent_branch} has no matching ref on origin \
              ({origin_parent_branch} does not resolve), so it is a local-only epic \
-             branch — do NOT run `gh pr create --base {parent_branch}`, the PR will \
+             branch — do NOT run `{wrong_pr}`, the PR will \
              fail for want of a base ref.\n"
         )
     };
@@ -15731,7 +15766,7 @@ fn run_factory_branch_merge_gate_for_delivery(
     } else {
         format!(
             "3. Push {factory_branch} to origin so your commit is durable: \
-             `git push origin {factory_branch}`\n"
+             `{push}`\n"
         )
     };
     // cas-90e8 (M73): the pieces shared across delivery shapes come from one
@@ -15753,7 +15788,7 @@ fn run_factory_branch_merge_gate_for_delivery(
              {durable_step}\
              4. If a merge is still needed, ask your supervisor to merge \
              {factory_branch} into {parent_branch}: {merge_request}. The supervisor \
-             merges with `git merge --no-ff {factory_branch}` on the epic branch.\n\
+             merges with `{merge}` on the epic branch.\n\
              5. Once merged, retry {retry}.\n\n\
              {exits}"
         )
@@ -15775,13 +15810,13 @@ fn run_factory_branch_merge_gate_for_delivery(
         format!(
             "Remediation:\n\
              1. {drain}\n\
-             2. Push {factory_branch} to its remote: `git push origin {factory_branch}`\n\
+             2. Push {factory_branch} to its remote: `{push}`\n\
              3. Open a PR targeting {parent_branch}: \
-             `gh pr create --base {parent_branch} --head {factory_branch}`\n\
+             `{pr}`\n\
              4. Merge the PR. Cassy already measured this branch against both \
              {parent_branch} and origin/{parent_branch}, so fetching again will not \
              change the count. To check a merge you believe landed: \
-             `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
+             `{ancestry}`.\n\
              5. Retry {retry}.\n\n\
              {exits}"
         )
@@ -16357,10 +16392,12 @@ pub(crate) fn parked_delivery_head(
         Ok(head) => return Ok(Some(head)),
         Err(reason) => reason,
     };
+    let [fetch_command] =
+        crate::worktree::GitOperations::git_remedies([&["fetch", "origin", anchor]])?;
     Err(format!(
         "PARKED DELIVERY UNRESOLVED: {} is parked for merge at anchor {anchor}, but that commit \
          does not resolve in {} ({fetch}). Cassy will not substitute the live factory branch \
-         or HEAD for the parked delivery. Fetch the commit (`git fetch origin {anchor}`) and \
+         or HEAD for the parked delivery. Fetch the commit (`{fetch_command}`) and \
          retry, or ask the supervisor to correct the anchor.",
         task.id,
         repo_path.display(),
@@ -16516,6 +16553,28 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     let tool_prefix = crate::mcp::tools::core::guidance::caller_prefix();
     let task_id = task_id.unwrap_or("<task-id>");
     let local_merge = delivery_mode == cas_types::DeliveryMode::LocalMerge;
+    let [push, target_log, lane_log, switch, cherry_pick, pr] =
+        match crate::worktree::GitOperations::shell_remedies([
+            ("git", &["push", "origin", &factory_branch][..]),
+            ("git", &["log", "--oneline", parent_branch, "-5"]),
+            ("git", &["log", "--oneline", &factory_branch, "-5"]),
+            ("git", &["switch", &factory_branch]),
+            ("git", &["cherry-pick", "<sha>..."]),
+            (
+                "gh",
+                &[
+                    "pr",
+                    "create",
+                    "--base",
+                    parent_branch,
+                    "--head",
+                    &factory_branch,
+                ],
+            ),
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return MergeRealityOutcome::Refuse(refusal),
+        };
     let publish_step = if local_merge {
         format!(
             "3. Do NOT push: delivery mode is local_merge, so {factory_branch} stays \
@@ -16524,7 +16583,7 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     } else {
         format!(
             "3. Push {factory_branch} to origin:\n\
-                `git push origin {factory_branch}`\n"
+                `{push}`\n"
         )
     };
     let integrate_step = if local_merge || parent_branch.starts_with("epic/") {
@@ -16540,7 +16599,7 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     } else {
         format!(
             "4. Open a PR targeting {parent_branch} and merge it:\n\
-                `gh pr create --base {parent_branch} --head {factory_branch}`\n"
+                `{pr}`\n"
         )
     };
     MergeRealityOutcome::Refuse(format!(
@@ -16552,11 +16611,11 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
          branch was never committed to at all.\n\n\
          Remediation:\n\
          1. Check where your commits actually landed:\n\
-            `git log --oneline {parent_branch} -5` and \
-            `git log --oneline {factory_branch} -5`\n\
+            `{target_log}` and \
+            `{lane_log}`\n\
          2. If commits are on the wrong branch, copy them onto \
          {factory_branch} from its worktree:\n\
-            `git switch {factory_branch} && git cherry-pick <sha>...`\n\
+            `{switch} && {cherry_pick}`\n\
          {publish_step}\
          {integrate_step}\
          5. Retry: `{tool_prefix}task action=close id={task_id}`\n\n\
@@ -21111,10 +21170,22 @@ fn run_epic_close_merge_gate_with_budget(
                 .unwrap_or_else(|| branch_content_direction(repo_path, branch, child_target));
             match &direction {
                 BranchContentDirection::ContentAbsent { .. } => {
+                    let refspec = format!("{branch}:refs/remotes/origin/{branch}");
+                    let remote = format!("origin/{branch}");
+                    let [fetch, merge, remote_merge, _switch] =
+                        match crate::worktree::GitOperations::git_remedies([
+                            &["fetch", "origin", &refspec],
+                            &["merge", "--no-ff", branch],
+                            &["merge", "--no-ff", &remote],
+                            &["switch", child_target],
+                        ]) {
+                            Ok(commands) => commands,
+                            Err(refusal) => return EpicCloseGateOutcome::Reject(refusal),
+                        };
                     let _ = writeln!(
                         cleaned_worktree_guidance,
-                        "  - {task}: `git fetch origin {branch}:refs/remotes/origin/{branch}` then \
-                         `git merge --no-ff {branch}` (or `origin/{branch}` when only the \
+                        "  - {task}: `{fetch}` then \
+                         `{merge}` (or `{remote_merge}` when only the \
                          remote-tracking ref remains) — content measured as absent from \
                          {parent}, so this merge delivers work rather than reverting it",
                         task = s.task_id,
@@ -26483,9 +26554,9 @@ mod merge_state_gate_tests {
 
     #[test]
     fn worker_task_close_rejects_when_factory_branch_unmerged() {
-        // Worker committed two new files on factory/worker that never
+        // Worker committed two new files on factory/worker{a,b}!e that never
         // landed on main. The gate must reject with stranded count + remediation.
-        let dir = init_factory_repo("worker");
+        let dir = init_factory_repo("worker{a,b}!e");
         std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
         git(dir.path(), &["add", "a.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: a"]);
@@ -26493,9 +26564,9 @@ mod merge_state_gate_tests {
         git(dir.path(), &["add", "b.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: b"]);
         let target_tip = rev_parse_local(dir.path(), "main");
-        let unreachable_tip = rev_parse_local(dir.path(), "factory/worker");
+        let unreachable_tip = rev_parse_local(dir.path(), "factory/worker{a,b}!e");
 
-        let task = worker_task("worker");
+        let task = worker_task("worker{a,b}!e");
         let req = base_req(&task.id);
         let mut env =
             TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("claude"))]);
@@ -26513,6 +26584,8 @@ mod merge_state_gate_tests {
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    // pin: the live close gate quotes the worker delivery ref.
+                    assert!(msg.contains("git push origin 'factory/worker{a,b}!e'"), "{msg}");
                     let prefix = coord.strip_suffix("coordination").unwrap();
                     assert!(msg.contains(&format!("{prefix}task action=close")), "{msg}");
                     assert!(
@@ -26520,7 +26593,7 @@ mod merge_state_gate_tests {
                         "{msg}"
                     );
                     assert!(
-                        msg.contains("factory/worker"),
+                        msg.contains("factory/worker{a,b}!e"),
                         "missing factory branch name: {msg}"
                     );
                     assert!(msg.contains("main"), "missing parent branch name: {msg}");
@@ -26566,7 +26639,7 @@ mod merge_state_gate_tests {
                          (cas-90e8): {msg}"
                     );
                     let poll = msg.find("action=inbox_poll").expect("poll step");
-                    let push = msg.find("Push factory/worker").expect("push step");
+                    let push = msg.find("Push factory/worker{a,b}!e").expect("push step");
                     let pr = msg.find("Open a PR targeting main").expect("PR step");
                     assert!(
                         poll < push && poll < pr,
@@ -38092,8 +38165,8 @@ mod epic_status_gate_tests {
     fn epic_close_still_prints_the_merge_command_for_genuinely_absent_work() {
         // Regression guard on the fix itself: real unmerged work must still get
         // actionable remediation.
-        let dir = init_epic_repo(&[("worker", 1)]);
-        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker"));
+        let dir = init_epic_repo(&[("worker{a,b}!e", 1)]);
+        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker{a,b}!e"));
         let task = epic("cas-epic-real");
         let req = base_req(&task.id);
         match run_epic_close_merge_gate(
@@ -38105,7 +38178,7 @@ mod epic_status_gate_tests {
         ) {
             EpicCloseGateOutcome::Reject(message) => {
                 assert!(
-                    message.contains("git merge --no-ff factory/worker"),
+                    message.contains("git merge --no-ff 'factory/worker{a,b}!e'"),
                     "genuine unmerged work must still be mergeable: {message}"
                 );
                 assert!(
@@ -41703,6 +41776,17 @@ mod merge_reality_tests {
     /// argument-less `git rebase --onto`).
     #[test]
     fn merge_reality_refusal_follows_epic_merge_model_with_complete_commands() {
+        let special = init_repo_worker_branch_empty();
+        git(special.path(), &["branch", "-m", "factory/test-worker", "factory/test{a,b}!e"]);
+        git(special.path(), &["branch", "epic/quote"]);
+        let special_outcome = check_factory_branch_merge_reality_with_delivery_mode(
+            special.path(), "test{a,b}!e", "epic/quote",
+            cas_types::DeliveryMode::PushBranch, Some("cas-dc1b"));
+        let MergeRealityOutcome::Refuse(special_message) = special_outcome else {
+            panic!("expected real merge-reality refusal");
+        };
+        // pin: the second live merge gate also emits copyable quoted Git advice.
+        assert!(special_message.contains("git push origin 'factory/test{a,b}!e'"), "{special_message}");
         let dir = init_repo_worker_branch_empty();
         git(dir.path(), &["branch", "epic/wave-a"]);
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(

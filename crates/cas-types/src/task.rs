@@ -541,6 +541,9 @@ pub struct FactoryBranchStart {
 pub struct EpicBranchOrigin {
     pub branch: String,
     pub host: String,
+    /// Stable source identity; legacy records fall back to their host label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 /// Deliverables and durable lifecycle evidence for a task.
@@ -1651,13 +1654,17 @@ mod tests {
 
         // Origin may be the only deliverable and must survive object and
         // legacy string transport without a machine-local checkout path.
-        let origin = serde_json::json!({"branch": "epic/peer", "host": "soundwave"});
+        for origin in [
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave"}),
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave", "device_id": "source-device"}),
+        ] {
         for value in [serde_json::json!({"epic_branch_origin": origin}),
             serde_json::json!(serde_json::json!({"epic_branch_origin": origin}).to_string())] {
             let mut encoded = serde_json::to_value(Task::new("cas-peer".into(), "peer".into())).unwrap();
             encoded["deliverables"] = value;
             let task: Task = serde_json::from_value(encoded).unwrap();
             assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["epic_branch_origin"], origin);
+        }
         }
     }
 

@@ -196,22 +196,24 @@ impl ConfigTuiApp {
 
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let footer_height = self.status_message.as_ref().map_or(3, |(message, _)| {
-            message
-                .lines()
-                .count()
-                .max(1)
-                .saturating_add(2)
-                .try_into()
-                .unwrap_or(u16::MAX)
-        });
+        let footer_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let footer_width = footer_block.inner(area).width;
+        let footer = ratatui::widgets::Paragraph::new(self.footer_text())
+            .block(footer_block)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        let footer_height = footer
+            .line_count(footer_width)
+            .max(3)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        let body_min_height = if self.status_message.is_some() { 6 } else { 10 };
 
         // Main layout: header, body, footer
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
-                Constraint::Min(10),   // Body
+                Constraint::Min(body_min_height), // Body
                 Constraint::Length(footer_height), // Footer/status
             ])
             .split(area);
@@ -226,6 +228,26 @@ impl ConfigTuiApp {
             ViewMode::ResetConfirm => self.render_reset_confirm(frame, area),
             ViewMode::ValueEdit => self.render_value_edit(frame, area),
             _ => {}
+        }
+    }
+
+    fn footer_text(&self) -> String {
+        if let Some((message, _)) = &self.status_message {
+            return message.clone();
+        }
+
+        match self.mode {
+            ViewMode::SectionList => {
+                "↑↓/jk:Move │ Enter:Edit │ d:Diff │ a:Advanced │ s:Save │ q:Quit │ ?:Help"
+                    .to_string()
+            }
+            ViewMode::SectionEdit => {
+                "↑↓/jk:Navigate │ Enter:Edit │ r:Reset │ Esc:Back │ s:Save │ q:Quit".to_string()
+            }
+            ViewMode::DiffView => "Esc:Back │ r:Reset All │ q:Quit".to_string(),
+            ViewMode::Help | ViewMode::ResetConfirm | ViewMode::ValueEdit => {
+                "Esc:Cancel │ Enter:Confirm".to_string()
+            }
         }
     }
 
@@ -654,12 +676,28 @@ mod tests {
     use super::*;
     use crate::config::operator_policy::InvocationContext;
 
+    fn render_screen(app: &mut ConfigTuiApp, width: u16, height: u16) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
+                    .collect::<Vec<_>>()
+                    .join("")
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// cas-0d4f0: the TUI refuses to save a security-relevant key from an
     /// agent context and keeps the edit unsaved; ordinary keys save.
     #[test]
     fn cas_0d4f0_config_tui_refuses_operator_keys_from_agents() {
-        use ratatui::{Terminal, backend::TestBackend};
-
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let agent = || InvocationContext {
@@ -702,21 +740,9 @@ mod tests {
             "{message}"
         );
 
-        for width in [80, 120] {
+        for width in [60, 80, 120] {
             let height = 24;
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| app.ui(frame)).unwrap();
-            let screen = (0..height)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
-                        .collect::<Vec<_>>()
-                        .join("")
-                        .trim_end()
-                        .to_owned()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let screen = render_screen(&mut app, width, height);
             assert!(
                 screen.contains("Operator-only config change refused."),
                 "TUI at {width} columns hides the refusal headline:\n{screen}"
@@ -728,6 +754,10 @@ mod tests {
             assert!(
                 screen.contains("cas config set notifications.webhook_url <value>"),
                 "TUI at {width} columns hides the remedy command:\n{screen}"
+            );
+            assert!(
+                screen.contains("open a fresh terminal and run it there."),
+                "TUI at {width} columns hides the fresh-terminal remedy:\n{screen}"
             );
         }
         assert_eq!(
@@ -743,6 +773,20 @@ mod tests {
         app.save_config_with(agent).unwrap();
         assert!(!app.has_unsaved);
         assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn config_tui_footer_keeps_help_visible_at_80_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+
+        let screen = render_screen(&mut app, 80, 24);
+
+        assert!(
+            screen.lines().any(|line| line.contains("?:Help")),
+            "TUI at 80 columns hides the help hint:\n{screen}"
+        );
     }
 
     #[test]

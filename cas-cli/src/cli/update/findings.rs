@@ -251,21 +251,30 @@ pub(super) fn cause_and_remedy(detail: &str, output: &str) -> (String, Option<St
 /// A cloud phase's own summary line says what went wrong and what to run;
 /// its detail ("3 pushed; 2 queued") only counts rows.
 fn cloud_cause(output: &str) -> Option<(String, Option<String>)> {
+    let separators = [
+        format!(" {} ", Icons::separator_dot(true)),
+        format!(" {} ", Icons::separator_dot(false)),
+    ];
     let line = output.lines().find_map(|line| {
         let line = line
             .trim()
             .trim_start_matches("[WARN]")
             .trim_start_matches(Icons::WARNING)
             .trim_start();
-        line.strip_prefix("Push incomplete · ")
-            .map(|rest| ("push incomplete", rest))
-            .or_else(|| line.strip_prefix("Pull incomplete · ").map(|rest| ("pull incomplete", rest)))
+        [("Push incomplete", "push incomplete"), ("Pull incomplete", "pull incomplete")]
+            .into_iter()
+            .find_map(|(prefix, what)| {
+                let rest = line.strip_prefix(prefix)?;
+                separators.iter().find_map(|separator| {
+                    rest.strip_prefix(separator.as_str()).map(|rest| (what, rest, separator))
+                })
+            })
     })?;
-    let (what, rest) = line;
+    let (what, rest, separator) = line;
     let mut generic = None;
     let mut specific = None;
     let mut parts: Vec<String> = Vec::new();
-    for part in rest.split(" · ") {
+    for part in rest.split(separator.as_str()) {
         if let Some(command) = part.strip_prefix("run ") {
             generic = Some(command.trim().to_owned());
             continue;

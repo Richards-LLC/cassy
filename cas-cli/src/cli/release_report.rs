@@ -3202,14 +3202,14 @@ mod tests {
     #[test]
     fn report_links_name_the_tagged_github_files_not_the_checkout_cas_692a() {
         let (source, pdf) = report_link_hrefs(
-            Some("Richards-LLC/cassy"),
-            "v3.72.0",
-            "docs/release-reports/v3.72.0.md",
-            "docs/release-reports/v3.72.0.pdf",
+            Some("o/r"),
+            "v9.99.1",
+            "docs/release-reports/v9.99.1.md",
+            "docs/release-reports/v9.99.1.pdf",
         );
         // pin: the exact URL is the link a reader of the published PDF follows.
-        assert_eq!(source, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.md");
-        assert_eq!(pdf, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.pdf");
+        assert_eq!(source, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.md");
+        assert_eq!(pdf, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.pdf");
     }
 
     /// cas-7860: issues are closed by hand minutes after the release PR

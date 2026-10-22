@@ -4,7 +4,7 @@
 Usage: python3 check-pdf.py REPORT.pdf ARTIFACT_DIR
 Needs PyMuPDF (`pip install pymupdf`). Writes one PNG per page and receipt.json
 into ARTIFACT_DIR, prints the receipt, and exits non-zero on a bounds finding,
-a footer-only last page, or a link to a local file (cas-692a).
+a footer-only last page, or a link to a local file.
 """
 import json, re, sys
 from pathlib import Path
@@ -40,7 +40,7 @@ closing = [block[1] for block in blocks if 'Markdown source' in block[4]]
 # Anchor on the folio itself, the last match: an evidence paragraph may also
 # open with "Markdown source:" higher on the page.
 footer_only = len(pdf) > 1 and bool(closing) and not any(block[3] <= max(closing) - 2 for block in blocks)
-# cas-692a: a file:// target, or one into a Cassy worktree, is dead for
+# A file:// target, or one into a Cassy worktree, is dead for
 # every reader of the published PDF.
 local_links = files + [uri for uri in links if uri.lower().startswith('file:') or '/.cas/worktrees/' in uri]
 receipt = {'pages': len(pdf), 'bounds_findings': findings, 'footer_only_last_page': footer_only,

@@ -1856,6 +1856,7 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         run_git(&["commit", "-m", &format!("{id}: extend reference history")], &path);
         let mut task = Task::new(id, format!("Extend {worker}'s reference history"));
         task.status = TaskStatus::AwaitingMerge;
+        task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
         task.depth = TaskDepth::Light;
         task.assignee = Some(worker.to_string());
         task.deliverables.factory_branch_anchor = Some(git_stdout(&path, &["rev-parse", "HEAD"]));

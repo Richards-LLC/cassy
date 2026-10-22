@@ -535,6 +535,7 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
     git(remote.path(), &["init", "--bare"]);
     git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
     let agents = service.inner.open_agent_store().unwrap();
+    service.inner.open_event_store().unwrap();
     let mut dead = Agent::new_with_role("dead-worker-id".into(), "dead-worker".into(), AgentRole::Worker);
     dead.status = AgentStatus::Shutdown;
     agents.register(&dead).unwrap();

@@ -121,6 +121,49 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
             "SELECT id,name,status,pid,factory_session FROM agents WHERE role='worker' AND (parent_id=?1 OR (factory_session=?2 AND ?2 IS NOT NULL)) ORDER BY id",
             &[&id, &session],
         )?;
+        // Preserve unadopted lane evidence across a chain of successors. Use
+        // current task/worker rows for those IDs, never replay old ownership.
+        let mut inherited_tasks = std::collections::HashSet::new();
+        let mut inherited_workers = std::collections::HashSet::new();
+        let mut inherited = conn.prepare("SELECT id,payload FROM agent_session_ends WHERE claimed_by=? AND claimed_epoch=? AND queued_at IS NOT NULL")?;
+        let inherited = inherited
+            .query_map(params![id, epoch], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut inherited_receipts = Vec::new();
+        for (receipt, payload) in inherited {
+            let previous: SupervisorHandoff =
+                serde_json::from_str(&payload).map_err(|e| StoreError::Other(e.to_string()))?;
+            for task in previous.tasks {
+                if let Some(id) = task["id"].as_str() {
+                    inherited_tasks.insert(id.to_string());
+                }
+            }
+            for worker in previous.workers {
+                if let Some(id) = worker["id"].as_str() {
+                    inherited_workers.insert(id.to_string());
+                }
+            }
+            inherited_receipts.push(
+                serde_json::json!({"inherited_handoff":receipt,"predecessor":previous.agent_id}),
+            );
+        }
+        let current_workers = rows(
+            conn,
+            "agents",
+            "SELECT id,name,status,pid,factory_session FROM agents WHERE role='worker' ORDER BY id",
+            &[],
+        )?;
+        for worker in current_workers {
+            if worker["id"]
+                .as_str()
+                .is_some_and(|id| inherited_workers.contains(id))
+                && !handoff.workers.iter().any(|w| w["id"] == worker["id"])
+            {
+                handoff.workers.push(worker);
+            }
+        }
         let mut owners = vec![id.to_string(), name.clone()];
         for worker in &handoff.workers {
             for key in ["id", "name"] {
@@ -139,6 +182,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
             .into_iter().filter(|task| {
                 ["assignee", "epic_verification_owner"].iter().any(|key| task[*key].as_str().is_some_and(|owner| owners.iter().any(|s| s == owner)))
                     || epic_ids.iter().any(|epic| epic["epic_id"] == task["id"])
+                    || task["id"].as_str().is_some_and(|id| inherited_tasks.contains(id))
             }).collect();
         // Notes are retained in the receipt; put them last in startup projections
         // so a long timeline cannot conceal the delivery ref or PR.
@@ -156,7 +200,25 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
             &[&name, &id],
         )?;
         handoff.pending.extend(rows(conn, "supervisor_queue", "SELECT id,event_type,payload FROM supervisor_queue WHERE supervisor_id=? AND processed_at IS NULL ORDER BY id", &[&id])?);
-        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
+        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event,trigger_filter FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
+        // A delivered Commander ask is still open while its deadline reminder
+        // is pending. Include its original body even after transport processed it.
+        let mut asks = Vec::new();
+        for reminder in &handoff.pending {
+            if let Some(filter) = reminder["trigger_filter"].as_str()
+                && let Ok(filter) = serde_json::from_str::<Value>(filter)
+                && let Some(ask_id) = filter["operator_ask"].as_i64()
+            {
+                asks.extend(rows(
+                    conn,
+                    "prompt_queue",
+                    "SELECT id,source,target,prompt FROM prompt_queue WHERE id=?",
+                    &[&ask_id],
+                )?);
+            }
+        }
+        handoff.pending.extend(asks);
+        handoff.pending.extend(inherited_receipts);
     }
     let encoded = serde_json::to_string(&handoff).map_err(|e| StoreError::Other(e.to_string()))?;
     conn.execute("INSERT INTO agent_session_ends (id,agent_id,registered_at,machine_id,role,reason,payload,ended_at) VALUES (?,?,?,?,?,?,?,?)", params![handoff.id,id,epoch,machine,role,reason,encoded,Utc::now().to_rfc3339()])?;

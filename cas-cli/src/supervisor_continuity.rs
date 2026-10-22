@@ -30,6 +30,8 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         serde_json::to_writer_pretty(temporary.as_file(), &handoff)?;
         temporary.as_file().sync_all()?;
         temporary.persist(&path)?;
+        #[cfg(unix)]
+        std::fs::File::open(&dir)?.sync_all()?;
         let mut detail = format!(
             "Supervisor handoff from {} ({}), end reason: {}.\nReceipt: {}\n",
             handoff.name,
@@ -46,6 +48,13 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         ] {
             detail.push_str(&format!("{label} ({}):\n", rows.len()));
             for row in rows.iter().take(12) {
+                if let Some(inherited) = row["inherited_handoff"].as_str() {
+                    detail.push_str(&format!(
+                        "- Earlier receipt: {}\n",
+                        dir.join(format!("{inherited}.json")).display()
+                    ));
+                    continue;
+                }
                 let line = serde_json::to_string(row)?;
                 let preview: String = line.chars().take(600).collect();
                 detail.push_str(&format!(
@@ -61,7 +70,7 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
                 detail.push_str("- Additional rows in receipt.\n");
             }
         }
-        detail.push_str("Review the receipt and explicitly adopt owned epics; live workers and leases were preserved.\n");
+        detail.push_str("Review the receipt and explicitly adopt owned epics. Worker rows are retirement-time evidence; verify current liveness before recovery.\n");
         crate::store::open_prompt_queue_store(root)?.enqueue_idempotent(
             SOURCE,
             &successor.name,

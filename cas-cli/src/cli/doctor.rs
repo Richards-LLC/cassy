@@ -2504,6 +2504,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("GitHub origin", &checks);
     checks.extend(git_hooks::checks(project_root));
     recorder.mark("Git hooks path", &checks); // doctor-snapshot: no default row (core.hooksPath unset)
+    if let Some(check) = managed_commits_check(project_root) { checks.push(check); }
     checks.push(managed_file_drift_check(project_root));
     recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
@@ -12756,5 +12757,58 @@ fn managed_file_drift_check(root: &Path) -> Check {
             CheckStatus::Warning,
             format!("managed file conflict: {error}; run `cas update`"),
         ),
+    }
+}
+
+// Publication diagnostic seam; implemented after the real-Git regression is red.
+fn managed_commits_check(_root: &Path) -> Option<Check> {
+    None
+}
+
+#[cfg(test)]
+mod managed_commits_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_finds_local_reconcile_commits_on_default_upstream_cas_3b812() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "--initial-branch=main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "baseline"]);
+        git(&["remote", "add", "origin", "./no-network-needed"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(&["branch", "--set-upstream-to=origin/main", "main"]);
+        assert!(managed_commits_check(&repo).is_none());
+        // A same-subject human commit is not a Cassy-authored repair.
+        git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
+        assert!(managed_commits_check(&repo).is_none());
+        git(&["-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
+        let main = git(&["rev-parse", "main"]);
+        git(&["checkout", "-qb", "factory/probe", "origin/main"]);
+        // Diagnose local main even when the worker checkout itself is aligned.
+        let check = managed_commits_check(&repo).expect("unpublished reconcile commit needs a finding");
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        let json = serialize_checks(&[check], &[]);
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(json[0]["group"], "config");
+        let message = json[0]["message"].as_str().unwrap();
+        assert!(message.contains("1") && message.contains("main") && message.contains("origin/main") && message.contains("reconcile"), "{message}");
+        let remedy = json[0]["remediation"].as_str().expect("action belongs in remediation");
+        assert!(remedy.contains("origin") && remedy.contains("PR"), "{remedy}");
+        assert_eq!(git(&["rev-parse", "main"]), main, "doctor must not move local history");
+        git(&["update-ref", "refs/remotes/origin/main", &main]);
+        assert!(managed_commits_check(&repo).is_none(), "published repairs are no longer pending");
+        git(&["config", "--unset", "branch.main.remote"]);
+        git(&["config", "--unset", "branch.main.merge"]);
+        assert!(managed_commits_check(&repo).is_none(), "no upstream is not proof of an unpushed repair");
     }
 }

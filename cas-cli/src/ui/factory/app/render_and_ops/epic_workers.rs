@@ -4969,6 +4969,17 @@ mod spawn_base_tests {
         assert_eq!(short_sha(&repo, "origin/main"), remote_sha);
         assert!(!repo.join(".cas/worktrees/legacy-path-worker").exists());
         assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let repair_tip = short_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("repair-only divergence still refuses").to_string();
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(short_sha(&repo, "main"), repair_tip);
+        assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
     }
 
     #[test]
@@ -5965,6 +5976,17 @@ mod spawn_base_tests {
             stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
             "the divergence remains explicitly diagnosable to the spawning caller"
         );
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let parent_tip = head_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/diverged", "main")
+            .expect_err("repair-only parent divergence still refuses");
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
+        assert_eq!(head_sha(&repo, "main"), parent_tip);
     }
 
     /// GH #584 / cas-a075: the production spawn-preparation seam must stop

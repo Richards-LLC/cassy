@@ -220,6 +220,7 @@ impl CasCore {
         };
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
+        let mut claim_snapshot = None;
         let mut cloud_local_holder: Option<String> = None;
         let peer_note = match peer_claims.clone() {
             Some(claims) => {
@@ -227,7 +228,7 @@ impl CasCore {
                 let kind = claim_kind;
                 let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                let (answer, fence) = {
+                let (answer, fence, snapshot) = {
                     let cas_root = self.cas_root.clone();
                     let (id, agent, name) =
                         (req.task_id.clone(), agent_id.clone(), agent_name.clone());
@@ -238,9 +239,10 @@ impl CasCore {
                             })
                         })
                         .await
-                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
+                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
                 };
                 peer_claim_fence = fence;
+                claim_snapshot = snapshot;
                 match answer {
                     Acquire::Claimed => {
                         cloud_claimed = true;
@@ -320,7 +322,7 @@ impl CasCore {
                     let _ = peer_budget
                         .run(move || {
                             let _fence = fence;
-                            claims.release_own(&id, &agent)
+                            claims.release_own_at(&id, &agent, claim_snapshot)
                         })
                         .await;
                 }

@@ -227,6 +227,21 @@ impl FakeCloud {
                 }
             },
             ("POST", "release") => {
+                // petra-stella-cloud #164: a conditional release names the
+                // lock snapshot it expects, both fields or neither; a lock
+                // reacquired or renewed since answers 409.
+                let expected = (body["expected_epoch"].as_u64(), body["expected_renewal_count"].as_u64());
+                match expected {
+                    (Some(epoch), Some(renewals)) => {
+                        if let Some(lock) = state.locks.get(&key).filter(|lock| lock.status == "active")
+                            && (lock.epoch != epoch || u64::from(lock.renewal_count) != renewals)
+                        {
+                            return (409, serde_json::json!({"error": "lock_snapshot_changed"}));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => return (400, serde_json::json!({"error": "expected_epoch and expected_renewal_count go together"})),
+                }
                 if let Some(winner) = state.replace_on_release.take()
                     && let Some(lock) = state.locks.get_mut(&key)
                 { lock.agent_id = winner; lock.renewed_at = now; lock.epoch += 1; }

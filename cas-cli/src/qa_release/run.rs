@@ -706,10 +706,11 @@ struct RunAnswer {
     measured: BTreeMap<String, f64>,
 }
 
-/// `<independence_key>=<id>` when the journey names a key and the run reported it.
+/// The run's `independence_key` value, when the journey names a key and the
+/// run reported it.
 fn identity(journey: &Journey, subjects: &BTreeMap<String, String>) -> Option<String> {
     let key = journey.independence_key.as_ref()?;
-    subjects.get(key).filter(|id| !id.is_empty()).map(|id| format!("{key}={}", printable(id)))
+    subjects.get(key).filter(|id| !id.is_empty()).map(|id| printable(id))
 }
 
 /// Everything a row walk reads; shared by a suite's worker threads.

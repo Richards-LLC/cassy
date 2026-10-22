@@ -2090,7 +2090,8 @@ journeys:
             .replace("prod: {status: live}", "prod: {status: dark}");
         let unowned = check(repo(&unowned).path(), Path::new(DEFAULT_PATH)).unwrap();
         assert_eq!(hand_walk(&unowned)[0].split(' ').take(2).collect::<Vec<_>>(), ["hand_walk_unowned", "B2-home"]);
-        let bad_due = check(repo(&hand.replace("2999-12-31", "soon")).path(), Path::new(DEFAULT_PATH)).unwrap();
+        let bad_due = hand.replace("cas-9999, due: \"2999-12-31\"", "cas-9999, due: \"soon\"");
+        let bad_due = check(repo(&bad_due).path(), Path::new(DEFAULT_PATH)).unwrap();
         assert_eq!(
             bad_due.problems.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect::<Vec<_>>(),
             [("automation", "automation.due must be a YYYY-MM-DD date")]

@@ -62,8 +62,8 @@ pub struct Row {
     /// Hand-walk minutes for a manual row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_minutes: Option<u32>,
-    /// `<independence_key>=<id>`: the result identity this run produced, so
-    /// a golden-set cell counts only distinct runs (cas-d863).
+    /// The journey's `independence_key` value this run produced, so a
+    /// golden-set cell counts only distinct runs (cas-d863).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     /// PRs a manual row was recorded to cover.

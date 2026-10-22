@@ -1106,9 +1106,10 @@ impl CasCore {
                 if previous_epic != &epic || previous_target != &target {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(
-                            "Active tasks have different epic or target bindings. Retry task action=create with an explicit epic, target_repo or target_branch; epic=\"\" creates a standalone task.",
-                        ),
+                        message: Cow::from(format!(
+                            "Active tasks have different epic or target bindings. Retry {tool_prefix}task action=create with an explicit epic, target_repo or target_branch; epic=\"\" creates a standalone task.",
+                            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+                        )),
                         data: None,
                     });
                 }
@@ -2771,10 +2772,13 @@ impl CasCore {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "Task is locked by {} until {}. A registered live supervisor can release it: task action=release id={}",
+                            "Task is locked by {} until {}. A registered live supervisor can release it: {tool_prefix}task action=release id={}",
                             holder_display,
                             expires_at.format("%H:%M"),
-                            task.id
+                            task.id,
+                            tool_prefix = self.supervisor_guidance_prefix().unwrap_or_else(
+                                crate::mcp::tools::core::guidance::caller_prefix,
+                            ),
                         ),
                     ));
                 }

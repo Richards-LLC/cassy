@@ -203,21 +203,176 @@ impl CasCore {
     }
 }
 
-fn verdict(cell: &str) -> bool {
-    ["PASS", "FAIL", "NOT A ROUTE"].iter().any(|verdict| {
-        cell.strip_prefix(verdict).is_some_and(|rest| {
+/// One ledger row: its id cell, its verdict cell and all its cells.
+struct Row<'a> {
+    id: &'a str,
+    verdict: &'a str,
+    cells: Vec<&'a str>,
+}
+
+/// Header names of a ledger table's verdict columns, in priority order: the
+/// evidence ledger's `verdict`, the independent-QA journeys table's `Run`, and
+/// short `Result` or `Status` tables. See [`names_column`] for compound
+/// headers such as `Verdict / label`.
+const VERDICT_HEADERS: [&str; 4] = ["verdict", "run", "result", "status"];
+
+fn table_cells(line: &str) -> Vec<&str> {
+    line.trim_matches('|')
+        .split('|')
+        .map(|c| c.trim().trim_matches('`').trim())
+        .collect()
+}
+
+fn separator(cells: &[&str]) -> bool {
+    cells
+        .iter()
+        .all(|c| c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':')))
+}
+
+/// Whether a header cell names `name`: exactly, or followed by a separator
+/// (`Verdict / label`, `Result/source`, `Run (n)`, `Status: prod`), so
+/// `Status page`, `Result before run` or `Run id` does not. `verdict` is
+/// unambiguous, so any `Verdict <qualifier>` counts (`verdict t1`).
+/// Emphasis is ignored.
+fn names_column(cell: &str, name: &str) -> bool {
+    let cell = cell
+        .trim_matches(|c: char| c == '*' || c == '_')
+        .to_ascii_lowercase();
+    cell.strip_prefix(name).is_some_and(|rest| {
+        rest.is_empty()
+            || rest.trim_start().starts_with(['/', '(', ':'])
+            || (name == "verdict" && rest.starts_with(char::is_whitespace))
+    })
+}
+
+/// The verdict-named columns of a header row, in [`VERDICT_HEADERS`] order.
+fn verdict_columns(cells: &[&str]) -> Vec<usize> {
+    VERDICT_HEADERS
+        .iter()
+        .flat_map(|name| {
+            cells
+                .iter()
+                .enumerate()
+                .filter(move |(_, cell)| names_column(cell, name))
+                .map(|(index, _)| index)
+        })
+        .collect()
+}
+
+/// Ledger rows outside code fences. Only verdict columns are read. A table
+/// header (the row above a `|---|` separator, or a row with a cell that is
+/// exactly `Verdict`) names them by [`VERDICT_HEADERS`]; a row reads the first one
+/// whose cell holds a verdict, so a `Run` column of run ids beside `Result`
+/// still counts. A headed table without one has no verdict column. Only a
+/// headerless row falls back by position: the fifth cell of a row with five or
+/// more cells, else the second. A list row reads `- ID: verdict`.
+fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
+    let lines: Vec<&str> = ledger.lines().map(str::trim).collect();
+    let mut fenced = false;
+    // `Some(columns)` inside a headed table; `None` before any header.
+    let mut header: Option<Vec<usize>> = None;
+    let mut rows = Vec::new();
+    for (index, line) in lines.iter().copied().enumerate() {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if !line.contains('|') {
+            header = None;
+            let row = line.trim_start_matches("- ");
+            if let Some((id, verdict)) = row.split_once(':') {
+                let (id, verdict) = (id.trim(), verdict.trim());
+                rows.push(Row {
+                    id,
+                    verdict,
+                    cells: vec![id, verdict],
+                });
+            }
+            continue;
+        }
+        let cells = table_cells(line);
+        if separator(&cells) {
+            continue;
+        }
+        let above_separator = lines
+            .get(index + 1)
+            .is_some_and(|next| next.contains('|') && separator(&table_cells(next)));
+        if above_separator || cells.iter().any(|c| c.eq_ignore_ascii_case("verdict")) {
+            header = Some(verdict_columns(&cells));
+            continue;
+        }
+        let positional = [if cells.len() >= 5 { 4 } else { 1 }];
+        let columns = header.as_deref().unwrap_or(&positional);
+        let verdict = columns
+            .iter()
+            .filter_map(|column| cells.get(*column).copied())
+            .find(|cell| disposition(cell, &cells).is_some())
+            .or_else(|| {
+                columns
+                    .first()
+                    .and_then(|column| cells.get(*column).copied())
+            });
+        if let Some(verdict) = verdict {
+            rows.push(Row {
+                id: cells[0],
+                verdict,
+                cells,
+            });
+        }
+    }
+    rows
+}
+
+/// What one verdict cell records for its journey.
+enum Disposition {
+    /// PASS or FAIL: a run of the journey.
+    Run,
+    /// NOT A ROUTE or NOT EXERCISED: <reason>.
+    Recorded,
+    /// BLOCKED_EXTERNAL: neither PASS nor FAIL, so the journey is still owed.
+    Owed(Option<crate::qa_release::blocked::BlockedExternal>),
+}
+
+/// Reads one verdict cell; bold (`**PASS**`) reads as plain.
+fn disposition(cell: &str, cells: &[&str]) -> Option<Disposition> {
+    use crate::qa_release::blocked::{self, BlockedExternal};
+    let cell = cell.trim_start_matches('*');
+    let after = |verdict: &str| {
+        cell.strip_prefix(verdict)
+            .map(|rest| rest.trim_start_matches('*'))
+    };
+    if cell.starts_with(blocked::VERDICT) {
+        return Some(Disposition::Owed(BlockedExternal::from_row(cell, cells)));
+    }
+    let word = |verdict: &str| {
+        after(verdict).is_some_and(|rest| {
             rest.is_empty()
                 || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'))
         })
-    }) || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
-        let reason = reason.trim();
-        !reason.is_empty() && reason != "<reason>"
-    })
+    };
+    if word("PASS") || word("FAIL") {
+        Some(Disposition::Run)
+    } else if word("NOT A ROUTE")
+        || after("NOT EXERCISED")
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|reason| {
+                let reason = reason.trim().trim_start_matches('*').trim();
+                !reason.is_empty() && reason != "<reason>"
+            })
+    {
+        Some(Disposition::Recorded)
+    } else {
+        None
+    }
 }
 
 /// G8 reads the park-time report, never a new diff. Legacy catalog adoption
 /// remains advisory; enforcement arms when a YAML registry exists.
 pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option<String> {
+    use crate::qa_release::independence::{Runs, identity};
     if impact["registry"]["present"] != true {
         return None;
     }
@@ -225,7 +380,7 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
         .as_array()?
         .iter()
         .filter(|j| j["status"] == "live")
-        .filter_map(|j| j["id"].as_str())
+        .filter_map(|j| Some((j["id"].as_str()?, j["independence_key"].as_str())))
         .collect();
     if live.is_empty() {
         return None;
@@ -233,38 +388,47 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
     if impact["head_sha"].as_str() != Some(head) {
         return Some("QA RECORD REJECTED: journey impact is for a different delivery head; refresh the QA dispatch for this round before recording approval.".into());
     }
-    let mut fenced = false;
-    let rows: Vec<_> = ledger
-        .lines()
-        .filter(|line| {
-            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                fenced = !fenced;
-                return false;
+    let rows = ledger_rows(ledger);
+    let (mut missing, mut owed, mut dependent) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, key) in live {
+        let recorded: Vec<_> = rows
+            .iter()
+            .filter(|row| row.id == id)
+            .filter_map(|row| Some((row, disposition(row.verdict, &row.cells)?)))
+            .collect();
+        if recorded.is_empty() {
+            missing.push(id);
+        }
+        for (row, disposition) in &recorded {
+            if let Disposition::Owed(blocked) = disposition {
+                let cell = (row.cells.len() >= 5).then(|| row.cells[1]);
+                owed.push(match blocked {
+                    Some(blocked) => blocked.owed(id, cell),
+                    None => format!(
+                        "{id} is BLOCKED_EXTERNAL without `blocked: provider=<provider> error=<error>`"
+                    ),
+                });
             }
-            !fenced
-        })
-        .collect();
-    let missing: Vec<_> = live
-        .into_iter()
-        .filter(|id| {
-            !rows.iter().any(|line| {
-                let cells: Vec<_> = line
-                    .trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|c| c.trim().trim_matches('`').trim())
-                    .collect();
-                if cells.len() >= 2 {
-                    cells.iter().any(|cell| cell == id) && cells.iter().any(|cell| verdict(cell))
-                } else {
-                    // Also accept a compact Markdown list row: `- ID: PASS`.
-                    let row = line.trim().trim_start_matches("- ");
-                    row.strip_prefix(id)
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .is_some_and(|rest| verdict(rest.trim()))
-                }
-            })
-        })
-        .collect();
-    (!missing.is_empty()).then(|| format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")))
+        }
+        if let Some(key) = key {
+            let runs = Runs::count(
+                recorded
+                    .iter()
+                    .filter(|(_, d)| matches!(d, Disposition::Run))
+                    .map(|(row, _)| identity(key, &row.cells)),
+            );
+            dependent.extend(runs.refusal(id, key, 0));
+        }
+    }
+    let mut refusals = Vec::new();
+    if !missing.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")));
+    }
+    if !owed.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: owed: {}: neither PASS nor FAIL; re-walk once the provider recovers.", owed.join("; ")));
+    }
+    if !dependent.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: {}. A duplicate or unidentified run is not independent; record one distinct <key>=<id> per run.", dependent.join("; ")));
+    }
+    (!refusals.is_empty()).then(|| refusals.join("\n"))
 }

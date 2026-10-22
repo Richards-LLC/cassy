@@ -76,6 +76,9 @@ pub struct Registry {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub manual_checks: BTreeMap<String, ManualCheck>,
     pub fixtures: Option<BTreeMap<String, Fixture>>,
+    /// Shared provider budgets the release gate meters (`kind: rate|quota|balance`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, Resource>,
     pub bug_families: BTreeMap<String, BugFamily>,
     pub journeys: Vec<Journey>,
     #[serde(flatten)]
@@ -96,6 +99,7 @@ deserialize_with_extra!(Registry {
     invariants,
     manual_checks,
     fixtures,
+    resources,
     bug_families,
     journeys,
 });
@@ -157,6 +161,62 @@ const MANUAL_CHECK_FIELDS: [&str; 7] = [
     "compare",
 ];
 const FIXTURE_FIELDS: [&str; 5] = ["description", "provider", "frozen", "recipe", "labels"];
+const RESOURCE_FIELDS: [&str; 4] = ["kind", "per_min", "concurrency", "per_day"];
+
+/// A registry `resources` entry. It declares a budget; it never names a command.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Resource {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_min: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_day: Option<u32>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+deserialize_with_extra!(Resource {
+    kind,
+    per_min,
+    concurrency,
+    per_day
+});
+
+/// A [`Resource`]'s validated budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    /// At most `per_min` units in any minute, `concurrency` requests in flight.
+    Rate { per_min: u32, concurrency: Option<u32> },
+    /// At most `per_day` units in any 24 hours.
+    Quota { per_day: u32 },
+    /// A consumable the adapter reports through `balance` and tops up through `grant`.
+    Balance,
+}
+
+impl Resource {
+    pub fn limit(&self) -> Result<Limit, String> {
+        let positive = |name: &str, value: Option<u32>| match value {
+            Some(0) => Err(format!("{name} must be positive")),
+            value => Ok(value),
+        };
+        let (per_min, concurrency, per_day) = (
+            positive("per_min", self.per_min)?,
+            positive("concurrency", self.concurrency)?,
+            positive("per_day", self.per_day)?,
+        );
+        match (self.kind.as_str(), per_min, concurrency, per_day) {
+            ("rate", Some(per_min), concurrency, None) => Ok(Limit::Rate { per_min, concurrency }),
+            ("rate", ..) => Err("kind rate needs per_min and takes no per_day".into()),
+            ("quota", None, None, Some(per_day)) => Ok(Limit::Quota { per_day }),
+            ("quota", ..) => Err("kind quota needs only per_day".into()),
+            ("balance", None, None, None) => Ok(Limit::Balance),
+            ("balance", ..) => Err("kind balance takes no limits; the adapter reports it".into()),
+            (kind, ..) => Err(format!("kind {kind:?} must be rate, quota or balance")),
+        }
+    }
+}
 
 /// Numeric grading mode: `exact`, or `{banded: {min_ratio | max_delta}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -499,6 +559,12 @@ pub struct Journey {
     /// Flags whose target-environment values the journey's evidence depends on.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on_flags: Vec<String>,
+    /// Result identity that makes runs independent, e.g. `post_audit_v2_runs.id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independence_key: Option<String>,
+    /// Units of each declared resource one run of the journey uses.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub consumes: BTreeMap<String, u32>,
     pub seeded: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -525,6 +591,8 @@ deserialize_with_extra!(Journey {
     evidence,
     readback,
     depends_on_flags,
+    independence_key,
+    consumes,
     seeded,
 });
 
@@ -952,6 +1020,13 @@ impl Registry {
                 }
             }
         }
+        for (name, resource) in &self.resources {
+            let subject = format!("resources.{name}");
+            report.extra_fields(&subject, &resource.extra, &RESOURCE_FIELDS);
+            if let Err(message) = resource.limit() {
+                report.problem("resource", &subject, message);
+            }
+        }
         for (name, manual) in &self.manual_checks {
             let subject = format!("manual_checks.{name}");
             if manual.statement.trim().is_empty() || manual.check.trim().is_empty() {
@@ -1130,6 +1205,27 @@ impl Registry {
                         id,
                         format!("flag {flag:?} must be 1-128 letters, digits or ._-:/"),
                     );
+                }
+            }
+            if let Some(key) = &journey.independence_key {
+                let valid = !key.is_empty()
+                    && key.len() <= 128
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+                if !valid {
+                    report.problem(
+                        "independence_key",
+                        id,
+                        format!("independence_key {key:?} must be 1-128 letters, digits or ._-"),
+                    );
+                }
+            }
+            for (resource, amount) in &journey.consumes {
+                if !self.resources.contains_key(resource) {
+                    report.problem("consumes", id, format!("unknown resource {resource:?}"));
+                } else if *amount == 0 {
+                    report.problem("consumes", id, format!("{resource} must consume at least 1"));
                 }
             }
             for invariant in &journey.invariants {
@@ -1470,6 +1566,21 @@ journeys:
                 "",
             ),
         ];
+        cases.push((
+            "consumes an undeclared resource",
+            GABBER.replace("    fixtures: [fresh]\n", "    fixtures: [fresh]\n    consumes: {credits: 10}\n"),
+            "consumes",
+            "unknown resource \"credits\"",
+        ));
+        cases.push((
+            "independence key with a space",
+            GABBER.replace(
+                "    fixtures: [fresh]\n",
+                "    fixtures: [fresh]\n    independence_key: \"post audit id\"\n",
+            ),
+            "independence_key",
+            "post audit id",
+        ));
         cases.push((
             "flag with a space",
             GABBER.replace(

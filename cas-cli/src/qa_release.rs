@@ -21,6 +21,8 @@ pub mod coverage;
 pub mod media;
 pub mod pack;
 pub mod verdict;
+pub mod independence;
+pub mod resources;
 
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -44,6 +46,8 @@ pub struct ReleaseConfig {
     pub timeout_secs: u32,
     /// Served component name to the repository paths it is built from.
     pub components: BTreeMap<String, Vec<String>>,
+    /// Environments where preflight may `grant` a balance shortfall.
+    pub grant_envs: Vec<String>,
     /// Pending-migration refusal for merges into `integration_branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrations: Option<MigrationsConfig>,
@@ -72,6 +76,7 @@ impl Default for ReleaseConfig {
             env: Vec::new(),
             timeout_secs: 120,
             components: BTreeMap::new(),
+            grant_envs: vec!["staging".into()],
             migrations: None,
             retention_days: 30,
         }
@@ -760,6 +765,7 @@ mod tests {
     use std::process::Command;
 
     include!("qa_release/fixture_test.rs");
+    include!("qa_release/resources_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes
     /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a

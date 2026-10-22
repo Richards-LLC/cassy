@@ -2053,11 +2053,13 @@ fn validate_ledger_receipt(
                     command,
                 ));
             };
-            owed.push(format!(
-                "row {} (cell {}) is {blocked}",
-                cells[0],
-                cells.get(1).copied().unwrap_or_default()
-            ));
+            if cells[0].is_empty() {
+                return Err(EvidenceRefusal::new(
+                    format!("invalid {} row: row id is empty", blocked::VERDICT),
+                    command,
+                ));
+            }
+            owed.push(blocked.owed(&format!("row {}", cells[0]), cells.get(1).copied()));
             continue;
         }
         if cells.get(4) != Some(&"DEFERRED") || cells.get(5) != Some(&"deployed-verification") {

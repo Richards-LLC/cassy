@@ -80,7 +80,7 @@
 - `cas-cli/src/qa_command.rs` - shared sandbox for project QA executables: no shell, env allow-list, timeout, 1 MiB stdout.
 - `cas-cli/src/qa_readback.rs` - shared read-back result, journey `readback` declaration, subject/invariant allow-list and outcome classification.
 - `cas-cli/src/qa_release.rs` - release gate seam: `[qa.release]` config, adapter protocol v1 and served-component equivalence preflight (fake adapter in `cas-cli/tests/fixtures/qa-release/`).
-- `cas-cli/src/qa_release/` - fixture recipe suite lifecycle, abort cleanup and expired-handle sweep; journal storage lives in `crates/cas-store/src/qa_fixture_store.rs`.
+- `cas-cli/src/qa_release/` - fixture recipe suite lifecycle, abort cleanup and expired-handle sweep (journal in `crates/cas-store/src/qa_fixture_store.rs`); `resources.rs` meters rate/quota budgets, preflight balance/grant and 429/402 classification (ledger in `crates/cas-store/src/qa_resource_store.rs`).
 - `cas-cli/src/cli/qa.rs` - `cas qa journeys --seed|--check|--status` and QA subcommand dispatch.
 - `cas-cli/src/cli/qa_impact.rs` - `cas qa impact` adapters for diff, files, stdin, and task-owned changes.
 - `cas-cli/src/cli/qa_post_release.rs` - `cas qa post-release start|status` and persisted jobs for the MCP daemon runner.

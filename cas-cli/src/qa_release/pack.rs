@@ -12,7 +12,6 @@ use crate::qa_readback::Readback;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -66,12 +65,6 @@ pub struct Row {
     pub covers_prs: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceUse {
-    pub need: u64,
-    pub used: u64,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuiteTiming {
     pub name: String,
@@ -102,8 +95,9 @@ pub struct Pack {
     pub coverage: Vec<PrCoverage>,
     #[serde(default)]
     pub fixtures: Vec<FixtureReceipt>,
-    #[serde(default)]
-    pub resources: BTreeMap<String, ResourceUse>,
+    /// What resource preflight measured and granted (C4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<super::resources::ResourcePlan>,
     #[serde(default)]
     pub suites: Vec<SuiteTiming>,
     #[serde(default)]
@@ -135,7 +129,7 @@ impl Pack {
             rows: Vec::new(),
             coverage: Vec::new(),
             fixtures: Vec::new(),
-            resources: BTreeMap::new(),
+            resources: None,
             suites: Vec::new(),
             media: Vec::new(),
             gate: gate([], Vec::new()),

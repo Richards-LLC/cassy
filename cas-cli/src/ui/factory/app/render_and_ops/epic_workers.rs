@@ -1462,14 +1462,21 @@ pub fn crash_cleanup_io(cleanup: &CrashCleanup) -> CrashCleanupOutcome {
     let Ok(agent_store) = open_agent_store(&cleanup.cas_dir) else {
         return CrashCleanupOutcome { worktree: None };
     };
-    let Some(agent_id) = agent_store
+    let Some(agent) = agent_store
         .list(None)
         .ok()
-        .and_then(|agents| agents.into_iter().find(|a| a.name == name).map(|a| a.id))
+        .and_then(|agents| agents.into_iter().find(|a| a.name == name))
     else {
         return CrashCleanupOutcome { worktree: None };
     };
-    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) {
+    let agent_id = agent.id.clone();
+    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) || worker_has_open_tasks(&cleanup.cas_dir, name) {
+        return CrashCleanupOutcome { worktree: None };
+    }
+    // Never orphan relocated output by deleting its checkout/provenance first.
+    if crate::factory_scratch::worker_target_dir(&plan.worktree.path).exists()
+        && !crate::factory_target_cache::retirement::retire_worker(&cleanup.cas_dir, &agent).unwrap_or(false)
+    {
         return CrashCleanupOutcome { worktree: None };
     }
     let outcome = crate::worktree::remove_worker_worktree_io(plan);
@@ -2956,6 +2963,18 @@ impl FactoryApp {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }
 
+        // Reclaim safe terminal/parked output for shutdown AND replacement.
+        // Check before settling bindings: that step can clear task assignees.
+        // Retirement checks the configured scratch path and preserves evidence
+        // before deleting; no absent in-tree target can stand in for success.
+        let target_retired = match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
+            Ok(complete) => complete,
+            Err(error) => {
+                tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
+                false
+            }
+        };
+
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
         let (_, released_task_ids) = settle_retired_worker_bindings_reporting(
@@ -2986,21 +3005,6 @@ impl FactoryApp {
 
         // Ensure selected tab is still valid
         self.clamp_selected_worker_tab();
-
-        // Evidence becomes durable even when a checkout stays parked. Recycle
-        // keeps its warm target; a shutdown attempts complete target retirement.
-        let target_retired = if preserve_worktree {
-            false
-        } else {
-            match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
-                Ok(removed) => removed || agent.metadata.get("clone_path")
-                    .is_some_and(|path| !std::path::Path::new(path).join("target").exists()),
-                Err(error) => {
-                    tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
-                    false
-                }
-            }
-        };
 
         // Teardown the worker's worktree when it's safe. "Safe" means all of its
         // tasks are Closed AND the tree is clean — we never destroy in-progress

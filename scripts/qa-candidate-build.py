@@ -69,11 +69,15 @@ def build(repo, revision, candidate_dir):
     scratch = release_env.resolve_scratch(repo, durable=True, create=True)
     if scratch.problem or not scratch.base:
         raise ValueError(f"release scratch unavailable: {scratch.problem}; {scratch.fix}")
-    main = release_env.main_checkout(repo) or repo
-    target = main / "target"  # The assembly proof's warm native Cargo target.
-    target.mkdir(parents=True, exist_ok=True)
     with release_scratch.ChildScope() as scope:
-        with release_scratch.OwnedDirectory("cas-qa-candidate.", scratch.base) as owned:
+        with (
+            release_scratch.OwnedDirectory(
+                Path(scratch.base).name + ".qa-candidate-", Path(scratch.base).parent,
+            ) as owned,
+            release_scratch.BoundedCache(owned / "target", os.environ, repo) as target,
+        ):
+            # Private, size/age bounded output lives only for this candidate.
+            # Legacy supervisor/main targets remain review-only.
             checkout = owned / "checkout"
             run(scope, ["git", "-C", repo, "worktree", "add", "--detach", checkout, revision])
             try:

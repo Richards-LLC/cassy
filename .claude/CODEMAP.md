@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of the 3.70 merge (`0e9f5b4e3`); regenerate with `/codemap` when modules move.
+> Structural map of the assembled 3.71 tree: 18 Rust members plus TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -28,8 +28,6 @@
 
 ## Workspace / packages
 
-The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate TypeScript packages.
-
 - `cas-cli/` - binary `cas` and service composition (Rust).
 - `crates/cas-types/` - shared task, agent, event, delivery, and wire types.
 - `crates/cas-store/` - SQLite stores, queues, knowledge, verification, and vector persistence.
@@ -56,9 +54,10 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/cli/doctor.rs`, `cas-cli/src/cli/doctor/` - health-check producers, grouped rendering, and communication checks.
 - `cas-cli/src/cli/update.rs`, `cas-cli/src/cli/update/` - update phases, binding checks, bounded discovery, and receipts.
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed-file inventory, Git reconciliation, and locking.
-- `cas-cli/src/cli/config/`, `cas-cli/src/config/` - config commands, metadata registry, and operator policy.
+- `cas-cli/src/cli/config/`, `cas-cli/src/config/` - in-place TOML commands, key registry, and operator policy.
+- `cas-cli/src/capability.rs`, `cas-cli/src/cli/hub_service.rs` - account/keychain probes, bounded auth cache, and service readiness.
 - `cas-cli/src/cli/codemap_cmd.rs`, `cas-cli/src/hooks/handlers/handlers_events/codemap.rs` - codemap freshness CLI and session banner/gate.
-- `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - shared read-only cwd tree and task/integration-ref selection for documentation freshness.
+- `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - read-only checkout/target measurements and pinned integration upkeep reports.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations and integration handlers.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/` - session/tool policy, native hook dispatch, and generated hook configuration.
 - `cas-cli/src/cloud/`, `cas-cli/src/hub/` - store sync, identity reconciliation, Commander pairing, operator inbox, and machine presence.
@@ -73,7 +72,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 
 ## QA registry, impact, and upkeep
 
-- `cas-cli/src/qa_registry.rs` - journey YAML schema, validation, debt, and shared path-filter semantics.
+- `cas-cli/src/qa_registry.rs` - journey YAML, typed manual checks, labeled/numeric criteria, debt, and path filters.
 - `cas-cli/src/qa_seed.rs` - bootstrap/merge registry entries from tracked routes and project context; coverage status.
 - `cas-cli/src/qa_impact.rs` - pure, versioned diff-to-journey impact analysis and unowned-area detection.
 - `cas-cli/src/qa_impact_io.rs` - read-only Git snapshots, diff paths, and legacy selector boundary for impact analysis.
@@ -99,8 +98,8 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/ui/factory/director/` - task dispatch, worker coordination, reminders, and stall handling.
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment evidence and directed supervisor wake batching.
 - `cas-cli/src/ui/factory/server_registry/` - owned server records and lifecycle.
-- `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_worker_check.rs` - target-path resolution and capped worker proof admission.
-- `cas-cli/src/factory_target_cache/` - target ownership, baseline seeding, parked caches, and retirement.
+- `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_worker_check.rs` - scratch paths, pressure recovery, and capped proof admission.
+- `cas-cli/src/factory_target_cache.rs`, `cas-cli/src/factory_target_cache/` - cache inventory/GC, ownership, parked targets, baseline seeding, and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch/environment projections, pane readiness, and terminal snapshots.
 - `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, queued injection, and submit gating.
 - `crates/cas-pty/src/`, `crates/cas-pty/conformance/` - PTY adapters, queued input, and harness conformance receipts.
@@ -140,6 +139,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - **QA contracts:** `docs/qa/`, `scripts/journey-eval.sh`, `scripts/terminal-qa.mjs`.
 - **Release records:** `docs/release-notes/`, `docs/release-reports/`, `docs/release-reports/assets/` - per-version drafts, reports, evidence, and publication rubrics.
 - **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `cas-cli/src/cli/release_report.rs`.
+- **QA binaries/scratch:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py` - exact-revision candidates and bounded owned output.
 - **Worker hooks/cache:** `.githooks/`, `scripts/fast-rows-pre-push.sh`, `scripts/refresh-worker-build-cache.sh`.
 - **Markdown:** `scripts/markdownlint.py`, `.markdownlint-cli2.jsonc`; **deploy/runbooks:** `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`.
 - **Config:** `.mcp.json`, `.env.worktree.template`, `.claude/settings.json`, `.codex/hooks.json` - MCP, worktree environment, and harness hook projections.

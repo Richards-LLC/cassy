@@ -1563,7 +1563,26 @@ env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTU
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn worker_proxy_filters_boot_and_reload_config_preserving_supervisor_gh_1047() {
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = tempfile::tempdir().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        std::fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_proxy,
+            "[servers.viktor]\ntransport = 'http'\n\
+             url = 'https://viktor.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
+        ).unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        // HOME alone does not redirect the loader's higher-priority XDG scope.
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        for key in ["VIKTOR_API_KEY", "NEON_API_KEY", "VERCEL_TOKEN"] {
+            env.remove(key);
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();

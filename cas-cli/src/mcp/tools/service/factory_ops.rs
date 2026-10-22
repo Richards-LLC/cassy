@@ -892,7 +892,7 @@ fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: boo
 /// pushed, so safety is whether its tip is reachable from the repository's
 /// target branch. A repository without any remote has the same local contract
 /// even for legacy push-branch task rows.
-fn shutdown_worktree_safety(
+pub(crate) fn shutdown_worktree_safety(
     path: &std::path::Path,
     local_merge_delivery: bool,
     target_branches: &[String],
@@ -8460,6 +8460,9 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
+        }
         if agent.status != cas_types::AgentStatus::Shutdown {
             // cas-b06f: requested, so reported by the shutdown receipt.
             super::orphan_recovery::recover_worker_retired_on_request(
@@ -8469,9 +8472,6 @@ pub(crate) fn retire_dead_worker_for_shutdown(
                 &held_task_ids,
                 "dead worker retired by shutdown request",
             );
-        }
-        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
-            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         recipients.insert(agent.id.clone());
         if let Some(session_id) = &agent.cc_session_id {

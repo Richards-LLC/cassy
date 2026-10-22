@@ -46,13 +46,18 @@ impl Measurement {
 
     fn resolve(cwd: &Path, cas_root: &Path, integration_only: bool) -> Self {
         let root = crate::store::detect::find_git_toplevel(cwd).unwrap_or_else(|_| {
-            if cwd.is_dir() {
+            let hint = cas_root.parent().unwrap_or(cwd);
+            let current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+            let project = hint.canonicalize().unwrap_or_else(|_| hint.to_path_buf());
+            if current.starts_with(&project) {
+                hint.to_path_buf()
+            } else if cwd.is_dir() {
                 cwd.to_path_buf()
             } else {
-                cas_root.parent().unwrap_or(cwd).to_path_buf()
+                hint.to_path_buf()
             }
         });
-        let store = if cas_root.parent().is_some_and(|hint| same_repo(&root, hint)) {
+        let store = if cas_root.parent().is_some_and(|hint| root.as_path() == hint || same_repo(&root, hint)) {
             cas_root.to_path_buf()
         } else {
             root.join(".cas")

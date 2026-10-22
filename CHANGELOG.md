@@ -7,6 +7,104 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.71.0] - 2026-10-21
+
+### Added — QA checks describe what good looks like
+
+- **Selected journeys** — Was: QA could depend on a legacy catalog or miss a shared pipeline change. → Now: Commander uses its tracked journey registry and semantic path selection, including shared-pipeline fan-out, while preserving catalog parity.
+
+- **Pending checkers** — Was: an unwritten automated check had no accountable owner or deadline. → Now: criteria can name a pending checker with an owner and due date. Overdue checkers fail validation, and manual checks distinguish human judgment from automation still to be written.
+
+- **Labeled criteria** — Was: example fixtures had no shared labels for judging a criterion. → Now: criteria can declare a definition and require per-fixture labels. Missing labels become debt and unknown or contradictory labels are rejected.
+
+- **Numeric comparisons** — Was: numeric criteria could not declare exact equality or an allowed change from a baseline. → Now: criteria accept exact or banded comparisons with a minimum ratio or maximum delta. Invalid bands and misspelled or contradictory criterion fields are diagnosed.
+
+### Fixed — QA warnings and evidence stay trustworthy
+
+- **Debt and history** — Was: QA status hid types of unfinished checks and had no previous count for comparison. → Now: status separates curation, manual-check, pending-checker and unlabeled-fixture debt, retaining previous check counts to show the change.
+
+- **Enforcement cannot weaken itself** — Was: a delivery could relax its own upkeep policy, or impact errors could erase an established refusal. → Now: the stricter base or delivered policy remains authoritative, proven registry findings survive impact failures, and malformed base policy sets a conservative floor without upgrading a warning-only delivered policy.
+
+- **Malformed comparisons** — Was: one malformed numeric comparison could make the whole journey registry unreadable. → Now: validation reports the bad comparison as one actionable registry problem so the remaining entries can still be inspected.
+
+- **Before-and-after evidence** — Was: declared visual comparisons could drop before-capture cells, while optional pair rules could apply even when no comparison was declared. → Now: declared before cells must survive comparison planning, optional coverage is enforced only when declared, shared pairs and diagnostic findings are preserved, and recorded waivers can recover.
+
+- **Report section labels** — Was: release-report labels could separate from their headings. → Now: labels stay with their section headings in report layouts.
+
+### Added — inspect documentation drift before enforcing it
+
+- **Upkeep status and warnings** — Was: turning on enforcement could reveal documentation drift only after it started blocking work. → Now: `cas qa journeys --status` reports registry, CODEMAP and overview drift against a pinned integration commit. A real transition to enforcement warns about known positive drift after saving the setting, while zero and unknown remain distinct.
+
+### Fixed — documentation follows the active checkout
+
+- **Current documentation reference** — Was: freshness checks could inspect the main checkout, a queued assignment or the wrong integration branch. → Now: checks use the current checkout and active task target, preserve existing ledger stores, show the measured reference and update time, and name the target-sync command when a stale checkout blocks editing.
+
+- **Overview watch paths** — Was: overview upkeep could fall back to nonexistent default directories and watch nothing silently. → Now: watch paths come from tracked overview declarations or configured existing paths, with an explicit warning when no product scope can be determined.
+
+### Fixed — work resumes and hands over without losing its history
+
+- **Resume after review** — Was: resuming a review hold could reject the same task’s own accepted commits. → Now: owned delivery commits remain attributable across review holds, anchored target merges and dirty edits. A fresh task still refuses unrelated uncommitted work.
+
+- **Rebased delivery ownership** — Was: rebasing after a conflict could make a valid delivery look unrelated or let a foreign subject pass through a body reference. → Now: fresh parking binds to the task-owned rebased delivery and checks the commit subject independently of references in its body.
+
+- **Squash receipt range** — Was: later documentation merges could distort the change range proved by a squash receipt. → Now: a first-parent squash receipt is measured against its own parent instead of a later target position.
+
+- **Released CI evidence** — Was: a queued success notice could outlive the exact delivery it had checked. → Now: release revalidates the immutable delivery and current CI evidence, marks superseded signals explicitly, and preserves relabeled prompts through native and batch handoff.
+
+- **Proof provenance** — Was: trusted notes could be partially matched, truncated or reused outside their original provenance block. → Now: whole provenance blocks are preserved and trusted notes match exactly from the start of a complete note.
+
+- **Store discovery and config reset** — Was: commands inside a `.cas` data folder could select its enclosing store, and resetting a key saved a default override. → Now: discovery stops at the enclosing `.cas` folder, so `cas config set` from a directory such as `~/.cas/artifacts` reports not initialized instead of writing machine settings. `cas config reset <key>` removes the stored key instead of writing the default into it.
+
+- **Staged managed repairs** — Was: reconciling managed files could create an unexpected commit on an integration branch. → Now: integration-branch repairs remain staged for review, using the full HEAD reference to classify the branch.
+
+### Fixed — hub commands and services explain their outcomes
+
+- **Restart JSON receipt** — Was: `cas hub restart --json` could emit more than one value or lose the completed stop step when starting failed. → Now: restart emits one JSON receipt, preserves stop evidence across start failures and raced stops, and fits its help text to terminal width.
+
+- **Transport refusal remedy** — Was: required-transport errors could omit the explicit loopback remedy or obscure the connection cause. → Now: the refusal names the cause and the supported loopback or socket-selection retry.
+
+- **Service readiness** — Was: service status could wrap badly or omit a repair action, probe failure cause or manual reboot remedy. → Now: readiness rows and custom profile labels fit narrow terminals, the repair command sits beneath the verdict, and failed probes retain their causes and recovery guidance.
+
+### Fixed — configuration edits preserve the surrounding file
+
+- **In-place config changes** — Was: `cas config set` could rewrite the whole TOML document, reorder tables and materialize defaults. → Now: only the named value is edited in place, including supported aliases, dotted keys and inline tables, while unrelated formatting and values stay intact.
+
+### Fixed — concurrent changes publish safely
+
+- **Concurrent merge publication** — Was: a peer advancing origin between fetch and push could leave a local-only merge and a retry could falsely say already contained. → Now: per-target locking covers merge paths, containment uses a fresh explicit origin ref, and an ordinary non-fast-forward push gets one fetch/merge/non-force retry without widening transactional review pins.
+
+- **Safe spawn references** — Was: a divergent or unverifiable spawn base could be accepted or a refusal could name the wrong checkout. → Now: configured origin evidence is verified, unsafe divergence is refused, and diagnostics name the unpublished branch and actual checkout.
+
+- **Launch diagnostics** — Was: preflight causes and runtime-log locations could be lost, or speculative log paths could appear before a launch decision. → Now: refusals retain their causes and actual log pointers, announce logs only after the decision, and keep pre-initialization logs in the host directory.
+
+### Fixed — disk space recovers before builds are refused
+
+- **Managed scratch cleanup** — Was: relocated build targets were omitted from cache cleanup and a full disk required manual intervention. → Now: GC inventories verified scratch targets on the admission filesystem, preserves live and warm targets, and admission attempts guarded cleanup once before remeasuring free space. Safe shutdown and replacement retire their target after preserving proof.
+
+### Fixed — account checks keep their real cause
+
+- **SSH keychain diagnostics** — Was: a locked macOS login keychain over SSH could look like a signed-out Claude account. → Now: checks identify the unavailable keychain and provide a local unlock remedy. Repeated account probes reuse bounded evidence without refreshing its age.
+
+- **Optional auth cache failure** — Was: a broken optional cache could hide the account’s actual login state. → Now: cache failures fall back to the real authentication probe and preserve its evidence, including a genuine logout.
+
+### Fixed — release tooling uses verified inputs
+
+- **Exact-revision QA candidate** — Was: building a QA binary required hand-written scratch commands and could miss Zig, use an unverified revision or grow a shared target without bound. → Now: `cas qa candidate build --task <id> --rev <full-sha>` resolves the release environment, checks binary version and revision, publishes the canonical manifest, and removes its private bounded target after artifact publication.
+
+- **Prebuild lookup retries** — Was: a transient artifact lookup failure could abort an otherwise valid release wait. → Now: prebuild lookups retry within the wait bound and preserve a sanitized failure cause if the lookup still cannot complete.
+
+- **Release help width** — Was: release-report help could run beyond a normal terminal width. → Now: report help wraps to the terminal width without dropping the latency options.
+
+### Internal
+
+- **Codex command workdir** — Was: command admission could interpret a Codex exec call in the wrong directory or lose the source of a redirected write. → Now: the native hook reads the explicit workdir, retains each write’s source and preserves safe relative-log admission while explaining refused omitted-workdir redirects.
+
+- **Split-state reconciliation** — Was: old shipped split bindings or repair/cleanup passes could strand or overwrite surviving child bindings. → Now: stale shipped splits stop binding children and cloud repair/cleanup preserve the surviving split state.
+
+- **Portable verifier artifacts** — Was: verifier permissions differed across supported instruction flavors. → Now: all shipped verifier flavors can fetch the task artifacts needed to inspect portable proof.
+
+- **Project maps and published records** — Was: the carried-forward project map, overview and release artifacts did not reflect the assembled changes. → Now: the structural map and product overview are refreshed, the previous release report and publication receipts are retained, and shared builtin reference history stays synchronized.
+
 ## [3.70.0] - 2026-10-21
 
 ### Added — adaptive QA picks the journeys a change touches

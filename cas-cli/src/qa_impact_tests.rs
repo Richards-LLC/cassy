@@ -379,6 +379,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/commander-merge-diffs.json")).unwrap();
     let head = git(root, &["rev-parse", "HEAD"]);
+    let mut selected_source_merges = 0;
     for diff in fixture["diffs"].as_array().unwrap() {
         // Replay real merge path sets against the migrated catalog at this head.
         // Original revisions are provenance, not a dependency on deep CI history.
@@ -405,6 +406,13 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             .iter()
             .map(|j| j.id.as_str())
             .collect::<Vec<_>>();
+        if !ids.is_empty()
+            && files
+                .iter()
+                .any(|file| file.starts_with("hub-web/src/") && !file.ends_with(".test.ts"))
+        {
+            selected_source_merges += 1;
+        }
         assert_eq!(ids, legacy, "merge {}", diff["head"]);
         assert_eq!(
             serde_json::to_value(ids).unwrap(),
@@ -413,4 +421,8 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             diff["head"]
         );
     }
+    assert!(
+        selected_source_merges > 0,
+        "parity needs a production source merge that selects journeys"
+    );
 }

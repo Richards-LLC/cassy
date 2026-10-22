@@ -1485,5 +1485,24 @@ mod tests {
             .collect();
         assert_eq!(chores.len(), 1);
         assert!(!chores[0].description.contains(lesson));
+
+        // A real pooled-store wait timeout is retryable, not a bad observation.
+        let connection = cas_store::shared_db::shared_connection(&core.cas_root.join("cas.db"))
+            .unwrap();
+        let held = connection.lock().unwrap();
+        let budget = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
+        let error = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "cas-0ab2:ver-busy".into())
+            .await
+            .unwrap_err();
+        drop(budget);
+        drop(held);
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR, "{error}");
+        assert!(error.message.contains("retry"), "{error}");
+        let invalid = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "missing-verdict".into())
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
     }
 }

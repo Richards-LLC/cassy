@@ -2236,6 +2236,154 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
 }
 
 #[tokio::test]
+async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(
+        &["init", "--bare", remote.path().to_str().unwrap()],
+        &repo.root,
+    );
+    let origin = "https://github.com/org/delivery-observation.git";
+    run_git(
+        &["remote", "add", "origin", origin],
+        &repo.root,
+    );
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", remote.path().display()),
+            origin,
+        ],
+        &repo.root,
+    );
+    run_git(&["branch", "epic/observation"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/observation"], &repo.root);
+
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[verification]\nenabled = true\n[project]\ncanonical_id = \"delivery-observation\"\n",
+    )
+    .unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    register_delivery_agent(
+        &cas_root,
+        "observation-supervisor",
+        "supervisor",
+        AgentRole::Supervisor,
+        "observation-recovery",
+    );
+
+    let worker = cas_root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    std::fs::write(worker.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+    run_git(&["add", "delivery.rs"], &worker);
+    run_git(&["commit", "-m", "parked observation delivery"], &worker);
+    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", "factory/alice"], &worker);
+
+    let task_id = "cas-8045-observation-retry";
+    let mut task = Task::new(task_id.into(), "Recover observed merge".into());
+    task.status = TaskStatus::AwaitingMerge;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some("alice".into());
+    task.acceptance_criteria = "The merged delivery receives independent verification.".into();
+    task.deliverables.factory_branch_anchor = Some(anchor);
+    task.deliverables.parked_branch = Some("factory/alice".into());
+    task.deliverables.parked_close_reason = Some("Parked after focused checks.".into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:delivery-observation".into(),
+        target_branch: "epic/observation".into(),
+    });
+    let tasks = open_task_store(&cas_root).unwrap();
+    tasks.add(&task).unwrap();
+
+    // Ensure the delivery table exists, then make the first observation fail
+    // after Git has successfully merged and pushed the branch.
+    let dummy_sha = "a".repeat(40);
+    cas_store::record_observed_delivery_merge(
+        &cas_root,
+        "fixture-schema",
+        "factory/fixture",
+        "epic/observation",
+        &dummy_sha,
+        &dummy_sha,
+        "fixture-actor",
+    )
+    .unwrap();
+    let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_fixture_observation
+         BEFORE INSERT ON observed_delivery_merges
+         WHEN NEW.task_id = 'cas-8045-observation-retry'
+         BEGIN SELECT RAISE(ABORT, 'fixture observation write failure'); END;",
+    )
+    .unwrap();
+
+    env.set(
+        cas::github_issue_attach::GH_BIN_ENV,
+        ci_check_run::green_ci(remote.path()),
+    );
+    let _env = env.enter_dir(&repo.root);
+    let service = delivery_service(&cas_root, "observation-supervisor");
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("factory/alice".into());
+    request.task_id = Some(task_id.into());
+    request.cleanup = Some(false);
+    let first = service
+        .coordination(Parameters(request.clone()))
+        .await
+        .expect_err("first request must surface the failed observation write");
+    assert!(
+        first
+            .message
+            .contains("Retry `worktree_merge id=")
+            && first.message.contains("task_id=cas-8045-observation-retry`"),
+        "{}",
+        first.message
+    );
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "epic/observation"]),
+        git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/observation"]),
+        "the first call has already merged and published the target"
+    );
+
+    conn.execute_batch("DROP TRIGGER fail_fixture_observation;")
+        .unwrap();
+    let retry = service
+        .coordination(Parameters(request))
+        .await
+        .expect("retry should reconcile the already-published merge");
+    let text = get_text(&retry);
+    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, task_id)
+        .unwrap()
+        .expect("retry must create the post-merge verification dispatch");
+    assert_eq!(
+        dispatch.state,
+        cas::types::VerificationDispatchState::Pending
+    );
+    let observations: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(observations, 1, "the retry records one observation");
+    let pending_intents: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pending_observed_delivery_merges WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_intents, 0, "successful recovery clears its intent");
+}
+
+#[tokio::test]
 async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker() {
     let repo = GitRepo::new();
     let mut env = test_env();

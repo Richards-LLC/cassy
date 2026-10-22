@@ -1400,6 +1400,75 @@ fn protected_default_branch_pr_error(
     ))
 }
 
+fn delivery_observation_failure_message(
+    worktree_id: &str,
+    task_id: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    format!(
+        "WorkTarget merge completed, but its delivery observation could not be finalized: {error}. \
+         Retry `worktree_merge id={worktree_id} task_id={task_id}`; observation writes are \
+         idempotent, and retry continues through verification-dispatch creation."
+    )
+}
+
+fn delivery_observation_intent_failure_message(
+    worktree_id: &str,
+    task_id: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    format!(
+        "WorkTarget recovery intent could not be recorded before merge: {error}. No Git merge \
+         was attempted. Retry `worktree_merge id={worktree_id} task_id={task_id}`."
+    )
+}
+
+fn has_pending_delivery_observation_recovery(
+    cas_root: &Path,
+    worktree_id: &str,
+    task_id: Option<&str>,
+    task: Option<&cas_types::Task>,
+    source_branch: &str,
+    target_branch: &str,
+    git: &crate::worktree::GitOperations,
+) -> Result<bool, McpError> {
+    let (Some(task_id), Some(task)) = (task_id, task) else {
+        return Ok(false);
+    };
+    if task.status != cas_types::TaskStatus::AwaitingMerge
+        || task.deliverables.parked_branch.as_deref() != Some(source_branch)
+        || task
+            .deliverables
+            .work_target
+            .as_ref()
+            .is_none_or(|target| target.target_branch.as_str() != target_branch)
+    {
+        return Ok(false);
+    }
+    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+        return Ok(false);
+    };
+    let source_tip = git
+        .resolve_commit(anchor)
+        .unwrap_or_else(|| anchor.to_string());
+    cas_store::has_pending_observed_delivery_merge(
+        cas_root,
+        task_id,
+        source_branch,
+        target_branch,
+        &source_tip,
+    )
+    .map_err(|error| McpError {
+        code: ErrorCode::INTERNAL_ERROR,
+        message: Cow::from(delivery_observation_failure_message(
+            worktree_id,
+            task_id,
+            error,
+        )),
+        data: None,
+    })
+}
+
 /// Translate worktree merge failures into supervisor-actionable MCP errors.
 ///
 /// The low-level merge layer owns cleanup and path discovery; this callable
@@ -3993,6 +4062,20 @@ impl CasCore {
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
 
+        let pending_observation_recovery = if transactional_delivery.is_none() {
+            has_pending_delivery_observation_recovery(
+                &cas_root,
+                &worktree.id,
+                task_id,
+                scoped_task.as_deref(),
+                &worktree.branch,
+                &worktree.parent_branch,
+                manager.git(),
+            )?
+        } else {
+            false
+        };
+
         // An unpublished local merge is not a no-op. Only a fresh origin
         // snapshot (or a repository with no origin) can prove containment.
         if transactional_delivery.is_none() {
@@ -4006,8 +4089,10 @@ impl CasCore {
                     if !origin_verified {
                         return Ok(Self::success(receipt));
                     }
-                    let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
-                    return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
+                    if !pending_observation_recovery {
+                        let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
+                        return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
+                    }
                 }
                 Containment::Unverified(message) => return Ok(Self::tool_error(message)),
                 Containment::NotContained => {}
@@ -4296,6 +4381,25 @@ impl CasCore {
                 .or_else(|| parked_source_tip.clone())
                 .or_else(|| manager.git().resolve_commit(&worktree.branch)))
             .flatten();
+        let pending_observation = match (
+            task_id,
+            declared_repo_context.as_ref(),
+            observed_source_tip.as_deref(),
+            self.get_agent_id(),
+        ) {
+            (Some(task_id), Some(context), Some(source_tip), Ok(actor))
+                if worktree.parent_branch == context.target_branch =>
+            {
+                Some((
+                    task_id.to_string(),
+                    worktree.branch.clone(),
+                    context.target_branch.clone(),
+                    source_tip.to_string(),
+                    actor,
+                ))
+            }
+            _ => None,
+        };
 
         // Carries the target-sync line from inside the merge branch out to the
         // receipt; empty when nothing needed reconciling.
@@ -4389,6 +4493,7 @@ impl CasCore {
             // Origin may have delivered this source while the local target
             // was behind. Re-check the reconciled ref before merge side effects.
             if transactional_delivery.is_none()
+                && !pending_observation_recovery
                 && let Some(receipt) = contained_after_reconcile(
                     manager.git(), &worktree.branch, &worktree.parent_branch, &reconcile,
                 )
@@ -4409,6 +4514,28 @@ impl CasCore {
                     )),
                     data: None,
                 });
+            }
+
+            if let Some((task_id, source_branch, target_branch, source_tip, actor)) =
+                pending_observation.as_ref()
+            {
+                cas_store::record_pending_observed_delivery_merge(
+                    &cas_root,
+                    task_id,
+                    source_branch,
+                    target_branch,
+                    source_tip,
+                    actor,
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(delivery_observation_intent_failure_message(
+                        &worktree.id,
+                        task_id,
+                        error,
+                    )),
+                    data: None,
+                })?;
             }
 
             // A parked pushed ref is independent of the worker's next task.
@@ -4927,15 +5054,10 @@ impl CasCore {
         // completion receipt. Record the verified Git merge separately from
         // worker proof, so a later scope correction has an immutable delivery
         // fact without inventing a worker receipt or verifier verdict.
-        if transactional_delivery.is_none()
-            && let (Some(task_id), Some(context), Some(source_tip), Some(target_tip), Ok(actor)) = (
-                task_id,
-                declared_repo_context.as_ref(),
-                observed_source_tip.as_deref(),
-                merge_commit.as_deref(),
-                self.get_agent_id(),
-            )
-            && worktree.parent_branch == context.target_branch
+        if let Some((task_id, source_branch, target_branch, source_tip, actor)) =
+            pending_observation.as_ref()
+            && let Some(target_tip) = merge_commit.as_deref()
+            && worktree.parent_branch.as_str() == target_branch
             && crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
                 &cwd, source_tip, target_tip,
             )
@@ -4943,16 +5065,18 @@ impl CasCore {
             cas_store::record_observed_delivery_merge(
                 &cas_root,
                 task_id,
-                &worktree.branch,
-                &context.target_branch,
+                source_branch,
+                target_branch,
                 source_tip,
                 target_tip,
-                &actor,
+                actor,
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "WorkTarget merge completed, but its delivery observation could not be recorded: {error}"
+                message: Cow::from(delivery_observation_failure_message(
+                    &worktree.id,
+                    task_id,
+                    error,
                 )),
                 data: None,
             })?;
@@ -5016,6 +5140,44 @@ impl CasCore {
             }
             _ => push_note,
         };
+
+        if let Some((task_id, source_branch, target_branch, source_tip, _)) =
+            pending_observation.as_ref()
+        {
+            let task_closed = self
+                .open_task_store()
+                .ok()
+                .and_then(|store| store.get(task_id).ok())
+                .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
+            let dispatch_pending = cas_store::get_latest_verification_dispatch(&cas_root, task_id)
+                .ok()
+                .flatten()
+                .is_some_and(|dispatch| {
+                    matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Pending
+                            | cas_types::VerificationDispatchState::Claimed
+                    )
+                });
+            if task_closed || dispatch_pending {
+                cas_store::clear_pending_observed_delivery_merge(
+                    &cas_root,
+                    task_id,
+                    source_branch,
+                    target_branch,
+                    source_tip,
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(delivery_observation_failure_message(
+                        &worktree.id,
+                        task_id,
+                        error,
+                    )),
+                    data: None,
+                })?;
+            }
+        }
 
         if let Some(mut close_result) = delivery_close_result {
             // Git and durable delivery state reached CloseReady, but the
@@ -5191,7 +5353,8 @@ mod tests {
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
-        describe_target_reconcile, is_cas_pattern_worktree, is_factory_style_worktree,
+        describe_target_reconcile, delivery_observation_failure_message,
+        is_cas_pattern_worktree, is_factory_style_worktree,
         is_git_worktree, lookup_branch_ci_with, path_is_under, protected_default_branch_pr_error,
         resolve_worktree_merge_cleanup, target_diverged_error, worktree_merge_mcp_error,
     };
@@ -5207,6 +5370,25 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    #[test]
+    fn delivery_observation_failure_names_idempotent_merge_recovery() {
+        let message = delivery_observation_failure_message(
+            "factory/worker",
+            "cas-8045",
+            "database is locked",
+        );
+
+        assert!(message.contains("database is locked"), "{message}");
+        assert!(
+            message.contains("worktree_merge id=factory/worker task_id=cas-8045"),
+            "the recovery action must identify the exact delivery: {message}"
+        );
+        assert!(
+            message.contains("idempotent") && message.contains("verification-dispatch"),
+            "the retry contract must say it resumes safely through dispatch: {message}"
+        );
     }
 
     #[cfg(unix)]

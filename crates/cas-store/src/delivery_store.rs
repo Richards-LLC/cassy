@@ -94,6 +94,21 @@ BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS observed_delivery_merges_immutable_delete
 BEFORE DELETE ON observed_delivery_merges
 BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
+
+-- Worktree merges are published before their durable observation is written.
+-- Keep an idempotent intent first so a failed observation can be resumed after
+-- origin already contains the parked source.
+CREATE TABLE IF NOT EXISTS pending_observed_delivery_merges (
+    task_id TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    source_commit_sha TEXT NOT NULL,
+    actor_agent_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, target_branch, source_commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_observed_delivery_merges_task
+    ON pending_observed_delivery_merges(task_id, created_at DESC);
 "#;
 
 /// Persist an authenticated worktree_merge observation after Git has advanced
@@ -123,22 +138,113 @@ pub fn record_observed_delivery_merge(
                 .to_string(),
         ));
     }
+    // The merge and push already happened when this observation is written.
+    // Retry the whole one-statement write on SQLITE_BUSY; INSERT OR IGNORE
+    // keeps a retry after an ambiguous completion idempotent.
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                merge_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Persist the recovery intent before a nontransactional Git merge starts.
+/// If the later observation write fails after publication, worktree_merge can
+/// distinguish its retry from an ordinary already-contained no-op.
+pub fn record_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+    actor_agent_id: &str,
+) -> Result<()> {
+    if [
+        task_id,
+        source_branch,
+        target_branch,
+        source_commit_sha,
+        actor_agent_id,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(StoreError::Parse(
+            "pending observed merge requires complete task, branch, commit, and actor identity"
+                .to_string(),
+        ));
+    }
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Whether this exact parked source has an unfinished observation recovery.
+pub fn has_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<bool> {
     let conn = open(root)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO observed_delivery_merges
-         (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            task_id,
-            source_branch,
-            target_branch,
-            source_commit_sha,
-            merge_commit_sha,
-            actor_agent_id,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pending_observed_delivery_merges
+             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+               AND source_commit_sha = ?4
+         )",
+        params![task_id, source_branch, target_branch, source_commit_sha],
+        |row| row.get(0),
+    )?)
+}
+
+/// Remove a pending intent after the observation and its close/dispatch path
+/// have been durably resumed. Repeated clears are harmless.
+pub fn clear_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<()> {
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "DELETE FROM pending_observed_delivery_merges
+             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+               AND source_commit_sha = ?4",
+            params![task_id, source_branch, target_branch, source_commit_sha],
+        )?;
+        Ok(())
+    })
 }
 
 fn open(root: &Path) -> Result<Connection> {
@@ -890,6 +996,7 @@ mod tests {
     use super::*;
     use crate::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
     use cas_types::{Agent, AgentRole, ClaimResult, Task, TaskStatus, VerificationDispatchState};
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -1901,5 +2008,56 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn observed_delivery_merge_retries_busy_and_is_idempotent() {
+        let root = TempDir::new().unwrap();
+        drop(open(root.path()).unwrap());
+
+        let db_path = root.path().join("cas.db");
+        let (locked, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = Connection::open(db_path).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(crate::SQLITE_BUSY_TIMEOUT + Duration::from_millis(250));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let result = record_observed_delivery_merge(
+            root.path(),
+            "cas-observed-merge",
+            "factory/worker",
+            "epic/release",
+            &"a".repeat(40),
+            &"b".repeat(40),
+            "supervisor",
+        );
+        holder.join().unwrap();
+        result.expect("the observation should retry after one busy-timeout window");
+        assert!(started.elapsed() < Duration::from_secs(15));
+
+        record_observed_delivery_merge(
+            root.path(),
+            "cas-observed-merge",
+            "factory/worker",
+            "epic/release",
+            &"a".repeat(40),
+            &"b".repeat(40),
+            "supervisor",
+        )
+        .unwrap();
+        let conn = open(root.path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
+                ["cas-observed-merge"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "retrying the same observation must be idempotent");
     }
 }

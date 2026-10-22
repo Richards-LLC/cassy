@@ -8552,6 +8552,20 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         status_text.contains(&format!("Message {notification_id} status:")),
         "status response must describe the same returned ID: {status_text}"
     );
+
+    // cas-6021: the same local id given as `id` is this queue's message,
+    // not a peer-mailbox lookup that answers 404.
+    let mut by_id = coord_msg("message_status", "swift-fox", "unused", None);
+    by_id.id = Some(notification_id.to_string());
+    let by_id_text = get_text(
+        &env.service
+            .coordination(Parameters(by_id))
+            .await
+            .expect("a local id given as id= resolves locally"),
+    );
+    // pin: the local report's header names the queue message (cas-6021).
+    assert!(by_id_text.contains(&format!("Message {notification_id} status:")), "{by_id_text}");
+    assert!(!by_id_text.contains("Peer message"), "{by_id_text}");
 }
 
 #[tokio::test]

@@ -10003,6 +10003,20 @@ mod tests {
 
         assert_eq!(pending_wakes, 1, "five statuses leave one pending wake");
         assert_eq!(superseded, 4, "each older status records its replacement");
+        // cas-6021 (#4206302): coalescing keeps one wake, never fewer
+        // messages. A worker's earlier question, superseded before transport
+        // by its next status, still reaches the supervisor in that one wake.
+        let surviving: String = conn
+            .query_row(
+                "SELECT prompt FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND processed_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for sequence in 1..=5 {
+            assert!(surviving.contains(&format!("status {sequence}")), "status {sequence} lost: {surviving}");
+        }
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so

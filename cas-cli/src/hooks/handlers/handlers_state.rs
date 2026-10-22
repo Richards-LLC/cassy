@@ -931,7 +931,7 @@ mod supervisor_handoff_tests {
         tasks.add(&parked).unwrap();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
-        let ask = queue.enqueue("ending", "operator", "Previously delivered open ask: select branch").unwrap();
+        let ask = queue.enqueue_with_session("ending", "operator", "Previously delivered open ask: select branch", "old-session").unwrap();
         queue.mark_processed(ask).unwrap();
         crate::store::open_reminder_store(&root).unwrap().create(
             &ending.id, None, "Unanswered operator ask deadline", cas_store::ReminderTriggerType::Time,

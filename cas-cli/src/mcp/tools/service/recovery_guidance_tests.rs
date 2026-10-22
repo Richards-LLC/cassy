@@ -548,25 +548,38 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
     let payload = serde_json::json!({"branch":source,"head":tip,"expected_remote":""});
     // All refusal rows must leave Git and task ownership alone. These exercise
     // registered identity, source ownership, liveness and exact expected tips.
-    for mode in ["worker-caller", "live-owner", "moved-source", "foreign-source", "remote-mismatch"] {
+    for mode in ["worker-caller", "live-owner", "moved-source", "foreign-source", "remote-mismatch", "retired-live-process"] {
         let mut input = payload.clone();
         let mut caller = agents.get("recovery-caller").unwrap();
+        let mut owned_child = None;
         match mode {
             "worker-caller" => { caller.role = AgentRole::Worker; agents.update(&caller).unwrap(); }
             "live-owner" => { dead.status = AgentStatus::Active; agents.update(&dead).unwrap(); }
             "moved-source" => input["head"] = "0000000000000000000000000000000000000000".into(),
             "foreign-source" => input["branch"] = "factory/unrelated".into(),
             "remote-mismatch" => input["expected_remote"] = tip.clone().into(),
+            "retired-live-process" => {
+                let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+                dead.pid = Some(child.id());
+                agents.update(&dead).unwrap();
+                agents.unregister(&dead.id).unwrap();
+                owned_child = Some(child);
+            }
             _ => unreachable!(),
         }
         let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":input.to_string()})).unwrap();
-        assert!(service.factory(Parameters(request)).await.is_err(), "{mode} must refuse");
+        let result = service.factory(Parameters(request)).await;
+        if let Some(mut child) = owned_child { let _ = child.kill(); let _ = child.wait(); }
+        dead.pid = None;
+        agents.register(&dead).unwrap();
+        assert!(result.is_err(), "{mode} must refuse: {result:?}");
         caller.role = AgentRole::Supervisor; agents.update(&caller).unwrap();
         dead.status = AgentStatus::Shutdown; agents.update(&dead).unwrap();
         assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "{mode}");
         assert_eq!(git(root, &["rev-parse", "HEAD"]), tip, "{mode}");
         assert!(git(remote.path(), &["for-each-ref", "--format=%(refname)"]).is_empty(), "{mode}");
     }
+    agents.unregister(&dead.id).unwrap();
     let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
     let result = service.factory(Parameters(request)).await.expect("authenticated successor must rescue unpushed work");
     let receipt = text(result);

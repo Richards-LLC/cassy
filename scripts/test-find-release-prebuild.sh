@@ -33,6 +33,9 @@ run_lookup() (
     unset SECONDS
     SECONDS=0
     sleep() { SECONDS=$((SECONDS + $1)); }
+    if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+        trap 'printf "%s\n" "$SECONDS" >"$FAKE_LOOKUP_CLOCK_FILE"' EXIT
+    fi
     source "$lookup_script" "$@"
 )
 
@@ -106,13 +109,15 @@ case "$2" in
       echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
       exit 1
     fi
-    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" ]]; then
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" || -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]]; then
       count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
       count=0
       [[ -f "$count_file" ]] && count="$(<"$count_file")"
       count=$((count + 1))
       printf '%s\n' "$count" >"$count_file"
-      if [[ "$count" == 1 ]]; then
+      failures=1
+      [[ ! -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]] || failures="$(<"$FAKE_ARTIFACTS_DIR/$run_id.fail-count")"
+      if (( count <= failures )); then
         echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
         exit 1
       fi
@@ -237,6 +242,40 @@ out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
   run_lookup faircommit 2>"$tmp/fair.err")"
 expect_field "$out" found true 'a persistently failing artifacts query does not starve another completed run'
 expect_field "$out" run-id 777 'the other completed run is adopted within the same poll'
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# A lone completed run can recover after several failed artifact queries,
+# even if it was already completed at the initial lookup.
+echo '{"workflow_runs":[{"id":888,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
+printf '%s' "$both_live" >"$tmp/artifacts/888.json"
+printf '4\n' >"$tmp/artifacts/888.fail-count"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=60 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  run_lookup recoverycommit 2>"$tmp/recovery.err")"
+expect_field "$out" found true 'a lone completed run recovers after more than two failed queries'
+expect_field "$out" run-id 888 'the recovered completed run is adopted'
+
+# A just-completed run whose queries never recover uses the bounded wait,
+# then reports a query failure rather than claiming its artifacts are absent.
+mkdir -p "$tmp/query-failure-sequence"
+echo '{"workflow_runs":[{"id":889,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/query-failure-sequence/1.json"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/query-failure-sequence/last.json"
+printf '%s' "$both_live" >"$tmp/artifacts/889.json"
+touch "$tmp/artifacts/889.fail-always"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/query-failure-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" run_lookup outagecommit 2>"$tmp/query-failure.err")"
+expect_field "$out" found false 'persistent artifact query failure falls back at the deadline'
+if [[ "$(<"$tmp/query-clock")" == 12 ]] \
+    && grep -qF 'artifacts query failed' <<<"$out" \
+    && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
+  printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+  fail=$((fail + 1))
+fi
 unset FAKE_RUNS_SEQUENCE_DIR
 
 # 9. A timed-out poll stays within the deadline and falls back with a sanitized

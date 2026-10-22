@@ -207,6 +207,27 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
 
+    // cas-09cf: a matching target alone does not prove this is a resume.
+    // Recorded anchors, or named work already on the target before first
+    // park, distinguish this task's continuation from a fresh assignment.
+    // cas-32fa: only anchors on this worker's branch count. A task
+    // transferred from another worker carries that worker's anchors, and
+    // this worker's leftover edits are not its prior work.
+    let has_prior_task_work = || {
+        task_identity.is_some_and(|identity| {
+            identity
+                .known_commits
+                .iter()
+                .any(|anchor| git.is_ancestor(anchor, &factory_tip))
+                || close_ops::task_attribution::branch_task_claims(
+                    worktree_path,
+                    &factory_tip,
+                    identity,
+                )
+                .is_some_and(|(own, _)| own.is_some())
+        })
+    };
+
     // Fresh tasks must not inherit another task's edits; resets must not
     // discard edits. Proven task continuations may retain their own dirty
     // tree when no reset is needed. Untracked CAS metadata is ignored.
@@ -225,6 +246,15 @@ fn reconcile_reused_factory_branch(
             ));
         }
         if !status.stdout.is_empty() {
+            // cas-32fa: a fresh start's edits belong to earlier work. A
+            // commit here would later be refused as unattributed, so stash.
+            if !has_prior_task_work() {
+                return Err(format!(
+                    "Cannot start task: {expected_branch} has uncommitted changes from earlier work, \
+                     not this task. Stash them with `git stash push -u -m \"<tag>\"` before starting; \
+                     committing them on this branch would later be refused as unattributed work."
+                ));
+            }
             return Err(format!(
                 "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before starting."
             ));
@@ -241,21 +271,6 @@ fn reconcile_reused_factory_branch(
     let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
-
-    // cas-09cf: a matching target alone does not prove this is a resume.
-    // Recorded anchors, or named work already on the target before first
-    // park, distinguish this task's continuation from a fresh assignment.
-    let has_prior_task_work = || {
-        task_identity.is_some_and(|identity| {
-            !identity.known_commits.is_empty()
-                || close_ops::task_attribution::branch_task_claims(
-                    worktree_path,
-                    &factory_tip,
-                    identity,
-                )
-                .is_some_and(|(own, _)| own.is_some())
-        })
-    };
 
     if target_tip == factory_tip {
         if !has_prior_task_work() {

@@ -17,6 +17,7 @@ pub fn handle_pre_tool_use(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
+    let turn_cwd = Path::new(&input.cwd);
     // Codex 0.163 reports the turn cwd and drops exec_command's workdir.
     // Honor the execution directory when a newer projection supplies it.
     let mut execution_input = None;
@@ -95,9 +96,9 @@ pub fn handle_pre_tool_use(
         );
         let mut updated = input.tool_input.clone().unwrap_or_default();
         updated["command"] = serde_json::Value::String(rewritten);
-        return handle_pre_tool_use_inner(input, cas_root, Some(updated));
+        return handle_pre_tool_use_inner(input, cas_root, Some(updated), turn_cwd);
     }
-    let mut output = handle_pre_tool_use_inner(input, cas_root, None)?;
+    let mut output = handle_pre_tool_use_inner(input, cas_root, None, turn_cwd)?;
     // cas-8dbe: only an edit the policy above allows takes a file lease.
     let denied = matches!(
         &output.hook_specific_output,
@@ -234,6 +235,7 @@ fn handle_pre_tool_use_inner(
     input: &HookInput,
     cas_root: Option<&Path>,
     prepared_cargo_input: Option<serde_json::Value>,
+    turn_cwd: &Path,
 ) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
@@ -348,7 +350,7 @@ fn handle_pre_tool_use_inner(
         if let Some(updated) = prepared_cargo_input {
             let mut rewritten_input = input.clone();
             rewritten_input.tool_input = Some(updated.clone());
-            let mut output = handle_pre_tool_use_inner(&rewritten_input, cas_root, None)?;
+            let mut output = handle_pre_tool_use_inner(&rewritten_input, cas_root, None, turn_cwd)?;
             output.rewrite_pre_tool_input(updated);
             return Ok(output);
         }
@@ -706,7 +708,10 @@ fn handle_pre_tool_use_inner(
         // change during a long session), so resolve the durable binding from
         // the current agent row on every hook invocation. The environment is
         // the bootstrap fallback until SessionStart has registered the row.
-        let registered_worktree = registered_factory_worktree_root(&mut stores, input);
+        // A supplied execution workdir resolves targets, but cannot widen an
+        // unbound agent's roots beyond the original turn directory.
+        let worktree_root = registered_factory_worktree_root(&mut stores, input)
+            .unwrap_or_else(|| turn_cwd.to_path_buf());
         let (artifacts_root, scratch_root) = {
             let config = stores.config();
             let factory = config.factory();
@@ -726,7 +731,7 @@ fn handle_pre_tool_use_inner(
         }) {
             // An aliased namespace must not authorize writes to its target.
             // Leave worktree operations and historical reads available.
-            artifacts_root = Some(registered_worktree.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
+            artifacts_root = Some(worktree_root.display().to_string());
         }
         // cas-3147 (GH #1169): operator write roots and task grants.
         let is_supervisor = crate::harness_policy::is_supervisor(input);
@@ -737,7 +742,7 @@ fn handle_pre_tool_use_inner(
             &artifacts_root,
             scratch_root.as_deref(),
             is_supervisor,
-            registered_worktree.as_deref(),
+            Some(&worktree_root),
             &write_policy,
             &write_task_ids,
         ) {
@@ -754,7 +759,7 @@ fn handle_pre_tool_use_inner(
                         &violation,
                         artifacts_root.as_deref(),
                         scratch_root.as_deref(),
-                        registered_worktree.as_deref(),
+                        Some(&worktree_root),
                         &write_policy,
                         &write_task_ids,
                     ),
@@ -6543,12 +6548,13 @@ mod workspace_contract_tests {
             &verifier("cargo nextest run -p cas --lib -E 'test(x)'"),
             Some(root.path()),
             None,
+            root.path(),
         )
         .unwrap();
         let rendered = serde_json::to_string(&output).unwrap();
         assert!(rendered.contains("deny") && rendered.contains("cas factory verifier-test"), "{rendered}");
         let output =
-            handle_pre_tool_use_inner(&verifier("git log --oneline -3"), Some(root.path()), None).unwrap();
+            handle_pre_tool_use_inner(&verifier("git log --oneline -3"), Some(root.path()), None, root.path()).unwrap();
         assert!(!serde_json::to_string(&output).unwrap().contains("VERIFIER RUST BUILD"));
     }
 
@@ -6711,7 +6717,7 @@ mod workspace_contract_tests {
 
         // The PreToolUse hook applies it to an agent's Bash call.
         let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None).expect("hook");
+        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None, Path::new(&input.cwd)).expect("hook");
         let rendered = serde_json::to_string(&output).expect("serialize");
         assert!(
             rendered.contains("deny") && rendered.contains("supervisor-only"),

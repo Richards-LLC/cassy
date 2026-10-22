@@ -665,6 +665,9 @@ mod pre_compact_flush_tests {
             ("CURL_ARGS_FILE", captured_args_path),
         ]);
 
+        send_webhook_notification("", "empty webhook must be a no-op").unwrap();
+        assert!(!captured_args.exists(), "empty webhook must not invoke curl");
+
         for url in [
             "http://127.0.0.1\\@evil.example/",
             "http://localhost\\@evil.example",

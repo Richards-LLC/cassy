@@ -4697,6 +4697,15 @@ impl CasCore {
             return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
+        // cas-3937: from here the merge is a fact; a slow close or verifier
+        // dispatch below must not turn its answer into UNKNOWN.
+        if let Some(sha) = merge_commit.as_deref() {
+            crate::mcp::tools::service::mutation_receipt::merge_committed(
+                sha,
+                &push_branch,
+                push_outcome.push_state_label(),
+            );
+        }
         let trunk_notice = if trunk_fallback {
             if push_outcome.is_published() {
                 format!(

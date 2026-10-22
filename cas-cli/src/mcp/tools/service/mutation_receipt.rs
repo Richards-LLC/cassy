@@ -127,6 +127,14 @@ pub(crate) fn task_terminal_committed(id: &str) {
     }
 }
 
+/// cas-3937: a `worktree_merge` reached its merged, published (or not)
+/// target. That is the request's terminal mutation; the task close and
+/// verification dispatch after it are post-commit work.
+pub(crate) fn merge_committed(commit: &str, target: &str, push_state: &str) {
+    // Red: the pre-cas-3937 behaviour, where a merge recorded no commit.
+    let _ = (commit, target, push_state);
+}
+
 impl Receipt {
     pub(crate) fn action(&self) -> &str {
         &self.action

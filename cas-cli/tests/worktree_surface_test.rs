@@ -2303,6 +2303,15 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
         let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
         assert_ne!(tip, old_anchor);
         run_git(&["push", "--force-with-lease", "origin", &branch], &worker);
+        let stale_receipt = service.task(Parameters(task_req(serde_json::json!({
+            "action": "close", "id": task_id, "commit_receipt": old_anchor,
+            "reason": "a retired receipt must not authorize a park",
+        })))).await.unwrap();
+        let refused = get_text(&stale_receipt);
+        assert!(!refused.contains("MERGE REQUIRED") && refused.contains(&tip)
+            && refused.contains("action=close"),
+            "an absent receipt must refuse at close with the current-tip recovery: {refused}");
+        assert_eq!(tasks.get(task_id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(old_anchor.as_str()));
         let retry = service.task(Parameters(close_request())).await.unwrap();
         assert!(get_text(&retry).contains("MERGE REQUIRED"), "{}", get_text(&retry));
         let parked = tasks.get(task_id).unwrap();

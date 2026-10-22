@@ -6246,6 +6246,25 @@ impl CasCore {
         if rebased_delivery_has_same_patches(repo_path, recorded, &candidate, &rebase_target, &task.id) {
             return Some(candidate);
         }
+        // cas-749f: a rebase may be followed by a correction before the
+        // worker re-parks. Prove the entire old delivery at its rewritten
+        // boundary, then apply the ordinary same-task continuation fences
+        // to the new commits; neither a dropped patch nor another task's
+        // stacked delivery can acquire this anchor.
+        if let Some(rebased) = rebased_delivery::equivalent_prefix(
+            repo_path, recorded, &candidate, &rebase_target, &task.id,
+        ) {
+            let branch = task.assignee.as_deref()
+                .map(|assignee| close_measured_factory_branch(repo_path, task, assignee));
+            if self.tip_is_own_task_lineage(
+                task_store, task, repo_path, branch.as_deref(), &rebased, Some(&candidate),
+            ) && parked_anchor_advance_with_target_is_attributable(
+                repo_path, &rebased, &candidate, &task.id,
+                self.sibling_lease_boundary(task_store, task), &target,
+            ) {
+                return Some(candidate);
+            }
+        }
         if self.rebinds_unpushed_anchor(task_store, task, repo_path, recorded, &candidate, &target) {
             return Some(candidate);
         }
@@ -8417,12 +8436,39 @@ impl CasCore {
                             )));
                         }
                     }
+                    // cas-749f: close must not park a receipt absent from
+                    // the source the supervisor will actually merge.
+                    let parking = if task.status != TaskStatus::AwaitingMerge {
+                        self.advance_commit_time_anchor_before_park(
+                            task_store.as_ref(), &task, &close_project_root,
+                            &resolved_parent_branch, measured_branch.as_deref(), anchor.as_deref(),
+                        )
+                    } else { task.clone() };
+                    let park_anchor = if task.status == TaskStatus::AwaitingMerge {
+                        self.eligible_awaiting_merge_advance(
+                            task_store.as_ref(), &task, &close_project_root,
+                            &resolved_parent_branch, anchor.as_deref(),
+                        ).or_else(|| task.deliverables.factory_branch_anchor.clone())
+                    } else { parking.deliverables.factory_branch_anchor.clone().or(anchor.clone()) };
+                    if let (Some(branch), Some(tip)) = (measured_branch.as_deref(), anchor.as_deref()) {
+                        for boundary in req.commit_receipt.as_deref().into_iter()
+                            .chain(park_anchor.as_deref())
+                        {
+                            if !git_commit_is_ancestor(&close_project_root, boundary, tip) {
+                                return Ok(Self::tool_error(format!(
+                                    "PARK REFUSED: delivery anchor {boundary} is absent from {branch} at pushed tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
+                                    crate::mcp::tools::core::guidance::caller_prefix(), task.id,
+                                )));
+                            }
+                        }
+                    }
                     // cas-eac2: fast-rows and focused-test receipts at this
                     // exact tip, read (never run) while the worker can still
                     // fix them; cas-d6eb: the blast-radius module check before
                     // parking locks the proof scope.
-                    if task.status != TaskStatus::AwaitingMerge
-                        && let Some(tip) = anchor.as_deref()
+                    if (task.status != TaskStatus::AwaitingMerge
+                        || park_anchor != task.deliverables.factory_branch_anchor)
+                        && let Some(tip) = park_anchor.as_deref()
                         && let Some(paths) = commit_receipt_window.as_ref().and_then(|window| {
                             task_attribution::paths(&close_project_root, &resolved_parent_branch, window, Some(tip))
                         })
@@ -8444,14 +8490,6 @@ impl CasCore {
                         // task's own commits only, the tip is the delivery:
                         // advance first, so the park, its QA round and its
                         // merge request all name the tip.
-                        let parking = self.advance_commit_time_anchor_before_park(
-                            task_store.as_ref(),
-                            &task,
-                            &close_project_root,
-                            &resolved_parent_branch,
-                            measured_branch.as_deref(),
-                            anchor.as_deref(),
-                        );
                         // cas-4b3f: snapshot the factory branch's current
                         // tip so later retries anchor to THIS task's own
                         // commit range, not whatever HEAD drifts to if a

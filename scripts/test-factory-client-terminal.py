@@ -48,6 +48,9 @@ def check_exit(binary, case, out):
         peer = None
         captured = bytearray()
         frozen = case == "blocked-output"
+        # crossterm may make stdin nonblocking. A separate open keeps that
+        # read-side flag from also making the frozen output writer nonblocking.
+        output = os.open(os.ttyname(slave), os.O_WRONLY | os.O_NOCTTY) if frozen else slave
         queued = 0
         signalled_at = None
         timed_out = False
@@ -58,7 +61,7 @@ def check_exit(binary, case, out):
                 listener.listen(1)
                 child = subprocess.Popen(
                     [binary, "attach", "terminal-proof"], cwd=scratch, env=env,
-                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                    stdin=slave, stdout=output, stderr=output, start_new_session=True,
                 )
                 triggered = False
                 was_raw = False
@@ -132,6 +135,8 @@ def check_exit(binary, case, out):
             if frozen:
                 termios.tcflow(slave, termios.TCOON)
             (out / f"{case}.ansi").write_bytes(captured)
+            if output != slave:
+                os.close(output)
             os.close(master)
             os.close(slave)
 

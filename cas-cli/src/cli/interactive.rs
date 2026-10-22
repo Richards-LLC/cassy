@@ -433,8 +433,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    /// pin: styled UTF-8 picker output stays identical; C/plain decorations
-    /// must be ASCII on the same actual row/help/completion renderers.
+    /// pin: styled UTF-8 picker uses the approved default-foreground/bold contract;
+    /// C/plain decorations stay ASCII and NO_COLOR suppresses all SGR.
     #[test]
     fn picker_decorations_follow_locale_cas_ba0e() {
         use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
@@ -473,12 +473,30 @@ mod tests {
                     render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
                     render_completed(&mut output, "Destination", None, mode).unwrap();
                     let text = String::from_utf8(output).unwrap();
-                    if locale == "C.UTF-8" && mode == OutputMode::Styled {
+                    // Pin terminal-default foreground: fixed ANSI colors can disappear
+                    // on light/dark/Solarized palettes. Bold is sufficient emphasis.
+                    let sgr = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+                    for code in sgr.find_iter(&text).map(|m| m.as_str()) {
+                        assert!(
+                            no_color.is_none() && mode == OutputMode::Styled,
+                            "SGR {code:?} under {mode:?}/NO_COLOR={no_color:?}"
+                        );
+                        assert!(
+                            matches!(code, "\x1b[1m" | "\x1b[0m"),
+                            "picker must use the terminal foreground without dimming: {code:?}"
+                        );
+                    }
+                    assert!(text.contains("\x1b[1;1H"), "cursor interaction must remain");
+                    assert!(
+                        text.contains("Alpha") && text.contains("Beta") && text.contains("ready")
+                    );
+                    assert!(text.contains(": cancelled"));
+                    if locale == "C.UTF-8" && mode == OutputMode::Styled && no_color.is_none() {
                         assert_eq!(
                             text, utf8_snapshot,
                             "styled UTF-8 bytes must not change (NO_COLOR={no_color:?})"
                         );
-                    } else {
+                    } else if locale == "C" || mode == OutputMode::Plain {
                         assert!(
                             text.is_ascii(),
                             "non-ASCII decorations for {locale}/{mode:?}/NO_COLOR={no_color:?}: {text:?}"

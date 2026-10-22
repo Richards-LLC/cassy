@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- **Independent verifier builds** — Was: warm seeding hardlinked Cargo's `.cargo-build-lock` and `.cargo-artifact-lock`, making verifier and worker builds wait on each other. → Now: each build recreates private locks, so warm seeding preserves independent builds.
+
 ## [3.74.0] - 2026-10-22
 
 ### Added

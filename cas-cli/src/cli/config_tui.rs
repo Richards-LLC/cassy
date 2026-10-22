@@ -94,7 +94,7 @@ pub struct ConfigTuiApp {
 impl ConfigTuiApp {
     pub fn new(cas_root: &std::path::Path) -> anyhow::Result<Self> {
         let cas_root = cas_root.to_path_buf();
-        let config = Config::load(&cas_root)?;
+        let config = crate::cli::config::load_editor_config(&cas_root)?;
         let original_config = config.clone();
         let registry = registry();
 
@@ -586,7 +586,7 @@ impl ConfigTuiApp {
         )?;
         if !self.pending_resets.is_empty() {
             self.pending_resets.clear();
-            self.config = Config::load(&self.cas_root)?;
+            self.config = crate::cli::config::load_editor_config(&self.cas_root)?;
         }
         self.original_config = self.config.clone();
         self.has_unsaved = false;
@@ -798,7 +798,7 @@ mod tests {
         std::fs::create_dir_all(&host_root).unwrap();
         std::fs::write(
             host_root.join("config.toml"),
-            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"auto\"\n",
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
         )
         .unwrap();
         let project = env.home().join("projects/config-tui-editor");
@@ -812,7 +812,7 @@ mod tests {
         let mut app = ConfigTuiApp::new(&root).unwrap();
         assert_eq!(
             app.values.get("hub.transport_mode").map(String::as_str),
-            Some("auto"),
+            Some("required"),
             "the editor should show the host-scoped value"
         );
         app.current_section = Some("sync".into());
@@ -846,6 +846,11 @@ mod tests {
         assert_eq!(
             Config::load(&host_root).unwrap().hub.unwrap().transport_mode(),
             crate::config::HubTransportMode::Loopback
+        );
+        assert_eq!(
+            app.values.get("hub.transport_mode").map(String::as_str),
+            Some("loopback"),
+            "the editor should reload the host value after reset"
         );
     }
 

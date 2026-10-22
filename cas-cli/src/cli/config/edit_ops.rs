@@ -43,7 +43,7 @@ fn execute_edit_line_based_with_input(
 ) -> anyhow::Result<()> {
     use std::io::Write;
 
-    let mut config = Config::load(cas_root)?;
+    let mut config = crate::cli::config::load_editor_config(cas_root)?;
     let original = config.clone();
     let reg = registry();
 
@@ -223,14 +223,14 @@ mod tests {
         std::fs::create_dir_all(&host_root).unwrap();
         std::fs::write(
             host_root.join("config.toml"),
-            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"auto\"\n",
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
         )
         .unwrap();
         let project = env.home().join("projects/config-editor");
         let root = crate::store::init_cas_dir(&project).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            "# preserve project comment\n[sync]\nenabled = true\n",
+            "# preserve project comment\n[sync]\nenabled = false\n",
         )
         .unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
             for meta in registry.configs_in_section(section) {
                 let answer = match meta.key {
                     "hub.transport_mode" => "d\n",
-                    "sync.enabled" => "false\n",
+                    "sync.enabled" => "true\n",
                     _ => "\n",
                 };
                 answers.push_str(answer);
@@ -248,7 +248,7 @@ mod tests {
         }
         let args = ConfigEditArgs {
             section: None,
-            modified: false,
+            modified: true,
             all: true,
         };
         let cli = Cli::parse_from(["cas", "--json"]);
@@ -257,7 +257,7 @@ mod tests {
 
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
-        assert_eq!(document["sync"]["enabled"].as_bool(), Some(false), "{saved}");
+        assert_eq!(document["sync"]["enabled"].as_bool(), Some(true), "{saved}");
         assert!(saved.contains("# preserve project comment"), "{saved}");
         assert!(document.get("hub").and_then(|hub| hub.get("transport_mode")).is_none(), "{saved}");
         let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();

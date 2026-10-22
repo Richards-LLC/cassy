@@ -26,6 +26,19 @@ fn config_root_for_key(key: &str, cas_root: &Path) -> PathBuf {
     }
 }
 
+/// Load project settings with host-scoped values overlaid for the editors.
+/// The editor's in-memory view must match the file that reset and save use.
+pub(crate) fn load_editor_config(cas_root: &Path) -> anyhow::Result<Config> {
+    let mut config = Config::load(cas_root)?;
+    let host_config = Config::load(&crate::config::host_config_dir())?;
+    for (key, value) in host_config.list() {
+        if host_scoped_key(&key) {
+            config.set(&key, &value)?;
+        }
+    }
+    Ok(config)
+}
+
 // Plain `get` stays a machine-readable scalar for `gh --repo "$(cas config get
 // issues.repo)"`. Structured and human multi-field views expose provenance.
 fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
@@ -253,10 +266,30 @@ pub(crate) fn save_editor_changes(
         }
     }
     let edited_document = toml_edit::Document::parse(toml::to_string(&saved_config)?)?.into_mut();
+    let mut written_paths = Vec::new();
     for (config_root, mut changes) in changes_by_root {
         changes.sort_by(|left, right| left.0.cmp(&right.0));
-        let fallback = Config::load(&config_root)?;
-        persist_editor_changes_for_root(&config_root, &fallback, &edited_document, &changes)?;
+        let result = (|| -> anyhow::Result<()> {
+            let fallback = Config::load(&config_root)?;
+            persist_editor_changes_for_root(
+                &config_root,
+                &fallback,
+                &edited_document,
+                &changes,
+                &mut written_paths,
+            )
+        })();
+        if let Err(error) = result {
+            if written_paths.is_empty() {
+                return Err(error);
+            }
+            let paths = written_paths
+                .iter()
+                .map(|path: &PathBuf| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(error.context(format!("config save failed; already saved: {paths}")));
+        }
     }
     Ok(())
 }
@@ -268,6 +301,7 @@ fn persist_editor_changes_for_root(
     fallback: &Config,
     edited_document: &toml_edit::DocumentMut,
     changes: &[(String, Option<String>)],
+    written_paths: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
     let _lock = crate::config::lock_project_config(config_root)?;
     let path = config_root.join("config.toml");
@@ -287,15 +321,18 @@ fn persist_editor_changes_for_root(
     for (key, value) in changes {
         let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
         if value.is_some() {
-            let replacement = config_document_item(edited_document.as_item(), serialized_path)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("edited config omitted {key}"))?;
-            set_config_document_item(&mut document, stored_path, Some(replacement))?;
-            if let Some(alternate_path) = alternate_path {
-                set_config_document_item(&mut document, alternate_path, None)?;
-            }
-            if let Some(marker) = upkeep_observe_marker_for_set(key) {
-                set_config_document_item(&mut document, marker, None)?;
+            if let Some(replacement) =
+                config_document_item(edited_document.as_item(), serialized_path).cloned()
+            {
+                set_config_document_item(&mut document, stored_path, Some(replacement))?;
+                if let Some(alternate_path) = alternate_path {
+                    set_config_document_item(&mut document, alternate_path, None)?;
+                }
+                if let Some(marker) = upkeep_observe_marker_for_set(key) {
+                    set_config_document_item(&mut document, marker, None)?;
+                }
+            } else {
+                remove_config_document_key(&mut document, stored_path, alternate_path)?;
             }
         } else {
             remove_config_document_key(&mut document, stored_path, alternate_path)?;
@@ -308,6 +345,7 @@ fn persist_editor_changes_for_root(
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
     if contents != raw {
         crate::config::atomic_replace_project_config(&path, &contents)?;
+        written_paths.push(path.clone());
     }
     if reconcile_viktor {
         crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;

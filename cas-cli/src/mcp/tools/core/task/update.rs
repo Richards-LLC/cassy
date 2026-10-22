@@ -2022,6 +2022,7 @@ impl CasCore {
 
         // Captured before `req.epic` is consumed below — the blocked_by guard
         // (cas-d45f) needs to know the epic this same call is establishing.
+        let epic_update_supplied = req.epic.is_some();
         let req_epic_for_blocker_guard: Option<String> = req
             .epic
             .as_deref()
@@ -2432,6 +2433,21 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if epic_update_supplied {
+            match crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &req.id,
+            ) {
+                Ok(released) if released > 0 => warnings.push(format!(
+                    "Released {released} obsolete split-derived Cloud claim(s) after retargeting."
+                )),
+                Ok(_) => {}
+                Err(error) => warnings.push(format!(
+                    "Task fields were updated, but split Cloud claim cleanup failed: {error}. Check the Cloud claim before starting the task."
+                )),
+            }
+        }
 
 
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the

@@ -15,7 +15,8 @@ use ghostty_vt::KeyModifiers as GhosttyKeyModifiers;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 /// Attach to an existing factory session via Unix socket
@@ -50,11 +51,30 @@ const CONTROL_PREFIX: &[u8] = b"\x1b]777;";
 const CONTROL_SUFFIX: u8 = 0x07; // BEL
 
 // A signal handler cannot use crossterm's locks or buffered terminal I/O.
-// Wake the bounded client loop instead; it restores before exiting.
+// Ask the client loop to restore, with an independent bound if I/O is stuck.
 static CLIENT_EXIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+const CLIENT_SIGNAL_GRACE: Duration = Duration::from_secs(1);
 
 extern "C" fn record_client_exit_signal(signal: libc::c_int) {
-    CLIENT_EXIT_SIGNAL.store(signal, Ordering::Relaxed);
+    if let Err(first) =
+        CLIENT_EXIT_SIGNAL.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed)
+    {
+        // A second signal must work even while the main thread is in write_all.
+        reraise_default_signal(first);
+    }
+}
+
+fn reraise_default_signal(signal: libc::c_int) {
+    // These POSIX calls are async-signal-safe. Unblock before raising because
+    // this can also run inside the handler for the signal being re-raised.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        libc::sigaddset(&mut mask, signal);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
+        libc::raise(signal);
+    }
 }
 
 /// Restore on every return and panic unwind, including partial setup failures.
@@ -62,6 +82,8 @@ extern "C" fn record_client_exit_signal(signal: libc::c_int) {
 struct ClientTerminalGuard {
     previous_handlers: Vec<(libc::c_int, libc::sigaction)>,
     raw_enabled: bool,
+    stop_watchdog: Arc<AtomicBool>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ClientTerminalGuard {
@@ -69,11 +91,13 @@ impl ClientTerminalGuard {
         let mut guard = Self {
             previous_handlers: Vec::new(),
             raw_enabled: false,
+            stop_watchdog: Arc::new(AtomicBool::new(false)),
+            watchdog: None,
         };
         CLIENT_EXIT_SIGNAL.store(0, Ordering::Relaxed);
         for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
             // Install before changing the terminal; Drop rolls back any partial
-            // registration. The handler performs only a lock-free atomic store.
+            // registration. The handler never touches terminal locks or I/O.
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
             action.sa_sigaction = record_client_exit_signal as *const () as libc::sighandler_t;
@@ -83,6 +107,24 @@ impl ClientTerminalGuard {
             }
             guard.previous_handlers.push((signal, previous));
         }
+        let stop = Arc::clone(&guard.stop_watchdog);
+        guard.watchdog = Some(
+            std::thread::Builder::new()
+                .name("factory-client-signal".into())
+                .spawn(move || {
+                    let mut signalled_at = None;
+                    while !stop.load(Ordering::Acquire) {
+                        let signal = CLIENT_EXIT_SIGNAL.load(Ordering::Relaxed);
+                        if signal != 0 {
+                            let since = signalled_at.get_or_insert_with(std::time::Instant::now);
+                            if since.elapsed() >= CLIENT_SIGNAL_GRACE {
+                                reraise_default_signal(signal);
+                            }
+                        }
+                        std::thread::park_timeout(Duration::from_millis(20));
+                    }
+                })?,
+        );
         enable_raw_mode()?;
         guard.raw_enabled = true;
         execute!(
@@ -111,9 +153,21 @@ impl Drop for ClientTerminalGuard {
             );
             let _ = disable_raw_mode();
         }
+        self.stop_watchdog.store(true, Ordering::Release);
+        if let Some(watchdog) = self.watchdog.take() {
+            watchdog.thread().unpark();
+            let _ = watchdog.join();
+        }
         // Keep signal interception until the terminal is safe again.
         for (signal, previous) in self.previous_handlers.iter().rev() {
             unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+        }
+        let signal = self.exit_signal();
+        if signal != 0 {
+            // Preserve death-by-signal even when an error unwinds this guard.
+            unsafe { libc::raise(signal) };
+            // A previously ignored/handled or masked signal must still terminate.
+            reraise_default_signal(signal);
         }
     }
 }
@@ -123,7 +177,6 @@ impl Drop for ClientTerminalGuard {
 /// The daemon renders the full TUI and broadcasts raw terminal output.
 /// This client just forwards bytes between the terminal and socket.
 fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
-
     let sock_path = PathBuf::from(&session.metadata.socket_path);
 
     // Connect to daemon socket
@@ -311,12 +364,7 @@ fn attach_unix(session: &SessionInfo) -> anyhow::Result<()> {
         }
     }
 
-    let signal = terminal_guard.exit_signal();
     drop(terminal_guard);
-    if signal != 0 {
-        // process::exit does not run destructors: restore explicitly above.
-        std::process::exit(128 + signal);
-    }
 
     Ok(())
 }

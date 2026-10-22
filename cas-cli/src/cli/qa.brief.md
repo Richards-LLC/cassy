@@ -44,6 +44,16 @@ the delivered commit.
 
 Scored by true-otter-3 on 2026-10-21; all floors hold.
 
+## Measured ref follow-ups (cas-1db78)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Upkeep status still leads with its verdict, then identifies the measured integration ref and commit. |
+| Scannable | An over-wide branch keeps both branch ends and its measured `@sha7`, with the middle elided within 80 columns. |
+| Readable | An enforce advisory sends the operator to plain `cas qa journeys --status`; the full-ref escape remains `--status --json`. |
+| Machine output | Status and config-save JSON preserve the complete measured ref and existing typed drift fields in one document. |
+| Omitted | The unpinned live-store config fallback is documented in source; no new status fields or config behavior are added. |
+
 ## Upkeep critique (cas-a77e)
 
 terminal-qa: PASS qa-upkeep-status · 12 runs · 0 fail · 0 warn · 0 allowed

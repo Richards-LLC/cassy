@@ -41,7 +41,7 @@ pub struct LeaseHistoryEntry {
     pub reason: Option<String>,
 }
 
-macro_rules! agent_session_end_schema {
+macro_rules! agent_session_end_table {
     () => { r#"CREATE TABLE IF NOT EXISTS agent_session_ends (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -56,11 +56,13 @@ macro_rules! agent_session_end_schema {
     queued_at TEXT,
     UNIQUE(agent_id, registered_at)
 );
-CREATE INDEX IF NOT EXISTS idx_agent_session_ends_host ON agent_session_ends(machine_id, ended_at);
 "# };
 }
+macro_rules! agent_session_end_index {
+    () => { "CREATE INDEX IF NOT EXISTS idx_agent_session_ends_host ON agent_session_ends(machine_id, ended_at)" };
+}
 /// Canonical additive session-end schema, shared with the migration registry.
-pub const AGENT_SESSION_END_SCHEMA: &str = agent_session_end_schema!();
+pub const AGENT_SESSION_END_SCHEMA: &[&str] = &[agent_session_end_table!(), agent_session_end_index!()];
 
 /// Schema for agents and task leases tables.
 ///
@@ -183,7 +185,7 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_agent ON worktree_leases(agent_id);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_status ON worktree_leases(status);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_expires ON worktree_leases(expires_at);
-"#, agent_session_end_schema!());
+"#, agent_session_end_table!(), agent_session_end_index!(), ";");
 
 /// Trait for agent storage operations
 pub trait AgentStore: Send + Sync {

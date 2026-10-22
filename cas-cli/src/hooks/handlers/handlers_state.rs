@@ -931,6 +931,14 @@ mod supervisor_handoff_tests {
         tasks.add(&parked).unwrap();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
+        let ask = queue.enqueue("ending", "operator", "Previously delivered open ask: select branch").unwrap();
+        queue.mark_processed(ask).unwrap();
+        crate::store::open_reminder_store(&root).unwrap().create(
+            &ending.id, None, "Unanswered operator ask deadline", cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)), None,
+            Some(&serde_json::json!({"operator_ask": ask})), 0, Some("old-session"),
+        ).unwrap();
+
         // Exercise the real SessionEnd handler, including unconditional cleanup.
         handle_session_end(
             &HookInput {
@@ -1004,8 +1012,9 @@ mod supervisor_handoff_tests {
         env.set("CAS_AGENT_NAME", "successor");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
         let output = handle_session_start(&start, Some(&root)).unwrap();
-        let context = serde_json::to_string(&output).unwrap();
-        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "compaction"] {
+        let value = serde_json::to_value(&output).unwrap();
+        let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "Previously delivered open ask: select branch", "compaction"] {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
         assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
@@ -1014,6 +1023,14 @@ mod supervisor_handoff_tests {
         assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
+        env.set("CAS_AGENT_NAME", "third-supervisor");
+        let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
+        let third = serde_json::to_value(third).unwrap();
+        let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("\"id\":\"cas-owned-id\""), "an unadopted inherited epic must survive another succession: {context}");
+        assert!(context.contains("\"name\":\"live-worker\""), "the inherited live worker must remain visible: {context}");
+
 
     }
 }

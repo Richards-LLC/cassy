@@ -7,7 +7,7 @@ pub const MIGRATION: Migration = Migration {
     subsystem: Subsystem::Agents,
     description: "Retain session-end causes and atomically claimed supervisor lane snapshots",
     // Canonical additive baseline: safe on both lazily initialized and migrated stores.
-    up: &[cas_store::AGENT_SESSION_END_SCHEMA],
+    up: cas_store::AGENT_SESSION_END_SCHEMA,
     detect: Some(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_session_ends'",
     ),

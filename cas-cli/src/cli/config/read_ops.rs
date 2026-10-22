@@ -971,7 +971,21 @@ mod tests {
                     "llm.worker.harness" => "claude",
                     "llm.worker.model" => "roundtrip-worker-model",
                     "llm.worker.reasoning_effort" => "high",
-                    _ => registry.get(key).expect("registered key").default,
+                    _ => {
+                        let meta = registry.get(key).expect("registered key");
+                        if meta.default.is_empty() {
+                            match key {
+                                "slack.stakeholder_contacts" => "[]",
+                                "issues.repo"
+                                | "issues.components.cassy"
+                                | "issues.components.violet"
+                                | "issues.components.cloud" => "example/repo",
+                                _ => "example",
+                            }
+                        } else {
+                            meta.default
+                        }
+                    }
                 };
                 let mut config = Config::default();
                 config

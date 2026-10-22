@@ -1133,6 +1133,11 @@ mod tests {
         pack.rows[1].covers_commits = vec![push[..7].to_string()];
         pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
         assert_eq!(pack.derive_gate().verdict, GateVerdict::Clean);
+        // A root commit in the range (no parent) is a unit too, never skipped.
+        project.git(&["checkout", "-q", "--orphan", "imported"]);
+        let root = project.commit("vendor/lib.ts", "imported history");
+        let units = coverage::candidate_prs(project.root(), &head, &root).unwrap();
+        assert!(units.len() == 1 && units[0].number.is_none() && units[0].commit == root && !units[0].changes.is_empty());
 
         // Seal and load: media, flag snapshot, gate.
         let dir = tempfile::tempdir().unwrap();
@@ -1186,8 +1191,19 @@ mod tests {
         std::fs::create_dir_all(dir.join("media")).unwrap();
         let mut pack = Pack::new("cassy", &"a".repeat(40), Vec::new());
         let limit = 4096;
-        for (name, size) in [("frame.png", 10), ("fits.mp4", 5000), ("huge.mp4", 5000), ("trace.zip", 5000)] {
-            std::fs::write(dir.join("media").join(name), vec![b'x'; size]).unwrap();
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let mp4: &[u8] = b"\0\0\0\x18ftypisom";
+        let zip: &[u8] = b"PK\x03\x04";
+        for (name, magic, size) in [
+            ("frame.png", png, 16),
+            ("fits.mp4", mp4, 5000),
+            ("huge.mp4", mp4, 5000),
+            ("trace.zip", zip, 5000),
+            ("disguised.png", zip, 16),
+        ] {
+            let mut bytes = magic.to_vec();
+            bytes.resize(size, b'x');
+            std::fs::write(dir.join("media").join(name), bytes).unwrap();
             pack.add_media(&dir, &format!("media/{name}")).unwrap();
         }
         let mut walked = row("checkout", "checkout", verdict::RowVerdict::Pass);
@@ -1202,7 +1218,7 @@ mod tests {
         let local: Vec<&str> = bundle.local_only.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(local, ["media/huge.mp4"]);
         let linked: Vec<&str> = bundle.linked.iter().map(|m| m.path.as_str()).collect();
-        assert_eq!(linked, ["media/trace.zip"], "only images and video are uploaded");
+        assert_eq!(linked, ["media/trace.zip", "media/disguised.png"], "only sniffed images and video are uploaded");
 
         // Violet is a fake; only the Slack upload URL is a loopback double.
         struct FakeViolet {
@@ -1239,7 +1255,7 @@ mod tests {
             let calls = violet.calls.lock().unwrap().clone();
             assert_eq!(
                 calls[0]["initial_comment"],
-                "gate OWED\nKept local (not uploaded): media/trace.zip, media/huge.mp4"
+                "gate OWED\nKept local (not uploaded): media/trace.zip, media/disguised.png, media/huge.mp4"
             );
             assert!(calls[2..].iter().all(|call| call["reply_to"] == "m1"), "{calls:?}");
             receipts
@@ -1286,13 +1302,29 @@ mod tests {
         assert!(prune_media(release.path(), 30, chrono::Utc::now()).is_empty(), "nothing is 30 days old yet");
         let sealed = Pack::load(&dir).unwrap();
         let sealed_bytes = std::fs::read(dir.join("pack.json")).unwrap();
+        let huge = dir.join("media/huge.mp4");
+        let huge_bytes = std::fs::read(&huge).unwrap();
+        std::fs::write(&huge, b"edited after sealing").unwrap();
         let later = chrono::Utc::now() + chrono::Duration::days(31);
         let deleted = prune_media(release.path(), 30, later);
         assert!(deleted.iter().any(|p| p.ends_with("media/frame.png")), "{deleted:?}");
         assert!(kept.exists() && dir.join("media/link.png").symlink_metadata().is_ok());
         assert_eq!(std::fs::read(dir.join("pack.json")).unwrap(), sealed_bytes, "pack.json bytes never change");
+        assert!(huge.exists() && !pack::pruned(&dir).unwrap().iter().any(|p| p.path == "media/huge.mp4"));
+        assert!(matches!(Pack::load(&dir), Err(pack::PackError::Media(_))), "a changed file is not pruned away");
+        std::fs::write(&huge, &huge_bytes).unwrap();
         assert_eq!(Pack::load(&dir).unwrap().gate, sealed.gate, "a pruned pack still loads");
         assert_eq!(slack_bundle(&dir, limit, &FakeTranscoder).unwrap().pruned.len(), 4);
+        let mut failing = Pack::load(&dir).unwrap();
+        failing.media.retain(|m| m.path != "media/frame.png");
+        failing.rows[0].frames.clear();
+        failing.flags = Some(flags::FlagSnapshot {
+            env: "staging".into(),
+            sha: "a".repeat(40),
+            values: [("api.key".to_string(), serde_json::json!("sk_live_abcdefghijklmnop"))].into(),
+        });
+        assert!(matches!(failing.seal(&dir), Err(pack::PackError::Secret(_))));
+        assert_eq!(Pack::load(&dir).unwrap().gate, sealed.gate, "a failed reseal keeps the old pack and its pruned records");
         let record = std::fs::read_to_string(dir.join(pack::PRUNED_FILE)).unwrap();
         std::fs::write(dir.join(pack::PRUNED_FILE), record.replacen(&sealed.media[0].sha256, &"0".repeat(64), 1)).unwrap();
         assert!(matches!(Pack::load(&dir), Err(pack::PackError::Media(_))), "pruned.json claiming another digest");

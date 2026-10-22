@@ -59,7 +59,11 @@ impl CasCore {
                 data: None,
             });
         }
-        if crate::qa_release::promotion::names_override(&req.note) {
+        // cas-bfc7: a release gate override passes a promotion status, so only
+        // a live registered supervisor's single-line decision note records it,
+        // through the trusted append below.
+        let release_override = crate::qa_release::promotion::names_override(&req.note);
+        if release_override {
             let well_formed = req.note_type.eq_ignore_ascii_case("decision")
                 && !req.note.contains('\n')
                 && crate::qa_release::promotion::is_override_note(&req.note);
@@ -143,8 +147,14 @@ impl CasCore {
         let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
 
         // prepare_note adds only committed ledger records after the caller's
-        // raw note has passed the marker rejection above.
-        let append = if formatted_note.lines().any(cas_store::task_note_markers::is_reserved_line) {
+        // raw note has passed the marker rejection above. An override-shaped
+        // line is trusted only when the supervisor check above admitted it.
+        let trusted = formatted_note.lines().any(|line| {
+            cas_store::task_note_markers::is_reserved_line(line)
+                && (release_override
+                    || cas_store::task_note_markers::release_gate_override(line).is_none())
+        });
+        let append = if trusted {
             task_store.append_trusted_note(&req.id, &formatted_note)
         } else {
             task_store.append_note(&req.id, &formatted_note)

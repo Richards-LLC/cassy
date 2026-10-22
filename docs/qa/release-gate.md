@@ -184,8 +184,9 @@ all, is `OWED`, and the gate names each owed row or PR and its cause.
 first-parent history: `Merge pull request #N` merges and squash subjects
 ending in `(#N)`. It maps each PR's diff to journeys through `cas qa impact`.
 A PR that no row exercises keeps the gate OWED until a manual row records
-`covers_prs: [N]`. Every other first-parent commit is a direct push and its
-own coverage unit, `push <sha7>`. It is owed the same way until a row
+`covers_prs: [N]`. Every other first-parent commit, including a root
+commit, which is diffed against the empty tree, is a direct push and its own
+coverage unit, `push <sha7>`. It is owed the same way until a row
 exercises it or a manual row records `covers_commits: [<sha7>]`.
 
 **Sealing.** Sealing rehashes every media file and refuses a link or any path
@@ -201,8 +202,9 @@ is refused. A changed `pack.json` stops the receipt satisfying close, exactly
 as a changed `LEDGER.md` does.
 
 **Slack.** The Violet bundle posts `pack.json`, with the summary as its
-comment, and then each image or video in that thread. Other media (traces,
-logs, archives) can carry credentials. They are never uploaded; the summary
+comment, and then each image or video in that thread. An image or video
+must also have matching magic bytes, so a zip named `x.png` is not uploaded.
+Other media (traces, logs, archives) can carry credentials. They are never uploaded; the summary
 names them by local path. Every file is rechecked
 against the pack digest and is at most 25 MiB. Video over the limit is
 re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
@@ -223,7 +225,9 @@ receipt bound to them stays valid. Before deleting a pack entry, retention
 records its path and digest in `pruned.json` beside the pack, atomically.
 Loading accepts a missing entry only when `pruned.json` records it with the
 pack's own digest. It refuses a record the pack does not list. An entry whose
-file changed is not pruned, so loading keeps refusing it.
+file changed is not pruned, so loading keeps refusing it. A reseal writes the
+new `pack.json` first and only then drops the records it no longer lists, so
+a reseal that fails leaves the previous pack loadable.
 
 ## Promotion: `cassy/release-gate`
 
@@ -264,15 +268,25 @@ task action=notes note_type=decision notes="RELEASE-GATE OVERRIDE sha=<full 40-c
 The override passes that exact SHA, or a commit with the same whole tree,
 for 6 hours from the note. The status description names the override and
 when it expires. Each head it passes is logged once as a decision note on
-that task. Cassy refuses the marker with a concrete SHA from any other
-writer and from every other note path.
+that task.
+
+The task store reserves the override line. Only the live supervisor's
+decision note is appended as trusted. Every other writer gets its copy
+indented so it never parses: worker notes, task updates (including the
+pre-compact flush), cloud sync merges and plain appends. An override
+therefore works only on the machine where the supervisor recorded it.
 
 **Freeze status.** While a run walks `integration_branch`, Cassy publishes a
 pending `cassy/release-freeze` status on the head of every open PR into
-that branch. At seal or abort it publishes success on the open PRs. Require
-the context on `integration_branch` so merges from outside Cassy wait too.
-A head pushed while no run is active has no freeze status until the next
-seal or abort.
+that branch. Outside a run, the status is success. The run driver publishes
+it at start, seal and abort, and again on every tick, so a PR opened or
+pushed between runs is released too. Each call posts only heads whose state
+changed, recorded in `.cas/release-gate/freeze-status.json`. Require the
+context on `integration_branch` so merges from outside Cassy wait too.
+
+PR listing reads every page of open PRs. One failed post does not stop the
+others; the error names each failure, and a failed head is retried on the
+next call.
 
 ## Independent runs: `independence_key`
 

@@ -285,16 +285,18 @@ pub fn names_override(text: &str) -> bool {
 /// Whether a decision-note body is a well-formed override:
 /// `RELEASE-GATE OVERRIDE sha=<40-hex>: <reason>`.
 pub fn is_override_note(body: &str) -> bool {
-    parse_override(&format!("[2000-01-01 00:00] ✅ DECISION {}", body.trim())).is_some()
+    parse_override(&format!("[2000-01-01 00:00] ✅ DECISION {body}")).is_some()
 }
 
-/// `[YYYY-MM-DD HH:MM] ✅ DECISION RELEASE-GATE OVERRIDE sha=<40-hex>: <reason>`.
-/// Callers other than a live registered supervisor's decision note cannot
-/// write the marker (`caller_note_marker_rejection`).
+/// `[YYYY-MM-DD HH:MM] ✅ DECISION RELEASE-GATE OVERRIDE sha=<40-hex>: <reason>`,
+/// exactly at the start of the line. The task store reserves this shape:
+/// every untrusted write (update, sync merge, the pre-compact flush, plain
+/// appends) indents a new copy so it no longer parses, and only the live
+/// supervisor's decision note is appended trusted.
 fn parse_override(line: &str) -> Option<(DateTime<Utc>, String, String)> {
-    let (stamp, body) = line.trim_start().strip_prefix('[')?.split_once("] ✅ DECISION ")?;
+    let (stamp, rest) = cas_store::task_note_markers::release_gate_override(line)?;
     let at = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M").ok()?.and_utc();
-    let (sha, reason) = body.strip_prefix(OVERRIDE_MARKER)?.strip_prefix(" sha=")?.split_once(':')?;
+    let (sha, reason) = rest.strip_prefix(" sha=")?.split_once(':')?;
     let reason = reason.trim();
     let full = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
     (full && !reason.is_empty()).then(|| (at, sha.to_ascii_lowercase(), reason.to_owned()))
@@ -313,24 +315,77 @@ pub fn publish(project_root: &Path, promotion: &Promotion) -> Result<(), String>
 
 /// Evaluates and publishes the head of every open PR into
 /// `qa.release.branches`; call after a pack is sealed. Returns the number
-/// published. Off unless `qa.github_status` is on.
+/// published. One failed publication does not stop the rest; the error
+/// names every failure. Off unless `qa.github_status` is on.
 pub fn publish_promotions(cas_root: &Path, project_root: &Path, config: &ReleaseConfig) -> Result<usize, String> {
     if !github_gate::github_status_enabled(cas_root) {
         return Ok(0);
     }
-    let mut published = 0;
+    let mut report = Report::default();
     for branch in &config.branches {
-        for (_, head) in github_gate::open_pr_heads(project_root, branch)? {
-            publish(project_root, &evaluate(project_root, cas_root, config, &head, Utc::now()))?;
-            published += 1;
+        match github_gate::open_pr_heads(project_root, branch) {
+            Ok(heads) => {
+                for (number, head) in heads {
+                    let promotion = evaluate(project_root, cas_root, config, &head, Utc::now());
+                    report.record(format!("PR #{number}"), publish(project_root, &promotion));
+                }
+            }
+            Err(error) => report.failures.push(format!("listing PRs into {}: {error}", printable(branch))),
         }
     }
-    Ok(published)
+    report.finish()
 }
 
-/// Holds (`frozen`) or releases every open PR into the integration branch
-/// with [`FREEZE_CONTEXT`]: pending when a run starts, success at seal or
-/// abort. Returns the number published. Off unless `qa.github_status` is on.
+/// Publications attempted in one pass.
+#[derive(Default)]
+struct Report {
+    published: usize,
+    failures: Vec<String>,
+}
+
+impl Report {
+    fn record(&mut self, subject: String, result: Result<(), String>) -> bool {
+        match result {
+            Ok(()) => {
+                self.published += 1;
+                true
+            }
+            Err(error) => {
+                self.failures.push(format!("{subject}: {error}"));
+                false
+            }
+        }
+    }
+
+    fn finish(self) -> Result<usize, String> {
+        if self.failures.is_empty() {
+            Ok(self.published)
+        } else {
+            Err(format!(
+                "{} published, {} failed: {}",
+                self.published,
+                self.failures.len(),
+                self.failures.join("; ")
+            ))
+        }
+    }
+}
+
+/// What [`publish_freeze`] last published, so a repeated call posts only
+/// new heads or a changed state.
+#[derive(Default, serde::Deserialize, Serialize)]
+struct FreezeState {
+    frozen: bool,
+    heads: std::collections::BTreeSet<String>,
+}
+
+/// Sets [`FREEZE_CONTEXT`] on every open PR into the integration branch:
+/// pending while a run walks it (`frozen`), success otherwise. Call it when a
+/// run starts, at seal or abort, and on each driver tick with the run's
+/// current state, so a PR opened or pushed between runs is released too.
+/// Only heads whose status would change are posted. Returns the number
+/// published; one failure does not stop the rest. Off unless
+/// `qa.github_status` is on.
 pub fn publish_freeze(
     cas_root: &Path,
     project_root: &Path,
@@ -348,11 +403,31 @@ pub fn publish_freeze(
     } else {
         (QaCommitState::Success, "No release gate run holds this branch".to_string())
     };
+    let path = cas_root.join("release-gate").join("freeze-status.json");
+    let previous: FreezeState = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
     let heads = github_gate::open_pr_heads(project_root, &config.integration_branch)?;
-    for (_, head) in &heads {
-        github_gate::publish_status(project_root, head, FREEZE_CONTEXT, state, &description)?;
+    let mut next = FreezeState { frozen, heads: Default::default() };
+    let mut report = Report::default();
+    for (number, head) in heads {
+        let posted = previous.frozen == frozen && previous.heads.contains(&head);
+        if posted
+            || report.record(
+                format!("PR #{number}"),
+                github_gate::publish_status(project_root, &head, FREEZE_CONTEXT, state, &description),
+            )
+        {
+            next.heads.insert(head);
+        }
     }
-    Ok(heads.len())
+    let saved = std::fs::create_dir_all(path.parent().expect("state file has a parent"))
+        .and_then(|()| std::fs::write(&path, serde_json::to_vec(&next).unwrap_or_default()));
+    if let Err(error) = saved {
+        report.failures.push(format!("saving {}: {error}", path.display()));
+    }
+    report.finish()
 }
 
 /// `cas qa release-gate verify --sha X`: evaluates the head, publishes the

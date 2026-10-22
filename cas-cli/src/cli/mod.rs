@@ -133,15 +133,15 @@ const CASSY_WORDMARK: &str = r#"
 const CASSY_PLAIN_WORDMARK: &str = "Cassy";
 
 /// Select the wordmark that is safe for the destination before clap renders
-/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+/// help. Piped output, `NO_COLOR` and non-UTF-8 locales get a compact text fallback.
 pub fn help_wordmark() -> &'static str {
     help_wordmark_for_mode(crate::ui::components::OutputMode::detect())
 }
 
 fn help_wordmark_for_mode(mode: crate::ui::components::OutputMode) -> &'static str {
     match mode {
-        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
-        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+        crate::ui::components::OutputMode::Styled if crate::ui::components::locale_is_utf8() => CASSY_WORDMARK,
+        _ => CASSY_PLAIN_WORDMARK,
     }
 }
 

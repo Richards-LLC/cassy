@@ -3834,12 +3834,21 @@ impl CasService {
                 // another machine; its receipt lives in the Cassy Cloud peer
                 // mailbox. cas-6021: a number this queue holds is its own
                 // message, answered here rather than as a peer 404.
-                match given
-                    .trim()
-                    .parse::<i64>()
-                    .ok()
-                    .filter(|id| queue.message_delivery_report(*id).ok().flatten().is_some())
-                {
+                // cas-6021 review: a local read error is reported as one,
+                // not hidden behind a peer lookup's unrelated failure.
+                let local = match given.trim().parse::<i64>() {
+                    Ok(id) => queue
+                        .message_delivery_report(id)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to query message status: {error}"),
+                            )
+                        })?
+                        .map(|_| id),
+                    Err(_) => None,
+                };
+                match local {
                     Some(local) => local,
                     None => return self.peer_message_status(given).await,
                 }

@@ -1594,6 +1594,18 @@ fn record_published_merge(
     }
 }
 
+/// cas-3937 test seam: stretch the work after a recorded merge, so a test
+/// can prove a slow close still answers with the merge. Debug builds only.
+async fn post_merge_test_delay() {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("CAS_TEST_POST_MERGE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms.min(10_000))).await;
+    }
+}
+
 #[cfg(test)]
 mod record_published_merge_tests {
     use super::record_published_merge;
@@ -4608,6 +4620,7 @@ impl CasCore {
             // cas-3937 review: the delivery close below can be slow too;
             // record the published merge before it.
             record_published_merge(manager.git(), None, &receipt.target_branch, &push_outcome);
+            post_merge_test_delay().await;
             target_push = Some((receipt.target_branch.clone(), push_outcome));
 
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
@@ -4763,6 +4776,7 @@ impl CasCore {
         // cas-3937: from here the merge is a fact; a slow close or verifier
         // dispatch below must not turn its answer into UNKNOWN.
         record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
+        post_merge_test_delay().await;
         let trunk_notice = if trunk_fallback {
             if push_outcome.is_published() {
                 format!(

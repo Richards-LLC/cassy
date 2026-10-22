@@ -581,6 +581,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             merge.reason = Some("red run reviewed".to_string());
         }
         let merged = if row == "green-approved" {
+            // A close slower than the post-commit grace, deterministically.
+            env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
             // cas-3937: under the real response budget with no post-commit
             // grace, the published merge answers COMMITTED with its merge
             // and push state, and the close after it finishes in the

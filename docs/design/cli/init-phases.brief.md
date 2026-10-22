@@ -130,6 +130,7 @@ the rejected round; corrective candidate proof will be recorded separately.
 
 
 ## Corrective candidate proof
+
 The round-two supervisor candidate is `c08cd120f91f4f333c94131010e0bf5d1c33ff83`,
 `cas 3.72.0 (c08cd12 2026-10-22)`, SHA-256
 `c2839d0187c9cd0d7abf188524da4129f2f1bf4f3bc9077164d22991abb14baa`.

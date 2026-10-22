@@ -1665,6 +1665,9 @@ substitutions remain refused; this profile is for targeted tests, not checks.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+The bounded nextest discovery guard requires `python3` on PATH, including in
+projects using the embedded runner without this repository's scripts. It forwards
+TERM/INT/HUP to its owned Cargo process group and bounds cleanup after stdout EOF.
 On Unix, named tests and their guard processes run with private links to resolved
 Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
 executables, and the selected Cargo invocation uses that private link; this

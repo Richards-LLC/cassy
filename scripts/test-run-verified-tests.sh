@@ -93,6 +93,8 @@ cat >"${tmpdir}/stalled-nextest" <<'EOF'
 #!/usr/bin/env bash
 echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
 trap 'echo TERM > "${CAS_TEST_TERM_MARKER}"' TERM
+# Closing the output pipe must not bypass the discovery deadline.
+exec 1>&- 2>&-
 sleep 2 &
 wait
 EOF
@@ -127,6 +129,73 @@ EOF
 )"
 expect fail 'the test run exited 42' 'real Cargo failure propagates' \
     env CARGO="${stub}" "${guard}" test -p cas --doc
+
+# cas-aee36: simulate termination of the capped foreground process group.
+# Every PID/group below belongs to this fixture; never signal a host process.
+cat >"${tmpdir}/kill-discovery.py" <<'PYKILL'
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+guard, temporary = sys.argv[1:]
+root = Path(temporary)
+fake = root / 'discovery-cargo.py'
+fake.write_text('''#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+marker = Path(os.environ['PID_FILE'])
+ready = marker.with_suffix('.ready')
+ready.write_text(json.dumps([os.getpid(), child.pid]))
+ready.replace(marker)
+print('    Finished `test` profile in 0.01s', flush=True)
+child.wait()
+''')
+fake.chmod(0o755)
+
+def live(pid):
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                            capture_output=True, text=True, timeout=2)
+    return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
+
+for interrupted in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    pid_file = root / f'pids-{interrupted}'
+    env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file),
+               CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+    pids = []
+    with (root / f'signal-{interrupted}.log').open('wb') as log:
+        wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                                   env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert pid_file.exists(), 'fixture did not reach discovery'
+            pids = json.loads(pid_file.read_text())
+            assert all(live(pid) for pid in pids), 'fixture children must be alive before signal'
+            os.killpg(wrapper.pid, interrupted)
+            assert wrapper.wait(timeout=5) != 0, 'interrupted run must not report success'
+            deadline = time.monotonic() + 5
+            while any(live(pid) for pid in pids) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert not any(live(pid) for pid in pids), f'{interrupted}: discovery children survived: {pids}'
+        finally:
+            # Cleanup is needed on RED as well: both groups are fixture-owned.
+            for group in [wrapper.pid, *pids[:1]]:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            wrapper.wait(timeout=3)
+print('signal cleanup passed: TERM, INT, HUP; no live discovery children')
+PYKILL
+expect pass 'signal cleanup passed' 'terminated discovery wrapper leaves no live children' \
+    python3 "${tmpdir}/kill-discovery.py" "${guard}" "${tmpdir}"
 
 if [[ "${fail}" -ne 0 ]]; then
     echo "FAIL: ${fail} verified-test guard self-test(s) failed" >&2

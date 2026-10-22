@@ -1782,9 +1782,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
             .env_remove("VERIFIED_TEST_LOG")
             .env("CARGO", cargo);
-        if test.is_some() {
-            command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
-        }
+        command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
         command
     } else {
         let mut command = Command::new(cargo);

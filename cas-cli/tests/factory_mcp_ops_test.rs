@@ -33,6 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+// The grouped integration harness owns the process-wide env/cwd lock.
 use crate::test_env_guard::TestEnvGuard;
 
 // =============================================================================
@@ -8974,6 +8975,21 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
     // pin: the local report's header names the queue message (cas-6021).
     assert!(by_id_text.contains(&format!("Message {notification_id} status:")), "{by_id_text}");
     assert!(!by_id_text.contains("Peer message"), "{by_id_text}");
+
+    // A present local row whose required text cannot be decoded is a local
+    // read failure, never a missing peer receipt. Preserve the SQLite error.
+    rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap()
+        .execute("UPDATE prompt_queue SET source = x'FF' WHERE id = ?1", [notification_id]).unwrap();
+    for via_id in [false, true] {
+        let mut request = coord_msg("message_status", "swift-fox", "unused", None);
+        if via_id { request.id = Some(notification_id.to_string()); }
+        else { request.notification_id = Some(notification_id); }
+        let error = env.service.coordination(Parameters(request)).await
+            .expect_err("corrupt local row must report a read error");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains("Failed to query message status"), "{error:?}");
+        assert!(!error.message.contains("peer"), "{error:?}");
+    }
 }
 
 #[tokio::test]

@@ -382,9 +382,11 @@ impl ConfigTuiApp {
 
                     // Validate
                     if let Some(meta) = self.registry.get(&key) {
-                        match meta.validate(&value) {
+                        let result = meta.validate(&value).and_then(|()| {
+                            self.config.set(&key, &value).map_err(|error| error.to_string())
+                        });
+                        match result {
                             Ok(()) => {
-                                self.config.set(&key, &value)?;
                                 self.values.insert(key.clone(), value);
                                 self.pending_resets.remove(&key);
                                 self.has_unsaved = true;
@@ -692,6 +694,43 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn config_tui_invalid_webhook_stays_inline_and_can_be_corrected() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("notifications".into());
+        app.option_keys = vec!["notifications.webhook_url".into()];
+        app.option_state.select(Some(0));
+        app.start_value_edit();
+        app.value_edit.as_mut().unwrap().input = "http://outside.example/webhook".into();
+        app.handle_value_edit_key(KeyCode::Enter).expect("URL errors must stay in the editor");
+        assert!(matches!(app.mode, ViewMode::ValueEdit));
+        let edit = app.value_edit.as_ref().unwrap();
+        assert_eq!(edit.input, "http://outside.example/webhook");
+        assert!(edit.error.as_deref().unwrap().contains("must use HTTPS"));
+        assert!(!app.has_unsaved);
+        assert_eq!(app.config.get("notifications.webhook_url").as_deref(), Some(""));
+        for width in [80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| app.ui(frame)).unwrap();
+            let screen = (0..24).map(|y| (0..width)
+                .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
+                .collect::<String>()).collect::<Vec<_>>().join("\n");
+            assert!(screen.contains("must use HTTPS"), "URL cause hidden at {width}:\n{screen}");
+            assert!(screen.contains("Esc: Cancel"), "editor recovery hidden at {width}:\n{screen}");
+        }
+        app.value_edit.as_mut().unwrap().input = "https://hooks.example.test/webhook".into();
+        app.handle_value_edit_key(KeyCode::Enter).unwrap();
+        assert!(matches!(app.mode, ViewMode::SectionEdit));
+        assert!(app.value_edit.is_none() && app.has_unsaved);
+        assert_eq!(app.config.get("notifications.webhook_url").as_deref(), Some("https://hooks.example.test/webhook"));
+        assert_eq!(Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(), Some(""));
     }
 
     /// cas-0d4f0: the TUI refuses to save a security-relevant key from an

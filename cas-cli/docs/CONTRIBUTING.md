@@ -235,6 +235,15 @@ the worker selected that target. Delegated reminders retain the issuing worker
 as sender. Supervisor self-reminders retain self-addressing on takeover; original
 owner and target IDs stay in the durable reminder record.
 
+A worker's undelivered typed status/ready messages coalesce into one pending
+wake, carrying earlier bodies with their original notification ids and summaries.
+The fold is bounded at 8,000 bytes. An earlier row that does not fit stays pending
+independently and can be delivered after a newer row; delivery order is not a
+chronological guarantee. Use each body's original label to identify it. A fold
+keeps the strongest wake intent among its messages, including absorbed identical
+bodies; a fold containing only acknowledgements or explicit quiet messages waits
+for the next turn.
+
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
 Supervisor assignment messages retain their explicit `task_id`, or the worker's

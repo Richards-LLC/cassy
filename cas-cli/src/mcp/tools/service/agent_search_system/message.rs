@@ -1047,7 +1047,12 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
-        if req.wake == Some(false) || req.kind.as_deref() == Some("receipt") {
+        // Persist this message's classification before folding adds labels
+        // and other bodies that no longer look like a pure acknowledgement.
+        let quiet_message = req.wake == Some(false)
+            || req.kind.as_deref() == Some("receipt")
+            || crate::supervisor_message_wakes::pure_ack(&message);
+        if quiet_message && role != "worker" {
             message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
         }
         // Resolve cross-machine peers before applying the local inbox cap.
@@ -1106,6 +1111,11 @@ impl CasService {
         if role == "worker" {
             message = crate::prompt_revalidation::
                 neutralize_worker_authored_envelope_tags(&message);
+            // Add CAS's quiet marker only after neutralizing caller tags,
+            // so it remains a type marker rather than escaped body text.
+            if quiet_message {
+                message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+            }
         }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
@@ -6367,6 +6377,37 @@ mod cas_89e1_post_merge_message_type_tests {
             error.message.contains("same-session supervisor"),
             "{error:?}"
         );
+    }
+
+    /// cas-6920: classify each acknowledgement before its labels and other
+    /// messages become part of the queued body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn folded_worker_acknowledgements_remain_inbox_only_cas_6920() {
+        let _env = TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas_root = root.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let worker = register_gh_1171_fleet(&core, false);
+        let agents = core.open_agent_store().unwrap();
+        let mut supervisor = agents.get("supervisor-a-id").unwrap();
+        supervisor.factory_session = worker.factory_session.clone();
+        agents.update(&supervisor).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let service = gh_1171_service(&core);
+        for body in ["ok", "thanks"] {
+            let mut request = message_request_to("supervisor");
+            request.kind = Some("status".into());
+            request.message = Some(body.into());
+            service.message_send(request).await.unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "acknowledgements still coalesce");
+        let prompt = &rows[0].prompt;
+        assert!(prompt.contains("ok") && prompt.contains("thanks"), "{prompt}");
+        assert!(crate::supervisor_message_wakes::quiet(prompt),
+            "folded acknowledgements must wait for the next turn: {prompt}");
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve

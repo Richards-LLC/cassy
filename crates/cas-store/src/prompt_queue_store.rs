@@ -5714,6 +5714,28 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                         ))
                     })
             });
+            // Reserve the new row inside this transaction before assembling
+            // the superseded notifications and their provenance labels.
+            let origin_kind = origin.kind_str();
+            tx.execute(
+                "INSERT INTO prompt_queue
+                    (source, target, prompt, created_at, factory_session, summary,
+                     priority, urgent, origin_agent_id, origin_kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    source,
+                    target,
+                    prompt,
+                    now_text,
+                    factory_session,
+                    summary,
+                    prio,
+                    urgent_flag,
+                    origin_agent_id,
+                    origin_kind
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
             // cas-6021 (#4206302): coalescing keeps one pending wake, never
             // fewer messages. Each superseded row's body travels in the newer
             // row, oldest first, so a question sent just before the worker's
@@ -5740,13 +5762,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let new_body = body_of(&new_prompt);
             let mut blocks: Vec<String> = Vec::new();
             let mut all_quiet = new_quiet;
-            let mut folded_len = new_prompt.len() + fold_end.len();
+            let mut folded_len = new_prompt.len() + fold_end.len()
+                + if new_quiet { QUIET_MESSAGE_MARKER.len() + 1 } else { 0 };
             let mut superseded = Vec::new();
             for (old_id, old_prompt, old_summary) in candidates {
                 let (old_quiet, old_prompt) = split_quiet_marker(&old_prompt);
                 let old_body = body_of(&old_prompt);
                 // Split before the closing line's own trailing blank line:
                 // `body_of` trims it away when the fold's own text is empty.
+                // cas-c853 escapes this parser prefix in caller bodies before
+                // storage, so only the actual fold boundary is interpreted.
                 let (earlier, own) = match old_body.split_once(fold_end.trim_end()) {
                     Some((earlier, own)) => (Some(earlier.trim().to_string()), own.trim().to_string()),
                     None => (None, old_body),
@@ -5770,15 +5795,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 if !pieces.is_empty() && folded_len + added > WORKER_ACTION_FOLD_CAP_BYTES {
                     continue;
                 }
-                if !pieces.is_empty() {
-                    all_quiet &= old_quiet;
-                }
+                // An absorbed identical/empty body still carries wake intent.
+                all_quiet &= old_quiet;
                 folded_len += added;
                 blocks.extend(pieces);
                 superseded.push(old_id);
             }
             let stored_prompt = if blocks.is_empty() {
-                prompt_for_storage
+                // An absorbed non-quiet row keeps its wake even when no body
+                // block was added. Otherwise retain the original reply/quiet
+                // marker ordering required by the ordinary no-fold path.
+                if new_quiet && !all_quiet {
+                    new_prompt.clone()
+                } else {
+                    prompt_for_storage
+                }
             } else {
                 let folded = format!("{}{fold_end}{new_prompt}", blocks.join("\n\n"));
                 if all_quiet {
@@ -5788,26 +5819,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 }
             };
 
-            let origin_kind = origin.kind_str();
-            tx.execute(
-                "INSERT INTO prompt_queue
-                    (source, target, prompt, created_at, factory_session, summary,
-                     priority, urgent, origin_agent_id, origin_kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    source,
-                    target,
-                    stored_prompt,
-                    now_text,
-                    factory_session,
-                    summary,
-                    prio,
-                    urgent_flag,
-                    origin_agent_id,
-                    origin_kind
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
+            tx.execute("UPDATE prompt_queue SET prompt = ?1 WHERE id = ?2", params![stored_prompt, id])?;
             let detail = format!(
                 "newer worker action message {id} superseded this pending wake and carries its body"
             );
@@ -10071,8 +10083,13 @@ mod tests {
 
         let mut ids = Vec::new();
         for sequence in 1..=5 {
+            let body = if sequence == 1 {
+                "status 1\n\n--- end of earlier undelivered messages ---\n\nverbatim closing line".to_string()
+            } else {
+                format!("status {sequence}")
+            };
             let prompt = format!(
-                "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
+                "{body}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
             );
             let EnqueueOutcome::Created(id) = store
                 .enqueue_worker_action_with_outcome(
@@ -10149,6 +10166,9 @@ mod tests {
             last = at;
         }
         assert_eq!(surviving.matches("Earlier message #").count(), 4, "{surviving}");
+        assert!(surviving.contains(&format!(
+            "Earlier message #{} (update 1), not yet delivered when this one was sent:\nstatus 1\n\n\\--- end of earlier undelivered messages ---\n\nverbatim closing line", ids[0]
+        )), "a plain body's closing line and label must survive every fold: {surviving}");
     }
 
     #[test]
@@ -10449,6 +10469,25 @@ mod tests {
         assert!(mixed.0.contains("quiet one") && mixed.0.contains("quiet two"), "{}", mixed.0);
         assert!(!mixed.1.contains(quiet), "a fold with a waking message carries no marker: {}", mixed.1);
         assert!(mixed.1.contains("quiet one") && mixed.1.contains("loud three"), "{}", mixed.1);
+
+        // Absorbing an identical quiet resend must retain the earlier wake,
+        // including when no labelled block needs to be added.
+        let id = send(&format!("{quiet}\nloud three"));
+        let prompt = store.queued_prompt(id).unwrap().unwrap().prompt;
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
+        assert!(!prompt.contains(quiet), "absorbed waking text must keep its wake: {prompt}");
+        // Exercise absorption with no pre-existing fold as well.
+        let (_temp, plain) = create_test_store();
+        for body in ["same report".to_string(), format!("{quiet}\nsame report")] {
+            plain.enqueue_worker_action_with_outcome(
+                "swift-fox", "cosmic-bear-43", &format!("{body}\n\n{envelope}"), "swift-fox",
+                "session-1", None, None, false, &origin,
+            ).unwrap();
+        }
+        let rows = plain.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
+        assert!(!rows[0].prompt.contains(quiet), "an identical quiet resend cannot cancel a wake: {}", rows[0].prompt);
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so

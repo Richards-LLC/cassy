@@ -170,6 +170,9 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .find(|task| task.title == "Peer-only epic")
                 .unwrap();
             let branch = epic.branch.as_deref().unwrap();
+            git(&f.repo, &["checkout", branch]);
+            commit(&f.repo, "unpublished-work");
+            git(&f.repo, &["checkout", "main"]);
             let tip = git(&f.repo, &["rev-parse", branch]);
             assert!(
                 git(
@@ -269,13 +272,9 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             assert_eq!(git(&f.origin, &["rev-parse", branch]), tip);
             let prep = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
                 .expect("published remedy must make peer spawn ready");
-            assert_eq!(
-                git(
-                    &prep.worktree_info.unwrap().worktree_path,
-                    &["rev-parse", "HEAD"]
-                ),
-                tip
-            );
+            let work = prep.worktree_info.unwrap();
+            let checkout = work.base_ref.as_deref().unwrap_or(&work.parent_branch);
+            assert_eq!(git(&peer, &["rev-parse", checkout]), tip);
             assert_eq!(git(&f.repo, &["rev-parse", branch]), tip);
         });
     }

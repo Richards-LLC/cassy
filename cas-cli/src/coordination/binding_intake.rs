@@ -44,11 +44,22 @@ pub struct PauseRecord {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseOrigin {
+    LegacyIntakeActive,
+}
+
 /// A missing classification never downgrades a positive managed observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChannelDisposition {
-    Paused,
+    Paused {
+        /// Only a definite refusal establishes a quiet window across retries.
+        /// Older journals and pauses that never submitted have no origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<PauseOrigin>,
+    },
     /// One attempt's request may have left. Uncertain like `Unknown`, but
     /// attributable: only a definite answer to this same attempt settles it.
     Submitting {
@@ -246,7 +257,7 @@ impl IntakeJournal {
                         return Err("submitting channel lacks its operation".into());
                     }
                 }
-                ChannelDisposition::Paused | ChannelDisposition::Unknown => {
+                ChannelDisposition::Paused { .. } | ChannelDisposition::Unknown => {
                     if !state.pauses.iter().any(|p| p.scope == policy.scope) {
                         return Err("channel gate lacks its original pause".into());
                     }
@@ -405,7 +416,9 @@ impl IntakeJournal {
                 ChannelDisposition::Unknown
             }
             _ if reports_managed => ChannelDisposition::Unknown,
-            (_, Reason::LegacyIntakeActive) => ChannelDisposition::Paused,
+            (_, Reason::LegacyIntakeActive) => ChannelDisposition::Paused {
+                origin: Some(PauseOrigin::LegacyIntakeActive),
+            },
             _ => ChannelDisposition::LegacyAllowed,
         };
         let settled = policy.disposition.clone();
@@ -415,11 +428,15 @@ impl IntakeJournal {
 
     /// No request left for this channel: a pause that never reached Cloud has
     /// no remote effect, so a blocked update must not keep project claims shut.
+    /// A refusal-backed quiet window belongs to a previous submitted attempt.
     pub fn release_unsubmitted(&self, scope: &IntakeScope) -> Result<(), String> {
         let _lock = self.lock()?;
         let mut state = self.read_locked()?;
         if let Some(policy) = state.policies.iter_mut().find(|policy| &policy.scope == scope)
-            && policy.disposition == ChannelDisposition::Paused
+            && matches!(
+                policy.disposition,
+                ChannelDisposition::Paused { origin: None }
+            )
         {
             policy.disposition = ChannelDisposition::LegacyAllowed;
             return self.write_locked(&state);
@@ -523,7 +540,9 @@ impl IntakeJournal {
             .iter()
             .filter_map(|policy| {
                 let label = match policy.disposition {
-                    ChannelDisposition::Paused | ChannelDisposition::LegacyAllowed => return None,
+                    ChannelDisposition::Paused { .. } | ChannelDisposition::LegacyAllowed => {
+                        return None;
+                    }
                     ChannelDisposition::Managed { .. } => "managed",
                     ChannelDisposition::Submitting { .. } | ChannelDisposition::Unknown => "uncertain",
                 };
@@ -580,7 +599,7 @@ impl IntakeJournal {
             if let Some(policy) = state.policies.iter_mut().find(|p| p.scope == scope)
                 && policy.disposition == ChannelDisposition::LegacyAllowed
             {
-                policy.disposition = ChannelDisposition::Paused;
+                policy.disposition = ChannelDisposition::Paused { origin: None };
                 self.write_locked(&state)?;
             }
             return Ok(existing);
@@ -600,12 +619,12 @@ impl IntakeJournal {
         state.pauses.push(pause.clone());
         if let Some(policy) = state.policies.iter_mut().find(|p| p.scope == pause.scope) {
             if matches!(policy.disposition, ChannelDisposition::LegacyAllowed) {
-                policy.disposition = ChannelDisposition::Paused;
+                policy.disposition = ChannelDisposition::Paused { origin: None };
             }
         } else {
             state.policies.push(ChannelPolicy {
                 scope: pause.scope.clone(),
-                disposition: ChannelDisposition::Paused,
+                disposition: ChannelDisposition::Paused { origin: None },
             });
         }
         self.write_locked(&state)?;
@@ -772,14 +791,23 @@ mod settle_tests {
         let attempt = || journal.mark_submitting(operation).unwrap().unwrap();
         journal.pause(scope.clone(), operation, 0).unwrap();
         let first = attempt();
-        assert_eq!(journal.settle_refusal(operation, first, &legacy_active).unwrap(), ChannelDisposition::Paused);
+        assert_eq!(
+            journal.settle_refusal(operation, first, &legacy_active).unwrap(),
+            ChannelDisposition::Paused {
+                origin: Some(PauseOrigin::LegacyIntakeActive),
+            }
+        );
         assert!(!journal.legacy_allowed().unwrap(), "the host must go quiet before a retry");
         let second = attempt();
         assert_eq!(journal.settle_refusal(operation, second, &not_member).unwrap(), ChannelDisposition::LegacyAllowed);
         assert!(journal.legacy_allowed().unwrap(), "a definite refusal had no effect");
 
         journal.pause(scope.clone(), operation, 1).unwrap();
-        assert_eq!(disposition(), ChannelDisposition::Paused, "the same operation re-arms its pause");
+        assert_eq!(
+            disposition(),
+            ChannelDisposition::Paused { origin: None },
+            "the same operation re-arms its pause"
+        );
         let overtaken = attempt();
         let latest = attempt();
         assert!(

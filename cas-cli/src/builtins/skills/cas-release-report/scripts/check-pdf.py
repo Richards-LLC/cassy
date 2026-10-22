@@ -3,8 +3,8 @@
 
 Usage: python3 check-pdf.py REPORT.pdf ARTIFACT_DIR
 Needs PyMuPDF (`pip install pymupdf`). Writes one PNG per page and receipt.json
-into ARTIFACT_DIR, prints the receipt, and exits non-zero on a bounds finding
-or a footer-only last page.
+into ARTIFACT_DIR, prints the receipt, and exits non-zero on a bounds finding,
+a footer-only last page, or a link to a local file (cas-692a).
 """
 import json, re, sys
 from pathlib import Path
@@ -20,10 +20,12 @@ def running_folio(text):
     return not rest or bool(title) and title.startswith(rest)
 
 output = Path(sys.argv[2]); output.mkdir(parents=True, exist_ok=True)
-findings, links = [], []
+findings, links, files = [], [], []
 for number, page in enumerate(pdf, 1):
     page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5)).save(output / f'{number:02d}.png')
     links.extend(link['uri'] for link in page.get_links() if 'uri' in link)
+    # Chromium prints a relative href as a launch link naming the local file.
+    files.extend(link['file'] for link in page.get_links() if link.get('file'))
     for x0, y0, x1, y1, text, *_ in page.get_text('blocks'):
         if not text.strip():
             continue
@@ -38,10 +40,16 @@ closing = [block[1] for block in blocks if 'Markdown source' in block[4]]
 # Anchor on the folio itself, the last match: an evidence paragraph may also
 # open with "Markdown source:" higher on the page.
 footer_only = len(pdf) > 1 and bool(closing) and not any(block[3] <= max(closing) - 2 for block in blocks)
-receipt = {'pages': len(pdf), 'bounds_findings': findings, 'footer_only_last_page': footer_only, 'links': links}
+# cas-692a: a file:// target, or one into a Cassy worktree, is dead for
+# every reader of the published PDF.
+local_links = files + [uri for uri in links if uri.lower().startswith('file:') or '/.cas/worktrees/' in uri]
+receipt = {'pages': len(pdf), 'bounds_findings': findings, 'footer_only_last_page': footer_only,
+           'links': links, 'local_links': local_links}
 (output / 'receipt.json').write_text(json.dumps(receipt, indent=2))
 print(json.dumps(receipt))
 if findings:
     sys.exit('PDF content exceeds printable bounds')
 if footer_only:
     sys.exit('PDF ends on a page holding only the closing folio')
+if local_links:
+    sys.exit('PDF holds a local file link no reader can open: ' + ', '.join(local_links))

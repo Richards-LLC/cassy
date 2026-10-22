@@ -446,12 +446,13 @@ def main():
     parser.add_argument('--project-root', default=Path('.'), type=Path)
     parser.add_argument('--tokens', type=Path)
     parser.add_argument('--pdf-href')
+    parser.add_argument('--source-href')
     parser.add_argument('--emphasis', default='')
     parser.add_argument('--footer', default='Release report')
     args = parser.parse_args()
     try:
         output = render(args.source.read_text(encoding='utf-8'), project_root=args.project_root,
-                        tokens=args.tokens, source_href=quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
+                        tokens=args.tokens, source_href=args.source_href or quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
                         pdf_href=args.pdf_href or quote(args.output.with_suffix('.pdf').name),
                         emphasis=args.emphasis, footer=args.footer)
         args.output.parent.mkdir(parents=True, exist_ok=True)

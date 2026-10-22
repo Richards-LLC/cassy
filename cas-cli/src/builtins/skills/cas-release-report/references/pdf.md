@@ -25,9 +25,12 @@ python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
 
 The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
 `receipt.json` with the page count, out-of-bounds text blocks, a
-`footer_only_last_page` flag and link targets. Text in the bottom margin counts
+`footer_only_last_page` flag, link targets and `local_links`. Text in the bottom margin counts
 as the running folio only when it is the PDF's title and/or "n / N". It exits non-zero on a bounds
-finding or when the last page holds only the closing folio. The template keeps
+finding, when the last page holds only the closing folio, or on a link to a local
+file (a `file://` target or a checkout path), which no reader of the published PDF
+can open. `cas release report` names the source and print edition by their GitHub
+URLs at the release tag when `issues.repo` is set. The template keeps
 that folio inside the final section so print never starts a page with it.
 
 Inspect every PNG, including the final page; contact sheets aid scanning but do

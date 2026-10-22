@@ -173,10 +173,13 @@ struct ReleaseEvidence {
     stage_trend: Vec<(String, Vec<(String, i64)>)>,
     /// (tasks, median seconds, worst task, worst seconds) from park to main.
     commit_to_main: Option<(u64, i64, String, i64)>,
+    /// cas-692a: a latency receipt was read, so its absent fields are its own.
+    latency_receipt_read: bool,
 }
 
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
+        self.latency_receipt_read = true;
         let seconds = |key: &str| {
             values
                 .get(key)
@@ -356,9 +359,11 @@ fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
 fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
     let mut output = String::from("### Pipeline latency\n\n");
     if evidence.stage_seconds.is_empty() {
-        output.push_str(
-            "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n",
-        );
+        output.push_str(if evidence.latency_receipt_read {
+            "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n"
+        } else {
+            "Stage timings are unavailable: no latency receipt was found for this release.\n\n"
+        });
         return output;
     }
     let budget = |stage: &str| {
@@ -575,12 +580,25 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     };
 
     let renderer = RendererAssets::locate(&project_root)?;
+    let relative = |path: &Path| {
+        path.strip_prefix(&project_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let links = report_link_hrefs(
+        project_config.issue_repo_registry().project.as_deref(),
+        &tag,
+        &relative(&source_path),
+        &relative(&pdf_path),
+    );
     render_html(
         &renderer.script,
         &source_path,
         &html_path,
         &project_root,
         renderer.render_timeout,
+        links,
     )?;
 
     let mut pdf_written = false;
@@ -2368,10 +2386,22 @@ fn is_release_note_section_label(line: &str) -> bool {
         || lower.starts_with("dev reply")
 }
 
-/// The report's "Markdown source" and "Print edition" link targets.
-fn report_link_hrefs(_github_repo: Option<&str>, _tag: &str, source: &str, pdf: &str) -> (String, String) {
-    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
-    (name(source), name(pdf))
+/// The report's "Markdown source" and "Print edition" link targets, given
+/// their repository-relative paths. cas-692a: Chromium prints a relative link
+/// as a file:// URL into the generating checkout, so with a known GitHub
+/// repository both name the files at the release tag. Without one they stay
+/// sibling names; the PDF printer then drops their link targets.
+fn report_link_hrefs(github_repo: Option<&str>, tag: &str, source: &str, pdf: &str) -> (String, String) {
+    match github_repo {
+        Some(repo) => (
+            format!("https://github.com/{repo}/blob/{tag}/{source}"),
+            format!("https://github.com/{repo}/blob/{tag}/{pdf}"),
+        ),
+        None => {
+            let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+            (name(source), name(pdf))
+        }
+    }
 }
 
 fn render_html(
@@ -2380,13 +2410,10 @@ fn render_html(
     output: &Path,
     project_root: &Path,
     timeout: Duration,
+    links: (String, String),
 ) -> anyhow::Result<()> {
     let mut command = Command::new("python3");
-    let pdf_name = output
-        .with_extension("pdf")
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "report.pdf".to_string());
+    let (source_href, pdf_href) = links;
     command
         .current_dir(project_root)
         .arg(script)
@@ -2395,8 +2422,10 @@ fn render_html(
         .arg(output)
         .arg("--project-root")
         .arg(project_root)
+        .arg("--source-href")
+        .arg(source_href)
         .arg("--pdf-href")
-        .arg(pdf_name);
+        .arg(pdf_href);
     let output_result = run_command(&mut command, Deadline::after(timeout), timeout)
         .map_err(|error| anyhow::anyhow!(bounded_error("python3", error)))?;
     if !output_result.status.success() {
@@ -2525,6 +2554,11 @@ const { pathToFileURL } = require('node:url');
     await page.evaluate(async () => {
       await document.fonts.ready;
       document.querySelectorAll('details').forEach(panel => { panel.open = true; });
+      // cas-692a: a link resolving to a local file is dead in every reader's
+      // copy; keep its text and drop the target.
+      document.querySelectorAll('a[href]').forEach(link => {
+        if (link.href.startsWith('file:')) link.removeAttribute('href');
+      });
     });
     // The running folio wears the report's own tokens: its title and page
     // count in the mono stack and muted ink the page declares.

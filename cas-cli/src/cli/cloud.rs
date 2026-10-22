@@ -3540,12 +3540,11 @@ pub(crate) fn render_sync_summary(
             let mut details = Vec::new();
             if !count_details.is_empty() {
                 details.push(count_details.join(", "));
-            } else if summary.team_counts.is_empty() {
-                details.push(if summary.errors.is_empty() && summary.team_errors.is_empty() {
-                    "nothing newer".to_string()
-                } else {
-                    "no rows applied".to_string()
-                });
+            } else if summary.team_counts.is_empty()
+                && summary.errors.is_empty()
+                && summary.team_errors.is_empty()
+            {
+                details.push("nothing newer".to_string());
             }
             let conflicts = summary.conflicts_resolved + summary.team_conflicts_resolved;
             if conflicts > 0 {
@@ -8240,16 +8239,18 @@ mod team_cmd_tests {
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 errors: vec!["task deserialize error (id=cas-bad): invalid status".to_string()],
+                conflicts_resolved: 1,
                 ..Default::default()
             },
             true,
         );
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
 
         render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
 
         assert!(tf.output().contains("Pull incomplete · 1 errors"));
         assert!(!tf.output().contains("nothing newer"));
+        assert!(tf.output().lines().all(|line| line.chars().count() <= 80));
         assert!(
             tf.output()
                 .contains("- task deserialize error (id=cas-bad)")

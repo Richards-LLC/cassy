@@ -16,7 +16,8 @@
 - Error rows use the existing muted formatter and four-space hanging indent; the
   summary's warning mark and error count remain the only verdict signals.
 - `nothing newer` appears only when neither scope applied rows and neither
-  scope reported an error; incomplete zero-count pulls say `no rows applied`.
+  scope reported an error; incomplete zero-count pulls omit that clause to
+  keep the verdict, conflict count and scope within 80 columns.
 - The existing JSON `errors` array carries skipped peer-close diagnostics.
 
 ## Critique

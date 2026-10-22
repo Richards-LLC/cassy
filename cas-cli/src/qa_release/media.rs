@@ -123,7 +123,9 @@ fn transcoded_path(dir: &Path, media: &Media) -> Result<PathBuf, PackError> {
         Ok(_) => {}
         Err(_) => std::fs::create_dir_all(&slack).map_err(|e| PackError::Io(e.to_string()))?,
     }
-    Ok(slack.join(format!("{}.mp4", &media.sha256[..media.sha256.len().min(16)])))
+    // Keyed by the media path: two videos with equal bytes are separate entries.
+    let key = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(media.path.as_bytes()));
+    Ok(slack.join(format!("{}.mp4", &key[..16])))
 }
 
 /// Posts a bundle: `pack.json` with `summary` as its comment, then each file

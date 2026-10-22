@@ -105,6 +105,66 @@ impl RustParser {
             .parse(source, None)
             .ok_or_else(|| CodeError::TreeSitter("failed to parse source".to_string()))
     }
+
+    /// Top-level external modules with an explicit `#[path]`, as
+    /// `(module name, relative file path)`. Comments, example strings, inline
+    /// modules and ambiguous or unsupported path attributes cannot claim a file.
+    pub fn explicit_external_modules(&mut self, source: &str) -> Result<Vec<(String, String)>> {
+        let tree = self.parse(source)?;
+        let root = tree.root_node();
+        if root.has_error() {
+            return Err(CodeError::Parse("invalid module source".into()));
+        }
+        let mut modules = Vec::new();
+        let mut cursor = root.walk();
+        for module in root.named_children(&mut cursor) {
+            if module.kind() != "mod_item" || module.child_by_field_name("body").is_some() {
+                continue;
+            }
+            let Some(name) = module.child_by_field_name("name") else {
+                continue;
+            };
+            let mut paths = Vec::new();
+            let mut sibling = module.prev_named_sibling();
+            while let Some(node) = sibling {
+                match node.kind() {
+                    "line_comment" | "block_comment" => {}
+                    "attribute_item" => {
+                        if let Some(attribute) = node.named_child(0)
+                            && attribute.named_child(0).is_some_and(|name| {
+                                self.node_text(&name, source.as_bytes()) == "path"
+                            })
+                        {
+                            let path =
+                                attribute.child_by_field_name("value").and_then(
+                                    |value| match value.kind() {
+                                        "string_literal" => serde_json::from_str::<String>(
+                                            self.node_text(&value, source.as_bytes()),
+                                        )
+                                        .ok(),
+                                        "raw_string_literal" => value.named_child(0).map(|text| {
+                                            self.node_text(&text, source.as_bytes()).to_string()
+                                        }),
+                                        _ => None,
+                                    },
+                                );
+                            // Retain invalid attributes too: two #[path] values
+                            // must not become unambiguous by dropping one.
+                            paths.push(path);
+                        }
+                    }
+                    _ => break,
+                }
+                sibling = node.prev_named_sibling();
+            }
+            if paths.len() == 1
+                && let Some(path) = paths.pop().flatten()
+            {
+                modules.push((self.node_text(&name, source.as_bytes()).to_string(), path));
+            }
+        }
+        Ok(modules)
+    }
 }
 
 impl LanguageParser for RustParser {

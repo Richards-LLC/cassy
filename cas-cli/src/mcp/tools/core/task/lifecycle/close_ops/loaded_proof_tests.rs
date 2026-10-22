@@ -104,7 +104,7 @@ fn structured_targets_accept_non_rust_runners_and_parallelism_forms_without_sha(
         let task = concurrency_task(receipt);
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .unwrap_or_else(|error| panic!("valid receipt {receipt}: {error}"));
-        assert!(declared_risk_close_gaps(&task, &[]).is_empty());
+        assert!(declared_risk_close_gaps(&task, &[], std::path::Path::new(".")).is_empty());
     }
 }
 
@@ -195,7 +195,7 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], missing: Op
             assert_ne!(response.is_error, Some(true), "{name}: {receipt}: {text}");
             assert_eq!(persisted.status, TaskStatus::Closed, "{name}: {text}");
             assert!(
-                declared_risk_close_gaps(&persisted, &[]).is_empty(),
+                declared_risk_close_gaps(&persisted, &[], dir.path()).is_empty(),
                 "{name}: audit differs"
             );
         } else {
@@ -213,7 +213,7 @@ async fn exercise_close_receipts_cas_69b4(receipts: &[(&str, &str)], missing: Op
             assert!(text.contains("parsed=[target,"), "{name}: {text}");
             assert!(text.contains("Accepted example:"), "{name}: {text}");
             assert!(
-                declared_risk_close_gaps(&persisted, &[])
+                declared_risk_close_gaps(&persisted, &[], dir.path())
                     .join(";")
                     .contains(&missing),
                 "{name}: audit differs"
@@ -319,7 +319,7 @@ fn missing_or_contradictory_fields_remain_refused_with_precise_diagnostics() {
             error.contains("Accepted example: LOADED_PROOF: target="),
             "{error}"
         );
-        let gaps = declared_risk_close_gaps(&task, &[]).join("; ");
+        let gaps = declared_risk_close_gaps(&task, &[], std::path::Path::new(".")).join("; ");
         assert!(gaps.contains(expected), "audit differs: {gaps}");
         assert!(
             gaps.contains("Accepted example: LOADED_PROOF: target="),
@@ -397,7 +397,7 @@ async fn mcp_typed_note_persistence_preserves_issue_receipt_for_close_and_audit(
     );
     validate_risk_close_proofs(&persisted, &[], dir.path())
         .expect("real typed-note write/reload must satisfy the production close gate");
-    assert!(declared_risk_close_gaps(&persisted, &[]).is_empty());
+    assert!(declared_risk_close_gaps(&persisted, &[], dir.path()).is_empty());
 }
 
 // Fixture families accepted before cas-69b4. Keep this inventory explicit so

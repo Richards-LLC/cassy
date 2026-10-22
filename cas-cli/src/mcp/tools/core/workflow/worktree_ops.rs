@@ -1496,8 +1496,9 @@ fn parked_merge_source(
 /// Whether a merge source is already integrated into its target.
 #[derive(Debug)]
 enum Containment {
-    /// Nothing to merge: the receipt names the source and target tips.
-    Contained(String),
+    /// Nothing to merge: the receipt names the source and target tips, and
+    /// whether origin (rather than the local target) proved it (cas-8315).
+    Contained { receipt: String, origin_verified: bool },
     /// The source is in the local target, but origin could not be fetched,
     /// so its publication cannot be proved (cas-d8ab).
     Unverified(String),
@@ -1549,10 +1550,13 @@ fn contained_at(
     authority: &str,
 ) -> Containment {
     if git.is_ancestor(source_tip, target_tip) {
-        Containment::Contained(format!(
-            "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
-             Source: {source} @ {source_tip}\nTarget: {authority} @ {target_tip}"
-        ))
+        Containment::Contained {
+            receipt: format!(
+                "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
+                 Source: {source} @ {source_tip}\nTarget: {authority} @ {target_tip}"
+            ),
+            origin_verified: authority != target,
+        }
     } else {
         Containment::NotContained
     }
@@ -1579,7 +1583,7 @@ fn contained_after_reconcile(
         _ => return None,
     };
     match contained_at(git, source, &source_tip, target, &target_tip, &authority) {
-        Containment::Contained(receipt) => Some(receipt),
+        Containment::Contained { receipt, .. } => Some(receipt),
         _ => None,
     }
 }
@@ -3802,9 +3806,15 @@ impl CasCore {
         // snapshot (or a repository with no origin) can prove containment.
         if transactional_delivery.is_none() {
             match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch) {
-                Containment::Contained(receipt) => {
+                Containment::Contained { receipt, origin_verified } => {
                     // Preserve the existing behind-local checkout repair, but only
                     // after origin has proved that this source needs no CI/merge.
+                    // cas-8315: judged against the local target (no origin, or
+                    // origin lacks the branch), there is nothing to repair from
+                    // origin, and a sync attempt would only report its failure.
+                    if !origin_verified {
+                        return Ok(Self::success(receipt));
+                    }
                     let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
                     return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
                 }

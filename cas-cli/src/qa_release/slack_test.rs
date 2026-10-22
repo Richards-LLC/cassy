@@ -96,7 +96,7 @@ fn slack_post_from_driver() {
     assert!(violet.calls.lock().unwrap().iter().all(|c| c["channel"] == "qa-release"));
 
     // The OWED reseal is a new generation: posted once on the next tick.
-    let clean = run::record(&gate.cas, None, &record("PASS")).unwrap();
+    let clean = run::record(&gate.cas, Some(&gate.sha), &record("PASS")).unwrap();
     assert_eq!((clean.gate.as_ref().map(|g| g.verdict), clean.generation), (Some(verdict::GateVerdict::Clean), 2));
     drive(&mut lease);
     assert_eq!(slack::posted(&dir).len(), 2);

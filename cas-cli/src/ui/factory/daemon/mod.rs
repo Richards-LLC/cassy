@@ -70,6 +70,8 @@ struct ClientConnection {
     /// Client's terminal dimensions
     client_cols: u16,
     client_rows: u16,
+    /// A framed Ctrl-Q detach permits this session to continue headless.
+    detaching: bool,
 }
 
 /// A connected GUI client (cas-desktop) using length-prefixed JSON protocol
@@ -406,6 +408,7 @@ pub struct FactoryDaemon {
 /// Parsed control events from client
 #[derive(Debug)]
 enum ControlEvent {
+    Detach,
     Resize(u16, u16),
     SetMode(ClientViewMode),
     MouseScrollUp,

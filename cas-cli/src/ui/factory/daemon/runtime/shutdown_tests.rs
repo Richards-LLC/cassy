@@ -115,16 +115,21 @@ fn factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1() 
             }); },
         }
         drop(client);
+        let mut reattached = None;
         if route == "detach" {
             std::thread::sleep(Duration::from_millis(700));
             if owned.child.try_wait().unwrap().is_some() || !running(group) || !running(descendant) {
                 failures.push("intentional detach must retain the daemon and its children".into());
             } else {
-                let mut reattached = UnixStream::connect(&socket).unwrap();
-                reattached.write_all(&[0x11]).unwrap();
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                stream.read_exact(&mut [0u8; 1]).unwrap();
+                stream.write_all(&[0x11]).unwrap();
+                reattached = Some(stream);
             }
         }
         let exited = wait_until(Duration::from_secs(12), || owned.child.try_wait().unwrap().is_some());
+        drop(reattached);
         let gone = wait_until(Duration::from_secs(2), || !running(group) && !running(descendant));
         if !exited || !gone {
             failures.push(format!("{route}: exited={exited}, children_gone={gone}"));

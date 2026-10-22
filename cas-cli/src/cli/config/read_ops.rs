@@ -976,6 +976,7 @@ mod tests {
                         if meta.default.is_empty() {
                             match key {
                                 "slack.stakeholder_contacts" => "[]",
+                                "factory.scratch_root" => "/tmp/cas-config-path",
                                 "issues.repo"
                                 | "issues.components.cassy"
                                 | "issues.components.violet"

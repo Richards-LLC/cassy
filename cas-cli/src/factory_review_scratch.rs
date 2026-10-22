@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const MIN_AGE_SECS: i64 = 2 * 3600;
 const LARGE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_RECLAIMS_PER_PASS: usize = 16;
 
 #[derive(Serialize, Deserialize)]
 struct Owner {
@@ -286,6 +287,14 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
         Some(id) => {
             let dispatch = cas_store::get_verification_dispatch(cas, id)?;
             ensure!(dispatch.task_id == task.id, "dispatch task mismatch");
+            ensure!(
+                !matches!(
+                    dispatch.state,
+                    cas_types::VerificationDispatchState::Pending
+                        | cas_types::VerificationDispatchState::Claimed
+                ),
+                "dispatch still active"
+            );
             dispatch.state == cas_types::VerificationDispatchState::Resolved
         }
         None => false,
@@ -294,14 +303,14 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
         task.is_terminal() || resolved,
         "task and dispatch still active"
     );
-    ensure!(
-        Utc::now()
-            .signed_duration_since(record.last_used_at.unwrap_or(record.created_at))
-            .num_seconds()
-            >= MIN_AGE_SECS,
-        "review checkout younger than 2 hours"
-    );
     Ok(())
+}
+
+fn source_is_old(record: &Owner) -> bool {
+    Utc::now()
+        .signed_duration_since(record.last_used_at.unwrap_or(record.created_at))
+        .num_seconds()
+        >= MIN_AGE_SECS
 }
 
 fn bytes(path: &Path, limit: Option<u64>) -> u64 {
@@ -333,7 +342,12 @@ fn entries(path: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
+fn reclaim(
+    cas: &Path,
+    directory: &Path,
+    clean: bool,
+    targets_only: bool,
+) -> Result<(&'static str, u64)> {
     let lock = lease(directory, false)?;
     let record = owner(cas, directory)?;
     eligible(cas, &record)?;
@@ -343,6 +357,14 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
     );
     let repo = cas.parent().context("project root missing")?;
     let checkout = directory.join("repo");
+    let _lane = if checkout.exists() {
+        Some(
+            crate::factory_worker_check::try_lock_lane(cas, &checkout)?
+                .context("review build lane is leased")?,
+        )
+    } else {
+        None
+    };
     let registrations = git(repo, &["worktree", "list", "--porcelain", "-z"])?;
     let registered: Vec<_> = registrations
         .split('\0')
@@ -380,15 +402,46 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
             "review checkout has source changes"
         );
     }
-    if !clean {
-        return Ok("reclaimable");
-    }
     // Recheck state and process evidence after inventory, before touching Git.
     eligible(cas, &owner(cas, directory)?)?;
     ensure!(
         !crate::factory_target_cache::review_output_in_use(directory, &lock),
         "review output became live"
     );
+    if targets_only || !source_is_old(&record) {
+        let target = checkout.join("target");
+        if !target.exists() {
+            return Ok((
+                "source retained (younger than 2 hours or target-only GC)",
+                0,
+            ));
+        }
+        safe_path(&target)?;
+        ensure!(
+            fs::symlink_metadata(&target)?.is_dir(),
+            "review target is not a directory"
+        );
+        ensure!(
+            git(&checkout, &["ls-files", "--", "target"])?.is_empty(),
+            "review target contains tracked source"
+        );
+        let size = bytes(&target, None);
+        if clean {
+            fs::remove_dir_all(&target)?;
+        }
+        return Ok((
+            if clean {
+                "target reclaimed; source retained"
+            } else {
+                "target reclaimable; source retained"
+            },
+            size,
+        ));
+    }
+    let size = bytes(directory, None);
+    if !clean {
+        return Ok(("reclaimable", size));
+    }
     if registered.contains(&checkout) {
         let path = checkout.to_str().context("non-UTF-8 checkout")?;
         if checkout.exists() {
@@ -411,28 +464,76 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
         }
     }
     fs::remove_dir_all(directory)?;
-    Ok("reclaimed")
+    Ok(("reclaimed", size))
+}
+
+/// The lifecycle and existing admission GC share the same guarded target-only
+/// pass. No source, registration, durable evidence or active dispatch is removed.
+pub(crate) fn reclaim_targets(cas: &Path, task_id: Option<&str>) -> u64 {
+    let Ok(cas) = cas.canonicalize() else {
+        return 0;
+    };
+    let root = base(&cas);
+    let tasks = match task_id {
+        Some(id) if component(id) => vec![root.join(id)],
+        Some(_) => return 0,
+        None => entries(&root),
+    };
+    tasks
+        .into_iter()
+        .flat_map(|task| entries(&task))
+        .filter(|directory| directory.join("repo/target").exists())
+        .filter(|directory| {
+            owner(&cas, directory)
+                .and_then(|record| eligible(&cas, &record))
+                .is_ok()
+        })
+        .take(MAX_RECLAIMS_PER_PASS)
+        .filter_map(|directory| reclaim(&cas, &directory, true, true).ok())
+        .map(|(_, size)| size)
+        .sum()
+}
+
+/// Wait for the bounded pass off the async executor, after the state transaction
+/// commits. A held lease or unavailable process evidence leaves output for GC.
+pub(crate) async fn reclaim_task_targets(cas: &Path, task_id: &str) {
+    let cas = cas.to_path_buf();
+    let task_id = task_id.to_owned();
+    if let Err(error) =
+        tokio::task::spawn_blocking(move || reclaim_targets(&cas, Some(&task_id))).await
+    {
+        tracing::warn!(%error, "review target cleanup deferred to GC");
+    }
 }
 
 /// Shared public GC path. Unknown/malformed owners are retained and reported.
 pub(crate) fn render(cas: &Path, clean: bool) -> String {
+    let cas = cas.canonicalize().unwrap_or_else(|_| cas.to_path_buf());
+    let cas = cas.as_path();
     let base = base(cas);
     let mut rows = Vec::new();
     let mut reclaimed = 0u64;
+    let mut reclaimable = 0u64;
+    let mut cleaned = 0usize;
     for task in entries(&base) {
         for directory in entries(&task) {
             let size = bytes(&directory, None);
-            let disposition = match reclaim(cas, &directory, clean) {
-                Ok(status) => {
-                    if status == "reclaimed" {
-                        reclaimed += size;
+            let mutate = clean && cleaned < MAX_RECLAIMS_PER_PASS;
+            let mut candidate_bytes = 0;
+            let disposition = match reclaim(cas, &directory, mutate, false) {
+                Ok((status, bytes)) => {
+                    candidate_bytes = bytes;
+                    reclaimable += bytes;
+                    if mutate && bytes > 0 {
+                        reclaimed += bytes;
+                        cleaned += 1;
                     }
                     status.to_owned()
                 }
                 Err(error) => format!("retained: {error:#}"),
             };
             rows.push(
-                serde_json::json!({"path": directory, "bytes": size, "disposition": disposition}),
+                serde_json::json!({"path": directory, "bytes": size, "reclaimable_bytes": candidate_bytes, "disposition": disposition}),
             );
         }
     }
@@ -448,7 +549,7 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
             row["bytes"]
         ));
     }
-    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimed_bytes": reclaimed, "dry_run": !clean})));
+    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "dry_run": !clean})));
     out
 }
 

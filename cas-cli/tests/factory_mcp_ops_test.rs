@@ -6748,6 +6748,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         .unwrap();
     assert!(owned.is_dir(), "changed review head must be retained");
     git_stdout(&checkout, &["checkout", "--detach", &head]);
+    // The first terminal pass already reclaimed the young target. Recreate
+    // output to exercise the independent open-file guard below.
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let file = std::fs::File::open(checkout.join("target/output")).unwrap();
     env.service
         .factory_request(Parameters(cleanup.clone()))

@@ -1590,8 +1590,13 @@ Publish durable proof outside that disposable home, in the task artifact root.
 root siblings of at least 1 GiB (apparent file bytes) as review-only. The
 unmanaged scan stops at that threshold and reports a lower bound, not a full
 recursive total.
-`gc_cleanup force=true dry_run=false` reclaims owned checkouts idle for at least
-two hours when the task is Closed/Cancelled or the exact dispatch is resolved.
+`gc_cleanup force=true dry_run=false` reclaims a managed review target as soon as
+the exact dispatch resolves, or a task without an active dispatch is Closed/Cancelled.
+Verdict recording and task close run the same guarded target-only pass; disk-pressure
+admission retries it through existing GC. Each pass reclaims at most 16 checkouts.
+The small source checkout and Git registration retain the two-hour idle grace period.
+`REVIEW_SCRATCH_STATUS_JSON` reports total and per-checkout `reclaimable_bytes`; a
+young terminal checkout contributes its disposable target bytes, not its source bytes.
 Successful checkout reuse refreshes `last_used_at`; older records without that
 field use creation time. It
 checks leases and native process evidence (open files, cwd, mappings and argv),
@@ -1602,7 +1607,7 @@ concurrent source edits; ignored build output is disposable. Force is permitted
 only to remove a registration whose checkout directory is already gone. It then
 deletes the disposable home. Unknown/malformed ownership,
 changed heads, another repository's registration, live or unverifiable users,
-and younger checkouts are retained. Force alone remains a preview for this tier.
+and pending/claimed dispatches are retained. Young source checkouts are retained. Force alone remains a preview for this tier.
 These rules make interrupted verifier/supervisor output collectable without
 relying on an agent remembering to remove a large checkout.
 

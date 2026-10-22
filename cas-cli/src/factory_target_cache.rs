@@ -225,15 +225,17 @@ fn inspect_with_probe(
     )
 }
 
-/// Admission reclaims only verified relocated worker targets. Keep full factory
+/// Admission reclaims verified relocated worker and resolved review targets. Keep full factory
 /// GC (previews, in-tree caches, traces and artifacts) an explicit operation.
 pub(crate) fn reclaim_scratch_for_admission(
     cas_root: &Path,
     policy: TargetCachePolicy,
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
+    let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
     let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, probe)?;
     cleanup_selected(cas_root, &mut report, policy, &[])?;
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(review_bytes);
     Ok(report)
 }
 

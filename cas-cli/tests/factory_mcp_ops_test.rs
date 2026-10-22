@@ -11218,8 +11218,9 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     }
     git(&["branch", "-D", "epic/{a,b}!e"]);
     let origin_only = status().await;
+    // pin: origin-only recovery preserves the predecessor ref as one shell argument.
     assert!(origin_only.contains(&remote_predecessor[..12])
-        && origin_only.contains("git merge --no-ff origin/epic/{a,b}!e"), "{origin_only}");
+        && origin_only.contains("git merge --no-ff 'origin/epic/{a,b}!e'"), "{origin_only}");
     git(&["checkout", "epic/succ"]);
     git(&["merge", "--no-ff", "origin/epic/{a,b}!e", "-m", "successor includes predecessor"]);
     let remote_successor = git(&["rev-parse", "HEAD"]);

@@ -248,6 +248,21 @@ fn config_document_paths<'a>(
     (serialized_path, stored_path, remove_path)
 }
 
+fn remove_config_document_key(
+    document: &mut toml_edit::DocumentMut,
+    key: &str,
+) -> anyhow::Result<bool> {
+    let (_, stored_path, alternate_path) = config_document_paths(document, key);
+    let stored_exists = config_document_item(document.as_item(), stored_path).is_some();
+    let alternate_exists = alternate_path
+        .is_some_and(|path| config_document_item(document.as_item(), path).is_some());
+    set_config_document_item(document, stored_path, None)?;
+    if let Some(alternate_path) = alternate_path {
+        set_config_document_item(document, alternate_path, None)?;
+    }
+    Ok(stored_exists || alternate_exists)
+}
+
 fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {
     match key {
         "upkeep.codemap" => Some("upkeep.observe_since.codemap"),
@@ -321,7 +336,7 @@ fn set_config_document_path(
 
 /// Remove the stored override without serializing defaults back into the file.
 /// Keep the same operator guard and atomic writer as other config mutations.
-fn reset_config_value(
+pub(in crate::cli) fn reset_config_value(
     key: &str,
     cas_root: &Path,
 ) -> anyhow::Result<(String, String)> {
@@ -336,12 +351,7 @@ fn reset_config_value(
     };
     let before: Config = toml::from_str(&raw)?;
     let mut document = toml_edit::Document::parse(&raw)?.into_mut();
-    let mut parts: Vec<_> = key.split('.').collect();
-    let leaf = parts.pop().expect("a config key has at least one part");
-    let parent = parts.into_iter().try_fold(document.as_item_mut(), |item, part| {
-        item.as_table_like_mut()?.get_mut(part)
-    });
-    let removed = parent.and_then(|item| item.as_table_like_mut()?.remove(leaf)).is_some();
+    let removed = remove_config_document_key(&mut document, key)?;
     let contents = document.to_string();
     let after: Config = toml::from_str(&contents)?;
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
@@ -929,6 +939,61 @@ pub(crate) fn execute_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
+        let registry = crate::config::registry();
+        let mut keys = registry.all_keys();
+        keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
+        keys.sort_unstable();
+        keys.dedup();
+
+        for key in keys {
+            let expected_path = match key {
+                "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+                    "factory.cargo_build_jobs"
+                }
+                "staging.staging_dir" | "staging.large_artifact_dir" => "staging.staging_dir",
+                _ => key,
+            };
+            let mut document = toml_edit::Document::parse("").unwrap().into_mut();
+            set_config_document_item(
+                &mut document,
+                expected_path,
+                Some(toml_edit::value("sentinel").into()),
+            )
+            .unwrap();
+
+            let (_, stored_path, alternate_path) = config_document_paths(&document, key);
+            assert!(
+                config_document_item(document.as_item(), stored_path).is_some(),
+                "registry key {key} did not resolve to TOML path {stored_path}"
+            );
+            assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
+            assert!(config_document_item(document.as_item(), stored_path).is_none(), "{key}");
+            if let Some(alternate_path) = alternate_path {
+                assert!(config_document_item(document.as_item(), alternate_path).is_none(), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn config_reset_removes_canonical_toml_path_for_registry_alias() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncargo_build_jobs = \"4\"\n",
+        )
+        .unwrap();
+
+        reset_config_value("factory.worker_build_jobs", &root).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["factory"].get("cargo_build_jobs").is_none(), "{saved}");
+    }
 
     #[test]
     fn cas_337b_config_reset_removes_key_and_restores_fallback() {

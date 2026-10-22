@@ -1011,7 +1011,7 @@ mod tests {
             let (_, stored_path, _) = config_document_paths(&document, key);
             assert!(
                 config_document_item(document.as_item(), stored_path).is_some(),
-                "registry key {key} did not resolve to a serialized TOML path {stored_path} in:\n{raw}"
+                "registry key {key} did not resolve to a serialized TOML path {stored_path} in:\n{document}"
             );
         }
     }

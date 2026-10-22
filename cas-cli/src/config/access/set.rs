@@ -725,6 +725,10 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.timeout_secs = secs;
             }
+            "qa.release.slack_channel" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.slack_channel = value.trim().to_string();
+            }
             "qa.release.retention_days" => {
                 let days = value.trim().parse().ok().filter(|days| *days > 0).ok_or_else(|| MemError::Parse("Expected a positive number of days".into()))?;
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);

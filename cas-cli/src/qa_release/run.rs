@@ -1195,6 +1195,7 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         Ok(sealed) => notes.extend(publish_comments(root, config, &sealed)),
         Err(error) => notes.push(format!("pack reload for publication failed: {error}")),
     }
+    notes.extend(super::slack::post_sealed(config, &dir));
     if let Err(error) = super::promotion::publish_freeze(cas_root, root, config, false) {
         notes.push(format!("freeze release not published: {}", printable(&error)));
     }

@@ -33,8 +33,11 @@ fn sniffed(path: &Path, video: bool) -> bool {
     }
     let head = head.as_slice();
     if video {
-        // MP4/MOV: an `ftyp` box; WebM/Matroska: the EBML header.
-        head.get(4..8) == Some(b"ftyp") || head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+        // MP4/MOV: an `ftyp` box with a video major brand (HEIC, AVIF and
+        // M4A share the box); WebM/Matroska: the EBML header.
+        const BRANDS: &[&[u8; 4]] = &[b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"qt  ", b"M4V ", b"dash"];
+        (head.get(4..8) == Some(b"ftyp") && head.get(8..12).is_some_and(|brand| BRANDS.iter().any(|b| b.as_slice() == brand)))
+            || head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
     } else {
         head.starts_with(b"\x89PNG\r\n\x1a\n")
             || head.starts_with(&[0xFF, 0xD8, 0xFF])

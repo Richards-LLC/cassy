@@ -466,3 +466,55 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         "parity needs a production source merge that selects journeys"
     );
 }
+
+/// GH #1340: qa impact, `cas codemap status` and `cas qa journeys --status`
+/// share one CODEMAP freshness source. A regen commit that also adds files,
+/// plus untracked checkout debris, is fresh in all three; a later structural
+/// commit makes all three stale.
+#[test]
+fn codemap_freshness_agrees_across_qa_impact_status_and_journeys_gh_1340() {
+    use crate::hooks::handlers::handlers_events::{
+        codemap::{CodemapStaleness, evaluate_codemap_at},
+        docs_freshness::{Measurement, UpkeepReport},
+    };
+    let temp = repo();
+    let repo = temp.path();
+    let origin = tempfile::tempdir().unwrap();
+    git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(repo, &["remote", "add", "origin", &origin.path().to_string_lossy()]);
+    write(repo, ".claude/CODEMAP.md", "- `src/` - Source\n");
+    commit(repo);
+    write(repo, ".claude/CODEMAP.md", "- `src/` - Source\n- `docs/` - Docs\n");
+    write(repo, "docs/PRODUCT_OVERVIEW.md", "overview");
+    write(repo, "docs/qa/notes.md", "notes");
+    commit(repo);
+    let publish = || {
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["fetch", "-q", "origin"]);
+        git(repo, &["remote", "set-head", "origin", "main"]);
+    };
+    publish();
+    write(repo, ".playwright-mcp/page.yml", "untracked debris");
+    let store = repo.join(".cas");
+    let counts = || {
+        let impact = analyze(repo, &QaConfig::default(), &[Change::modified("src/a.ts")], None, None)
+            .unwrap()
+            .warnings
+            .iter()
+            .find_map(|w| w.strip_prefix("CODEMAP is stale (").map(|rest| rest.split(' ').next().unwrap().to_owned()));
+        let status = match evaluate_codemap_at(&Measurement::at(repo, &store)).unwrap().staleness {
+            None => Some(0),
+            Some(CodemapStaleness::Stale { total_changes, .. }) => Some(total_changes),
+            other => panic!("unexpected status {other:?}"),
+        };
+        let journeys = UpkeepReport::at(&Measurement::integration_at(repo, &store), &QaConfig::default())
+            .codemap
+            .drift_count;
+        (impact, status, journeys)
+    };
+    assert_eq!(counts(), (None, Some(0), Some(0)));
+    write(repo, "src/new.ts", "new");
+    commit(repo);
+    publish();
+    assert_eq!(counts(), (Some("1".to_owned()), Some(1), Some(1)));
+}

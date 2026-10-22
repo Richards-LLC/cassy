@@ -2382,7 +2382,9 @@ mod tests {
     fn a_rejection_needs_an_issue_the_delivery_owns() {
         use cas_types::QaVerdict::*;
         let refusal = rejection_scope_refusal(Rejected, 2, 0).expect("only pre-existing issues");
-        assert!(refusal.contains("never rejects a delivery"), "{refusal}");
+        for scope in ["stated purpose", "acceptance criteria", "demo statement", "journey invariant", "diff adds or edits"] {
+            assert!(refusal.contains(scope), "missing {scope}: {refusal}");
+        }
         assert!(rejection_scope_refusal(Rejected, 2, 1).is_none());
         assert!(rejection_scope_refusal(Rejected, 0, 0).is_none());
         assert!(rejection_scope_refusal(Approved, 3, 0).is_none());

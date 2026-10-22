@@ -25,6 +25,8 @@ use crate::hub::{
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+// Leave the launcher's readiness budget time to observe a peer or child exit.
+const HUB_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
 const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -2052,7 +2054,7 @@ fn serve_foreground_logged(
         // than treating a transient owner in that gap as a failed launch.
         let mut lock = match lock {
             Some(lock) => lock,
-            None => paths.wait_for_instance_lock(HUB_LAUNCH_TIMEOUT)?,
+            None => paths.wait_for_instance_lock(HUB_STARTUP_LOCK_TIMEOUT)?,
         };
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())

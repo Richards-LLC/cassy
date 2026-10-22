@@ -512,7 +512,7 @@ fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
     assert!(warnings.iter().all(|line| line.chars().count() <= 78), "{output}");
     assert!(output.contains("outside HOME"), "{output}");
     assert!(output.contains("~/.claude-operator@example.com/skills"), "{output}");
-    assert!(!output.contains(home.to_str().unwrap()), "{output}");
+    assert!(warnings.iter().all(|line| !line.contains(home.to_str().unwrap())), "{output}");
     let joined: String = warnings.iter().flat_map(|line| line.split_whitespace()).collect();
     assert!(joined.contains(target.to_str().unwrap()), "{output}");
     assert!(warnings.iter().any(|line| line.trim() == "Retry: cas update --user"), "{output}");

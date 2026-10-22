@@ -105,6 +105,27 @@ fn wrap_builtin_receipt(message: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Violet migration is advisory: keep diagnostics off JSON stdout, while
+/// sharing builtin receipts' lossless wrapping and HOME presentation.
+pub(super) fn report_update_warning(message: &str, remedy: &str) {
+    let message = match dirs::home_dir() {
+        Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
+        None => message.to_string(),
+    };
+    // `warning: ` occupies nine cells; the outer update phase adds two.
+    let width = usize::from(crate::ui::components::terminal_width()).saturating_sub(11);
+    for (index, line) in wrap_builtin_receipt(&message, width).iter().enumerate() {
+        if index == 0 {
+            eprintln!("warning: {line}");
+        } else {
+            eprintln!("         {line}");
+        }
+    }
+    for line in wrap_builtin_receipt(remedy, width) {
+        eprintln!("  {line}");
+    }
+}
+
 fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()> {
     let mut out = io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
@@ -3417,7 +3438,10 @@ fn sync_user_builtins_with_discovery(
     mut discover: impl FnMut(crate::accounts::Provider, &Path) -> io::Result<Vec<crate::accounts::AccountDir>>,
 ) -> anyhow::Result<()> {
     if let Err(error) = violet() {
-        eprintln!("warning: Violet update advisory: {error}; continuing builtin sync");
+        report_update_warning(
+            &format!("Violet update advisory: {error}; continuing builtin sync"),
+            "Retry: cas update --user",
+        );
     }
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")

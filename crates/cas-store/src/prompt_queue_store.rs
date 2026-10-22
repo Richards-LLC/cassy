@@ -2449,6 +2449,28 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult>;
 
+    /// Idempotent enqueue with explicit interrupt intent. Queue ordering alone
+    /// never grants urgency. Adapters without atomic urgent support refuse it.
+    fn enqueue_idempotent_urgent(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        dedupe_key: &str,
+        origin: Option<&QueueOrigin>,
+    ) -> Result<EnqueueIdempotentResult> {
+        if urgent {
+            return Err(StoreError::Other(
+                "atomic idempotent urgent enqueue is unsupported by this store".into(),
+            ));
+        }
+        self.enqueue_idempotent(source, target, prompt, factory_session, summary, priority, dedupe_key, origin)
+    }
+
     /// Persist a daemon nudge and supersede only older, undelivered nudges
     /// for the same worker/task. Episode replay never withdraws a newer row.
     fn enqueue_worker_stall_nudge(
@@ -6055,6 +6077,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         dedupe_key: &str,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
+        self.enqueue_idempotent_urgent(source, target, prompt, factory_session, summary, priority, false, dedupe_key, origin)
+    }
+
+    fn enqueue_idempotent_urgent(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        dedupe_key: &str,
+        origin: Option<&QueueOrigin>,
+    ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
         if target.trim().eq_ignore_ascii_case("operator") {
             return self
@@ -6066,6 +6103,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     metadata: OperatorTurnMetadata {
                         summary,
                         priority,
+                        urgent,
                         origin,
                         dedupe_key: Some(dedupe_key),
                         ..Default::default()
@@ -6093,7 +6131,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -6102,6 +6140,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     factory_session,
                     summary,
                     prio,
+                    urgent,
                     dedupe_key,
                     origin_agent_id,
                     origin_kind
@@ -12266,6 +12305,34 @@ mod tests {
         let rows = store.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].origin, Some(QueueOrigin::Daemon));
+    }
+
+    #[test]
+    fn idempotent_urgency_is_explicit_and_replay_cannot_escalate_cas_c28b() {
+        for urgent in [false, true] {
+            let (_temp, store) = create_test_store();
+            let first = store.enqueue_idempotent_urgent(
+                "violet-activity:C1", "supervisor", "first body", Some("session"), None,
+                Some(NotificationPriority::High), urgent, "delivery-1", Some(&QueueOrigin::Daemon),
+            ).unwrap();
+            let EnqueueIdempotentResult::Created(id) = first else { panic!("first enqueue must create") };
+            let replay = store.enqueue_idempotent_urgent(
+                "other-source", "supervisor", "replacement body", Some("session"), None,
+                Some(NotificationPriority::Normal), !urgent, "delivery-1", None,
+            ).unwrap();
+            assert_eq!(replay, EnqueueIdempotentResult::AlreadyExists(id));
+            let rows = store.peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].urgent, rows[0].priority), (urgent, NotificationPriority::High));
+            assert_eq!(rows[0].origin, Some(QueueOrigin::Daemon));
+            assert_eq!(rows[0].prompt, "first body");
+            store.enqueue_idempotent(
+                "legacy-high", "supervisor", "ordinary high", Some("session"), None,
+                Some(NotificationPriority::High), "legacy", Some(&QueueOrigin::Daemon),
+            ).unwrap();
+            let legacy = store.peek_all(10).unwrap().into_iter().find(|row| row.source == "legacy-high").unwrap();
+            assert!(!legacy.urgent, "existing High callers keep ordinary delivery semantics");
+        }
     }
 
     /// Corrupt provenance reads as no provenance, never as "close enough"

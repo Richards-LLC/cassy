@@ -338,7 +338,7 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
         (true, &unresolved, &[None, Some(false), Some(true)]),
     ];
     for (recorded, project, endpoints) in cases {
-        let metadata = create_metadata(
+        let mut metadata = create_metadata(
             name,
             dead_pid,
             "supervisor",
@@ -386,6 +386,17 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
             if endpoint.is_some() {
                 std::fs::remove_file(&socket).unwrap();
             }
+        }
+        if project == unresolved {
+            metadata.daemon_pid = std::process::id();
+            SessionManager::new().save_metadata(&metadata).unwrap();
+            let error = RuntimeInventory::discover(&root)
+                .err()
+                .expect("live unresolved session must refuse");
+            assert!(
+                error.contains(name) && error.contains(&format!("cas kill -- {name}")),
+                "{error}"
+            );
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

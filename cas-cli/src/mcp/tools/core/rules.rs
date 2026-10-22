@@ -1486,4 +1486,46 @@ mod tests {
         assert_eq!(chores.len(), 1);
         assert!(!chores[0].description.contains(lesson));
     }
+
+    #[tokio::test]
+    async fn rule_observe_waits_for_a_foreign_sqlite_writer() {
+        use crate::mcp::tools::service::{CasService, RuleRequest};
+        use rmcp::handler::server::wrapper::Parameters;
+        use std::time::Duration;
+
+        let (_temp, core) = isolated_core();
+        // Open the same pooled connection and create the candidate tables
+        // before the independent connection takes the database write lock.
+        cas_store::list_rule_candidates(&core.cas_root).unwrap();
+        let db_path = core.cas_root.join("cas.db");
+        let (locked, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+
+        let service = CasService::new(core.clone(), None);
+        let request: RuleRequest = serde_json::from_value(serde_json::json!({
+            "action": "observe",
+            "content": "A concurrent observation must wait for the SQLite writer",
+            "tags": "category:concurrency",
+            "source_ids": "cas-lock:ver-lock",
+        }))
+        .unwrap();
+        let result = service
+            .rule(Parameters(request))
+            .await
+            .expect("rule action should return a tool result");
+        holder.join().unwrap();
+
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let candidates = cas_store::list_rule_candidates(&core.cas_root).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].distinct_tasks(), 1);
+        assert_eq!(candidates[0].occurrences[0].verdict_id, "ver-lock");
+    }
 }

@@ -32,7 +32,9 @@ sources qualify:
   `<artifacts_root>/<project-key>/<task-id>/candidate/`. In the Cassy source
   repository, run `cas qa candidate build --task <task-id> --rev <sha>`; it
   prints the binary path, version and SHA-256 and writes `VERSION.txt`,
-  `SHA256SUMS` and `RECEIPT.json` beside the binary;
+  `SHA256SUMS` and `RECEIPT.json` beside the binary. Anyone, a worker
+  included, gets that binary's path with `cas qa candidate path --task
+  <task-id>`, which refuses until the candidate exists;
 - a CI release archive whose recorded commit or tree equals the revision;
 - the installed release, once the revision is published and `--version` names it.
 

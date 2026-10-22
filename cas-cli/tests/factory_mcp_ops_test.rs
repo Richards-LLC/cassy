@@ -6519,9 +6519,20 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
 /// A real verdict frees disposable build output immediately, keeping the small
 /// source checkout available for the existing two-hour audit grace period.
+fn review_target_env() -> FactoryTestEnv {
+    let mut env = FactoryTestEnv::with_server_supervisor();
+    // Match the canonical owner path written by scratch-checkout; macOS's
+    // temporary directory otherwise reaches the /var -> /private/var alias.
+    env.cas_root = env.cas_root.canonicalize().unwrap();
+    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    core.set_agent_id_for_testing("test-supervisor-id".into());
+    env.service = CasService::new(core, None);
+    env
+}
+
 #[tokio::test]
 async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
-    let env = FactoryTestEnv::with_server_supervisor();
+    let env = review_target_env();
     init_sync_repo(&env, "verdict-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -6580,7 +6591,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
 /// even with an old, unleased checkout. The public GC must fail closed.
 #[tokio::test]
 async fn test_gc_preserves_active_review_target_cas_f275() {
-    let env = FactoryTestEnv::with_server_supervisor();
+    let env = review_target_env();
     init_sync_repo(&env, "active-review-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();

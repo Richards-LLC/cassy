@@ -16,6 +16,7 @@ use std::time::Duration;
 pub mod blocked;
 pub mod fixtures;
 pub mod flags;
+pub mod independence;
 pub mod resources;
 
 /// Adapter protocol version written to and required from every envelope.

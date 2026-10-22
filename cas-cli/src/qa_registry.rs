@@ -559,6 +559,9 @@ pub struct Journey {
     /// Flags whose target-environment values the journey's evidence depends on.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on_flags: Vec<String>,
+    /// Result identity that makes runs independent, e.g. `post_audit_v2_runs.id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independence_key: Option<String>,
     /// Units of each declared resource one run of the journey uses.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub consumes: BTreeMap<String, u32>,
@@ -588,6 +591,7 @@ deserialize_with_extra!(Journey {
     evidence,
     readback,
     depends_on_flags,
+    independence_key,
     consumes,
     seeded,
 });
@@ -1200,6 +1204,20 @@ impl Registry {
                         "depends_on_flags",
                         id,
                         format!("flag {flag:?} must be 1-128 letters, digits or ._-:/"),
+                    );
+                }
+            }
+            if let Some(key) = &journey.independence_key {
+                let valid = !key.is_empty()
+                    && key.len() <= 128
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+                if !valid {
+                    report.problem(
+                        "independence_key",
+                        id,
+                        format!("independence_key {key:?} must be 1-128 letters, digits or ._-"),
                     );
                 }
             }

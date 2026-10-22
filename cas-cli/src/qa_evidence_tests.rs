@@ -1187,6 +1187,43 @@ fn ledger_pass_row_must_be_real_build() {
     assert!(refusal.problem.contains("label real-build"), "{refusal:?}");
 }
 
+/// cas-9779: a cell blocked by an external provider stays owed. It is never a
+/// PASS, even beside one, and never a FAIL; the refusal names the provider,
+/// its error and the owed cell.
+#[test]
+fn ledger_blocked_external_cell_stays_owed() {
+    let fx = Fixture::new();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: "",
+        deployed_origins: &[],
+    };
+    let ledger = fx.task_dir.join("LEDGER.md");
+    std::fs::write(
+        &ledger,
+        "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n\
+         | M02 | posts/create | posted | failed_fetch | BLOCKED_EXTERNAL | real-build | blocked: provider=rapidapi error=502 failed_fetch | - |\n",
+    )
+    .unwrap();
+    let refusal = validate_ledger(&ctx).unwrap_err();
+    assert_eq!(
+        refusal.problem,
+        "owed: row M02 (cell posts/create) is BLOCKED_EXTERNAL{provider=rapidapi, error=502 failed_fetch}: \
+         neither PASS nor FAIL, so the cell is still owed",
+        "{refusal:?}"
+    );
+    std::fs::write(
+        &ledger,
+        "| M02 | posts/create | posted | - | BLOCKED_EXTERNAL | real-build | blocked: error=502 | - |\n",
+    )
+    .unwrap();
+    let refusal = validate_ledger(&ctx).unwrap_err();
+    assert!(refusal.problem.contains("blocked: provider=<provider> error=<error>"), "{refusal:?}");
+}
+
 #[test]
 fn terminal_qa_receipt_must_pass_and_be_fresh() {
     let fx = Fixture::new();

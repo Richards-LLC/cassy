@@ -10870,7 +10870,7 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         saved.notes
     );
     assert!(
-        saved.notes.contains("cas-0a69"),
+        saved.notes.contains(task_id.as_str()),
         "audit must name this task: {}",
         saved.notes
     );

@@ -957,19 +957,7 @@ mod tests {
 
     #[test]
     fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
-        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &[
-            "hooks.stop.duplicate_detection_enabled",
-            "hooks.stop.duplicate_detection_threshold",
-            "hooks.stop.learning_review_enabled",
-            "hooks.stop.learning_review_threshold",
-            "hooks.stop.rule_review_enabled",
-            "hooks.stop.rule_review_threshold",
-            "notifications.on_auth_success",
-            "notifications.on_idle_prompt",
-            "notifications.on_permission_prompt",
-            "notifications.webhook_url",
-            "slack.stakeholder_contacts",
-        ];
+        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &["slack.stakeholder_contacts"];
 
         let registry = crate::config::registry();
         let mut keys = registry.all_keys();

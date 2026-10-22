@@ -1026,6 +1026,15 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
 
 #[tokio::test]
 async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
+    cross_repo_merge_mutates_only_declared_repo(false).await;
+}
+
+#[tokio::test]
+async fn worker_only_cross_repo_merge_uses_reviewed_target_repo_cas_be50() {
+    cross_repo_merge_mutates_only_declared_repo(true).await;
+}
+
+async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
     env.set("HOME", home.path());
@@ -1062,6 +1071,20 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     run_git(&["add", "repo-b-work.txt"], &wt_path);
     run_git(&["commit", "-m", "repo B work"], &wt_path);
 
+    if implicit {
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some("factory/alice".into());
+        let head = git_stdout(&repo_b.root, &["rev-parse", "factory/alice"]);
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        task.demo_statement = "Read the delivered file in repo B".into();
+        task_store.update(&task).unwrap();
+        // Test-only review record: the exact source already has a verdict.
+        cas_store::waive_qa_pass(
+            &cas_root_a, &task.id, "fixture-reviewer", "alice", "factory/alice",
+            &head, "fixture: exact cross-repo delivery reviewed", chrono::Utc::now(),
+        ).unwrap();
+    }
+
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
@@ -1070,7 +1093,7 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     let svc = make_service(cas_root_a);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
-    req.task_id = Some(task.id);
+    req.task_id = (!implicit).then_some(task.id);
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc

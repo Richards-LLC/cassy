@@ -964,8 +964,9 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     };
     let is_local = |id: &str| agents.get(id).is_ok();
     let duration = lease_duration_secs(cas_root);
-    // cas-c55f: retry file-lease releases that did not reach the Cloud.
+    // cas-c55f, cas-978d: retry releases that did not reach the Cloud.
     crate::cloud::file_leases::release_pending(&claims, cas_root);
+    release_pending_task_claims(&claims, cas_root);
     for (task_id, lease_backed) in targets {
         match claims.renew(&task_id, agent_id, duration) {
             Ok(()) => {
@@ -1124,6 +1125,122 @@ pub fn release_task_claim(cas_root: &Path, task_id: &str) {
     if let Err(error) = claims.release_local(task_id, &is_local) {
         tracing::debug!(task = %task_id, %error, "cloud claim release failed");
     }
+}
+
+/// One background task-claim release waits at most this long.
+const CLAIM_RELEASE_BUDGET: Duration = Duration::from_secs(5);
+
+/// cas-978d: task claims whose release was asked but not yet confirmed by
+/// Cassy Cloud, by task id, with when the release was asked.
+fn pending_claim_releases_path(cas_root: &Path) -> std::path::PathBuf {
+    cas_root.join("claim-releases.json")
+}
+
+fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<String, i64> {
+    std::fs::read_to_string(pending_claim_releases_path(cas_root))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Read-modify-write the pending releases under an exclusive file lock; no
+/// Cloud call runs inside `change`.
+fn update_pending_claim_releases<R>(
+    cas_root: &Path,
+    change: impl FnOnce(&mut std::collections::BTreeMap<String, i64>) -> R,
+) -> R {
+    use fs2::FileExt;
+    let path = pending_claim_releases_path(cas_root);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"));
+    let _guard = lock.as_ref().ok().filter(|file| file.lock_exclusive().is_ok());
+    let mut pending = read_pending_claim_releases(cas_root);
+    let result = change(&mut pending);
+    if pending.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else if let Ok(text) = serde_json::to_string(&pending) {
+        let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    result
+}
+
+/// cas-978d: [`release_task_claim`] off the caller, for park, close and
+/// cancel, so a slow Cloud never delays them. The release is recorded first
+/// and stays recorded until the Cloud confirms it; the next background
+/// release or the daemon's claim renewal retries one that failed.
+pub fn release_task_claim_in_background(cas_root: &Path, task_id: &str) {
+    // Red: the pre-cas-978d release, inline on the caller.
+    release_task_claim(cas_root, task_id);
+}
+
+pub(crate) fn release_task_claim_in_background_with(
+    claims: Option<PeerClaims>,
+    cas_root: &Path,
+    task_id: &str,
+) -> Option<std::thread::JoinHandle<()>> {
+    let claims = claims?;
+    let now = Utc::now().timestamp();
+    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now));
+    let cas_root = cas_root.to_path_buf();
+    std::thread::Builder::new()
+        .name("cas-claim-release".into())
+        .spawn(move || release_pending_task_claims(&claims, &cas_root))
+        .ok()
+}
+
+/// Release every recorded pending task claim held by an agent of this
+/// database. A task holding a live local lease again was started anew here,
+/// so its claim is the new holder's and the record is dropped unreleased;
+/// so is one older than a lease's lifetime, whose claim has run out.
+pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) {
+    let pending = read_pending_claim_releases(cas_root);
+    if pending.is_empty() {
+        return;
+    }
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return;
+    };
+    let is_local = |id: &str| agents.get(id).is_ok();
+    let now = Utc::now().timestamp();
+    let lifetime = i64::from(lease_duration_secs(cas_root));
+    let mut settled = Vec::new();
+    for (task_id, asked) in pending {
+        let restarted = agents
+            .get_lease(&task_id)
+            .ok()
+            .flatten()
+            .is_some_and(|lease| lease.is_valid());
+        let done = restarted || now - asked >= lifetime || {
+            let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
+            match budgeted.release_local(&task_id, &is_local) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::debug!(task = %task_id, %error, "cloud claim release failed; will retry");
+                    false
+                }
+            }
+        };
+        if done {
+            settled.push((task_id, asked));
+        }
+    }
+    if settled.is_empty() {
+        return;
+    }
+    update_pending_claim_releases(cas_root, |pending| {
+        for (task_id, asked) in settled {
+            // A release asked again meanwhile keeps its newer record.
+            if pending.get(&task_id) == Some(&asked) {
+                pending.remove(&task_id);
+            }
+        }
+    });
 }
 
 /// What a spawn learns about peers before it queues anything (cas-0078).

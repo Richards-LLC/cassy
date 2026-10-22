@@ -6650,6 +6650,8 @@ impl CasService {
         out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
         out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
+        out.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
+        out.push_str(&crate::factory_review_scratch::unmanaged_large(&self.inner.cas_root));
         out.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
@@ -7498,6 +7500,7 @@ impl CasService {
         }
 
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",

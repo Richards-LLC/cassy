@@ -753,11 +753,28 @@ pub enum FactoryCommands {
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
+    /// Create a disposable task-owned detached checkout; print its absolute path.
+    #[command(override_usage = "cas factory scratch-checkout [OPTIONS]\n       --cas-root <ROOT> --task-id <TASK> --head <SHA>")]
+    ScratchCheckout {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        dispatch_id: Option<String>,
+        #[arg(long)]
+        head: String,
+    },
     /// Run a task's named tests at a verification's bound head under the
     /// worker builder cap (task-verifier capped lane, cas-d95c)
     VerifierTest {
         #[arg(long)]
         cas_root: std::path::PathBuf,
+        /// Task owning the disposable checkout
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        dispatch_id: Option<String>,
         /// Full commit SHA of the verification's bound head
         #[arg(long)]
         head: String,
@@ -1247,11 +1264,19 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 isolated_test_env,
                 cargo_args,
             } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
-            FactoryCommands::VerifierTest {
-                cas_root,
-                head,
-                cargo_args,
-            } => crate::factory_worker_check::execute_verifier(cas_root, head, cargo_args),
+            FactoryCommands::ScratchCheckout { cas_root, task_id, dispatch_id, head } => {
+                let checkout = crate::factory_review_scratch::create(
+                    cas_root, &std::env::current_dir()?, task_id, dispatch_id.as_deref(), head,
+                )?;
+                if cli.json {
+                    println!("{}", serde_json::json!({"path": checkout.path, "task_id": task_id, "dispatch_id": dispatch_id, "head": head}));
+                } else {
+                    println!("{}", checkout.path.display());
+                }
+                Ok(())
+            }
+            FactoryCommands::VerifierTest { cas_root, task_id, dispatch_id, head, cargo_args } =>
+                crate::factory_worker_check::execute_verifier(cas_root, task_id, dispatch_id.as_deref(), head, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,

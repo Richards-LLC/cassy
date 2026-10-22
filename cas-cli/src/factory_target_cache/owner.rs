@@ -193,6 +193,10 @@ fn paths(cas_root: &Path, worktree: &Path) -> io::Result<(PathBuf, PathBuf)> {
 
 /// Must precede seed data or Cargo. Existing unmarked targets remain legacy.
 pub(crate) fn acquire(cas_root: &Path, worktree: &Path) -> io::Result<Option<Lease>> {
+    // Review output is owned and collected with its entire disposable checkout.
+    if crate::factory_review_scratch::is_managed_checkout(cas_root, worktree) {
+        return Ok(None);
+    }
     let mut lease = open(cas_root, worktree, true)?;
     if let Some(lease) = lease.as_mut() {
         lease.record.pid = std::process::id();

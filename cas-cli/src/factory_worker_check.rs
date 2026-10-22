@@ -1338,9 +1338,17 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 /// slot, a private target, the zero-test guard). A verifier otherwise has no
 /// clean checkout of that head under the worktrees root, and fell back to
 /// plain Cargo that no admission saw.
-pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> Result<()> {
+pub(crate) fn execute_verifier(
+    cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
+    head: &str,
+    args: &[String],
+) -> Result<()> {
     execute_verifier_at(
         cas_root,
+        task_id,
+        dispatch_id,
         head,
         args,
         &std::env::current_dir()?,
@@ -1351,6 +1359,8 @@ pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> 
 
 fn execute_verifier_at(
     cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
     head: &str,
     args: &[String],
     cwd: &Path,
@@ -1362,38 +1372,9 @@ fn execute_verifier_at(
             "Verifier tests run named tests only: `nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`"
         );
     }
-    let worktree = verifier_worktree(cas_root, cwd, head)?;
-    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner, None)
-}
-
-/// A detached checkout of `head` under the Cassy worktrees root, so the
-/// capped runner admits it and its slot counts. Reused while it still points
-/// at `head`; it never touches a worker's checkout.
-fn verifier_worktree(cas_root: &Path, cwd: &Path, head: &str) -> Result<PathBuf> {
-    if !valid_git_oid(head) {
-        bail!("Verifier tests need the full bound head commit SHA, not {head:?}");
-    }
-    let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
-    git(&repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])
-        .with_context(|| format!("bound head {head} is not in this repository; fetch it first"))?;
-    let worktree = cas_root.join("worktrees").join(format!("verify-{}", &head[..12]));
-    if worktree.exists() {
-        let current = git(&worktree, &["rev-parse", "HEAD"])?;
-        if current.trim() != head {
-            bail!(
-                "{} is checked out at {} instead of the bound head {head}; remove it and retry",
-                worktree.display(),
-                current.trim()
-            );
-        }
-    } else {
-        std::fs::create_dir_all(cas_root.join("worktrees"))?;
-        git(
-            &repo,
-            &["worktree", "add", "--detach", &worktree.to_string_lossy(), head],
-        )?;
-    }
-    Ok(worktree)
+    let checkout =
+        crate::factory_review_scratch::create(cas_root, cwd, task_id, dispatch_id, head)?;
+    execute_at_with_scope(cas_root, args, &checkout.path, cargo, scope_runner, None)
 }
 
 /// Prefer the active task's declared integration target, never the pushed
@@ -1438,7 +1419,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
     // Check only isolated, seeded worker caches; never use a shared target.
-    if !repo.starts_with(cas_root.join("worktrees")) {
+    if !repo.starts_with(cas_root.join("worktrees"))
+        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo) {
         bail!(
             "Worker check requires an isolated worktree under {}",
             cas_root.join("worktrees").display()
@@ -3540,15 +3522,21 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
     /// counted worktrees root, instead of running as uncounted plain Cargo.
     #[test]
     fn verifier_tests_are_admitted_against_the_builder_cap_cas_d95c() {
-        let _env =
-            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("project");
         fixture_commit(&repo);
-        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let head = git(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 1\n").unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders = 1\n",
+        )
+        .unwrap();
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
@@ -3557,15 +3545,54 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
             .map(|arg| arg.to_string())
             .collect();
 
-        let error = execute_verifier_at(&root, &head, &args, &repo, Path::new("/nonexistent/cargo"), None)
-            .expect_err("the only builder slot is held");
-        assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
-        let checkout = root.join("worktrees").join(format!("verify-{}", &head[..12]));
-        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &args,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("the only builder slot is held");
+        assert!(
+            error.to_string().contains("max_concurrent_builders=1"),
+            "{error}"
+        );
+        let run = std::fs::read_dir(root.join("review-scratch/cas-proof"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            git(&run.join("repo"), &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim(),
+            head
+        );
 
-        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"].iter().map(|arg| arg.to_string()).collect();
-        let error = execute_verifier_at(&root, &head, &unnamed, &repo, Path::new("/nonexistent/cargo"), None)
-            .expect_err("verifiers run named tests only");
+        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &unnamed,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("verifiers run named tests only");
         assert!(error.to_string().contains("named tests only"), "{error}");
     }
 

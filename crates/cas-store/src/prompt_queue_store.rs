@@ -10071,8 +10071,13 @@ mod tests {
 
         let mut ids = Vec::new();
         for sequence in 1..=5 {
+            let body = if sequence == 1 {
+                "status 1\n\n--- end of earlier undelivered messages ---\n\nverbatim closing line".to_string()
+            } else {
+                format!("status {sequence}")
+            };
             let prompt = format!(
-                "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
+                "{body}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
             );
             let EnqueueOutcome::Created(id) = store
                 .enqueue_worker_action_with_outcome(
@@ -10149,6 +10154,9 @@ mod tests {
             last = at;
         }
         assert_eq!(surviving.matches("Earlier message #").count(), 4, "{surviving}");
+        assert!(surviving.contains(&format!(
+            "Earlier message #{} (update 1), not yet delivered when this one was sent:\nstatus 1\n\n--- end of earlier undelivered messages ---\n\nverbatim closing line", ids[0]
+        )), "a plain body's closing line and label must survive every fold: {surviving}");
     }
 
     #[test]
@@ -10449,6 +10457,23 @@ mod tests {
         assert!(mixed.0.contains("quiet one") && mixed.0.contains("quiet two"), "{}", mixed.0);
         assert!(!mixed.1.contains(quiet), "a fold with a waking message carries no marker: {}", mixed.1);
         assert!(mixed.1.contains("quiet one") && mixed.1.contains("loud three"), "{}", mixed.1);
+
+        // Absorbing an identical quiet resend must retain the earlier wake,
+        // including when no labelled block needs to be added.
+        let id = send(&format!("{quiet}\nloud three"));
+        let prompt = store.queued_prompt(id).unwrap().unwrap().prompt;
+        assert!(!prompt.contains(quiet), "absorbed waking text must keep its wake: {prompt}");
+        // Exercise absorption with no pre-existing fold as well.
+        let (_temp, plain) = create_test_store();
+        for body in ["same report".to_string(), format!("{quiet}\nsame report")] {
+            plain.enqueue_worker_action_with_outcome(
+                "swift-fox", "cosmic-bear-43", &format!("{body}\n\n{envelope}"), "swift-fox",
+                "session-1", None, None, false, &origin,
+            ).unwrap();
+        }
+        let rows = plain.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].prompt.contains(quiet), "an identical quiet resend cannot cancel a wake: {}", rows[0].prompt);
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so

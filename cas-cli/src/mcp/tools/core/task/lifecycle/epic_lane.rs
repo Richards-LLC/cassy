@@ -152,3 +152,85 @@ mod tests {
         assert!(explicit_base_note(None, "epic/a-cas-1").is_empty());
     }
 }
+
+/// cas-1630: the open epic a new epic follows, from its `blocked_by` ids:
+/// the first non-terminal epic that already has a branch. A successor epic
+/// stacks on that branch so follow-ups on unreleased code can start.
+pub(crate) fn open_predecessor_epic(
+    store: &dyn cas_store::TaskStore,
+    blocked_by: &[String],
+) -> Option<(String, String)> {
+    blocked_by.iter().find_map(|id| {
+        let task = store.get(id).ok()?;
+        let branch = task.branch.clone().filter(|branch| !branch.trim().is_empty())?;
+        (task.task_type == cas_types::TaskType::Epic && !task.is_terminal())
+            .then(|| (task.id, branch))
+    })
+}
+
+fn git_ok(repo: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Whether `commit` is on `branch`, locally or as last fetched from origin.
+fn on_branch(repo: &Path, commit: &str, branch: &str) -> bool {
+    [branch.to_string(), format!("origin/{branch}")].iter().any(|candidate| {
+        git_ok(repo, &["merge-base", "--is-ancestor", commit, candidate])
+    })
+}
+
+/// cas-1630: a follow-up created in `epic` that cites a commit its branch
+/// lacks cannot start until that code reaches the branch. Name each such
+/// commit, and the open epic that has it, so the base is fixed at create.
+pub(crate) fn cited_commit_warning(
+    repo: &Path,
+    store: &dyn cas_store::TaskStore,
+    epic: &cas_types::Task,
+    text: &str,
+) -> String {
+    let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) else {
+        return String::new();
+    };
+    let Ok(pattern) = regex::Regex::new(r"\b[0-9a-f]{7,40}\b") else {
+        return String::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let others: Vec<(String, String)> = store
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| {
+            task.task_type == cas_types::TaskType::Epic && !task.is_terminal() && task.id != epic.id
+        })
+        .filter_map(|task| task.branch.clone().map(|branch| (task.id, branch)))
+        .collect();
+    let mut lines = Vec::new();
+    for found in pattern.find_iter(text).map(|m| m.as_str()) {
+        if !found.bytes().any(|byte| byte.is_ascii_alphabetic()) || !seen.insert(found) || seen.len() > 10 {
+            continue;
+        }
+        if !git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("{found}^{{commit}}")])
+            || on_branch(repo, found, branch)
+        {
+            continue;
+        }
+        let holder = others
+            .iter()
+            .find(|(_, other)| on_branch(repo, found, other))
+            .map(|(id, other)| format!(" it is on open epic {id} ({other})"))
+            .unwrap_or_else(|| " no open epic has it".to_string());
+        lines.push(format!("{found} is not on {branch};{holder}"));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n⚠️ CITED CODE NOT ON THIS EPIC (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
+        lines.join("; ")
+    )
+}

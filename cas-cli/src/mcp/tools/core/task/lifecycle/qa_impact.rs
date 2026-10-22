@@ -305,7 +305,11 @@ fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
             .iter()
             .filter_map(|column| cells.get(*column).copied())
             .find(|cell| disposition(cell, &cells).is_some())
-            .or_else(|| columns.first().and_then(|column| cells.get(*column).copied()));
+            .or_else(|| {
+                columns
+                    .first()
+                    .and_then(|column| cells.get(*column).copied())
+            });
         if let Some(verdict) = verdict {
             rows.push(Row {
                 id: cells[0],

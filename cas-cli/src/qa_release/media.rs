@@ -26,11 +26,12 @@ fn extension_in(path: &str, list: &[&str]) -> bool {
 /// video container: the extension alone would upload a zip named `x.png`.
 fn sniffed(path: &Path, video: bool) -> bool {
     use std::io::Read;
-    let mut head = [0u8; 12];
-    let Ok(read) = std::fs::File::open(path).and_then(|mut file| file.read(&mut head)) else {
+    // Up to 12 bytes or EOF: a single read() may return short.
+    let mut head = Vec::with_capacity(12);
+    if std::fs::File::open(path).and_then(|file| file.take(12).read_to_end(&mut head)).is_err() {
         return false;
-    };
-    let head = &head[..read];
+    }
+    let head = head.as_slice();
     if video {
         // MP4/MOV: an `ftyp` box; WebM/Matroska: the EBML header.
         head.get(4..8) == Some(b"ftyp") || head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])

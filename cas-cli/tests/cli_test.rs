@@ -318,6 +318,26 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
         other_registry["debt_summary"]["delta"].is_null(),
         "{other_registry}"
     );
+
+    // One consumer is debt; repeated mentions in that journey still count once.
+    // Shared and unused groups in the same registry must not produce warnings.
+    let groups = "owner_groups:\n  audit-v2: {description: Audit prompts, globs: ['page.ts']}\n  shared: {description: Shared logic, globs: ['page.ts']}\n  unused: {description: Future logic, globs: ['page.ts']}\n";
+    let grouped = seeded
+        .replace("invariants:\n", &format!("{groups}invariants:\n"))
+        .replace("    owners: ['page.ts']\n", "    owners: ['page.ts']\n    owner_groups: [audit-v2, audit-v2, shared]\n")
+        + "  - id: second\n    status: live\n    seeded: true\n    entry: {url: /second, trigger: Open}\n    owners: ['page.ts']\n    owner_groups: [shared]\n";
+    std::fs::write(&alternate, grouped).unwrap();
+    let single = json();
+    assert_eq!(single["problems"], serde_json::json!([]));
+    assert_eq!(single["single_reference_owner_groups"], serde_json::json!({"audit-v2": "signup"}));
+    let debts: Vec<_> = single["debt"].as_array().unwrap().iter()
+        .filter(|row| row["code"] == "single_reference_owner_group").collect();
+    assert_eq!(debts.len(), 1, "{single}");
+    assert_eq!(debts[0]["subject"], "owner_groups.audit-v2");
+    assert!(debts[0]["message"].as_str().unwrap().contains("signup"), "{single}");
+    let human = human("DEBT: 0 problem(s), 3 debt item(s)\n");
+    let warnings: Vec<_> = human.lines().filter(|line| line.starts_with("WARN owner group ")).collect();
+    assert_eq!(warnings, ["WARN owner group audit-v2: only journey signup"], "{human}");
 }
 
 #[test]

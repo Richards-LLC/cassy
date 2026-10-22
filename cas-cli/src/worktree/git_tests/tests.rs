@@ -1528,6 +1528,17 @@ fn publish_branch_to_origin_never_creates_an_absent_remote_branch() {
         !String::from_utf8_lossy(&refs.stdout).contains("epic/local-only"),
         "origin must not have gained the branch"
     );
+
+    // cas-3937 review: a missing tracking ref is not proof that origin lacks
+    // the branch. With origin unreachable it is unconfirmed, so the target is
+    // not a confirmed local-only one and the merge is not published.
+    Command::new("git")
+        .args(["remote", "set-url", "origin", origin_path.with_extension("gone").to_str().unwrap()])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+    let unreachable = git.publish_branch_to_origin("epic/local-only");
+    assert!(!unreachable.is_published(), "{unreachable:?}");
 }
 
 #[test]

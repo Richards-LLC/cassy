@@ -1099,7 +1099,23 @@ impl GitOperations {
             }
             Some(_) => {}
             // Never *create* a remote branch as a side effect of a merge.
-            None => return TargetPushOutcome::RemoteBranchAbsent,
+            // cas-3937 review: a missing tracking ref may only mean this
+            // clone never fetched the branch. Only an origin that answers
+            // and lists no such branch makes the target local-only.
+            None if self.origin_lacks_branch(branch, timeout) => {
+                return TargetPushOutcome::RemoteBranchAbsent;
+            }
+            None => {
+                return TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha),
+                    remote_sha: None,
+                    reason: format!(
+                        "origin/{branch} is not known here and origin did not confirm it lacks \
+                         `{branch}` (unreachable, or the branch was never fetched); not pushed. \
+                         Fetch origin, then retry"
+                    ),
+                };
+            }
         }
 
         let mut cmd = Command::new("git");

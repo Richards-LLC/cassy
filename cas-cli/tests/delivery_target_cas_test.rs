@@ -523,6 +523,19 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             &["remote", "add", "origin", &format!("git@github.com:org/{slug}.git")],
             &repo.root,
         );
+        // cas-3937: a local-only target must be confirmed by an origin that
+        // answers and lacks the branch. The GitHub URL stays for CI; Git
+        // reaches it as an empty bare repository.
+        let origin_dir = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "-q", "--bare", origin_dir.path().to_str().unwrap()], &repo.root);
+        run_git(
+            &[
+                "config",
+                &format!("url.{}.insteadOf", origin_dir.path().display()),
+                &format!("git@github.com:org/{slug}.git"),
+            ],
+            &repo.root,
+        );
         let cas_root = init_cas_dir(&repo.root).expect("init CAS");
         let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
@@ -608,6 +621,11 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
             assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
+            // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
+            assert!(
+                notes.contains("waiting on a gate") && notes.contains("awaiting_merge"),
+                "{row}: {notes}"
+            );
             answer
         } else {
             get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"))

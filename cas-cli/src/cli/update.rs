@@ -2511,6 +2511,9 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
             "{} managed file conflict(s); run `cas update --sync --json`",
             report.conflicts.len()
         )),
+        Ok(report) if report.commit_warning.is_some() => {
+            ProjectPhase::Warning(report.commit_warning.unwrap())
+        }
         Ok(report) if report.outcome == "staged" => {
             ProjectPhase::Warning("managed changes staged; commit pending".into())
         }
@@ -3466,7 +3469,7 @@ fn sync_claude_files_into(
     };
 
     let managed_files = if let Some(plan) = reconciliation {
-        let report = plan.finish(&builtin_harnesses)?;
+        let report = plan.finish(&builtin_harnesses, &cas_root)?;
         builtin_gitignore.tracked_paths.clear();
         report
     } else {
@@ -5520,6 +5523,9 @@ fn report_managed_files(
             )
         };
         println!("{message}");
+        if let Some(warning) = &report.commit_warning {
+            println!("WARN: {warning}");
+        }
         if report.outcome == "committed" {
             println!("Next: commit is local-only; push to origin and open a PR.");
         }

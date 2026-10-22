@@ -281,8 +281,15 @@ With no other staged work on a work branch, it makes one dedicated
 Cassy author identity. It never auto-commits on `main`, `master`, `staging`,
 `develop`, `trunk`, the detected repository default, the configured
 `factory.epic_base_branch`, or an `epic/*` branch. Detached or unreadable HEAD
-also leaves the repair staged. These cases report `outcome: "staged"` with no
-commit; review with `git diff --cached` and move the repair to a dedicated work
+also leaves the repair staged. The guard reads configuration from the CAS root
+passed to sync, including
+shared stores outside a worktree. If that configuration cannot be loaded, the
+repair stays staged with `commit_warning` and update succeeds. Fix the config
+before retrying. If default-branch detection has no origin HEAD, configured
+initial branch or common trunk, it falls back to the current branch; this also
+keeps the repair staged rather than granting permission to create history.
+These safe refusals report `outcome: "staged"` with no commit; review with
+`git diff --cached` and move the repair to a dedicated work
 branch before committing through the project's normal review process. It never
 pushes. A committed repair prints a local-only next step: push it to origin and
 open a normal PR. Doctor checks the default branch against its configured

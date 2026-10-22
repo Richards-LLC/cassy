@@ -2900,6 +2900,7 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
     env.remove("CAS_AGENT_ROLE");
     env.remove("CAS_SKIP_FACTORY_TOOLING");
     let home = env.home().to_path_buf();
+    let mut failures = Vec::new();
     for (branch, can_commit) in [
         ("main", false),
         ("staging", false),
@@ -2907,34 +2908,87 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         ("release/base", false),
         ("epic/shared", false),
         ("repair/managed", true),
+        ("detached", false),
+        ("repair/config-unreadable", false),
+        ("release/shared-state", false),
+        ("repair/unknown-default", false),
     ] {
         let project = cas_6718_drifted_project(&home.join(branch));
-        let root = project.join(".cas");
+        let root = if branch == "release/shared-state" {
+            // A worktree may use the main checkout's store/config without a
+            // project-local .cas. Exercise that actual sync call-site pattern.
+            // Remove generated rule WIP that needs the local store's authority;
+            // this row isolates commit policy after the store moves away.
+            cas_6718_git(&project, &["checkout", "--", ".claude/rules/cas/rule-fixture.md"]);
+            let shared = home.join("shared-cas-state");
+            std::fs::rename(project.join(".cas"), &shared).unwrap();
+            shared
+        } else {
+            project.join(".cas")
+        };
         env.set("CAS_ROOT", &root);
         cas_6718_git(&project, &["update-ref", "refs/remotes/origin/production", "HEAD"]);
         cas_6718_git(&project, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/production"]);
-        cas_6718_git(&project, &["checkout", "-qB", branch]);
+        if branch == "detached" {
+            cas_6718_git(&project, &["checkout", "--detach", "-q", "HEAD"]);
+        } else {
+            cas_6718_git(&project, &["checkout", "-qB", branch]);
+        }
         if branch == "main" {
             // A same-named tag must not change the checked-out branch identity.
             cas_6718_git(&project, &["tag", "main", "HEAD"]);
         }
         let path = root.join("config.toml");
         let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        config["factory"]["epic_base_branch"] = toml_edit::value("release/base");
-        std::fs::write(path, config.to_string()).unwrap();
+        let configured_base = if branch == "release/shared-state" { branch } else { "release/base" };
+        config["factory"]["epic_base_branch"] = toml_edit::value(configured_base);
+        std::fs::write(&path, config.to_string()).unwrap();
+        if branch == "repair/config-unreadable" {
+            // A directory fails config reading on every host, including root.
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
+        if branch == "repair/unknown-default" {
+            cas_6718_git(&project, &["branch", "-D", "main"]);
+            cas_6718_git(&project, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+            cas_6718_git(&project, &["update-ref", "-d", "refs/remotes/origin/production"]);
+        }
         let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-        let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+        let (result, output) = capture_phase(true, || sync_claude_files_into(
+            &update_test_cli(branch != "repair/config-unreadable"), Some(&root), Some(&project),
+        ));
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                failures.push(format!("{branch}: update aborted instead of keeping repair staged: {error}"));
+                continue;
+            }
+        };
         let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
-        assert_eq!(after != before, can_commit, "reconcile moved {branch}");
-        assert_eq!(report.commit.is_some(), can_commit, "{branch}");
+        if (after != before) != can_commit || report.commit.is_some() != can_commit {
+            failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
+        }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
-        if !can_commit {
+        if !can_commit && report.commit.is_none() {
             assert_eq!(report.outcome, "staged", "{branch}");
             assert!(report.staged > 0);
             assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
         }
-        assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
+        if branch == "repair/config-unreadable" {
+            let json = serde_json::to_value(&report).unwrap();
+            let warning = json["commit_warning"].as_str().expect("guard error needs a structured warning");
+            assert!(warning.contains("config") && warning.contains("staged"), "{warning}");
+            let lines: Vec<_> = output.lines().filter(|line| line.contains(warning)).collect();
+            assert_eq!(lines.len(), 1, "{output}");
+            assert!(lines[0].is_ascii() && lines[0].len() <= 78, "{}", lines[0]);
+            assert!(path.is_dir(), "update must not replace the unreadable config");
+        }
+        if branch != "repair/unknown-default" {
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
+        }
+        assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

@@ -19,6 +19,10 @@ so a failed run's force recovery keeps the same configuration as a clean init,
 including hooks, tasks and the enforce defaults for upkeep and the QA registry.
 Existing MCP roots and `mcpServers` fields must be JSON objects; arrays, null and
 scalars are refused without mutation or panic.
+The MCP phase keeps its leading refusal short enough for 80 columns; root and
+server-shape causes remain in the detailed error chain. The generic phase and
+top-level diagnostic both report failures; their shared duplication is tracked
+separately in cas-d258.
 
 ## Evidence plan
 

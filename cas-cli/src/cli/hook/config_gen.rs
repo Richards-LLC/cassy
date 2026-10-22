@@ -652,7 +652,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let existing_content = if mcp_json_path.exists() {
         Some(
             std::fs::read_to_string(&mcp_json_path)
-                .context("Cannot read existing .mcp.json; file left unchanged")?,
+                .context("Cannot read .mcp.json; file left unchanged")?,
         )
     } else {
         None
@@ -668,12 +668,14 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     // Validate before mutation: indexing a non-object can panic or replace null.
     let root = config
         .as_object_mut()
-        .context("Invalid JSON in .mcp.json: root must be an object; file left unchanged")?;
+        .context("root must be a JSON object")
+        .context("Invalid JSON in .mcp.json; file left unchanged")?;
     let servers = root
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .context("Invalid JSON in .mcp.json: mcpServers must be an object; file left unchanged")?;
+        .context("mcpServers must be a JSON object")
+        .context("Invalid JSON in .mcp.json; file left unchanged")?;
 
     // Add or update Cassy server config
     servers.insert(

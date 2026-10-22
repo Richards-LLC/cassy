@@ -1515,12 +1515,20 @@ or ownership refuses reuse; no existing ad-hoc directory is adopted.
 Publish durable proof outside that disposable home, in the task artifact root.
 
 `gc_report` includes managed review checkout status and flags unmanaged scratch
-root siblings of at least 1 GiB (apparent file bytes) as review-only.
-`gc_cleanup force=true dry_run=false` reclaims owned checkouts at least two hours
-old when the task is Closed/Cancelled or the exact dispatch is resolved. It
+root siblings of at least 1 GiB (apparent file bytes) as review-only. The
+unmanaged scan stops at that threshold and reports a lower bound, not a full
+recursive total.
+`gc_cleanup force=true dry_run=false` reclaims owned checkouts idle for at least
+two hours when the task is Closed/Cancelled or the exact dispatch is resolved.
+Successful checkout reuse refreshes `last_used_at`; older records without that
+field use creation time. It
 checks leases and native process evidence (open files, cwd, mappings and argv),
-rechecks terminal ownership, removes any Git worktree registration, then deletes
-the disposable checkout and its build output. Unknown/malformed ownership,
+rechecks terminal ownership, and retains any checkout with edited tracked files
+or untracked files, even if local Git configuration hides untracked status.
+Existing checkouts use non-force `git worktree remove`, which also refuses
+concurrent source edits; ignored build output is disposable. Force is permitted
+only to remove a registration whose checkout directory is already gone. It then
+deletes the disposable home. Unknown/malformed ownership,
 changed heads, another repository's registration, live or unverifiable users,
 and younger checkouts are retained. Force alone remains a preview for this tier.
 These rules make interrupted verifier/supervisor output collectable without

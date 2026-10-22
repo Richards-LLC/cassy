@@ -1498,9 +1498,52 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
     );
 }
 
+fn candidate_worktree(sandbox: &CasSandbox) -> std::path::PathBuf {
+    for args in [
+        vec!["init", "--quiet"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let mut git = Command::new("git");
+        sandbox.configure_command(&mut git);
+        let output = git.args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let worktree = sandbox.path().join("scratch-candidate");
+    let mut git = Command::new("git");
+    sandbox.configure_command(&mut git);
+    let output = git
+        .args(["worktree", "add", "--detach", "--quiet"])
+        .arg(&worktree)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    worktree
+}
+
 #[test]
-fn test_serve_repairs_m213_before_starting() {
+fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
     let sandbox = CasSandbox::new();
+    let worktree = candidate_worktree(&sandbox);
     let db_path = sandbox.cas_root().join("cas.db");
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1514,7 +1557,45 @@ fn test_serve_repairs_m213_before_starting() {
         .unwrap();
     }
 
-    let mut client = McpTestClient::spawn_capturing_stderr(&sandbox);
+    // The candidate must not upgrade a live store found through a worktree.
+    // CLAUDE_PROJECT_DIR identifies the worktree, not consent to mutate its parent.
+    let output = sandbox
+        .command()
+        .current_dir(&worktree)
+        .env("CLAUDE_PROJECT_DIR", &worktree)
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_DIR")
+        .arg("serve")
+        .output()
+        .unwrap();
+    let pending: i64 = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM cas_migrations WHERE id = 213",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending, 0,
+        "a candidate must leave the inherited store's migration ledger unchanged"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "unapproved migration must refuse startup: {stderr}"
+    );
+    assert!(
+        stderr.contains("CAS_ROOT") && stderr.contains("HOME"),
+        "refusal must explain isolation: {stderr}"
+    );
+
+    // Factory panes explicitly pin CAS_ROOT, so their normal schema repair survives.
+    let mut explicit = sandbox.command();
+    explicit
+        .current_dir(&worktree)
+        .env("CLAUDE_PROJECT_DIR", &worktree);
+    let mut client = McpTestClient::spawn_command_capturing_stderr(explicit);
     let response = client.initialize();
     assert!(
         response.error.is_none(),

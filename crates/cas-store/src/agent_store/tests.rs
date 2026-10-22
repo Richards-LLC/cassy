@@ -534,6 +534,7 @@ fn test_lease_renewal() {
     }
     store.update(&agent).unwrap();
     tasks.delete(&task.id).unwrap();
+    store.try_claim(&task.id, &agent.id, 60, None).unwrap();
     let before = store.get_lease(&task.id).unwrap().unwrap();
     store.heartbeat(&agent.id).unwrap();
     assert!(store.renew_lease(&task.id, &agent.id, 120).is_err());
@@ -693,12 +694,21 @@ fn test_heartbeat_renews_worktree_lease_past_original_duration() {
 /// — must not accidentally touch or extend another agent's lease.
 #[test]
 fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
-    let (_temp, store) = create_test_store();
+    let (temp, store) = create_test_store();
 
     let agent_a = Agent::new("agent-hb-a".to_string(), "A".to_string());
     let agent_b = Agent::new("agent-hb-b".to_string(), "B".to_string());
     store.register(&agent_a).unwrap();
     store.register(&agent_b).unwrap();
+
+    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+    tasks.init().unwrap();
+    for (id, assignee) in [("task-a", &agent_a.id), ("task-b", &agent_b.id)] {
+        let mut task = cas_types::Task::new(id.into(), "Running task".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some(assignee.clone());
+        tasks.add(&task).unwrap();
+    }
 
     store.try_claim("task-a", "agent-hb-a", 1, None).unwrap();
     store.try_claim("task-b", "agent-hb-b", 1, None).unwrap();
@@ -708,6 +718,7 @@ fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     store.heartbeat("agent-hb-a").unwrap();
 
+    assert_eq!(store.get_lease("task-a").unwrap().unwrap().renewal_count, 1);
     let b_after = store.get_lease("task-b").unwrap().unwrap();
     assert_eq!(
         b_after.expires_at, b_before.expires_at,

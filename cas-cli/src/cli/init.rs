@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use crossterm::{
     execute,
-    style::{Color, Print, SetForegroundColor},
+    style::{Attribute, Color, Print, SetAttribute, SetForegroundColor},
 };
 use tracing::{error, info, warn};
 
@@ -233,47 +233,16 @@ pub(crate) fn classify_init_dir(cwd: &Path, home: Option<&Path>) -> Option<NonPr
 }
 
 // ============================================================================
-// Colors (CRT aesthetic matching boot.rs)
+// Init styles: terminal-owned text, palette-safe semantic marks
 // ============================================================================
 
-mod colors {
-    use crossterm::style::Color;
-
-    // Standard ANSI colors keep the wordmark readable in terminal themes that
-    // remap the 16-color palette.
-    pub const WORDMARK: Color = Color::Cyan;
-
-    pub const CYAN: Color = Color::Rgb {
-        r: 0,
-        g: 200,
-        b: 255,
-    };
-    pub const GREEN: Color = Color::Rgb {
-        r: 80,
-        g: 250,
-        b: 120,
-    };
-    pub const ORANGE: Color = Color::Rgb {
-        r: 255,
-        g: 200,
-        b: 80,
-    };
-    pub const RED: Color = Color::Rgb {
-        r: 255,
-        g: 90,
-        b: 90,
-    };
-    pub const WHITE: Color = Color::White;
-    pub const GRAY: Color = Color::Rgb {
-        r: 120,
-        g: 120,
-        b: 130,
-    };
-    pub const DARK_GRAY: Color = Color::Rgb {
-        r: 70,
-        g: 70,
-        b: 75,
-    };
+#[derive(Clone, Copy)]
+enum InitStyle {
+    Text,
+    Heading,
+    SuccessMark,
+    WarningMark,
+    ErrorMark,
 }
 
 /// Cassy's compact six-row wordmark. The 49-cell widest row leaves room for
@@ -321,7 +290,7 @@ fn init_text_for_mode(text: &str, mode: OutputMode) -> std::borrow::Cow<'_, str>
 
 fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
     for line in cassy_wordmark_lines() {
-        print_colored(&format!("{indent}{line}\n"), colors::WORDMARK)?;
+        print_colored(&format!("{indent}{line}\n"), InitStyle::Heading)?;
     }
     Ok(())
 }
@@ -470,7 +439,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
         }
 
         println!();
-        print_colored(&format!("  ⚠  {}", kind.warning(&cwd)), colors::ORANGE)?;
+        print_colored(&format!("  ⚠  {}", kind.warning(&cwd)), InitStyle::Text)?;
         println!();
         if !interactive::confirm("  Initialize Cassy here anyway", false)? {
             println!("\n  Nothing was written. `cd` into your project and run `cas init` there.");
@@ -630,22 +599,22 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // cas-563f: a .cas without its store is not initialized yet (see execute_json).
     if cas_store_present(&cas_dir_path) && !args.force {
-        print_colored("", colors::WHITE)?;
-        print_colored("  ● ", colors::CYAN)?;
-        print_colored("Cassy already initialized at ", colors::WHITE)?;
-        print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
+        print_colored("", InitStyle::Text)?;
+        print_colored("  ● ", InitStyle::Text)?;
+        print_colored("Cassy already initialized at ", InitStyle::Text)?;
+        print_colored(&cas_dir_path.display().to_string(), InitStyle::Text)?;
         println!();
-        print_colored("  → ", colors::GRAY)?;
-        print_colored("Use ", colors::GRAY)?;
-        print_colored("--force", colors::WHITE)?;
-        print_colored(" to reinitialize\n\n", colors::GRAY)?;
+        print_colored("  → ", InitStyle::Text)?;
+        print_colored("Use ", InitStyle::Text)?;
+        print_colored("--force", InitStyle::Text)?;
+        print_colored(" to reinitialize\n\n", InitStyle::Text)?;
         return Ok(());
     }
 
     // Mini header
     println!();
     print_cassy_wordmark("  ")?;
-    print_colored("  Cassy init (using defaults)\n\n", colors::GRAY)?;
+    print_colored("  Cassy init (using defaults)\n\n", InitStyle::Text)?;
 
     let keep_config = keeps_existing_config(&cas_dir_path);
     let cas_dir = init_cas_dir(cwd)?;
@@ -698,8 +667,8 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     // Check if already initialized
     if cas_dir_path.exists() && !args.force {
         println!();
-        print_colored("  Cassy is already initialized at ", colors::WHITE)?;
-        print_colored(&cas_dir_path.display().to_string(), colors::CYAN)?;
+        print_colored("  Cassy is already initialized at ", InitStyle::Text)?;
+        print_colored(&cas_dir_path.display().to_string(), InitStyle::Text)?;
         println!("\n");
 
         let options = ["Reconfigure settings", "Keep existing and exit"];
@@ -743,54 +712,57 @@ fn print_welcome() -> anyhow::Result<()> {
     render_welcome(OutputMode::detect(), print_colored)
 }
 
-fn render_welcome(mode: OutputMode, mut write: impl FnMut(&str, Color) -> anyhow::Result<()>) -> anyhow::Result<()> {
-    write("\n", Color::Reset)?;
+fn render_welcome(
+    mode: OutputMode,
+    mut write: impl FnMut(&str, InitStyle) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    write("\n", InitStyle::Text)?;
     write(
         "  ╭──────────────────────────────────────────────────────╮\n",
-        colors::CYAN,
+        InitStyle::Text,
     )?;
-    write("  │", colors::CYAN)?;
+    write("  │", InitStyle::Text)?;
     write(
         "                                                      ",
-        colors::CYAN,
+        InitStyle::Text,
     )?;
-    write("│\n", colors::CYAN)?;
+    write("│\n", InitStyle::Text)?;
     for line in cassy_wordmark_lines_for_mode(mode) {
-        write("  │  ", colors::CYAN)?;
-        write(line, colors::WORDMARK)?;
+        write("  │  ", InitStyle::Text)?;
+        write(line, InitStyle::Heading)?;
         write(
             &" ".repeat(INIT_WORDMARK_WIDTH.saturating_sub(line.chars().count())),
-            colors::CYAN,
+            InitStyle::Text,
         )?;
-        write("│\n", colors::CYAN)?;
+        write("│\n", InitStyle::Text)?;
     }
-    write("  │", colors::CYAN)?;
+    write("  │", InitStyle::Text)?;
     write(
         "                                                      ",
-        colors::CYAN,
+        InitStyle::Text,
     )?;
-    write("│\n", colors::CYAN)?;
+    write("│\n", InitStyle::Text)?;
     write(
         "  ╰──────────────────────────────────────────────────────╯\n",
-        colors::CYAN,
+        InitStyle::Text,
     )?;
-    write("\n", Color::Reset)?;
-    write("  │ ", colors::GRAY)?;
+    write("\n", InitStyle::Text)?;
+    write("  │ ", InitStyle::Text)?;
     write(
         "Multi-agent coding factory with persistent memory and task coordination.\n",
-        colors::WHITE,
+        InitStyle::Text,
     )?;
-    write("\n", Color::Reset)?;
+    write("\n", InitStyle::Text)?;
     Ok(())
 }
 
 fn print_section_header(title: &str) -> anyhow::Result<()> {
     println!();
-    print_colored("  ● ", colors::CYAN)?;
-    print_colored(title, colors::WHITE)?;
+    print_colored("  ● ", InitStyle::Text)?;
+    print_colored(title, InitStyle::Heading)?;
     println!();
-    print_colored("  ", colors::GRAY)?;
-    print_colored(&"─".repeat(50), colors::DARK_GRAY)?;
+    print_colored("  ", InitStyle::Text)?;
+    print_colored(&"─".repeat(50), InitStyle::Text)?;
     println!();
     Ok(())
 }
@@ -874,50 +846,50 @@ fn confirm_and_apply(
     let gitignore_exists = cwd.join(".gitignore").exists();
 
     // Files to create
-    print_colored("  Create:\n", colors::WHITE)?;
+    print_colored("  Create:\n", InitStyle::Text)?;
 
     if !cas_exists {
-        print_file_item(".cas/", "Cassy data directory", colors::GREEN)?;
+        print_file_item(".cas/", "Cassy data directory", InitStyle::Text)?;
     }
-    print_file_item(".cas/config.toml", "Configuration", colors::GREEN)?;
+    print_file_item(".cas/config.toml", "Configuration", InitStyle::Text)?;
     if !gitignore_exists {
-        print_file_item(".gitignore", "Add .cas/ exclusion", colors::GREEN)?;
+        print_file_item(".gitignore", "Add .cas/ exclusion", InitStyle::Text)?;
     }
 
     if config.agents.claude {
         if !mcp_exists {
-            print_file_item(".mcp.json", "MCP server config", colors::GREEN)?;
+            print_file_item(".mcp.json", "MCP server config", InitStyle::Text)?;
         }
         if !settings_exists {
-            print_file_item(".claude/settings.json", "Claude Code hooks", colors::GREEN)?;
+            print_file_item(".claude/settings.json", "Claude Code hooks", InitStyle::Text)?;
         }
         if !skill_exists {
-            print_file_item(".claude/skills/cas/SKILL.md", "Cassy skill", colors::GREEN)?;
+            print_file_item(".claude/skills/cas/SKILL.md", "Cassy skill", InitStyle::Text)?;
         }
-        print_file_item(".claude/agents/", "Built-in agents", colors::GREEN)?;
-        print_file_item(".claude/commands/", "Built-in commands", colors::GREEN)?;
+        print_file_item(".claude/agents/", "Built-in agents", InitStyle::Text)?;
+        print_file_item(".claude/commands/", "Built-in commands", InitStyle::Text)?;
     }
 
     if config.agents.codex {
         if !codex_config_exists {
-            print_file_item(".codex/config.toml", "Codex MCP config", colors::GREEN)?;
+            print_file_item(".codex/config.toml", "Codex MCP config", InitStyle::Text)?;
         }
         if !codex_hooks_exists {
             print_file_item(
                 ".codex/hooks.json",
                 "Cassy hook (review with /hooks)",
-                colors::GREEN,
+                InitStyle::Text,
             )?;
         }
-        print_file_item(".codex/skills/", "Built-in skills", colors::GREEN)?;
+        print_file_item(".codex/skills/", "Built-in skills", InitStyle::Text)?;
     }
 
     if config.agents.grok {
         if !mcp_exists {
-            print_file_item(".mcp.json", "MCP server config (shared with Grok)", colors::GREEN)?;
+            print_file_item(".mcp.json", "MCP server config (shared with Grok)", InitStyle::Text)?;
         }
-        print_file_item(".grok/agents/", "Built-in agents", colors::GREEN)?;
-        print_file_item(".grok/skills/", "Built-in skills", colors::GREEN)?;
+        print_file_item(".grok/agents/", "Built-in agents", InitStyle::Text)?;
+        print_file_item(".grok/skills/", "Built-in skills", InitStyle::Text)?;
     }
 
     // Factory tooling files
@@ -927,16 +899,16 @@ fn confirm_and_apply(
 
     if has_factory_changes {
         println!();
-        print_colored("  Factory tooling:\n", colors::WHITE)?;
+        print_colored("  Factory tooling:\n", InitStyle::Text)?;
         if !env_template_exists {
             print_file_item(
                 ".env.worktree.template",
                 "Worktree env template",
-                colors::GREEN,
+                InitStyle::Text,
             )?;
         }
         if !boot_script_exists {
-            print_file_item("scripts/worktree-boot.sh", "Boot script", colors::GREEN)?;
+            print_file_item("scripts/worktree-boot.sh", "Boot script", InitStyle::Text)?;
         }
     }
 
@@ -948,35 +920,35 @@ fn confirm_and_apply(
         || gitignore_exists;
     if has_modifications {
         println!();
-        print_colored("  Modify:\n", colors::WHITE)?;
+        print_colored("  Modify:\n", InitStyle::Text)?;
 
         if gitignore_exists {
-            print_file_item(".gitignore", "Add .cas/ exclusion", colors::ORANGE)?;
+            print_file_item(".gitignore", "Add .cas/ exclusion", InitStyle::Text)?;
         }
 
         if config.agents.claude {
             if settings_exists {
-                print_file_item(".claude/settings.json", "Add Cassy hooks", colors::ORANGE)?;
+                print_file_item(".claude/settings.json", "Add Cassy hooks", InitStyle::Text)?;
             }
             if mcp_exists {
-                print_file_item(".mcp.json", "Add Cassy server", colors::ORANGE)?;
+                print_file_item(".mcp.json", "Add Cassy server", InitStyle::Text)?;
             }
             if claude_md_exists {
-                print_file_item("CLAUDE.md", "Add Cassy instructions", colors::ORANGE)?;
+                print_file_item("CLAUDE.md", "Add Cassy instructions", InitStyle::Text)?;
             } else {
-                print_file_item("CLAUDE.md", "Create with Cassy instructions", colors::GREEN)?;
+                print_file_item("CLAUDE.md", "Create with Cassy instructions", InitStyle::Text)?;
             }
         }
 
         if config.agents.codex {
             if codex_config_exists {
-                print_file_item(".codex/config.toml", "Add Cassy server", colors::ORANGE)?;
+                print_file_item(".codex/config.toml", "Add Cassy server", InitStyle::Text)?;
             }
             if codex_hooks_exists {
                 print_file_item(
                     ".codex/hooks.json",
                     "Install Cassy hook (review with /hooks)",
-                    colors::ORANGE,
+                    InitStyle::Text,
                 )?;
             }
         }
@@ -984,7 +956,7 @@ fn confirm_and_apply(
         // Only print .mcp.json's "Modify" row once — claude's clause above
         // already covers it when claude is also enabled.
         if config.agents.grok && mcp_exists && !config.agents.claude {
-            print_file_item(".mcp.json", "Add Cassy server (shared with Grok)", colors::ORANGE)?;
+            print_file_item(".mcp.json", "Add Cassy server (shared with Grok)", InitStyle::Text)?;
         }
     }
 
@@ -1001,13 +973,13 @@ fn confirm_and_apply(
     Ok(true)
 }
 
-fn print_file_item(path: &str, description: &str, color: Color) -> anyhow::Result<()> {
-    print_colored("    ", colors::WHITE)?;
-    print_colored(path, color)?;
+fn print_file_item(path: &str, description: &str, style: InitStyle) -> anyhow::Result<()> {
+    print_colored("    ", InitStyle::Text)?;
+    print_colored(path, style)?;
     // Pad to align descriptions
     let padding = 32_usize.saturating_sub(path.len());
-    print_colored(&" ".repeat(padding), colors::WHITE)?;
-    print_colored(description, colors::GRAY)?;
+    print_colored(&" ".repeat(padding), InitStyle::Text)?;
+    print_colored(description, InitStyle::Text)?;
     println!();
     Ok(())
 }
@@ -1130,19 +1102,19 @@ fn apply_configuration(
         Err(e) => {
             // Don't fail the entire init if integrations explode — they're
             // additive. Surface the error and continue.
-            print_colored("  ! ", colors::ORANGE)?;
+            print_colored("  ! ", InitStyle::WarningMark)?;
             print_colored(
                 &format!("Integrations failed: {e:#}\n"),
-                colors::WHITE,
+                InitStyle::Text,
             )?;
         }
     }
 
     // Final success message
     println!();
-    print_colored("  ✓ ", colors::GREEN)?;
-    print_colored("Cassy initialized at ", colors::WHITE)?;
-    print_colored(&cas_dir.display().to_string(), colors::CYAN)?;
+    print_colored("  ✓ ", InitStyle::SuccessMark)?;
+    print_colored("Cassy initialized at ", InitStyle::Text)?;
+    print_colored(&cas_dir.display().to_string(), InitStyle::Text)?;
     println!("\n");
 
     Ok(())
@@ -1158,9 +1130,9 @@ where
 
     // Show spinner
     let frames = spinner_frames_for_mode(OutputMode::detect());
-    print_colored("  ", colors::WHITE)?;
-    print_colored(&format!("{}", frames[0]), colors::ORANGE)?;
-    print_colored(&format!(" {label}..."), colors::WHITE)?;
+    print_colored("  ", InitStyle::Text)?;
+    print_colored(&format!("{}", frames[0]), InitStyle::WarningMark)?;
+    print_colored(&format!(" {label}..."), InitStyle::Text)?;
     stdout.flush()?;
 
     if animate {
@@ -1168,12 +1140,12 @@ where
         for i in 0..8 {
             thread::sleep(Duration::from_millis(50));
             print!("\r");
-            print_colored("  ", colors::WHITE)?;
+            print_colored("  ", InitStyle::Text)?;
             print_colored(
                 &format!("{}", frames[i % frames.len()]),
-                colors::ORANGE,
+                InitStyle::WarningMark,
             )?;
-            print_colored(&format!(" {label}..."), colors::WHITE)?;
+            print_colored(&format!(" {label}..."), InitStyle::Text)?;
             stdout.flush()?;
         }
     }
@@ -1183,12 +1155,12 @@ where
         Ok(result) => {
             // Show success
             print!("\r");
-            print_colored("  ✓ ", colors::GREEN)?;
-            print_colored(label, colors::WHITE)?;
+            print_colored("  ✓ ", InitStyle::SuccessMark)?;
+            print_colored(label, InitStyle::Text)?;
             // Pad to clear any remnants
             let padding = 40_usize.saturating_sub(label.len());
-            print_colored(&" ".repeat(padding), colors::WHITE)?;
-            print_colored(&result, colors::GRAY)?;
+            print_colored(&" ".repeat(padding), InitStyle::Text)?;
+            print_colored(&result, InitStyle::Text)?;
             println!();
             info!(
                 phase = label,
@@ -1201,10 +1173,10 @@ where
         Err(e) => {
             // Show failure
             print!("\r");
-            print_colored("  ✗ ", colors::RED)?;
-            print_colored(label, colors::WHITE)?;
-            print_colored(" — ", colors::GRAY)?;
-            print_colored(&format!("{e}"), colors::RED)?;
+            print_colored("  ✗ ", InitStyle::ErrorMark)?;
+            print_colored(label, InitStyle::Text)?;
+            print_colored(" — ", InitStyle::Text)?;
+            print_colored(&format!("{e}"), InitStyle::Text)?;
             println!();
             error!(
                 phase = label,
@@ -1249,7 +1221,12 @@ fn render_quick_start(out: &mut impl Write, mode: OutputMode) -> std::io::Result
 
     let table = quick_start_table_for_mode(mode);
     let width = crossterm::terminal::size().map(|(width, _)| width).unwrap_or(80);
-    let mut fmt = Formatter::new(out, mode, ActiveTheme::default(), width);
+    // Init has no selected terminal theme. Let its text and borders inherit
+    // the terminal foreground, retaining the table's bold headings.
+    let mut theme = ActiveTheme::default();
+    theme.palette.text_primary = ratatui::style::Color::Reset;
+    theme.palette.text_muted = ratatui::style::Color::Reset;
+    let mut fmt = Formatter::new(out, mode, theme, width);
     fmt.newline()?;
     table.render(&mut fmt)?;
     fmt.newline()
@@ -1296,24 +1273,24 @@ fn print_next_steps(cwd: &Path) {
 }
 
 fn render_next_steps(
-    mut write: impl FnMut(&str, Color) -> anyhow::Result<()>,
+    mut write: impl FnMut(&str, InitStyle) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use ratatui::text::Span;
 
     let title = "─ Next steps ";
     let rows = [
-        ("", colors::WHITE),
+        ("", InitStyle::Text),
         (
             "  Commit Cassy config so factory workers can access it:",
-            colors::WHITE,
+            InitStyle::Text,
         ),
-        ("", colors::WHITE),
+        ("", InitStyle::Text),
         (
             "    git add .claude/ CLAUDE.md .mcp.json .gitignore",
-            colors::GREEN,
+            InitStyle::Text,
         ),
-        ("    git commit -m \"Configure Cassy\"", colors::GREEN),
-        ("", colors::WHITE),
+        ("    git commit -m \"Configure Cassy\"", InitStyle::Text),
+        ("", InitStyle::Text),
     ];
     let inner_width = rows
         .iter()
@@ -1327,10 +1304,10 @@ fn render_next_steps(
             "  ┌{title}{}┐\n",
             "─".repeat(inner_width - Span::raw(title).width())
         ),
-        colors::CYAN,
+        InitStyle::Text,
     )?;
     for (text, color) in rows {
-        write("  │", colors::CYAN)?;
+        write("  │", InitStyle::Text)?;
         write(
             &format!(
                 "{text}{}",
@@ -1338,9 +1315,9 @@ fn render_next_steps(
             ),
             color,
         )?;
-        write("│\n", colors::CYAN)?;
+        write("│\n", InitStyle::Text)?;
     }
-    write(&format!("  └{}┘\n", "─".repeat(inner_width)), colors::CYAN)?;
+    write(&format!("  └{}┘\n", "─".repeat(inner_width)), InitStyle::Text)?;
     Ok(())
 }
 
@@ -1359,14 +1336,14 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 // Helper functions
 // ============================================================================
 
-fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
-    write_colored(&mut stdout(), text, color, OutputMode::detect())
+fn print_colored(text: &str, style: InitStyle) -> anyhow::Result<()> {
+    write_colored(&mut stdout(), text, style, OutputMode::detect())
 }
 
 fn write_colored(
     writer: &mut impl Write,
     text: &str,
-    color: Color,
+    style: InitStyle,
     mode: OutputMode,
 ) -> anyhow::Result<()> {
     let text = init_text_for_mode(text, mode);
@@ -1374,7 +1351,39 @@ fn write_colored(
         write!(writer, "{text}")?;
         return Ok(());
     }
-    execute!(writer, SetForegroundColor(color), Print(text.as_ref()))?;
+    // ANSI color names can also map to a light color on a light background.
+    // Only one-cell UTF-8 marks use fixed mid-tones (>=3:1 on all four
+    // terminal-qa palettes); ASCII labels such as [OK] stay default text.
+    let color = if super::supports_styled_glyphs(mode) {
+        match style {
+            InitStyle::SuccessMark => Color::Rgb {
+                r: 40,
+                g: 145,
+                b: 75,
+            },
+            InitStyle::WarningMark => Color::Rgb {
+                r: 170,
+                g: 130,
+                b: 0,
+            },
+            InitStyle::ErrorMark => Color::Rgb {
+                r: 205,
+                g: 85,
+                b: 85,
+            },
+            InitStyle::Text | InitStyle::Heading => Color::Reset,
+        }
+    } else {
+        Color::Reset
+    };
+    execute!(writer, SetForegroundColor(color))?;
+    if matches!(style, InitStyle::Heading) {
+        execute!(writer, SetAttribute(Attribute::Bold))?;
+    }
+    execute!(writer, Print(text.as_ref()))?;
+    if matches!(style, InitStyle::Heading) {
+        execute!(writer, SetAttribute(Attribute::NormalIntensity))?;
+    }
     execute!(writer, SetForegroundColor(Color::Reset))?;
     Ok(())
 }

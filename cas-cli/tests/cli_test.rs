@@ -390,6 +390,12 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
     write("pages/base.ts", "export {};\n");
     let baseline = commit();
     write("pages/new.ts", "export {};\n");
+    // Integration has seeded debt and a broken reference; the checkout is curated.
+    write(
+        "docs/qa/journeys.yaml",
+        &registry.replace("    status: live", "    status: live\n    seeded: true")
+            .replace("invariants: [FLOW]", "invariants: [MISSING]"),
+    );
     let integrated = commit();
     git(&["update-ref", "refs/remotes/origin/main", &integrated]);
     git(&["reset", "--hard", &baseline]);
@@ -407,7 +413,20 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
     let report = status();
     let measured = format!("origin/main@{integrated}");
     assert_eq!(report["upkeep"]["measured_ref"], measured, "{report}");
-    for artifact in ["codemap", "product_overview", "registry"] {
+    assert_eq!(report["source"], "working_tree", "{report}");
+    assert_eq!(report["differs_from_measured_ref"], true, "{report}");
+    assert_eq!(report["seeded"], 0, "{report}");
+    assert_eq!(report["debt_count"], 0, "{report}");
+    assert_eq!(report["problems"], serde_json::json!([]), "{report}");
+    assert_eq!(report["upkeep"]["registry"]["drift_count"], 2, "{report}");
+    assert_eq!(report["upkeep"]["registry"]["debt_count"], 1, "{report}");
+    let checked = cas_cmd(root).current_dir(root)
+        .args(["qa", "journeys", "--check", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+    assert_eq!(report["problems"], checked["problems"]);
+    assert_eq!(report["debt_count"], checked["debt_summary"]["total"]);
+    for artifact in ["codemap", "product_overview"] {
         assert_eq!(
             report["upkeep"][artifact]["drift_count"], 1,
             "{artifact}: {report}"
@@ -429,6 +448,13 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             .stdout
             .clone();
         let human = String::from_utf8(human).unwrap();
+        assert!(human.starts_with("READY: 0 problem(s), 0 debt item(s) (working tree)\n"), "{human}");
+        assert!(human.contains("Working tree:\n  Journeys: 1  Added: 0\n  Seeded: 0  Unowned surfaces: 0"), "{human}");
+        assert!(human.contains("Working tree differs from measured ref."), "{human}");
+        let (_, integration) = human.split_once("Integration upkeep:\n").unwrap();
+        assert!(integration.contains("journey registry: 2 validation/ownership issue(s)"), "{human}");
+        assert!(integration.contains("1 validation problem(s), 1 unowned surface file(s)"), "{human}");
+        assert!(integration.contains("Curation debt: 1"), "{human}");
         let line = human.lines().find(|line| line.starts_with("Measured ref: ")).unwrap();
         assert!(line.chars().count() <= 80, "{human}");
         if branch == "main" {

@@ -311,8 +311,6 @@ fn config(cas_root: &Path) -> Result<ReleaseConfig> {
         .context("No qa.release.adapter configured; set qa.release.adapter first")
 }
 
-/// The run's hand-walk debt: manual minutes per journey with each journey's
-/// automation owner (an unreadable registry leaves every owner unknown).
 /// What `--json` prints: the run's fields at top level plus `hand_walk`,
 /// the debt summary the text status shows.
 pub fn status_json(cas_root: &Path, run: &Run) -> Result<Value> {
@@ -321,6 +319,8 @@ pub fn status_json(cas_root: &Path, run: &Run) -> Result<Value> {
     Ok(value)
 }
 
+/// The run's hand-walk debt: manual minutes per journey with each journey's
+/// automation owner (an unreadable registry leaves every owner unknown).
 pub fn hand_walk(cas_root: &Path, run: &Run) -> pack::HandWalk {
     let registry = registry(cas_root).ok().map(|(registry, _)| registry);
     pack::HandWalk::measure(&run.rows, registry.as_ref())
@@ -1193,6 +1193,10 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         }
         pack.seal(&dir).map_err(anyhow::Error::msg)?;
         run.generation += 1;
+        // A reseal is a record's, not the TTL's: no retry hint applies now.
+        if run.generation > 1 {
+            run.ttl_sealed = false;
+        }
         run.state = State::Sealed;
         run.gate = Some(pack.gate.clone());
         run.note(format!("SEAL generation {}: {:?}", run.generation, pack.gate.verdict));

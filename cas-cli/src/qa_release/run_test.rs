@@ -259,6 +259,7 @@ fn run_preflight_refusals() {
     assert!(refusal.contains("was sealed by the TTL; retry the record with --sha"), "{refusal}");
     let resealed = run::record(&gate.cas, Some(&gate.sha), &record).unwrap();
     assert_eq!(resealed.generation, 2);
+    assert!(!resealed.ttl_sealed, "a reseal clears the TTL retry hint");
     assert_eq!(resealed.row("support").unwrap().verdict.word(), "PASS");
 
     // A corrupt run file, or one naming another SHA, is reported, never sliced.
@@ -272,6 +273,8 @@ fn run_preflight_refusals() {
     assert!(run::Freeze { sha: "abc".into(), until }.refusal("staging").contains("for abc holds"));
     let wide = format!("a{}", "é".repeat(12));
     assert_eq!(short(&wide), format!("a{}", "é".repeat(11)), "cuts on a char boundary");
+    let push = coverage::PrCoverage { pr: None, commit: wide.clone(), journeys: vec![], rows: vec![], manual_row: None };
+    assert_eq!(push.subject(), format!("push a{}", "é".repeat(6)));
     assert!(crate::config::Config::default().set("qa.release.gate_env", "stag ing").is_err());
 
     let path = gate.cas.join("config.toml");

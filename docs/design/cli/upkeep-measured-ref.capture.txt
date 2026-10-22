@@ -1,0 +1,19 @@
+status at 80 columns
+DRIFT: 1 journey(s), 0 added
+Measured ref: origin/epic/integration-up...gration-upkeep-release-suffix@38a9ade
+CODEMAP: 1 structural change(s)
+PRODUCT_OVERVIEW: 1 relevant change(s)
+journey registry: 1 registry issue(s)
+  Curation debt: 0 (separate from drift)
+Full ref: cas qa journeys --status --json
+Next: cas qa journeys --check
+Seeded: 0  Unowned surfaces: 0
+Registry: docs/qa/journeys.yaml
+
+warning at 80 columns
+✓ Set upkeep.codemap = enforce
+  was: observe
+WARNING: CODEMAP drift: 1 structural change(s)
+Measured ref: origin/epic/integration-up...gration-upkeep-release-suffix@5df1c05
+Review: cas qa journeys --status
+Full ref: cas qa journeys --status --json

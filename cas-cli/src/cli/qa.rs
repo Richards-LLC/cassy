@@ -16,10 +16,28 @@ use crate::hooks::handlers::handlers_events::docs_freshness::{Measurement, Upkee
 
 pub(crate) fn measured_ref_line(reference: &str) -> String {
     let prefix = "Measured ref: ";
-    format!(
-        "{prefix}{}",
-        crate::ui::widgets::truncate(reference, 80 - prefix.len())
-    )
+    let room = 80 - prefix.len();
+    if reference.len() <= room {
+        return format!("{prefix}{reference}");
+    }
+    let Some((branch, sha)) = reference.rsplit_once('@') else {
+        return format!("{prefix}{}", crate::ui::widgets::truncate(reference, room));
+    };
+    let sha = if sha == "unavailable" { sha } else { sha.get(..7).unwrap_or(sha) };
+    let branch_room = room.saturating_sub(sha.len() + 1);
+    let branch = if branch.len() <= branch_room {
+        branch.to_owned()
+    } else {
+        // Keep both branch ends and the measured commit; ASCII dots also work
+        // in C locale. Byte budgets conservatively fit multibyte ref names.
+        let tail = branch
+            .char_indices()
+            .find(|(index, _)| branch.len() - index <= branch_room / 2)
+            .map(|(index, _)| &branch[index..])
+            .unwrap_or_default();
+        format!("{}{tail}", crate::ui::widgets::truncate(branch, branch_room - tail.len()))
+    };
+    format!("{prefix}{branch}@{sha}")
 }
 
 #[derive(Serialize)]

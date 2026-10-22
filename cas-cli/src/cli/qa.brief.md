@@ -44,6 +44,41 @@ the delivered commit.
 
 Scored by true-otter-3 on 2026-10-21; all floors hold.
 
+## Measured ref follow-ups (cas-1db78)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Upkeep status still leads with its verdict, then identifies the measured integration ref and commit. |
+| Scannable | An over-wide branch keeps both branch ends and its measured `@sha7`, with the middle elided within 80 columns. |
+| Readable | An enforce advisory sends the operator to plain `cas qa journeys --status`; the full-ref escape remains `--status --json`. |
+| Machine output | Status and config-save JSON preserve the complete measured ref and existing typed drift fields in one document. |
+| Omitted | The unpinned live-store config fallback is documented in source; no new status fields or config behavior are added. |
+
+### Follow-up critique
+
+`terminal-qa: PASS cas-1db78-status · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+`terminal-qa: PASS cas-1db78-warning · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+Supervisor receipt #543393 binds candidate
+`08947dab060787ace9381761fac242cfd9a03863`,
+`cas 3.72.0 (08947da 2026-10-22)`, to both native terminal surfaces.
+The real Git/config audit runs also exit zero and retain full measured refs in
+JSON. Captures live in task cas-1db78 `terminal-status/` and `terminal-warning/`;
+the gate uses `--json-flag --json --escape-flag --json`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Status leads with DRIFT and its measured commit; config save names the changed gate before the advisory. |
+| Fit | 5 | Both branch ends and @sha7 survive the 80-column measured row; complete refs remain in JSON. |
+| Craft | 4 | Review points to the readable status command; a separate Full ref command names the JSON escape. |
+| Theme safety | 5 | Both surfaces pass four palettes, NO_COLOR, pipe and C locale with ASCII middle dots. |
+| Machine contract | 5 | Status and saved-config JSON preserve full measured refs and existing typed drift fields. |
+
+Scored by young-otter-20 on 2026-10-22 against supervisor captures and audits.
+The fallback comment documents the existing local configuration behavior;
+measurement and enforcement semantics are unchanged.
+
 ## Upkeep critique (cas-a77e)
 
 terminal-qa: PASS qa-upkeep-status · 12 runs · 0 fail · 0 warn · 0 allowed

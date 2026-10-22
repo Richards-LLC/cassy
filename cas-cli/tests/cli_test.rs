@@ -390,19 +390,33 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             "{artifact}: {report}"
         );
     }
-    let human = cas_cmd(root)
-        .current_dir(root)
-        .args(["qa", "journeys", "--status"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert!(
-        String::from_utf8(human)
-            .unwrap()
-            .contains(&format!("Measured ref: {measured}"))
-    );
+    let long_branch = format!("epic/{}release-suffix", "measured-integration-reference-".repeat(4));
+    for branch in ["main", long_branch.as_str()] {
+        git(&["update-ref", &format!("refs/remotes/origin/{branch}"), &integrated]);
+        let config_path = root.join(".cas/config.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(&config_path, config.replace("epic_base_branch = 'main'", &format!("epic_base_branch = '{branch}'"))).unwrap();
+        let human = cas_cmd(root)
+            .current_dir(root)
+            .env("COLUMNS", "80")
+            .args(["qa", "journeys", "--status"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let human = String::from_utf8(human).unwrap();
+        let line = human.lines().find(|line| line.starts_with("Measured ref: ")).unwrap();
+        assert!(line.chars().count() <= 80, "{human}");
+        if branch == "main" {
+            assert_eq!(line, format!("Measured ref: {measured}"));
+        } else {
+            assert!(line.ends_with(&format!("@{}", &integrated[..7])), "measured SHA lost: {human}");
+            assert!(line.contains("origin/epic/") && line.contains("release-suffix@"), "branch ends lost: {human}");
+            assert!(human.contains("Full ref: cas qa journeys --status --json"), "{human}");
+        }
+        std::fs::write(config_path, config).unwrap();
+    }
     for (index, key) in [
         "upkeep.codemap",
         "upkeep.product_overview",
@@ -417,7 +431,8 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
                 .args(["config", "set", key, "enforce"])
                 .assert()
                 .success()
-                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"));
+                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"))
+                .stdout(predicate::str::contains("Review: cas qa journeys --status\n"));
         } else {
             let output = cas_cmd(root)
                 .current_dir(root)

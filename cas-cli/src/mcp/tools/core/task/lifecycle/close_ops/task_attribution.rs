@@ -3480,8 +3480,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn receipt_upper_boundary_excludes_later_sibling_commit() {
+    #[tokio::test]
+    async fn receipt_upper_boundary_excludes_later_sibling_commit() {
+        use crate::mcp::CasService;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = fixture();
         let p = dir.path();
         commit(p, "first.md", "first\n", "first part");
@@ -3492,6 +3495,59 @@ mod tests {
             stat.contains("first.md") && stat.contains("second.md") && !stat.contains("sibling.rs"),
             "{stat}"
         );
+
+        // cas-7b88: close a parked delivery after its worker starts another
+        // task. The report must use the implicit parked receipt, just as the
+        // close gates do, rather than the unrelated checkout's current HEAD.
+        git(p, &["reset", "--hard", &receipt]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-m", "merge delivered task", "factory/worker"]);
+        git(p, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(p, &["update-ref", "refs/remotes/origin/factory/worker", &receipt]);
+        std::fs::write(p.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let root = crate::store::init_cas_dir(p).unwrap();
+        std::fs::write(root.join("config.toml"), "[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+        env.set("CAS_ROOT", &root);
+        let wt = root.join("worktrees/worker");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(p, &["worktree", "add", "-q", "-b", "factory/worker-cas-next", wt.to_str().unwrap(), "main"]);
+        let next_tip = commit(&wt, "next.md", "unrelated work\n", "follow-up on another task");
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-taskb".into(), "Delivered task".into());
+        task.created_at = window().task_floor;
+        task.depth = cas_types::TaskDepth::Light;
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.add(&task).unwrap();
+        let mut next = Task::new("cas-next".into(), "Active next task".into());
+        next.status = TaskStatus::InProgress;
+        next.assignee = Some("worker".into());
+        next.deliverables.factory_branch_anchor = Some(next_tip.clone());
+        next.deliverables.parked_branch = Some("factory/worker-cas-next".into());
+        store.add(&next).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "worker".into(), "worker".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("worker".into());
+        let service = CasService::new(core, None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "delivery already merged",
+        })).unwrap();
+        let result = service.task(Parameters(request)).await.unwrap();
+        let text = result.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Closed task:"), "{text}");
+        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
+        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);
     }
 
     #[test]

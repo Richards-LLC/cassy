@@ -245,7 +245,7 @@ pub(crate) fn save_editor_changes(
             .push((key.clone(), true));
     }
 
-    let edited_document = toml_edit::Document::parse(toml::to_string(edited)?)?;
+    let edited_document = toml_edit::Document::parse(toml::to_string(edited)?)?.into_mut();
     for (config_root, mut changes) in changes_by_root {
         changes.sort_by(|left, right| left.0.cmp(&right.0));
         let fallback = Config::load(&config_root)?;
@@ -259,7 +259,7 @@ pub(crate) fn save_editor_changes(
 fn persist_editor_changes_for_root(
     config_root: &Path,
     fallback: &Config,
-    edited_document: &toml_edit::Document,
+    edited_document: &toml_edit::DocumentMut,
     changes: &[(String, bool)],
 ) -> anyhow::Result<()> {
     let _lock = crate::config::lock_project_config(config_root)?;

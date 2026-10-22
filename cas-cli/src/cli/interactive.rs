@@ -2,6 +2,7 @@
 
 use std::io::{self, BufRead, Write};
 
+use crate::ui::components::OutputMode;
 use crossterm::event::KeyModifiers;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -209,6 +210,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     let mut stdout = io::stdout();
     let mut selected: usize = 0;
     let cols = ColumnWidths::compute(items);
+    let mode = OutputMode::detect();
 
     // Reserve vertical space so the terminal scrolls enough for our content.
     let total_lines = items.len() + 3; // title + blank + items + help
@@ -223,7 +225,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     enable_raw_mode()?;
     execute!(stdout, Hide)?;
 
-    render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+    render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
 
     let result = loop {
         if !event::poll(std::time::Duration::from_millis(50))? {
@@ -256,7 +258,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
                 KeyCode::Esc | KeyCode::Char('q') => break None,
                 _ => continue,
             }
-            render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+            render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
         }
     };
 
@@ -273,13 +275,29 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     }
     execute!(stdout, MoveTo(0, origin_row))?;
 
-    // Completed-form summary line
-    match result {
-        Some(idx) => {
+    render_completed(
+        &mut stdout,
+        title,
+        result.map(|idx| items[idx].label.as_str()),
+        mode,
+    )?;
+    Ok(result)
+}
+
+fn render_completed(
+    stdout: &mut impl Write,
+    title: &str,
+    selected: Option<&str>,
+    mode: OutputMode,
+) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
+    // The same summary renderer is used after acceptance and cancellation.
+    match selected {
+        Some(label) => {
             execute!(
                 stdout,
                 SetForegroundColor(Color::Green),
-                Print("  ✓ "),
+                Print(if styled_glyphs { "  ✓ " } else { "  + " }),
                 ResetColor,
                 SetAttribute(Attribute::Bold),
                 Print(title),
@@ -287,7 +305,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
                 SetForegroundColor(Color::DarkGrey),
                 Print(": "),
                 ResetColor,
-                Print(&items[idx].label),
+                Print(label),
                 Print("\n"),
             )?;
         }
@@ -295,7 +313,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
             execute!(
                 stdout,
                 SetForegroundColor(Color::DarkGrey),
-                Print("  ✗ "),
+                Print(if styled_glyphs { "  ✗ " } else { "  x " }),
                 Print(title),
                 Print(": cancelled"),
                 ResetColor,
@@ -303,8 +321,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
             )?;
         }
     }
-
-    Ok(result)
+    Ok(())
 }
 
 /// Pad `s` with spaces to `width`.
@@ -317,13 +334,15 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 fn render_picker(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     title: &str,
     items: &[PickerItem],
     selected: usize,
     origin_row: u16,
     cols: &ColumnWidths,
+    mode: OutputMode,
 ) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
     let mut row = origin_row;
 
     // Title
@@ -353,7 +372,7 @@ fn render_picker(
                 stdout,
                 SetForegroundColor(Color::Magenta),
                 SetAttribute(Attribute::Bold),
-                Print("  ❯ "),
+                Print(if styled_glyphs { "  ❯ " } else { "  > " }),
                 SetAttribute(Attribute::Reset),
                 SetAttribute(Attribute::Bold),
                 Print(&label_padded),
@@ -394,7 +413,11 @@ fn render_picker(
         MoveTo(0, row),
         Clear(ClearType::CurrentLine),
         SetForegroundColor(Color::DarkGrey),
-        Print("  ↑/↓ navigate • enter select • q cancel"),
+        Print(if styled_glyphs {
+            "  ↑/↓ navigate • enter select • q cancel"
+        } else {
+            "  up/down navigate | enter select | q cancel"
+        }),
         ResetColor,
     )?;
 
@@ -409,6 +432,63 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    /// pin: styled UTF-8 picker output stays identical; C/plain decorations
+    /// must be ASCII on the same actual row/help/completion renderers.
+    #[test]
+    fn picker_decorations_follow_locale_cas_ba0e() {
+        use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
+        use crate::ui::components::OutputMode;
+        use crossterm::style::Color;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let items = vec![
+            PickerItem {
+                label: "Alpha".into(),
+                tags: vec![PickerTag {
+                    text: "ready".into(),
+                    color: Color::Green,
+                }],
+            },
+            PickerItem {
+                label: "Beta".into(),
+                tags: vec![],
+            },
+        ];
+        let cols = ColumnWidths::compute(&items);
+        let utf8_snapshot: String = serde_json::from_str(include_str!(
+            "../../../docs/design/cli/interactive-picker.utf8.json"
+        ))
+        .unwrap();
+        for locale in ["C.UTF-8", "C"] {
+            env.set("LC_ALL", locale);
+            for mode in [OutputMode::Styled, OutputMode::Plain] {
+                let mut output = Vec::new();
+                render_picker(&mut output, "Destination", &items, 0, 0, &cols, mode).unwrap();
+                render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
+                render_completed(&mut output, "Destination", None, mode).unwrap();
+                let text = String::from_utf8(output).unwrap();
+                if locale == "C.UTF-8" && mode == OutputMode::Styled {
+                    assert_eq!(text, utf8_snapshot, "styled UTF-8 bytes must not change");
+                } else {
+                    assert!(
+                        text.is_ascii(),
+                        "non-ASCII decorations for {locale}/{mode:?}: {text:?}"
+                    );
+                    for expected in [
+                        "  > ",
+                        "  + ",
+                        "  x ",
+                        "  up/down navigate | enter select | q cancel",
+                    ] {
+                        assert!(
+                            text.contains(expected),
+                            "missing {expected:?} for {locale}/{mode:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// EOF on stdin must NOT cause `select` to loop forever (cas-bf06).
     /// Prior to this fix, a closed stdin spun at 100% CPU writing

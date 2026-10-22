@@ -945,7 +945,9 @@ async fn cas_cfe6_start_repairs_or_honestly_reports_a_failed_claim_renewal() {
         let restart = machine(&cloud.url, PROJECT, "restart-worker");
         let peer = machine(&cloud.url, PROJECT, "peer-worker");
         let task = "cas-renew-gap";
-        for m in [&alpha, &restart] { m.put_task(task, TaskType::Task); }
+        for m in [&alpha, &restart] {
+            m.put_task(task, TaskType::Task);
+        }
         cloud.live(&peer, "peer-worker");
         start(&alpha.core, task, false).await.unwrap();
         let before = cloud.active_lock(task).unwrap().1;
@@ -954,32 +956,53 @@ async fn cas_cfe6_start_repairs_or_honestly_reports_a_failed_claim_renewal() {
             if outcome == "unavailable" {
                 state.fail_renew = true;
             } else {
-                state.change_before_renew = Some((outcome == "peer").then(|| peer.agent_id.clone()));
+                state.change_before_renew =
+                    Some((outcome == "peer").then(|| peer.agent_id.clone()));
             }
         }
         let result = start(&restart.core, task, false).await;
-        let local = open_agent_store(&restart.cas_dir).unwrap().get_lease(task).unwrap();
+        let local = open_agent_store(&restart.cas_dir)
+            .unwrap()
+            .get_lease(task)
+            .unwrap();
         match outcome {
             "released" => {
                 let started = result.expect("restart repairs its Cloud claim before success");
-                let (_, lock) = cloud.active_lock(task).expect("the restarted claim exists immediately");
+                let (_, lock) = cloud
+                    .active_lock(task)
+                    .expect("the restarted claim exists immediately");
                 assert_eq!(lock.agent_id, restart.agent_id, "{started}");
-                assert!(lock.epoch > before.epoch, "a fresh claim replaced the released snapshot");
+                assert!(
+                    lock.epoch > before.epoch,
+                    "a fresh claim replaced the released snapshot"
+                );
                 assert!(local.is_some(), "{started}");
             }
             "peer" => {
                 let error = result.expect_err("a peer winning the renewal gap refuses the start");
                 assert!(error.contains("peer-worker"), "{error}");
-                assert!(local.is_none(), "a refused restart publishes no local lease");
+                assert!(
+                    local.is_none(),
+                    "a refused restart publishes no local lease"
+                );
                 assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
             }
             _ => {
                 let started = result.expect("unavailable Cloud still permits a local lease");
                 assert!(started.to_lowercase().contains("unreachable"), "{started}");
                 assert!(local.is_some());
-                let renews = cloud.state.lock().unwrap().requests.iter()
-                    .filter(|r| r.ends_with("/renew")).count();
-                assert!(renews <= 3, "repair is bounded (including the initial start): {renews}");
+                let renews = cloud
+                    .state
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .filter(|r| r.ends_with("/renew"))
+                    .count();
+                assert!(
+                    renews <= 3,
+                    "repair is bounded (including the initial start): {renews}"
+                );
             }
         }
     }
@@ -1008,8 +1031,14 @@ async fn cas_cfe6_local_transfer_classifies_the_current_cloud_holder() {
         }
         let before = cloud.active_lock(task);
         let claims = PeerClaims::for_project(&alpha.cas_dir).unwrap();
-        let answer = claims.take_from_local(task, ClaimKind::Task, &previous.agent_id,
-            &alpha.agent_id, "new-worker", 600);
+        let answer = claims.take_from_local(
+            task,
+            ClaimKind::Task,
+            &previous.agent_id,
+            &alpha.agent_id,
+            "new-worker",
+            600,
+        );
         if holder == "peer" {
             assert!(matches!(answer, Acquire::PeerHolds(_)), "{answer:?}");
             assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
@@ -1019,9 +1048,20 @@ async fn cas_cfe6_local_transfer_classifies_the_current_cloud_holder() {
             assert_eq!(after.agent_id, alpha.agent_id);
             if holder == "self" {
                 let before = before.unwrap().1;
-                assert_eq!((after.epoch, after.renewal_count), (before.epoch, before.renewal_count));
-                assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")),
-                    "a transfer must not release its winner's own claim");
+                assert_eq!(
+                    (after.epoch, after.renewal_count),
+                    (before.epoch, before.renewal_count)
+                );
+                assert!(
+                    !cloud
+                        .state
+                        .lock()
+                        .unwrap()
+                        .requests
+                        .iter()
+                        .any(|r| r.ends_with("/release")),
+                    "a transfer must not release its winner's own claim"
+                );
             }
         }
     }

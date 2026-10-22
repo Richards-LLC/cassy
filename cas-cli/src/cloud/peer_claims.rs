@@ -437,6 +437,9 @@ impl PeerClaims {
     /// A same-agent re-claim of a live lock comes back unchanged, so the
     /// renewal is what makes any earlier, still in-flight conditional release
     /// of that lock miss (409) instead of dropping this start's claim.
+    /// A release can still win the round trip between claim and renewal.
+    /// If renewal fails, re-acquire and renew once within the same budget;
+    /// only a confirmed renewal reports Claimed and supplies the snapshot.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_for_local_lease(
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
@@ -458,14 +461,35 @@ impl PeerClaims {
         // Cancellation remains intentional if Cloud becomes unavailable at
         // this point: the caller publishes a local lease, and renewal repairs
         // its Cloud mirror. Keep release fenced until that local publication.
-        let answer = self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local);
-        let snapshot = matches!(answer, Acquire::Claimed)
-            .then(|| self.coordinator(agent_id)
-                .and_then(|coordinator| coordinator.renew(&self.key(task_id), duration_secs))
-                .inspect_err(|error| tracing::warn!(task = %task_id, %agent_id, %error,
-                    "claim snapshot renewal failed; rollback will use a fresh conditional read")))
-            .and_then(Result::ok)
-            .map(|lease| ClaimSnapshot { epoch: lease.epoch, renewal_count: lease.renewal_count });
+        let claims = self.clone().with_budget(PeerBudget::default());
+        let mut answer = claims.acquire_bounded(
+            task_id, kind, agent_id, agent_name, duration_secs, is_local,
+        );
+        let mut snapshot = None;
+        for attempt in 0..2 {
+            if !matches!(answer, Acquire::Claimed) {
+                break;
+            }
+            match claims.coordinator(agent_id)
+                .and_then(|coordinator| coordinator.renew(&claims.key(task_id), duration_secs))
+            {
+                Ok(lease) => {
+                    snapshot = Some(ClaimSnapshot { epoch: lease.epoch, renewal_count: lease.renewal_count });
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(task = %task_id, %agent_id, %error,
+                        "claim snapshot renewal failed; checking the claim again within the request budget");
+                    answer = if attempt == 0 {
+                        claims.acquire_bounded(
+                            task_id, kind, agent_id, agent_name, duration_secs, is_local,
+                        )
+                    } else {
+                        Acquire::Unavailable(format!("claim snapshot renewal failed: {error}"))
+                    };
+                }
+            }
+        }
         (answer, Some(_fence), snapshot)
     }
 
@@ -721,6 +745,9 @@ impl PeerClaims {
         let released = match expected {
             Some(expected) => claims.release_if_unchanged(&key, expected),
             None => match claims.read_lock(&key, from) {
+                Ok(Some(lock)) if !lock.foreign_account && lock.agent_id == agent_id => {
+                    return Acquire::Claimed;
+                }
                 Ok(Some(lock)) if !lock.foreign_account && lock.agent_id == from => {
                     claims.release_with_reserve(&key, &lock)
                 }

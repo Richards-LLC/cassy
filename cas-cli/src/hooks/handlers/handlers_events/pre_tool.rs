@@ -9279,21 +9279,26 @@ mod workspace_contract_tests {
         env.set("CAS_CLONE_PATH", &worktree);
 
         let mut mismatches = Vec::new();
-        for (command, workdir, expected, missing_workdir, unbound) in [
-            ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false, false),
-            ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false, false),
-            ("printf x > target/check.log 2>&1".to_string(), None, "allow", false, false),
-            ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true, false),
-            ("printf x > ../../outside.log".to_string(), Some(child), "deny", false, false),
-            (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false, false),
-            (format!("printf x > '{}'", outside.display()), None, "deny", false, false),
+        for (command, workdir, expected, missing_workdir, unbound, no_root) in [
+            ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false, false, false),
+            ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false, false, false),
+            ("printf x > target/check.log 2>&1".to_string(), None, "allow", false, false, false),
+            ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true, false, false),
+            ("printf x > ../../outside.log".to_string(), Some(child), "deny", false, false, false),
+            (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false, false, false),
+            (format!("printf x > '{}'", outside.display()), None, "deny", false, false, false),
             (format!(r#"printf x > '{}'; sh -c "cd '{}' && printf y > outside.log""#,
-                outside.display(), outside.parent().unwrap().display()), None, "deny", false, false),
+                outside.display(), outside.parent().unwrap().display()), None, "deny", false, false, false),
             (format!("cd '{}' && printf x > outside.log", outside.parent().unwrap().display()),
-                None, "deny", false, false),
+                None, "deny", false, false, false),
             ("printf x > outside.log".to_string(), Some(outside.parent().unwrap().to_path_buf()),
-                "deny", false, true),
+                "deny", false, true, false),
+            ("printf x > outside.log".to_string(), Some(outside.parent().unwrap().to_path_buf()),
+                "deny", false, true, true),
         ] {
+            if no_root {
+                env.remove("CAS_ROOT");
+            }
             if unbound {
                 env.remove("CAS_CLONE_PATH");
             } else {
@@ -9305,7 +9310,9 @@ mod workspace_contract_tests {
             if let Some(workdir) = workdir {
                 input.tool_input.as_mut().unwrap()["workdir"] = serde_json::json!(workdir);
             }
-            let value = serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap();
+            let value = serde_json::to_value(handle_pre_tool_use(
+                &input, (!no_root).then_some(cas_root.as_path()),
+            ).unwrap()).unwrap();
             let specific = &value["hookSpecificOutput"];
             let reason = specific["permissionDecisionReason"].as_str().unwrap_or("");
             let decision = if value == serde_json::json!({}) {

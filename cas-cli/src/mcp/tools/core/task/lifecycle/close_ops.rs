@@ -32662,6 +32662,93 @@ esac
         );
     }
 
+    /// cas-af3b: a failed optional blob probe must leave the ordinary line
+    /// proof available. Both the batched lookup and a later blob read can
+    /// fail while Git diffs remain readable.
+    #[test]
+    fn unreadable_reference_history_blobs_fall_back_to_line_proof_cas_af3b() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let path = p.join(REFERENCE_HISTORY_LEDGER);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let history = |hashes: &[&str]| {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "files": {"skills/demo/references/guide.md": hashes},
+            }))
+            .unwrap()
+        };
+        std::fs::write(&path, history(&["base"])).unwrap();
+        git(p, &["add", REFERENCE_HISTORY_LEDGER]);
+        git(p, &["commit", "-qm", "baseline ledger"]);
+        let parent = rev_parse_local(p, "HEAD");
+        std::fs::write(&path, history(&["base", "delivered"])).unwrap();
+        git(p, &["commit", "-qam", "cas-test1: add reference hash"]);
+        let delivery = rev_parse_local(p, "HEAD");
+        std::fs::write(p.join("unrelated-one.txt"), "one\n").unwrap();
+        git(p, &["add", "unrelated-one.txt"]);
+        git(p, &["commit", "-qm", "later unrelated edit one"]);
+        let targets = [rev_parse_local(p, "HEAD"), {
+            std::fs::write(p.join("unrelated-two.txt"), "two\n").unwrap();
+            git(p, &["add", "unrelated-two.txt"]);
+            git(p, &["commit", "-qm", "later unrelated edit two"]);
+            rev_parse_local(p, "HEAD")
+        }];
+
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let real_git = std::env::split_paths(&original_path)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("real git on PATH");
+        let shim_dir = p.join("git-shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let shim = shim_dir.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$1" = cat-file ]; then
+  case "$CAS_AF3B_FAIL" in
+    batch) [ "$2" = '--batch-check=%(objectname) %(objecttype)' ] && exit 87 ;;
+    blob) [ "$2" = blob ] && exit 87 ;;
+  esac
+fi
+exec "$CAS_AF3B_REAL_GIT" "$@"
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AF3B_REAL_GIT", &real_git);
+        env.set(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(shim_dir.clone()).chain(std::env::split_paths(&original_path)),
+            )
+            .unwrap(),
+        );
+        for (mode, target) in ["batch", "blob"].into_iter().zip(targets) {
+            env.set("CAS_AF3B_FAIL", mode);
+            let presence = super::delivery_evolution::line_content_presence(
+                p,
+                &parent,
+                &delivery,
+                &target,
+                REFERENCE_HISTORY_LEDGER,
+            );
+            assert_eq!(
+                presence,
+                Ok(Some(DeliveryContentPresence::Present {
+                    paths: vec![REFERENCE_HISTORY_LEDGER.to_string()],
+                })),
+                "{mode} failure must use the ordinary line proof"
+            );
+        }
+    }
+
     /// cas-2ea6: the cas-9dee shape. A lane's reference-history ledger records
     /// the hash of a draft it later rewrote away, so that version never ships.
     /// The integration regenerates the ledger from the merged history inside

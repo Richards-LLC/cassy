@@ -22,6 +22,7 @@ pub mod media;
 pub mod pack;
 pub mod verdict;
 pub mod independence;
+pub mod promotion;
 pub mod resources;
 
 /// Adapter protocol version written to and required from every envelope.
@@ -48,6 +49,9 @@ pub struct ReleaseConfig {
     pub components: BTreeMap<String, Vec<String>>,
     /// Environments where preflight may `grant` a balance shortfall.
     pub grant_envs: Vec<String>,
+    /// The environment promotion serves; its `flags` are compared once with
+    /// the pack's snapshot.
+    pub target_env: String,
     /// Pending-migration refusal for merges into `integration_branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrations: Option<MigrationsConfig>,
@@ -77,6 +81,7 @@ impl Default for ReleaseConfig {
             timeout_secs: 120,
             components: BTreeMap::new(),
             grant_envs: vec!["staging".into()],
+            target_env: "prod".into(),
             migrations: None,
             retention_days: 30,
         }
@@ -766,6 +771,7 @@ mod tests {
 
     include!("qa_release/fixture_test.rs");
     include!("qa_release/resources_test.rs");
+    include!("qa_release/promotion_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes
     /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a

@@ -13,6 +13,17 @@ mod update;
 /// Caller text appended to the task timeline cannot forge the marker lines
 /// emitted by artifact publication or server-attested proposal sync.
 pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
+    forged_marker_rejection(text).or_else(|| {
+        crate::qa_release::promotion::names_override(text).then_some(RELEASE_GATE_OVERRIDE_RULE)
+    })
+}
+
+/// Only a live registered supervisor's decision note may record a release
+/// gate override, because it passes a promotion status for 6 hours.
+pub(crate) const RELEASE_GATE_OVERRIDE_RULE: &str = "Only a live registered supervisor may record a release gate override, as one decision note: task action=notes note_type=decision notes=\"RELEASE-GATE OVERRIDE sha=<full 40-char sha>: <reason>\".";
+
+/// Markers no caller may write: proposal provenance and artifact proofs.
+pub(crate) fn forged_marker_rejection(text: &str) -> Option<&'static str> {
     if crate::cloud::syncer::contains_proposal_provenance_marker(text) {
         Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).")
     } else if crate::artifacts::proof::contains_proof_marker(text) {

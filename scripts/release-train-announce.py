@@ -376,10 +376,12 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
             fail(f"{BODY_NAMES[index]} post returned invalid part_ids; preserve partial receipt, do not retry writes")
         receipt_values[f"{prefix}_PART_IDS"] = json.dumps(part_ids, separators=(",", ":"))
         receipt(receipt_path, receipt_values)
+        # Violet contract: a split root's thread_id is its first part;
+        # the compatibility message_id identifies its last part.
         if index == 0:
-            parent = message_id
+            parent = part_ids[0]
         elif index == 2:
-            dev_parent = message_id
+            dev_parent = part_ids[0]
         if index < len(texts) - 1:
             time.sleep(1)
     receipt(receipt_path, receipt_values)

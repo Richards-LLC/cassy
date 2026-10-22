@@ -74,6 +74,8 @@ class Announce(unittest.TestCase):
             message = {"message_id": message_id, "permalink": "https://slack.test/" + message_id}
             if len(writes) in getattr(self, "split_replies", {}):
                 message["part_ids"] = self.split_replies[len(writes)]
+            if len(writes) in getattr(self, "root_threads", {}):
+                message["thread_id"] = self.root_threads[len(writes)]
             return {"message": message}
 
         client.tool.side_effect = tool
@@ -84,6 +86,53 @@ class Announce(unittest.TestCase):
                 patch.object(announce, "announce_token_env", return_value=None), \
                 patch.object(announce.time, "sleep"):
             announce.post("9.99.8", str(self.draft), str(self.receipt), str(self.body_dir))
+
+    def report_stage_parents(self, announcement_receipt):
+        """Run the real report stage with only local publication and post stubs."""
+        fixture = Path(tempfile.mkdtemp(dir=self.root))
+        worktree = fixture / "release"
+        worktree.mkdir()
+        hooks = fixture / "empty-hooks"
+        hooks.mkdir()
+        git = ["git", "-C", str(worktree), "-c", "core.hooksPath=" + str(hooks),
+               "-c", "user.name=Receipt Fixture", "-c", "user.email=fixture@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], check=True, capture_output=True)
+        subprocess.run(git + ["commit", "--allow-empty", "-qm", "fixture"], check=True, capture_output=True)
+        subprocess.run(git + ["tag", "-a", "v9.99.8", "-m", "fixture"], check=True, capture_output=True)
+        head = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+        artifacts = fixture / "artifacts"
+        run = artifacts / "v9.99.8-release"
+        run.mkdir(parents=True)
+        (run / "announce.receipt").write_text(announcement_receipt)
+        (run / "landed-main.sha").write_text(head)
+        (run / "release-workflow.json").write_text(json.dumps({
+            "headBranch": "main", "headSha": head, "event": "push",
+            "status": "completed", "conclusion": "success",
+        }))
+        published = "TAG=v9.99.8\nPUBLISHED_AT=2099-01-02T00:00:00Z\n"
+        (run / "release-published.receipt").write_text(
+            published + "LINUX_SHA256=" + "a" * 64 + "\nMACOS_SHA256=" + "b" * 64 + "\n")
+        (run / "release-latency.receipt").write_text(published + "PUBLISH_LATENCY_SECONDS=1\n")
+        reports = worktree / "docs/release-reports"
+        reports.mkdir(parents=True)
+        for extension in ("md", "html", "pdf"):
+            (reports / ("v9.99.8." + extension)).write_text("fixture: no rendering or upload")
+        capture = fixture / "post-arguments.txt"
+        stub = fixture / "post-stub.sh"
+        # Deliberately stop before status can accept a fake report receipt.
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAS_TEST_REPORT_ARGS"\nexit 23\n')
+        stub.chmod(0o755)
+        env = {name: value for name, value in os.environ.items()
+               if not name.startswith(("VIOLET_", LEGACY_ENV_PREFIX, "CAS_RELEASE_"))}
+        env.update(CAS_RELEASE_ARTIFACTS_ROOT=str(artifacts), CAS_RELEASE_ENV_FILE=str(fixture / "absent.env"),
+                   CAS_RELEASE_TRAIN_REPORT_POST_CMD=str(stub), CAS_TEST_REPORT_ARGS=str(capture))
+        result = subprocess.run(
+            ["bash", str(SCRIPT.with_name("release-train.sh")), "9.99.8", str(worktree), "--report"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        return capture.read_text().splitlines()[-2:]
 
     def test_validate_rejects_named_tokens_in_every_body(self):
         for index, name in enumerate(announce.BODY_NAMES):
@@ -213,17 +262,41 @@ class Announce(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_post_sends_validated_bodies_and_preserves_threads_and_receipts(self):
-        for split_replies in ({}, {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]}):
+        report = announce.load_report_adapter()
+        # The PDF file and upload message are separate public receipt identities.
+        for file_block in (None, {}, {"file_id": ""}, {"file_id": "pdf-message"}):
+            with self.subTest(file_block=file_block):
+                envelope = {
+                    "message": {"message_id": "pdf-message", "permalink": "https://slack.test/pdf-message"},
+                    "download_url": "https://files.test/report.pdf",
+                }
+                if file_block is not None:
+                    envelope["file"] = file_block
+                with self.assertRaisesRegex(report.AdapterError, "file id"):
+                    report.file_receipt(envelope)
+        for split_replies in (
+            {},
+            {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]},
+            {1: ["1.0", "1"], 2: ["2.0", "2"], 3: ["3.0", "3"], 4: ["4.0", "4"]},
+        ):
             with self.subTest(split_replies=split_replies):
                 self.split_replies = split_replies
+                self.root_threads = {index: parts[0] for index, parts in split_replies.items() if index in (1, 3)}
                 self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
                 self.assertEqual(self.validate().returncode, 0)
                 adapter, writes = self.adapter()
                 self.post(adapter)
                 self.assertEqual([item["text"] for item in writes], list(BODIES))
-                self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
+                self.assertEqual([item.get("reply_to") for item in writes], [
+                    None, self.root_threads.get(1, "1"), None, self.root_threads.get(3, "3"),
+                ])
                 values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
                 self.assertEqual(values["DEV_REPLY_ID"], "4")
+                if 1 in split_replies:
+                    self.assertEqual(self.report_stage_parents(self.receipt.read_text()), ["1.0", "3.0"])
+                    legacy = "\n".join(line for line in self.receipt.read_text().splitlines()
+                                       if "_PART_IDS=" not in line) + "\n"
+                    self.assertEqual(self.report_stage_parents(legacy), ["1", "3"])
                 # Render the real saved-draft receipt, including every transport part.
                 result = subprocess.run(
                     ["bash", "-c", 'source "$1"; run_dir="$2"; worktree="$2"; '

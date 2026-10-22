@@ -1505,6 +1505,34 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     assert_eq!(metadata["end_reason"], "unknown", "missing evidence must retain an explicit unknown end reason");
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
+    let reopened = SqliteAgentStore::open(temp.path()).unwrap();
+    reopened.init().unwrap();
+    for (id, role, machine) in [
+        ("worker", AgentRole::Worker, Some("stable-machine")),
+        ("other-host", AgentRole::Supervisor, Some("other-machine")),
+        ("unknown-host", AgentRole::Supervisor, None),
+    ] {
+        let mut ineligible = Agent::new(id.into(), id.into());
+        ineligible.role = role;
+        ineligible.machine_id = machine.map(str::to_string);
+        reopened.register(&ineligible).unwrap();
+        assert!(reopened.claim_supervisor_handoffs(&ineligible).unwrap().is_empty(), "{id}");
+    }
+    let mut successor = Agent::new("successor".into(), "new-supervisor".into());
+    successor.role = AgentRole::Supervisor;
+    successor.machine_id = agent.machine_id.clone();
+    reopened.register(&successor).unwrap();
+    let claimed = reopened.claim_supervisor_handoffs(&successor).unwrap();
+    assert_eq!(claimed.len(), 1, "retirement survives store reopen");
+    let mut rival = Agent::new("rival".into(), "rival-supervisor".into());
+    rival.role = AgentRole::Supervisor;
+    rival.machine_id = agent.machine_id.clone();
+    reopened.register(&rival).unwrap();
+    assert!(reopened.claim_supervisor_handoffs(&rival).unwrap().is_empty(), "one successor wins");
+    assert_eq!(reopened.claim_supervisor_handoffs(&successor).unwrap().len(), 1, "failed publication retries");
+    reopened.mark_supervisor_handoff_queued(&claimed[0].id, &successor).unwrap();
+    assert!(reopened.claim_supervisor_handoffs(&successor).unwrap().is_empty(), "durable queue publication is once-only");
+
 }
 
 #[test]

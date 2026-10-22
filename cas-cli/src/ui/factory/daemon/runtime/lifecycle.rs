@@ -4244,6 +4244,17 @@ impl FactoryDaemon {
         // Disconnect cloud phone-home client
         self.disconnect_cloud();
 
+        // Retain the lane before worker registrations/panes are destroyed.
+        if let Ok(agents) = open_agent_store(self.app.cas_dir())
+            && let Ok(rows) = agents.list(None)
+        {
+            for agent in rows.iter().filter(|a| a.role == cas_types::AgentRole::Supervisor && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
+                if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, None) {
+                    tracing::warn!(%error, "could not retain factory shutdown handoff");
+                }
+            }
+        }
+
         // Kill all PTY process groups. Snapshot worker PGIDs first so their
         // durable ownership records can be removed only after death is
         // confirmed; any survivor stays visible to gc_report.

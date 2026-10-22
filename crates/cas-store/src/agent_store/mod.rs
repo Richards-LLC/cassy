@@ -162,6 +162,22 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_agent ON worktree_leases(agent_id);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_status ON worktree_leases(status);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_expires ON worktree_leases(expires_at);
+CREATE TABLE IF NOT EXISTS agent_session_ends (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    machine_id TEXT,
+    role TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    claimed_by TEXT,
+    claimed_epoch TEXT,
+    queued_at TEXT,
+    UNIQUE(agent_id, registered_at)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_session_ends_host ON agent_session_ends(machine_id, ended_at);
+
 "#;
 
 /// Trait for agent storage operations
@@ -598,6 +614,7 @@ impl SqliteAgentStore {
 
 mod ops_agent;
 pub(crate) use ops_agent::register_agent_with_conn;
+pub mod continuity;
 mod ops_coordination;
 mod ops_task_leases;
 mod ops_worktree;

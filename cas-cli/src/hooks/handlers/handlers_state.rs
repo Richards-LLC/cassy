@@ -235,6 +235,11 @@ pub(crate) fn cleanup_agent_leases_for_end(
         return Some(Vec::new());
     }
 
+    if let Err(error) = crate::supervisor_continuity::record_end(cas_root, &agent.id, end_reason) {
+        tracing::error!(agent_id = %agent.id, %error, "SessionEnd handoff failed; preserving identity");
+        return None;
+    }
+
     if let Err(error) = crate::supervisor_notices::orphan_epics(cas_root, &agent) {
         tracing::error!(agent_id = %agent.id, %error, "SessionEnd epic orphan notice failed; preserving identity for recovery");
         return None;
@@ -913,6 +918,11 @@ mod supervisor_handoff_tests {
         worker.role = AgentRole::Worker;
         worker.factory_session = ending.factory_session.clone();
         agents.register(&worker).unwrap();
+        let mut live_task = Task::new("cas-live".into(), "Live lease".into());
+        live_task.status = TaskStatus::InProgress;
+        live_task.assignee = Some(worker.name.clone());
+        tasks.add(&live_task).unwrap();
+        agents.try_claim(&live_task.id, &worker.id, 600, None).unwrap();
         let mut parked = Task::new("cas-parked".into(), "Pending delivery".into());
         parked.assignee = Some(worker.name.clone());
         parked.status = TaskStatus::AwaitingMerge;
@@ -999,6 +1009,9 @@ mod supervisor_handoff_tests {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
         assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
+        assert_eq!(agents.get_lease(&live_task.id).unwrap().unwrap().agent_id, worker.id);
+        assert_eq!(tasks.get(&live_task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
         let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
         assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
 

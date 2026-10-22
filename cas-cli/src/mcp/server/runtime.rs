@@ -557,20 +557,21 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // harness — a pty, or a sibling that inherited the pipe (cas-82d6c).
     let waiting = server.waiting();
     tokio::pin!(waiting);
-    tokio::select! {
+    let end_reason = tokio::select! {
         result = &mut waiting => {
             if let Err(e) = result {
                 eprintln!("[Cassy] MCP server terminated with error: {e}");
             }
+            "transport_eof"
         }
-        () = parent_watchdog.tripped() => {}
-    }
+        () = parent_watchdog.tripped() => "parent_watchdog",
+    };
 
     eprintln!("[Cassy] Shutting down, releasing tasks...");
     {
         use crate::agent_id::read_session_for_mcp;
         if let Ok(agent_id) = read_session_for_mcp(&cas_root) {
-            if let Err(e) = release_agent_tasks(&cas_root, &agent_id) {
+            if let Err(e) = release_agent_tasks(&cas_root, &agent_id, end_reason) {
                 eprintln!("[Cassy] Failed to release agent tasks for {agent_id}: {e}");
             }
         }
@@ -907,7 +908,8 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
 }
 
 /// Release all tasks claimed by an agent on shutdown and unregister the agent
-fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str, reason: &str) -> anyhow::Result<()> {
+    crate::supervisor_continuity::record_end(cas_root, agent_id, Some(reason))?;
     let agent_store = open_agent_store(cas_root)?;
     agent_store.graceful_shutdown(agent_id)?;
     agent_store.clear_working_epics(agent_id)?;

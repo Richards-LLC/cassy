@@ -181,6 +181,8 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
     if ending.role != AgentRole::Supervisor {
         return Ok(());
     }
+    crate::supervisor_continuity::record_end(root, &ending.id, None)
+        .map_err(|error| crate::error::CasError::Other(error.to_string()))?;
     let tasks = open_task_store(root)?;
     let agents = open_agent_store(root)?.list(None)?;
     let named_owner = agents

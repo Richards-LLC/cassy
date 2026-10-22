@@ -5513,6 +5513,16 @@ impl FactoryDaemon {
                 let is_worker = self.app.worker_names().contains(&pane_id);
 
                 if is_supervisor {
+                    if let Ok(agents) = open_agent_store(self.app.cas_dir())
+                        && let Ok(rows) = agents.list(None)
+                    {
+                        let reason = format!("pane_exit: code={exit_code:?}, signal={exit_signal:?}");
+                        for agent in rows.iter().filter(|a| a.name == pane_id && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
+                            if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, Some(&reason)) {
+                                tracing::warn!(%error, "could not retain supervisor pane-exit evidence");
+                            }
+                        }
+                    }
                     // Supervisor exited (either /exit or crash) — shut down the whole factory
                     tracing::info!("Supervisor exited with code {exit_code:?}, shutting down");
                     self.shutdown.store(true, Ordering::Relaxed);

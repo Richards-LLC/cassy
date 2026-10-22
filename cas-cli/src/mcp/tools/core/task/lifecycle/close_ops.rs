@@ -36540,60 +36540,67 @@ mod epic_status_gate_tests {
         assert!(row.blocks_epic_close(), "later edits of the retained base cannot revive lost delivery: {row:?}");
     }
 
-    /// cas-9eae1 fence: a reachable delivery with no later first-parent path
-    /// touch and absent target content remains a real dropped-content verdict.
+    /// A later task may retire an anchor's line, but a merge resolution or
+    /// an unattributed deletion must retain the dropped-content fence.
     #[test]
-    fn ancestor_anchor_without_later_path_evolution_stays_dropped_cas_9eae1() {
-        let dir = init_epic_repo(&[]);
-        let p = dir.path();
-
-        std::fs::write(p.join("shared.rs"), "fn value() { base(); }\n").unwrap();
-        git(p, &["add", "shared.rs"]);
-        git(p, &["commit", "-q", "-m", "seed shared file"]);
-        git(p, &["checkout", "-q", "-b", "factory/worker"]);
-        std::fs::write(p.join("shared.rs"), "fn value() { worker_v1(); }\n").unwrap();
-        git(p, &["add", "shared.rs"]);
-        git(p, &["commit", "-q", "-m", "worker delivery"]);
-        let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
-
-        // `ours` intentionally carries the anchor in history while removing
-        // its file effect. Nothing after the integration touches shared.rs.
-        git(p, &["checkout", "-q", "main"]);
-        git(
-            p,
-            &[
-                "merge",
-                "-q",
-                "--no-ff",
-                "-s",
-                "ours",
-                "factory/worker",
-                "-m",
-                "drop worker delivery",
-            ],
-        );
-
-        assert!(git_commit_is_ancestor(p, &anchor, "main"));
-        assert_eq!(
-            delivery_content_presence_on_target(p, &anchor, "main"),
-            DeliveryContentPresence::Dropped {
-                paths: vec!["shared.rs".to_string()]
-            },
-            "a genuine dropped hunk with no later path touch must remain dropped"
-        );
-
-        let mut task = child("cas-dropped", TaskStatus::Closed, Some("worker"));
-        task.deliverables.factory_branch_anchor = Some(anchor);
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
-        let row = &statuses[0];
-        assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()]);
-        assert!(
-            row.blocks_epic_close(),
-            "real dropped content must remain an epic close blocker: {row:?}"
-        );
-        let report = render_epic_status_report("cas-epic", "main", &statuses);
-        assert!(report.contains("content dropped"), "{report}");
-        assert!(report.contains("hard-blocked"), "{report}");
+    fn ancestor_anchor_retirement_distinguishes_task_rewrite_from_merge_loss_cas_5993() {
+        for mode in ["named", "closed-child", "merge", "unnamed", "body-only"] {
+            let dir = init_epic_repo(&[]);
+            let p = dir.path();
+            let baseline = "pub fn baseline() {}\n";
+            std::fs::write(p.join("shared.rs"), baseline).unwrap();
+            git(p, &["add", "shared.rs"]);
+            git(p, &["commit", "-q", "-m", "seed shared file"]);
+            git(p, &["checkout", "-q", "-b", "factory/worker"]);
+            std::fs::write(p.join("shared.rs"), format!("{baseline}pub fn delivered() {{}}\n")).unwrap();
+            git(p, &["add", "shared.rs"]);
+            git(p, &["commit", "-q", "-m", "feat(cas-aaaa): deliver helper"]);
+            let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+            let removal = if mode == "merge" {
+                git(p, &["checkout", "-q", "main"]);
+                git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker",
+                    "-m", "merge(cas-bbbb): discard helper"]);
+                epic_git_stdout(p, &["rev-parse", "HEAD"])
+            } else {
+                // Same reused lane, ordinary task rewrite before integration.
+                std::fs::write(p.join("shared.rs"), baseline).unwrap();
+                git(p, &["add", "shared.rs"]);
+                let subject = match mode {
+                    "named" => "refactor(cas-bbbb): retire obsolete helper",
+                    "body-only" => "refactor: retire helper\n\nRelated incident cas-bbbb",
+                    _ => "refactor: retire helper",
+                };
+                git(p, &["commit", "-q", "-m", subject]);
+                let removal = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+                git(p, &["checkout", "-q", "main"]);
+                git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+                removal
+            };
+            assert!(git_commit_is_ancestor(p, &anchor, "main"));
+            let mut task = child("cas-aaaa", TaskStatus::Closed, Some("worker"));
+            task.deliverables.factory_branch_anchor = Some(anchor);
+            let mut children = vec![task];
+            if mode == "closed-child" {
+                let mut later = child("cas-bbbb", TaskStatus::Closed, Some("worker"));
+                later.deliverables.factory_branch_anchor = Some(removal.clone());
+                children.push(later);
+            }
+            let statuses = collect_epic_branch_statuses(&children, "main", p);
+            let row = &statuses[0];
+            let report = render_epic_status_report("cas-epic", "main", &statuses);
+            if matches!(mode, "named" | "closed-child") {
+                assert!(row.dropped_paths.is_empty(), "{mode}: {report}");
+                assert!(!row.blocks_epic_close(), "{mode}: {report}");
+                let note = row.content_evolution_note.as_deref().expect("supersession evidence");
+                // pin: informational audit must identify the actual retiring SHA and task.
+                assert!(note.contains(&format!("anchor superseded by {removal} (cas-bbbb)")), "{mode}: {note}");
+                assert!(!report.contains("content dropped"), "{mode}: {report}");
+            } else {
+                assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()], "{mode}: {report}");
+                assert!(row.blocks_epic_close(), "{mode}: {report}");
+                assert!(report.contains("content dropped"), "{mode}: {report}");
+            }
+        }
     }
 
     #[test]

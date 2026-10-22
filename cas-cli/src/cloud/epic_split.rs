@@ -300,12 +300,22 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
     Ok(current)
 }
 
+/// Admission and renewal retain historical ownership when task projection is
+/// unavailable. A stale hold can be cancelled; a missing hold admits peer work.
+fn guarded_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
+    current_epic_splits(cas_root).or_else(|error| {
+        tracing::warn!(%error, "could not project epic splits; retaining historical bindings");
+        list_epic_splits(cas_root)
+            .map_err(|raw_error| format!("{error}; epic split fallback: {raw_error}"))
+    })
+}
+
 /// The binding split, if any, under which `task_id` is the peer's.
 pub fn split_hold_for(cas_root: &Path, task_id: &str) -> Option<SplitHold> {
     if !has_store(cas_root) {
         return None;
     }
-    let splits = match current_epic_splits(cas_root) {
+    let splits = match guarded_epic_splits(cas_root) {
         Ok(splits) => splits,
         Err(error) => {
             tracing::debug!(%error, "could not read epic splits");
@@ -1342,7 +1352,7 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
     if let Err(error) = release_obsolete_split_claims(cas_root, claims, None, None, Some(agent_id)) {
         tracing::warn!(%error, agent = %agent_id, "could not settle obsolete epic split claims");
     }
-    let Ok(splits) = current_epic_splits(cas_root) else {
+    let Ok(splits) = guarded_epic_splits(cas_root) else {
         return 0;
     };
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {

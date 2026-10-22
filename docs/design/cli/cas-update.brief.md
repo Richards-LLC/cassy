@@ -1,15 +1,5 @@
 # Brief: `cas update` (human mode)
 
-## Local runtime preflight (cas-0700)
-
-Binding reconciliation filters the machine-wide session registry by project
-before checking process identity or GUI endpoints. Dead or stale sessions with
-refused or absent endpoints are skipped without deleting metadata or sockets;
-the same rule covers unattributed socket paths left by macOS shutdown. Each
-connect has a 250 ms bound. Held or unknown endpoints still block, naming the
-session and a safely quoted `cas kill <name>` remedy when attributable. The
-existing binding report carries that cause in human and JSON output.
-
 | Field | Sentence |
 | --- | --- |
 | First two lines | Whether anything is pending — a newer binary, unapplied migrations — or, after a refresh, whether every project converged. |
@@ -283,3 +273,13 @@ Schema migrations remain skipped in the native dry run. Upkeep planning runs
 with the real dry-run flag after successful or planned schema work; schema
 failures still prevent upkeep writes. Human notes fit within the existing
 80-column project detail block; JSON retains the complete notes as data.
+
+## Local runtime preflight (cas-0700)
+
+Binding reconciliation filters the machine-wide session registry by project
+before checking process identity or GUI endpoints. Dead or stale sessions with
+refused or absent endpoints are skipped without deleting metadata or sockets;
+the same rule covers unattributed socket paths left by macOS shutdown. Each
+connect has a 250 ms bound. Held or unknown endpoints still block, naming the
+session and a safely quoted `cas kill -- <name>` remedy when attributable. The
+existing binding report carries that cause in human and JSON output.

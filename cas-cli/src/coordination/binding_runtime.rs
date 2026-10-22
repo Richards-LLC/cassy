@@ -259,7 +259,7 @@ fn inactive_endpoint(path: &Path) -> bool {
 }
 
 fn endpoint_refusal(state: &str, session: &str) -> Result<String, String> {
-    let [remedy] = crate::worktree::GitOperations::shell_remedies([("cas", &["kill", session])])?;
+    let [remedy] = crate::worktree::GitOperations::shell_remedies([("cas", &["kill", "--", session])])?;
     Ok(format!(
         "{state} session {} still has a held or unknown GUI endpoint; run `{remedy}`",
         crate::worktree::GitOperations::visible_git_label(session),

@@ -327,9 +327,12 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
     let mut failures = Vec::new();
     // The other-project held row proves filtering precedes endpoint refusal.
     for (recorded, same_project, held) in [
-        (true, false, false), (true, false, true),
-        (true, true, false), (true, true, true),
-        (false, false, false), (false, false, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+        (false, false, false),
+        (false, false, true),
     ] {
         let project = if same_project { &root } else { &other };
         let metadata = create_metadata(
@@ -351,7 +354,7 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
         let result = RuntimeInventory::discover(&root);
         match result {
             Err(error) if recorded && same_project && held => {
-                if !error.contains(name) || !error.contains(&format!("cas kill {name}")) {
+                if !error.contains(name) || !error.contains(&format!("cas kill -- {name}")) {
                     failures.push(format!("held endpoint lacks named remedy: {error}"));
                 }
             }
@@ -361,7 +364,9 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
             Err(error) => failures.push(format!(
                 "recorded={recorded}, same_project={same_project}, held={held}: {error}"
             )),
-            Ok(_) if held && (!recorded || same_project) => failures.push("held endpoint was allowed".into()),
+            Ok(_) if held && (!recorded || same_project) => {
+                failures.push("held endpoint was allowed".into())
+            }
             Ok(_) => {}
         }
         assert!(
@@ -407,8 +412,14 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)
         .unwrap();
+    // The earlier runtime thread exited. Keep a real listener held here:
+    // a stale PID with a refused endpoint is now intentionally skipped.
+    let socket = crate::ui::factory::gui_socket_path("bind-fx");
+    std::fs::remove_file(&socket).unwrap();
+    let _held = std::os::unix::net::UnixListener::bind(socket).unwrap();
     let stale = client.repair(&root, &scope).unwrap();
     assert!(matches!(stale.outcome, RepairOutcome::Blocked));
+    assert!(stale.error.unwrap().contains("cas kill -- bind-fx"));
     std::fs::write(&metadata_path, b"{").unwrap();
     let corrupt = client.repair(&root, &scope).unwrap();
     assert!(matches!(corrupt.outcome, RepairOutcome::Blocked));

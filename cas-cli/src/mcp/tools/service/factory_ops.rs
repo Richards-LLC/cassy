@@ -7998,12 +7998,13 @@ mod resume_brief_sender_tests {
         assert_eq!(resume_brief_sender(&agents, Some("lead-id"), Some("session-a")), "swift-octopus-83");
         assert_eq!(resume_brief_sender(&agents, Some("unregistered"), Some("session-a")), "swift-octopus-83");
         assert_eq!(resume_brief_sender(&agents, None, Some("session-a")), "swift-octopus-83");
-        for sender in [
+        // cas-e13c: the exact fallbacks, so another session's supervisor
+        // can never stand in for this one.
+        assert_eq!(
             resume_brief_sender(&agents, None, Some("session-b")),
-            resume_brief_sender(&agents, None, None),
-        ] {
-            assert!(!sender.contains("unknown"), "{sender}");
-        }
+            "supervisor (factory session session-b)"
+        );
+        assert_eq!(resume_brief_sender(&agents, None, None), "supervisor");
     }
 }
 

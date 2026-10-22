@@ -10276,13 +10276,14 @@ mod tests {
         for _ in 0..3 {
             send("unrelated chatter");
         }
-        let scan = |cap| {
+        let scan_with = |cap, wanted: &str| {
             store
                 .received_supervisor_messages_scan("worker", "history-session", since, 1, cap, |row, _| {
-                    !row.prompt.contains("unrelated")
+                    row.prompt.contains(wanted)
                 })
                 .unwrap()
         };
+        let scan = |cap| scan_with(cap, "answer");
 
         let (found, hit_cap) = scan(10);
         assert_eq!(found.iter().map(|(row, _)| row.id).collect::<Vec<_>>(), vec![answer]);
@@ -10291,6 +10292,12 @@ mod tests {
         let (found, hit_cap) = scan(3);
         assert!(found.is_empty(), "the answer is beyond a 3-row scan: {found:?}");
         assert!(hit_cap, "a scan stopped by its cap says so");
+
+        // cas-e13c: exactly `cap` rows read with too few matches is not a
+        // truncation; only a row beyond the cap is.
+        let (found, hit_cap) = scan_with(4, "nothing matches this");
+        assert!(found.is_empty());
+        assert!(!hit_cap, "all 4 rows were read; nothing was cut off");
     }
 
     #[test]

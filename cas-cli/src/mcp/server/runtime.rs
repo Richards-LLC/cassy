@@ -471,6 +471,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                             );
                         }
                         let engine = std::sync::Arc::new(engine);
+                        crate::qa_release::slack::install_proxy(engine.clone());
                         spawn_idle_upstream_sweeper(&engine, idle_timeout);
                         Some(engine)
                     }

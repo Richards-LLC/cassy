@@ -40,6 +40,7 @@ env = "staging"
 | `adapter` | Project-relative adapter executable. Empty leaves the gate off. |
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
+| `slack_channel` | Slack channel the `cas serve` driver posts each sealed pack to through Violet (default empty: no post). |
 | `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
 | `max_cells` | Most rows (cells × runs) one golden-set journey may expand into (default 500). |
 | `components` | Served component name to the repository paths it is built from. |
@@ -212,6 +213,26 @@ re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
 fits. If re-encoding fails or the video is still too large, it stays
 local-only and the row's frames carry the evidence.
 
+**Posting at seal.** When `slack_channel` is set, the `cas serve` driver
+posts each sealed pack through the serve process's Violet proxy, once per
+pack generation, keyed by the sha256 of `pack.json`. It never uses the Slack
+connector. An OWED reseal therefore posts its new generation once.
+
+- **Identity:** the driver calls as the fixed identity `release-gate-driver`
+  with the `Standard` role, and goes through Violet's normal policy and
+  audience checks.
+- **Limits:** that caller can call only `violet_post` and only to
+  `slack_channel`. Every call is audit-logged with the pack sha256 and the
+  channel.
+- **Receipts:** the permalink is written to the run notes and to `slack.json`
+  in the pack directory.
+- **Failures:** a failed post is noted and not recorded, so the next
+  generation posts. With no Violet proxy in the serve process, the run notes
+  say so and nothing is posted.
+- **Video sniffing:** a video's `ftyp` box must name a video brand (`isom`,
+  `mp42`, `qt` and others), so HEIC, AVIF or M4A saved under a video
+  extension is linked rather than uploaded.
+
 **PR comment.** Cassy keeps one comment per PR, marked
 `<!-- cassy:release-gate -->`, and edits it in place. A body over 65,000
 characters (GitHub's limit is 65,536) is cut at a line and ends with a
@@ -361,7 +382,10 @@ the expected value of each labeled criterion. It comes in two forms:
 - an id repeats or is not a plain token;
 - a frozen digest is not 64 hex characters, or a storage key is missing;
 - a matrix axis or value is empty;
-- `runs: 0`.
+- `runs: 0`, or `runs` above 1 with no `independence_key` (duplicates could
+  not be told apart);
+- two journeys would plan the same row id, for example journey `a` cell `b`
+  and journey `a.b`.
 
 It reports `unlabeled_cell` debt for a record with no label for one of the
 journey's labeled criteria.
@@ -374,23 +398,35 @@ Each cell is walked `runs` times, one row per run:
 - `run` is n.
 
 Resource preflight needs consumes × runs × cells. Start refuses before the
-freeze, and persists nothing, when a journey expands past
-`qa.release.max_cells` rows (default 500). The refusal names the journey,
-cells, runs and limit.
+freeze, and persists nothing, in two cases:
+
+- A journey expands past `qa.release.max_cells` rows (default 500). Cells
+  are counted before they are built, and the refusal names the journey,
+  cells, runs and limit.
+- Two journeys plan the same row id, because one walk would fill both rows.
 
 **Grading.** The `run` request's `args` carry the cell:
 `{id, record: {id, frozen, labels}, axes}` and `run`. The answer may add
-`measured: {criterion: number}`. Each measured value is graded against the
-cell's label with the criterion's `compare` (default `exact`). A band miss
-is a FAIL that names the value, the % of the baseline and the baseline. The
+`measured: {criterion: number}`. Each labeled criterion the cell has a label
+for is graded against that label with the criterion's `compare` (default
+`exact`):
+
+- A band miss is a FAIL that names the value, the % of the baseline and the
+  baseline.
+- A labeled criterion with no measured value is
+  `NOT_EXERCISED{automation}`, which is owed.
+- An unlabeled cell keeps the runner's verdict. It is debt: the pack and the
+  PR comment list it. The
 answer's `subjects` value for `independence_key` is the run's identity.
 
 **Coverage.** At seal, each cell counts only distinct identities. A
 duplicate or unidentified run is rejected as `NOT_EXERCISED` and names the
 duplicate, so the cell stays OWED; a run with no verdict is OWED too. The
 pack's `matrix` lists each golden journey's cells, runs, required
-(cells × runs), counted runs and the rows still missing. The PR comment
-shows `<journey>: counted/required runs (cells × runs)`.
+(cells × runs), counted runs, the rows still missing and the unlabeled
+cells. The PR comment shows
+`<journey>: counted/required runs (cells × runs)`, then the owed count and
+the unlabeled cells.
 
 ## Deploy failure alerts
 

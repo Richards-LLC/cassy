@@ -1036,10 +1036,39 @@ impl Registry {
     /// must be well formed; a record without a label for one of the journey's
     /// labeled criteria is `unlabeled_cell` debt.
     fn validate_golden_sets(&self, project_root: &Path, tracked: &[String], report: &mut ValidationReport) {
+        // Every row id the gate could plan: two journeys must never share one,
+        // or one walk would fill both rows.
+        let mut row_ids: BTreeMap<String, &str> = BTreeMap::new();
+        for journey in &self.journeys {
+            let rows: Vec<String> = if journey.is_golden_set() {
+                crate::qa_release::matrix::planned_ids(project_root, journey, 100_000).unwrap_or_default()
+            } else {
+                vec![journey.id.clone()]
+            };
+            for row in rows {
+                match row_ids.get(&row) {
+                    Some(other) if *other != journey.id => report.problem(
+                        "row_id",
+                        &journey.id,
+                        format!("row id {row} is also planned by journey {other}; rename one"),
+                    ),
+                    _ => {
+                        row_ids.insert(row, &journey.id);
+                    }
+                }
+            }
+        }
         for journey in &self.journeys {
             let id = journey.id.as_str();
             if journey.runs == Some(0) {
                 report.problem("runs", id, "runs must be at least 1");
+            }
+            if journey.runs.is_some_and(|runs| runs > 1) && journey.independence_key.is_none() {
+                report.problem(
+                    "runs",
+                    id,
+                    "runs above 1 needs an independence_key, or duplicate runs cannot be told apart",
+                );
             }
             for (axis, values) in &journey.matrix {
                 if !plain_token(axis) || values.is_empty() || !values.iter().all(|v| plain_token(v)) {
@@ -1064,17 +1093,12 @@ impl Registry {
                     continue;
                 }
             };
-            let labeled: Vec<&String> = journey
-                .invariants
-                .iter()
-                .chain(&journey.manual_checks)
-                .filter(|c| self.criterion(c).is_some_and(|(_, labeled)| labeled))
-                .collect();
+            let labeled = self.labeled_criteria(journey);
             for record in &records {
                 let missing: Vec<&str> = labeled
                     .iter()
-                    .filter(|c| record.labels.get(c.as_str()).is_none_or(Value::is_null))
-                    .map(|c| c.as_str())
+                    .filter(|c| record.labels.get(**c).is_none_or(Value::is_null))
+                    .copied()
                     .collect();
                 if !missing.is_empty() {
                     report.debt(
@@ -1085,6 +1109,17 @@ impl Registry {
                 }
             }
         }
+    }
+
+    /// The journey's invariants and manual checks marked `labeled: true`.
+    pub fn labeled_criteria<'a>(&self, journey: &'a Journey) -> Vec<&'a str> {
+        journey
+            .invariants
+            .iter()
+            .chain(&journey.manual_checks)
+            .filter(|c| self.criterion(c).is_some_and(|(_, labeled)| labeled))
+            .map(String::as_str)
+            .collect()
     }
 
     /// Resolve shared groups after the journey's direct owners in declared group order.
@@ -2130,7 +2165,7 @@ journeys:
             )
             .replace(
                 "    spec: tests/signup.spec.ts\n",
-                "    spec: tests/signup.spec.ts\n    fixture_set: tests/golden.tsv\n    matrix: {route: [web, app]}\n    runs: 2\n",
+                "    spec: tests/signup.spec.ts\n    fixture_set: tests/golden.tsv\n    matrix: {route: [web, app]}\n    runs: 2\n    independence_key: run.id\n",
             );
         let sha = "a".repeat(64);
         let golden = |name: &str, contents: &str| {
@@ -2156,6 +2191,17 @@ journeys:
         let report = check(jsonl.path(), Path::new(DEFAULT_PATH)).unwrap();
         let problems: Vec<_> = report.problems.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect();
         assert_eq!(problems, [("fixture_set", "tests/golden.jsonl repeats record id A")]);
+
+        // A journey named like a golden row id would be filled by that row's
+        // walk, and runs above 1 need an independence_key.
+        let clash = yaml.replace("    independence_key: run.id\n", "")
+            + "  - id: B2-home.A.web.r1\n    status: dark\n    status_reason: Clashes with a golden row\n";
+        let clash = repo(&clash);
+        std::fs::write(clash.path().join("tests/golden.tsv"), format!("id\tsha256\tstorage_key\nA\t{sha}\tgolden/a.mp4\n")).unwrap();
+        assert!(Command::new("git").args(["add", "."]).current_dir(clash.path()).status().unwrap().success());
+        let report = check(clash.path(), Path::new(DEFAULT_PATH)).unwrap();
+        let problems: Vec<_> = report.problems.iter().map(|p| (p.code.as_str(), p.subject.as_str())).collect();
+        assert_eq!(problems, [("row_id", "B2-home.A.web.r1"), ("runs", "B2-home")], "{:?}", report.problems);
     }
 
     #[test]

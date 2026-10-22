@@ -1925,6 +1925,47 @@ impl CloudSyncer {
         }
     }
 
+    /// A consumed peer close remains attention-worthy after its pull cursor
+    /// advances. Both pull scopes report the durable guard until this local
+    /// delivery's lifecycle changes, without fetching or journaling it again.
+    fn report_guarded_peer_closes(
+        &self,
+        task_store: &dyn TaskStore,
+        result: &mut SyncResult,
+    ) -> Result<(), CasError> {
+        #[derive(Deserialize)]
+        struct GuardedTask {
+            local: Task,
+            rejected_remote: Task,
+            reason: String,
+        }
+
+        for (id, row) in self.queue.latest_task_lifecycle_conflicts()? {
+            let guard: GuardedTask = match serde_json::from_str(&row) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    result.errors.push(format!("Task {id}: lifecycle guard journal error: {error}"));
+                    continue;
+                }
+            };
+            if guard.local.status != TaskStatus::AwaitingMerge || !guard.rejected_remote.is_terminal() {
+                continue;
+            }
+            let current = match task_store.get(&id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if current.lifecycle_matches(&guard.local) {
+                result.errors.push(format!(
+                    "Task {}: remote {} skipped; local awaiting_merge\n      Guard: {}\n      Inspect: cas cloud conflicts --json",
+                    id, guard.rejected_remote.status, guard.reason,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn record_terminal_regression_conflict(
         &self,
         local: &Task,
@@ -2388,19 +2429,8 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped(reason)) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
-                    // A protected local delivery may legitimately retain its
-                    // lifecycle, but a peer's close must never disappear into
-                    // a successful no-op receipt. Keep the guard auditable.
-                    if previous_status == Some(crate::types::TaskStatus::AwaitingMerge)
-                        && remote_task.is_terminal()
-                    {
-                        result.errors.push(format!(
-                            "Task {}: remote {} skipped; local awaiting_merge\n      Guard: {reason}\n      Inspect: cas cloud conflicts --json",
-                            remote_task.id, remote_task.status,
-                        ));
-                    }
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -2676,6 +2706,7 @@ impl CloudSyncer {
 
         self.reassert_quarantine();
 
+        self.report_guarded_peer_closes(task_store, &mut result)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -3589,19 +3620,8 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped(reason)) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
-                    // A protected local delivery may legitimately retain its
-                    // lifecycle, but a peer's close must never disappear into
-                    // a successful no-op receipt. Keep the guard auditable.
-                    if previous_status == Some(crate::types::TaskStatus::AwaitingMerge)
-                        && remote_task.is_terminal()
-                    {
-                        result.errors.push(format!(
-                            "Task {}: remote {} skipped; local awaiting_merge\n      Guard: {reason}\n      Inspect: cas cloud conflicts --json",
-                            remote_task.id, remote_task.status,
-                        ));
-                    }
                 }
                 Err(e) => {
                     result.errors.push(format!("Task error: {e}"));
@@ -3737,6 +3757,7 @@ impl CloudSyncer {
         for conflict in self.take_conflict_log() {
             result.record_conflict_detail(conflict);
         }
+        self.report_guarded_peer_closes(task_store, &mut result)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }

@@ -1233,6 +1233,8 @@ impl CasService {
             }
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
+            let capacity_assistance = matches!(action.as_str(), "message" | "interrupt")
+                && req.blocker == Some(true) && req.target.as_deref() == Some("supervisor");
 
             // Destructive operations fail closed on fields that belong to
             // another action in this unified request. Serde catches unknown
@@ -1536,6 +1538,15 @@ impl CasService {
                     ),
                 )),
             };
+
+            if capacity_assistance && result.as_ref().is_ok_and(|result| result.is_error != Some(true))
+                && let Ok(worker_id) = this.inner.get_registered_agent_id_read_only()
+            {
+                if let Err(error) = crate::factory_capacity_wait::assistance_queued(
+                    &this.inner.cas_root, &worker_id,
+                    (!event_task_id.is_empty()).then_some(event_task_id.as_str()), chrono::Utc::now())
+                { tracing::warn!(%error, "capacity assistance queued but wait stamp failed"); }
+            }
 
             // cas-0033: the supervisor's calls retry queued branch deletions
             // and delete branches whose task ended or whose worktree is gone

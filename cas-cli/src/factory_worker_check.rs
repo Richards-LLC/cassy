@@ -393,7 +393,26 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nRetry the same capped Cargo command when host pressure or a builder slot clears.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon escalates a recorded wait once after 20 minutes. Report an actual need for assistance immediately.")
+}
+
+#[derive(Debug)]
+struct CapacityRefusal(String);
+impl std::fmt::Display for CapacityRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&waiting_for_admission(&self.0))
+    }
+}
+impl std::error::Error for CapacityRefusal {}
+
+fn recorded_refusal(root: &Path, repo: &Path, cause: &str) -> anyhow::Error {
+    let mut message = waiting_for_admission(cause);
+    match crate::factory_capacity_wait::record_refusal(root, repo, cause, chrono::Utc::now()) {
+        Ok(Some(wait)) => message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339())),
+        Ok(None) => {},
+        Err(error) => message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed.")),
+    }
+    anyhow::anyhow!(message)
 }
 
 #[derive(Debug)]
@@ -440,7 +459,7 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<BuilderSlot> {
             Err(error) => return Err(error.into()),
         }
     }
-    bail!("{}", waiting_for_admission(&format!("max_concurrent_builders={cap} slots are occupied")))
+    Err(CapacityRefusal(format!("max_concurrent_builders={cap} slots are occupied")).into())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -1382,7 +1401,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
-        bail!("{}", waiting_for_admission(&violations.join("; ")));
+        drop(admission);
+        return Err(recorded_refusal(&cas_root, &repo, &violations.join("; ")));
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
@@ -1392,7 +1412,17 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
-    let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
+    let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
+        Ok(slot) => slot,
+        Err(error) => {
+            drop(admission);
+            if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
+                return Err(recorded_refusal(&cas_root, &repo, &refusal.0));
+            }
+            return Err(error);
+        }
+    };
+    crate::factory_capacity_wait::admitted(&cas_root, &repo)?;
     // A parked target may contain proof logs but no debug artifacts. Seed only
     // missing children from the published immutable baseline under the lane lock.
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
@@ -2679,6 +2709,119 @@ PY"#);
             std::fs::metadata(&source).unwrap().ino()
         );
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
+    }
+
+    /// Capacity is waiting for local resources, not a yielded task.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_refusals_keep_lease_and_escalate_once_cas_dd28() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::RawContent;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "capacity-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_ROOT", &root);
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("capacity-worker", "worker", AgentRole::Worker),
+            ("capacity-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("capacity-fixture".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-dd28".into(), "wait for build capacity".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("working")).unwrap();
+        let lease = agents.get_lease(&task.id).unwrap().unwrap();
+        let notices = open_supervisor_queue_store(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-supervisor".into());
+        let service = CasService::new(core, None);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        for _ in 0..3 {
+            let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+            assert!(refused.contains("Waiting for build admission"), "{refused}");
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+            assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), 0);
+        }
+        let result = service.factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "worker_status", "summary_mode": true,
+        })).unwrap())).await.unwrap();
+        let status = result.content.into_iter().filter_map(|content| match content.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // pin: capacity wait and next retry identify resource waiting to workers and supervisors.
+        assert!(status.to_ascii_lowercase().contains("capacity wait"), "{status}");
+        assert!(status.contains("next retry"), "{status}");
+        assert!(status.contains("max_concurrent_builders=1"), "{status}");
+        assert_eq!(status.matches("Capacity wait:").count(), 1);
+        let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        let retry_at = wait.since + chrono::Duration::minutes(2);
+        let repeated = crate::factory_capacity_wait::record_refusal(&root, &repo,
+            "memory PSI some avg10 25% exceeds 10%", retry_at).unwrap().unwrap();
+        assert_eq!(repeated.since, wait.since, "retry cannot reset the escalation deadline");
+        assert_eq!(repeated.next_retry, retry_at + chrono::Duration::seconds(120));
+        for (minutes, expected_pages) in [(19, 0), (20, 1), (21, 1), (30, 1)] {
+            // The daemon uses this same reconciliation entry with wall time;
+            // passing time here needs neither a sleep nor a fake store.
+            crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"),
+                wait.since + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), expected_pages);
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+        }
+        drop(held);
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "admission clears the episode");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+
+        // Explicit need uses the existing durable worker message immediately,
+        // and consumes the same episode's later automatic escalation.
+        let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        assert!(execute_at(&root, &args, &repo, &fake).is_err());
+        let explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-worker".into());
+        let worker = CasService::new(core, None);
+        let need = "Need storage assistance to repair the scratch volume";
+        let delivered = worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": task.id,
+            "blocker": true, "summary": "Storage repair needed", "message": need,
+        })).unwrap())).await.unwrap();
+        assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
+        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
+            .iter().any(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)));
+        let after_need = notices.pending_count("capacity-supervisor").unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
+        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+
+        // A replacement lease cannot inherit an earlier wait or its deadline.
+        assert!(agents.release_lease_if_owner_epoch(&task.id, "capacity-worker", lease.epoch, "new ownership generation").unwrap());
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("resumed")).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(30)).unwrap();
+        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
     }
 
     #[cfg(unix)]

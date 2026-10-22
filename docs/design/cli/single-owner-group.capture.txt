@@ -1,0 +1,17 @@
+short IDs at80 columns
+DEBT: 0 problem(s), 1 debt item(s)
+Debt by kind:
+  single_reference_owner_group: 1
+Debt change: +0 since previous check (1 -> 1)
+WARN owner group audit-v2: only journey signup
+Details: cas qa journeys --check --verbose
+Registry: docs/qa/journeys.yaml
+
+long IDs at80 columns
+DEBT: 0 problem(s), 1 debt item(s)
+Debt by kind:
+  single_reference_owner_group: 1
+Debt change: +0 since previous check (1 -> 1)
+WARN owner group shared-audit-...: only journey audit-consumer... (full: --json)
+Details: cas qa journeys --check --verbose
+Registry: docs/qa/journeys.yaml

@@ -179,6 +179,18 @@ test("literal progress ellipses pass without a truncation escape", async (t) => 
   assert.deepEqual(report.findings, []);
 });
 
+test("progress-like truncated table rows and cut-off words fail without an escape", async (t) => {
+  const lines = ["Running  job-alpha  checkou...", "Loading configuration fi...", "Reconfiguring Cassy..."];
+  const report = await runTerminalQa({
+    command: [process.execPath, "-e", `console.log(${JSON.stringify(lines.join("\n"))})`],
+    out: tmpOut(t),
+    label: "progress-like-truncation",
+  });
+  assert.equal(report.verdict, "FAIL");
+  assert.deepEqual(checks(report), ["truncation-without-escape"]);
+  assert.deepEqual([...new Set(report.findings.map((f) => f.detail.token))].sort(), ["checkou...", "fi..."]);
+});
+
 const DEFECTS = [
   ["wrapped-table.sh", "overflow"],
   ["low-contrast.sh", "contrast"],

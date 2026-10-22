@@ -61,17 +61,44 @@ fn live_local_agent(agent: &Agent, now: DateTime<Utc>, local_machine: &str) -> O
     crate::mcp::daemon::pid_matches_fingerprint(pid, fingerprint).then_some(pid)
 }
 
-/// Convert the live server's process fingerprint to wall time so a recycled
-/// PID cannot inherit a historical epoch from another process.
+/// Read start time and parent from one process-info call, so a recycled PID
+/// cannot inherit a historical epoch from another process.
 #[cfg(target_os = "macos")]
-fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
-    let micros = crate::mcp::daemon::read_pid_starttime(pid)?;
-    DateTime::<Utc>::from_timestamp_micros(i64::try_from(micros).ok()?)
+fn process_identity(pid: u32) -> Option<(DateTime<Utc>, u32)> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: proc_pidinfo initializes the entire buffer on exact-size success.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as libc::c_int,
+        )
+    };
+    if written != size as libc::c_int {
+        return None;
+    }
+    // SAFETY: the exact-size return above means every field was initialized.
+    let info = unsafe { info.assume_init() };
+    let micros = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)?;
+    Some((
+        DateTime::<Utc>::from_timestamp_micros(i64::try_from(micros).ok()?)?,
+        info.pbi_ppid,
+    ))
 }
 
 #[cfg(target_os = "linux")]
-fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
-    let ticks = crate::mcp::daemon::read_pid_starttime(pid)?;
+fn process_identity(pid: u32) -> Option<(DateTime<Utc>, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = stat.rsplit_once(") ")?.1;
+    let fields = tail.split_whitespace().collect::<Vec<_>>();
+    let parent_pid = fields.get(1)?.parse().ok()?;
+    let ticks = fields.get(19)?.parse::<u64>().ok()?;
     // SAFETY: sysconf only reads the system clock-tick rate.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if hz <= 0 {
@@ -87,25 +114,21 @@ fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
     let started = std::time::UNIX_EPOCH
         + Duration::from_secs(boot)
         + Duration::from_secs_f64(ticks as f64 / hz as f64);
-    Some(DateTime::<Utc>::from(started))
+    Some((DateTime::<Utc>::from(started), parent_pid))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn process_started_at(_pid: u32) -> Option<DateTime<Utc>> {
+fn process_identity(_pid: u32) -> Option<(DateTime<Utc>, u32)> {
     None
 }
 
-fn epoch_matches_live_start(pid: u32, started_at: &str) -> bool {
-    let Some(process_start) = process_started_at(pid) else {
-        return false;
-    };
-    let Ok(epoch_start) = DateTime::parse_from_rfc3339(started_at) else {
-        return false;
-    };
+fn epoch_live_parent(pid: u32, started_at: &str) -> Option<u32> {
+    let (process_start, parent_pid) = process_identity(pid)?;
+    let epoch_start = DateTime::parse_from_rfc3339(started_at).ok()?;
     // The epoch is written during daemon startup, after its process starts.
     // A small tolerance covers timestamp precision and slow initialization.
     let elapsed = (epoch_start.with_timezone(&Utc) - process_start).num_seconds();
-    (-1..=30).contains(&elapsed)
+    (-1..=30).contains(&elapsed).then_some(parent_pid)
 }
 
 /// The supplied installed version lets tests exercise the real stores and
@@ -120,11 +143,13 @@ pub(crate) fn snapshot_with_installed(
         .list(None)
         .map_err(|e| format!("agent roster: {e}"))?;
     let history = SqliteHistoryStore::open(cas_root).map_err(|e| format!("binary epochs: {e}"))?;
+    let since = (now - chrono::Duration::seconds(120)).to_rfc3339();
     let epochs = history
-        .list_epochs(None, 4096)
+        .list_recent_daemon_epochs(&since, 4096)
         .map_err(|e| format!("binary epochs: {e}"))?;
     let local_machine = Agent::get_or_generate_machine_id();
-    let mut latest = BTreeMap::new();
+    let mut by_agent_pid = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
+    let mut seen_server_pid = BTreeSet::new();
     for epoch in epochs {
         if epoch.epoch_kind != EPOCH_KIND_DAEMON_START {
             continue;
@@ -138,22 +163,23 @@ pub(crate) fn snapshot_with_installed(
         let fresh = DateTime::parse_from_rfc3339(observed)
             .ok()
             .is_some_and(|at| (now - at.with_timezone(&Utc)).num_seconds().abs() <= 120);
-        if fresh {
-            latest.insert(pid, epoch);
-        }
-    }
-    let mut by_parent = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
-    for (server_pid, epoch) in latest {
-        if !epoch_matches_live_start(server_pid, &epoch.started_at) {
+        if !fresh {
             continue;
         }
-        let Some(parent_pid) = crate::agent_id::get_parent_of_pid(server_pid) else {
+        let Some(parent_pid) = epoch_live_parent(pid, &epoch.started_at) else {
             continue;
         };
-        by_parent
+        if !seen_server_pid.insert(pid) {
+            continue;
+        }
+        by_agent_pid
+            .entry(pid)
+            .or_default()
+            .push((pid, epoch.version.clone()));
+        by_agent_pid
             .entry(parent_pid)
             .or_default()
-            .push((server_pid, epoch.version));
+            .push((pid, epoch.version));
     }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
@@ -164,7 +190,7 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let matches = by_parent.get(&pid).cloned().unwrap_or_default();
+        let matches = by_agent_pid.get(&pid).cloned().unwrap_or_default();
         if matches.is_empty() {
             servers.push(ServerVersion {
                 name: agent.name,
@@ -354,7 +380,7 @@ mod tests {
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let child = DaemonChild(
             std::process::Command::new("sleep")
-                .arg("30")
+                .arg("120")
                 .spawn()
                 .unwrap(),
         );
@@ -379,10 +405,13 @@ mod tests {
     #[test]
     fn worker_status_flags_live_old_mcp_against_installed_binary() {
         let (_dir, root, worker, child) = fixture();
-        assert!(!epoch_matches_live_start(
-            child.0.id(),
-            &(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()
-        ));
+        assert!(
+            epoch_live_parent(
+                child.0.id(),
+                &(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()
+            )
+            .is_none()
+        );
         let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         assert_eq!(snapshot.servers[0].pid, child.0.id());
         let status = render(&snapshot, Some("factory-release"));
@@ -390,16 +419,61 @@ mod tests {
         assert!(status.contains("old-worker (Worker"), "{status}");
         assert!(status.contains("9.99.1 [STALE"), "{status}");
 
+        // Eager MCP registration records the server PID itself. Both roster
+        // shapes must identify this same live daemon epoch.
+        let mut direct = Agent::new_with_role(
+            "worker-direct".into(),
+            "direct-worker".into(),
+            AgentRole::Worker,
+        );
+        direct.factory_session = Some("factory-release".into());
+        direct.pid = Some(child.0.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut direct, child.0.id());
+        open_agent_store(&root).unwrap().register(&direct).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
+        assert!(
+            snapshot
+                .servers
+                .iter()
+                .any(|row| row.name == "direct-worker" && row.pid == child.0.id() && row.older),
+            "{:?}",
+            snapshot.servers
+        );
+
+        // The bounded scan must retain the newest live epoch after more than
+        // 4096 older history rows have accumulated.
+        let history = SqliteHistoryStore::open(&root).unwrap();
+        let old_start = Utc::now() - chrono::Duration::days(30);
+        for index in 0..4096 {
+            let at = (old_start + chrono::Duration::seconds(index)).to_rfc3339();
+            let mut old = crate::history::epochs::current_daemon_epoch(&at);
+            old.pid = Some(500_000 + index);
+            old.ended_at = Some(at.clone());
+            old.recorded_at = at;
+            history.record_epoch(&old).unwrap();
+        }
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
+        assert_eq!(
+            snapshot.servers.iter().filter(|row| row.older).count(),
+            2,
+            "{:?}",
+            snapshot.servers
+        );
+
         // A dead/reused PID cannot borrow a historical version and generate
         // a false alert for another process.
         let mut reused = worker;
         reused.pid_starttime = Some(u64::MAX);
         open_agent_store(&root).unwrap().update(&reused).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         assert!(
-            snapshot_with_installed(&root, "9.99.2", Utc::now())
-                .unwrap()
-                .servers
-                .is_empty()
+            snapshot.servers.iter().all(|row| row.name != "old-worker")
+                && snapshot
+                    .servers
+                    .iter()
+                    .any(|row| row.name == "direct-worker" && row.older),
+            "{:?}",
+            snapshot.servers
         );
     }
 

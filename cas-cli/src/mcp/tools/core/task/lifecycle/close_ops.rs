@@ -1006,7 +1006,11 @@ fn proof_target_segments(token: &str) -> Vec<String> {
 fn proof_target_matches_module(target: &str, module: &SourceModule) -> bool {
     let paths: Vec<Vec<String>> = std::iter::once(&module.segments)
         .chain(module.test_parent.iter())
-        .map(|path| path.iter().map(|segment| segment.to_ascii_lowercase()).collect())
+        .map(|path| {
+            path.iter()
+                .map(|segment| segment.to_ascii_lowercase())
+                .collect()
+        })
         .collect();
     if module.segments.is_empty() {
         return false;
@@ -2055,7 +2059,14 @@ fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<S
             continue;
         };
         for (_name, relative) in mounts {
-            if absolute.parent()?.join(relative).canonicalize().ok().as_ref() != Some(&changed_file) {
+            if absolute
+                .parent()?
+                .join(relative)
+                .canonicalize()
+                .ok()
+                .as_ref()
+                != Some(&changed_file)
+            {
                 continue;
             }
             let normalized = parent.to_str()?.replace('\\', "/");
@@ -2073,7 +2084,10 @@ fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<S
 /// library proof target; `mod.rs` names its directory's module. Mounted test
 /// siblings keep their physical names for receipts and diagnostics, with an
 /// additional Rust module path used only for declaration matching.
-pub(crate) fn changed_source_modules(proof_repo: &std::path::Path, paths: &[String]) -> Vec<SourceModule> {
+pub(crate) fn changed_source_modules(
+    proof_repo: &std::path::Path,
+    paths: &[String],
+) -> Vec<SourceModule> {
     let mut modules = std::collections::BTreeSet::new();
     for path in paths {
         let normalized = path.replace('\\', "/");
@@ -2199,7 +2213,11 @@ pub(crate) fn platform_risk_implausibility(
     ))
 }
 
-fn declared_risk_close_gaps(task: &Task, changed_paths: &[String], proof_repo: &std::path::Path) -> Vec<String> {
+fn declared_risk_close_gaps(
+    task: &Task,
+    changed_paths: &[String],
+    proof_repo: &std::path::Path,
+) -> Vec<String> {
     let mut gaps = Vec::new();
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         gaps.push(format!(
@@ -2214,7 +2232,8 @@ fn declared_risk_close_gaps(task: &Task, changed_paths: &[String], proof_repo: &
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered = uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let uncovered =
+            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             gaps.push(format!(
                 "blast-radius uncovered source modules: {}",
@@ -2594,7 +2613,8 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered = uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let uncovered =
+            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             return Err(format!(
                 "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. {}",
@@ -3118,7 +3138,11 @@ mod risk_proof_tests {
             "README.md".to_string(),
         ];
         assert_eq!(
-            uncovered_blast_radius_modules(std::path::Path::new("."), &changed, &["lifecycle".to_string()]),
+            uncovered_blast_radius_modules(
+                std::path::Path::new("."),
+                &changed,
+                &["lifecycle".to_string()]
+            ),
             ["mcp::tools::service::core"]
         );
     }
@@ -3142,13 +3166,19 @@ mod risk_proof_tests {
             "test(=cli::integrate)",
         ] {
             assert!(
-                uncovered_blast_radius_modules(std::path::Path::new("."), &changed, &[target.to_string()]).is_empty(),
+                uncovered_blast_radius_modules(
+                    std::path::Path::new("."),
+                    &changed,
+                    &[target.to_string()]
+                )
+                .is_empty(),
                 "{target} must cover cli::integrate::**"
             );
         }
         // The exact cas-48a6 rejection: proof_targets cli::integrate,cli::update,builtins.
         assert!(
-            uncovered_blast_radius_modules(std::path::Path::new("."), 
+            uncovered_blast_radius_modules(
+                std::path::Path::new("."),
                 &changed,
                 &paths(&["cli::integrate", "cli::update", "builtins"]),
             )
@@ -3156,7 +3186,8 @@ mod risk_proof_tests {
         );
         // A sibling or a descendant target is not an ancestor.
         assert_eq!(
-            uncovered_blast_radius_modules(std::path::Path::new("."), 
+            uncovered_blast_radius_modules(
+                std::path::Path::new("."),
                 &paths(&["cas-cli/src/cli/integrate/fs.rs"]),
                 &paths(&[
                     "cli::update",
@@ -3180,7 +3211,12 @@ mod risk_proof_tests {
             "cas --lib violet_retirement",
         ] {
             assert!(
-                uncovered_blast_radius_modules(std::path::Path::new("."), &changed, &[target.to_string()]).is_empty(),
+                uncovered_blast_radius_modules(
+                    std::path::Path::new("."),
+                    &changed,
+                    &[target.to_string()]
+                )
+                .is_empty(),
                 "{target} must cover cli::integrate::violet_retirement"
             );
         }
@@ -3196,7 +3232,8 @@ mod risk_proof_tests {
         // Each target's normalized text contains a changed module name, which
         // the removed substring arm counted as coverage.
         assert_eq!(
-            uncovered_blast_radius_modules(std::path::Path::new("."), 
+            uncovered_blast_radius_modules(
+                std::path::Path::new("."),
                 &changed,
                 &paths(&["violet_retirement", "updates", "skills::builtins_tests"]),
             ),
@@ -3204,7 +3241,11 @@ mod risk_proof_tests {
         );
         // A crate alias only strips a prefix; it never covers by itself.
         assert_eq!(
-            uncovered_blast_radius_modules(std::path::Path::new("."), &paths(&["cas-cli/src/update.rs"]), &paths(&["cas"])),
+            uncovered_blast_radius_modules(
+                std::path::Path::new("."),
+                &paths(&["cas-cli/src/update.rs"]),
+                &paths(&["cas"])
+            ),
             ["update"]
         );
     }

@@ -203,6 +203,7 @@ impl Config {
             "qa.release.retention_days" => Some(qa.release.clone().unwrap_or_default().retention_days.to_string()),
             "qa.release.components" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().components).expect("serializable components")),
             "qa.release.target_env" => Some(qa.release.clone().unwrap_or_default().target_env),
+            "qa.release.gate_env" => Some(qa.release.clone().unwrap_or_default().gate_env),
             "qa.release.suites" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().suites).expect("serializable suites")),
             "qa.release.grant_envs" => Some(qa.release.clone().unwrap_or_default().grant_envs.join(",")),
             "qa.release.migrations.paths" => Some(qa.release.clone().unwrap_or_default().migrations.unwrap_or_default().paths.join(",")),

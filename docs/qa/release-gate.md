@@ -20,6 +20,7 @@ adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
 grant_envs = ["staging"]
+target_env = "prod"
 
 [qa.release.components]
 backend = ["apps/backend", "packages/shared"]
@@ -41,9 +42,10 @@ env = "staging"
 | `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
 | `components` | Served component name to the repository paths it is built from. |
 | `grant_envs` | Environments where preflight may `grant` a balance shortfall (default `["staging"]`). |
+| `target_env` | Environment promotion serves; promotion reads its `flags` once (default `prod`). |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
-| `target_env` | The environment the gate walks, sent as every request's `env` (default `staging`). |
+| `gate_env` | The environment the gate walks, sent as every request's `env` (default `staging`). |
 | `suites` | Named suites, each `{journeys \| kinds, wall_clock_mins, concurrency}`; see [Running the gate](#running-the-gate). |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes
@@ -181,7 +183,9 @@ all, is `OWED`, and the gate names each owed row or PR and its cause.
 first-parent history: `Merge pull request #N` merges and squash subjects
 ending in `(#N)`. It maps each PR's diff to journeys through `cas qa impact`.
 A PR that no row exercises keeps the gate OWED until a manual row records
-`covers_prs: [N]`.
+`covers_prs: [N]`. Every other first-parent commit is a direct push and its
+own coverage unit, `push <sha7>`. It is owed the same way until a row
+exercises it or a manual row records `covers_commits: [<sha7>]`.
 
 **Sealing.** Sealing rehashes every media file and refuses a link or any path
 outside `media/`. It derives the gate, runs the evidence secret scan over the
@@ -196,18 +200,78 @@ is refused. A changed `pack.json` stops the receipt satisfying close, exactly
 as a changed `LEDGER.md` does.
 
 **Slack.** The Violet bundle posts `pack.json`, with the summary as its
-comment, and then each media file in that thread. Every file is rechecked
+comment, and then each image or video in that thread. Other media (traces,
+logs, archives) can carry credentials. They are never uploaded; the summary
+names them by local path. Every file is rechecked
 against the pack digest and is at most 25 MiB. Video over the limit is
 re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
 fits. If re-encoding fails or the video is still too large, it stays
 local-only and the row's frames carry the evidence.
 
 **PR comment.** Cassy keeps one comment per PR, marked
-`<!-- cassy:release-gate -->`, and edits it in place.
+`<!-- cassy:release-gate -->`, and edits it in place. A body over 65,000
+characters (GitHub's limit is 65,536) is cut at a line and ends with a
+pointer to the pack.
 
 **Retention.** `qa.release.retention_days` (default 30) deletes old media
 files only inside each pack's own `media/`. Links are never followed or
-deleted, and `pack.json` stays as the record.
+deleted.
+
+`pack.json` stays as the record, and its bytes never change, so a batch
+receipt bound to them stays valid. Before deleting a pack entry, retention
+records its path and digest in `pruned.json` beside the pack, atomically.
+Loading accepts a missing entry only when `pruned.json` records it with the
+pack's own digest. It refuses a record the pack does not list. An entry whose
+file changed is not pruned, so loading keeps refusing it.
+
+## Promotion: `cassy/release-gate`
+
+Promotion reads the pack. A head passes when either of these sealed packs
+is CLEAN and the target serves the flags the evidence ran under:
+
+- the pack for that SHA;
+- a pack for a commit with the same whole tree. A merge commit whose tree
+  equals the walked SHA counts as walked.
+
+Each evaluation reads `target_env` through the `flags` verb once, for the
+walked journeys' `depends_on_flags`, and compares the result with the pack's
+snapshot.
+
+| Result | When | Description names |
+|---|---|---|
+| `success` | A CLEAN pack and no flag mismatch. | The walked SHA. |
+| `pending` | No sealed pack exists yet. | The head. |
+| `failure` | Packs exist, but none walked this tree. | The head and the latest walked SHA. |
+| `failure` | The pack is FAILED or OWED. | The FAILED rows, or each OWED row or PR and its cause. |
+| `failure` | A flag differs on `target_env`, or the read failed. | Each `CONFIG_MISMATCH`, or `FLAGS UNKNOWN`. |
+
+`cas qa release-gate verify --sha X` prints the verdict and exits nonzero
+unless it passes, so projects without GitHub can use it as their check. With
+`qa.github_status = true`, it also publishes the verdict as the commit status
+`cassy/release-gate` on X. After each seal, the run publishes the status on
+the head of every open PR into `branches`. Require `cassy/release-gate` in
+branch protection on each promotion branch. Statuses use the same `gh`
+publisher as `cassy/independent-qa`.
+
+**Override.** A live registered supervisor may record the operator's
+decision as one decision note on any task:
+
+```text
+task action=notes note_type=decision notes="RELEASE-GATE OVERRIDE sha=<full 40-char sha>: <reason>"
+```
+
+The override passes that exact SHA, or a commit with the same whole tree,
+for 6 hours from the note. The status description names the override and
+when it expires. Each head it passes is logged once as a decision note on
+that task. Cassy refuses the marker with a concrete SHA from any other
+writer and from every other note path.
+
+**Freeze status.** While a run walks `integration_branch`, Cassy publishes a
+pending `cassy/release-freeze` status on the head of every open PR into
+that branch. At seal or abort it publishes success on the open PRs. Require
+the context on `integration_branch` so merges from outside Cassy wait too.
+A head pushed while no run is active has no freeze status until the next
+seal or abort.
 
 ## Independent runs: `independence_key`
 
@@ -495,7 +559,7 @@ JSON object. Each suite names exactly one of `journeys` or `kinds`, with a
 positive `wall_clock_mins` and `concurrency` (default 1). Suites run in name
 order, and a journey runs in the first suite that selects it.
 
-**Scope.** Each gate walks every journey live in `target_env` that is marked
+**Scope.** Each gate walks every journey live in `gate_env` that is marked
 `release_always: true`, plus the journeys whose owners the range
 `<base>..<sha>` touches (`cas qa impact`). The base is the newest sealed
 CLEAN pack whose SHA is an ancestor, else the merge base with the first of
@@ -559,12 +623,14 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
   rows by verdict, owed rows and manual minutes. `--json` prints the run.
 - `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
   records a manual row. Optional flags are `--reason`, `--cause`,
-  `--minutes`, `--subject kind=id` and `--covers-pr N`. Files in `<dir>`
+  `--minutes`, `--subject kind=id`, `--covers-pr N` and `--covers-commit <sha>`. Files in `<dir>`
   become the row's frames, and a PASS needs at least one. A declared
   read-back runs with the given subjects. A row the plan lacks must name
-  `--covers-pr`.
+  `--covers-pr` or `--covers-commit`.
 - `cas qa release-gate abort [--sha <sha>] --reason <why>` ends a live run
   and lifts the freeze.
+- `cas qa release-gate verify --sha <sha>` runs the
+  [promotion check](#promotion-cassyrelease-gate).
 
 `--sha` defaults to the live run.
 
@@ -574,7 +640,10 @@ the pack is sealed. After the seal, Cassy does two things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a
-  promotion branch whose head is the SHA.
+  promotion branch whose head is the SHA;
+- publishes the `cassy/release-freeze` release and the promotion statuses.
+
+`start` publishes the pending freeze status and `abort` releases it.
 
 Failures are noted on the run and never change the gate.
 

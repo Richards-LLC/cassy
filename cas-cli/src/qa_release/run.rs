@@ -13,8 +13,8 @@ use super::pack::{self, Pack, Row, SuiteTiming};
 use super::resources::{self, Meter, MeteredError, PlannedRow as PlannedUse, ResourcePlan};
 use super::verdict::{Gate, GateVerdict, NotExercisedCause, RowVerdict};
 use super::{
-    CallError, ReleaseConfig, Request, ServedComponent, ServedRefusal, Verb, preflight_served,
-    printable,
+    CallError, ReleaseConfig, Request, ServedComponent, ServedRefusal, Verb, configured,
+    preflight_served, printable,
 };
 use crate::qa_registry::{FixtureSource, Journey, Registry};
 use anyhow::{Context, Result, bail, ensure};
@@ -339,7 +339,7 @@ fn plan(
         None => None,
     };
     let mut rows = Vec::new();
-    for journey in registry.journeys.iter().filter(|j| live_in(j, &config.target_env)) {
+    for journey in registry.journeys.iter().filter(|j| live_in(j, &config.gate_env)) {
         let why = match &impacted {
             _ if journey.release_always => "release_always",
             Some(ids) if ids.contains(&journey.id) => "impacted",
@@ -366,6 +366,7 @@ fn row(id: &str, journey: &str, verdict: RowVerdict) -> Row {
         readbacks: Vec::new(),
         manual_minutes: None,
         covers_prs: Vec::new(),
+        covers_commits: Vec::new(),
     }
 }
 
@@ -398,7 +399,7 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
         );
     }
     let (registry, qa) = registry(cas_root)?;
-    let env = config.target_env.clone();
+    let env = config.gate_env.clone();
     let served_start = preflight_served(root, &config, &env, &sha).map_err(anyhow::Error::msg)?;
     let base = scope_base(cas_root, root, &config, &sha);
     let plan = plan(&registry, &qa, &config, root, base.as_deref(), &sha)?;
@@ -448,6 +449,12 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
     };
     run.note(format!("START {} rows; freeze until {}", run.plan.len(), run.freeze_until.to_rfc3339()));
     save(cas_root, &mut run)?;
+    if let Err(error) = super::promotion::publish_freeze(cas_root, root, &config, true) {
+        run = update(cas_root, &sha, |run| {
+            run.note(format!("freeze status not published: {}", printable(&error)));
+            Ok(run.clone())
+        })?;
+    }
     Ok(run)
 }
 
@@ -456,13 +463,22 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
 pub fn abort(cas_root: &Path, sha: Option<&str>, reason: &str) -> Result<Run> {
     ensure!(!reason.trim().is_empty(), "abort needs a non-empty --reason");
     let sha = resolve(cas_root, sha)?.sha;
-    update(cas_root, &sha, |run| {
+    let run = update(cas_root, &sha, |run| {
         ensure!(run.state.live(), "the release gate for {sha} is already {:?}", run.state);
         run.state = State::Aborted;
         run.abort_reason = Some(printable(reason));
         run.note(format!("ABORT: {}", printable(reason)));
         Ok(run.clone())
-    })
+    })?;
+    match configured(cas_root).map(|config| {
+        super::promotion::publish_freeze(cas_root, project_root(cas_root)?, &config, false).map_err(anyhow::Error::msg)
+    }) {
+        Some(Err(error)) => update(cas_root, &sha, |run| {
+            run.note(format!("freeze release not published: {error}"));
+            Ok(run.clone())
+        }),
+        _ => Ok(run),
+    }
 }
 
 /// A manual row: what a person walked and saw.
@@ -479,6 +495,8 @@ pub struct Record {
     /// Read-back subject ids, `kind → id`.
     pub subjects: BTreeMap<String, String>,
     pub covers_prs: Vec<u64>,
+    /// Direct-push commits this row covers.
+    pub covers_commits: Vec<String>,
 }
 
 /// Records a manual row. On a live run it fills a planned manual row (or adds
@@ -526,8 +544,8 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
             ),
         }
         ensure!(
-            planned.is_some() || !input.covers_prs.is_empty(),
-            "row {} is not planned; an extra manual row must name --covers-pr",
+            planned.is_some() || !input.covers_prs.is_empty() || !input.covers_commits.is_empty(),
+            "row {} is not planned; an extra manual row must name --covers-pr or --covers-commit",
             input.row
         );
         Ok(run.state == State::Sealed)
@@ -565,7 +583,7 @@ fn walk_manual(
         "PASS" => {
             ensure!(!frames.is_empty(), "a PASS needs --evidence with at least one frame");
             let outcome = journey.readback.as_ref().map(|_| {
-                super::readback(root, config, &config.target_env, sha, journey, &input.subjects)
+                super::readback(root, config, &config.gate_env, sha, journey, &input.subjects)
                     .unwrap_or_else(crate::qa_readback::Outcome::Missing)
             });
             readbacks.extend(readback_record(outcome.as_ref()));
@@ -584,6 +602,7 @@ fn walk_manual(
     walked.readbacks = readbacks;
     walked.manual_minutes = input.minutes;
     walked.covers_prs = input.covers_prs.clone();
+    walked.covers_commits = input.covers_commits.clone();
     Ok(walked)
 }
 
@@ -950,8 +969,13 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
             .chain(run.rows.iter().filter(|r| !run.plan.iter().any(|p| p.id == r.id)))
             .cloned()
             .collect();
+        // A frame retention already pruned keeps its earlier digest.
+        let previous = Pack::load(&dir).ok();
         for frame in pack.rows.iter().flat_map(|r| r.frames.clone()).collect::<Vec<_>>() {
-            pack.add_media(&dir, &frame).map_err(anyhow::Error::msg)?;
+            if let Err(error) = pack.add_media(&dir, &frame) {
+                let kept = previous.as_ref().and_then(|p| p.media.iter().find(|m| m.path == frame));
+                pack.media.push(kept.cloned().ok_or_else(|| anyhow::Error::msg(error))?);
+            }
         }
         if let Some(base) = &run.base {
             let prs = coverage::candidate_prs(root, base, sha)?;
@@ -983,6 +1007,12 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
     match Pack::load(&dir) {
         Ok(sealed) => notes.extend(publish_comments(root, config, &sealed)),
         Err(error) => notes.push(format!("pack reload for publication failed: {error}")),
+    }
+    if let Err(error) = super::promotion::publish_freeze(cas_root, root, config, false) {
+        notes.push(format!("freeze release not published: {}", printable(&error)));
+    }
+    if let Err(error) = super::promotion::publish_promotions(cas_root, root, config) {
+        notes.push(format!("promotion status not published: {}", printable(&error)));
     }
     if !notes.is_empty() {
         run = update(cas_root, sha, |run| {

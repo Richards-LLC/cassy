@@ -51,6 +51,9 @@ pub enum ReleaseGateCommand {
         /// PR number this row covers (repeatable).
         #[arg(long = "covers-pr")]
         covers_prs: Vec<u64>,
+        /// Direct-push commit this row covers (repeatable).
+        #[arg(long = "covers-commit")]
+        covers_commits: Vec<String>,
     },
     /// End a live run without a pack and lift the freeze.
     Abort {
@@ -58,6 +61,11 @@ pub enum ReleaseGateCommand {
         sha: Option<String>,
         #[arg(long)]
         reason: String,
+    },
+    /// Evaluate the promotion check for a PR head and publish its status.
+    Verify {
+        #[arg(long)]
+        sha: String,
     },
 }
 
@@ -68,6 +76,9 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
         (None, None) => bail!("pass --sha <sha> to start a gate, or use status, record or abort"),
         (Some(ReleaseGateCommand::Status { sha }), _) => run::resolve(root, sha.as_deref())?,
         (Some(ReleaseGateCommand::Abort { sha, reason }), _) => run::abort(root, sha.as_deref(), reason)?,
+        (Some(ReleaseGateCommand::Verify { sha }), _) => {
+            return crate::qa_release::promotion::verify_cli(root, sha, cli.json);
+        }
         (
             Some(ReleaseGateCommand::Record {
                 sha,
@@ -79,6 +90,7 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
                 minutes,
                 subjects,
                 covers_prs,
+                covers_commits,
             }),
             _,
         ) => {
@@ -106,6 +118,7 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
                 minutes: *minutes,
                 subjects,
                 covers_prs: covers_prs.clone(),
+                covers_commits: covers_commits.clone(),
             };
             run::record(root, sha.as_deref(), &input)?
         }

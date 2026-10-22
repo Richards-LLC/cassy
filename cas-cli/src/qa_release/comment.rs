@@ -6,6 +6,8 @@ use super::verdict::GateVerdict;
 use std::time::Duration;
 
 pub const MARKER: &str = "<!-- cassy:release-gate -->";
+/// GitHub refuses comment bodies over 65,536 characters; stay well under.
+pub const MAX_CHARS: usize = 65_000;
 
 /// The GitHub comment calls the gate makes. Production is [`GhComments`];
 /// tests use a fake.
@@ -17,7 +19,8 @@ pub trait PrComments {
 }
 
 /// The pack as a PR comment: gate verdict, failed and owed rows, PR coverage,
-/// the flag snapshot and the media count.
+/// the flag snapshot and the media count. A body over [`MAX_CHARS`] is cut at
+/// a line and ends with a pointer to the full pack.
 pub fn render_comment(pack: &Pack) -> String {
     let gate = &pack.gate;
     let word = match gate.verdict {
@@ -53,13 +56,25 @@ pub fn render_comment(pack: &Pack) -> String {
                 (Some(manual), true) => format!("manual row `{}`", printable(manual)),
                 (None, true) => "**not exercised**".into(),
             };
-            body.push_str(&format!("- #{}: {by}\n", pr.pr));
+            body.push_str(&format!("- {}: {by}\n", pr.subject()));
         }
     }
     if let Some(flags) = &pack.flags {
         body.push_str(&format!("\n`{}`\n", flags.ledger_line()));
     }
     body.push_str(&format!("\n{} media files kept locally.\n", pack.media.len()));
+    if body.chars().count() <= MAX_CHARS {
+        return body;
+    }
+    let pointer = format!(
+        "\n… truncated. The full record is `release/{}/pack.json` in the project's artifacts.\n",
+        pack.sha
+    );
+    let keep = MAX_CHARS - pointer.chars().count();
+    let cut = body.char_indices().nth(keep).map_or(body.len(), |(index, _)| index);
+    let cut = body[..cut].rfind('\n').map_or(cut, |line| line + 1);
+    body.truncate(cut);
+    body.push_str(&pointer);
     body
 }
 

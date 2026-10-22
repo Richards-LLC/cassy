@@ -662,7 +662,38 @@ mod tests {
         let (message, is_error) = app.status_message.clone().unwrap();
         assert!(is_error && message.contains("operator"), "{message}");
         let saved = Config::load(&root).unwrap();
-        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
+        assert_eq!(
+            saved.get("qa.evidence_gate"),
+            app.original_config.get("qa.evidence_gate")
+        );
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config
+            .set(
+                "notifications.webhook_url",
+                "https://hooks.example.test/services/secret",
+            )
+            .unwrap();
+        app.has_unsaved = true;
+        app.save_config_with(agent).unwrap();
+        assert!(
+            app.has_unsaved,
+            "operator-only webhook edit must remain unsaved"
+        );
+        let (message, is_error) = app.status_message.clone().unwrap();
+        assert!(
+            is_error
+                && message.contains("notifications.webhook_url")
+                && message.contains("operator"),
+            "{message}"
+        );
+        assert_eq!(
+            Config::load(&root)
+                .unwrap()
+                .get("notifications.webhook_url")
+                .as_deref(),
+            Some("")
+        );
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("sync.min_helpful", "5").unwrap();

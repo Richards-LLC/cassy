@@ -3594,6 +3594,7 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
         assert!(prose.contains(path), "{output}");
         // pin: lossless advice must keep every word and the actionable user command.
         assert!(prose.contains("Review each file; to accept the Cassy version, delete it and rerun `cas update --user`."), "{output}");
+        assert!(output.lines().any(|line| line.contains("`cas update --user`.")), "{output}");
         assert!(!prose.contains("--sync") && !prose.contains('…'), "{output}");
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), local);
     }

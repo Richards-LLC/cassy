@@ -5802,7 +5802,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 superseded.push(old_id);
             }
             let stored_prompt = if blocks.is_empty() {
-                prompt_for_storage
+                // An absorbed non-quiet row keeps its wake even when no body
+                // block was added. Otherwise retain the original reply/quiet
+                // marker ordering required by the ordinary no-fold path.
+                if new_quiet && !all_quiet {
+                    new_prompt.clone()
+                } else {
+                    prompt_for_storage
+                }
             } else {
                 let folded = format!("{}{fold_end}{new_prompt}", blocks.join("\n\n"));
                 if all_quiet {

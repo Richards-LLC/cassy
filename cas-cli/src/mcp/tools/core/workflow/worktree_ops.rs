@@ -4988,7 +4988,7 @@ impl CasCore {
                     && push_outcome.is_published() =>
             {
                 let outcome = self.close_after_green_merge(task_id, merge_sha).await;
-                crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.receipt(task_id));
+                crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 format!("{push_note}{}", outcome.receipt(task_id))
             }
             _ => push_note,

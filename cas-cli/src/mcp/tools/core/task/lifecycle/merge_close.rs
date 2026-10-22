@@ -25,6 +25,14 @@ pub(crate) enum CassyMergeClose {
 
 impl CassyMergeClose {
     /// One receipt line for the caller's response.
+    /// cas-3fc8: what the post-commit note says this close concluded.
+    pub(crate) fn followup(&self, task_id: &str) -> String {
+        match self {
+            Self::NotEligible => "not eligible for Cassy's close".to_string(),
+            other => other.receipt(task_id),
+        }
+    }
+
     pub(crate) fn receipt(&self, task_id: &str) -> String {
         match self {
             Self::NotEligible => String::new(),

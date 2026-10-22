@@ -159,10 +159,10 @@ pub(crate) fn merge_followup(outcome: &str) {
         && receipt.action == "worktree_merge"
         && let Ok(mut followup) = receipt.followup.lock()
     {
-        // cas-3fc8: an empty receipt means the task was not eligible.
+        // cas-3fc8: a close that answered no text still gets a named outcome.
         let outcome = outcome.trim();
         *followup = Some(if outcome.is_empty() {
-            "not eligible for Cassy's close".to_string()
+            "the close returned no text".to_string()
         } else {
             outcome.to_string()
         });

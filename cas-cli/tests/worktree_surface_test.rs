@@ -1823,19 +1823,10 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     env.set("CAS_AGENT_ROLE", "worker");
     env.set("CAS_FACTORY_MODE", "1");
     let repo = GitRepo::new();
-    run_git(
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/test/reference-union.git",
-        ],
-        &repo.root,
-    );
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
     std::fs::write(
         cas_root.join("config.toml"),
-        "[verification]\nenabled = false\n",
+        "[verification]\nenabled = false\n[project]\ncanonical_id = \"reference-union\"\n",
     )
     .unwrap();
     let base_hash = "1".repeat(64);
@@ -1861,7 +1852,7 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     run_git(&["commit", "-m", "baseline reference history"], &repo.root);
     let base = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
     let target = WorkTarget {
-        repo_selector: "remote:github.com/test/reference-union".to_string(),
+        repo_selector: "project:reference-union".to_string(),
         target_branch: "main".to_string(),
     };
     let store = open_task_store(&cas_root).unwrap();

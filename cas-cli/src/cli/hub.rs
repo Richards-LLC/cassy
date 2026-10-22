@@ -1892,7 +1892,40 @@ fn cleanup_stale_launcher_files_with(
     root: &std::path::Path,
     is_alive: impl Fn(u32) -> bool,
 ) {
-    let _ = (root, is_alive);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix(".launcher-") else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !matches!(extension, "pid" | "go" | "error") {
+            continue;
+        }
+        let Some((stamp, pid)) = stem.rsplit_once('-') else {
+            continue;
+        };
+        if stamp.parse::<i64>().is_err() {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || pid > i32::MAX as u32 || is_alive(pid) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
 }
 
 impl ScopedFile {
@@ -4484,8 +4517,16 @@ mod tests {
         let stale_pid = 111;
         let live_pid = 222;
         for extension in ["pid", "go", "error"] {
-            std::fs::write(root.path().join(format!(".launcher-7-{stale_pid}.{extension}")), b"stale").unwrap();
-            std::fs::write(root.path().join(format!(".launcher-8-{live_pid}.{extension}")), b"live").unwrap();
+            std::fs::write(
+                root.path().join(format!(".launcher-7-{stale_pid}.{extension}")),
+                b"stale",
+            )
+            .unwrap();
+            std::fs::write(
+                root.path().join(format!(".launcher-8-{live_pid}.{extension}")),
+                b"live",
+            )
+            .unwrap();
         }
         let unrelated = root.path().join(".launcher-unrelated.error");
         std::fs::write(&unrelated, b"unrelated").unwrap();
@@ -4493,8 +4534,17 @@ mod tests {
         cleanup_stale_launcher_files_with(root.path(), |pid| pid == live_pid);
 
         for extension in ["pid", "go", "error"] {
-            assert!(!root.path().join(format!(".launcher-7-{stale_pid}.{extension}")).exists());
-            assert!(root.path().join(format!(".launcher-8-{live_pid}.{extension}")).exists());
+            assert!(
+                !root
+                    .path()
+                    .join(format!(".launcher-7-{stale_pid}.{extension}"))
+                    .exists()
+            );
+            assert!(
+                root.path()
+                    .join(format!(".launcher-8-{live_pid}.{extension}"))
+                    .exists()
+            );
         }
         assert!(unrelated.exists());
     }

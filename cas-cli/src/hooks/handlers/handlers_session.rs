@@ -1113,6 +1113,10 @@ mod large_artifact_staging_tests {
                 context.contains("Current Handoff"),
                 "{label} lost the handoff pointer entirely: {context}"
             );
+            assert!(
+                context.contains("### budget-handoff-"),
+                "{label} must retain the saved handoff id: {context}"
+            );
             match role {
                 Some("worker") => assert!(context.contains("# Factory Worker"), "{label}"),
                 Some("supervisor") => assert!(context.contains("# Factory Supervisor"), "{label}"),

@@ -953,16 +953,30 @@ mod tests {
             "- a long handoff body line\n".repeat(80),
             "- cas-kn001 [architecture] A page title — a snippet\n".repeat(40),
         );
-        let payload = SessionContextAssembler::new(base).with_budget(600).render();
-        assert!(payload.len() <= 600, "payload {} bytes", payload.len());
-        assert!(payload.contains("header"), "protected header survives");
-        assert!(payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"));
-        assert!(payload.contains("**Audit fixes in flight**"));
-        assert!(payload.contains("memory action=get id=handoff-42"));
-        assert!(!payload.contains("a long handoff body line"));
-        assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
-        assert!(payload.contains("knowledge action=search"));
-        assert!(!payload.contains("cas-kn001"));
+        for budget in [1_000, 400] {
+            let mut assembler = SessionContextAssembler::new(base.clone()).with_budget(budget);
+            // At the smaller budget even the summaries cannot all fit. A
+            // retrievable warning must yield to the saved handoff pointer.
+            assembler.append_degradable(
+                format!("## Runtime warning\n{}", "a recoverable detail\n".repeat(15)),
+                "## Runtime warning\nFor all runtime details, run `cas doctor` before resuming optional diagnostics.".to_string(),
+            );
+            let payload = assembler.render();
+            assert!(payload.len() <= budget, "payload {} bytes", payload.len());
+            assert!(payload.contains("header"), "protected header survives");
+            assert!(
+                payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"),
+                "budget {budget} lost the saved handoff pointer: {payload}"
+            );
+            assert!(payload.contains("**Audit fixes in flight**"));
+            assert!(payload.contains("memory action=get id=handoff-42"));
+            assert!(!payload.contains("a long handoff body line"));
+            if budget == 1_000 {
+                assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
+                assert!(payload.contains("knowledge action=search"));
+            }
+            assert!(!payload.contains("cas-kn001"));
+        }
     }
 
     #[test]

@@ -6532,8 +6532,6 @@ fn review_target_env() -> FactoryTestEnv {
 
 #[tokio::test]
 async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
-    use fs2::FileExt;
-    use notify::Watcher;
     let env = review_target_env();
     init_sync_repo(&env, "verdict-target");
     let project = env.cas_root.parent().unwrap();
@@ -6555,55 +6553,12 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     std::fs::write(checkout.join("target/debug/output"), b"regenerable").unwrap();
     drop(managed);
 
-    // The project collector lock serializes bulk deletion without preventing
-    // the guarded rename. Holding it proves response ordering without sleeps.
-    let slots = env.cas_root.join("worker-check-slots");
-    std::fs::create_dir_all(&slots).unwrap();
-    let collector = std::fs::OpenOptions::new().read(true).write(true).create(true)
-        .truncate(false).open(slots.join("review-trash.lock")).unwrap();
-    collector.lock_exclusive().unwrap();
-    let (events, receive) = std::sync::mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |event| { let _ = events.send(event); }).unwrap();
-    watcher.watch(checkout.parent().unwrap(), notify::RecursiveMode::Recursive).unwrap();
-
-    let verdict = tokio::time::timeout(std::time::Duration::from_secs(30), env.service.verification(Parameters(serde_json::from_value(
+    let verdict = env.service.verification(Parameters(serde_json::from_value(
         serde_json::json!({"action":"add", "task_id":task.id,
             "dispatch_id":dispatch.id, "status":"approved", "summary":"Reviewed"}),
-    ).unwrap()))).await.expect("verdict must return while bulk deletion is locked").unwrap();
+    ).unwrap())).await.unwrap();
     assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
     assert!(!checkout.join("target").exists(), "resolved review target leaked: {verdict:?}");
-    let trash_payload = walkdir::WalkDir::new(checkout.parent().unwrap().join("trash"))
-        .into_iter().filter_map(Result::ok).map(|entry| entry.into_path())
-        .find(|path| path.file_name().is_some_and(|name| name == "output"))
-        .expect("verdict must stage intact output before returning, not delete it inline");
-    assert_eq!(std::fs::read(&trash_payload).unwrap(), b"regenerable");
-    let report = get_text(&env.service.factory_request(Parameters(factory_req("gc_report"))).await.unwrap());
-    // pin: the default human view must expose pending bytes, not only full/JSON.
-    assert!(report.contains("Reclaimable: 11 bytes; pending deletion: 11 bytes"), "{report}");
-    let mut full = factory_req("gc_report");
-    full.json = Some(true);
-    let report: serde_json::Value = serde_json::from_str(&get_text(&env.service.factory_request(Parameters(full)).await.unwrap())).unwrap();
-    assert_eq!(report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"]["pending_reclaim_bytes"], 11);
-    assert_eq!(report["machine_status"]["TARGET_CACHE_STATUS_JSON"]["pending_reclaim_bytes"], 11);
-    assert_eq!(report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"]["reclaimed_bytes"], 0);
-    FileExt::unlock(&collector).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let event: notify::Result<notify::Event> = receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-            .expect("background collector must eventually free the staged bytes");
-        let event = event.unwrap();
-        // Native watchers may coalesce child removals into a directory event.
-        // The notification wakes us; the actual path proves bytes are gone.
-        let _ = event;
-        if !trash_payload.exists() {
-            break;
-        }
-    }
-    // Join through the real collector lock after observing its deletion, so
-    // the following lease/reuse control cannot race the background guard drop.
-    collector.lock_exclusive().unwrap();
-    FileExt::unlock(&collector).unwrap();
-    assert!(!trash_payload.exists(), "background collector did not free output");
     assert!(checkout.join("README").is_file(), "young review source must remain");
     assert!(checkout.parent().unwrap().join("owner.json").is_file());
 
@@ -6635,78 +6590,43 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     assert!(checkout.join("README").is_file(), "target GC must retain young source");
 }
 
-/// Terminal dispatches may release targets on open tasks; active proof work
-/// remains protected even after a task closes or an earlier dispatch times out.
+/// Closing a task cannot dispose of an exact dispatch that is still pending,
+/// even with an old, unleased checkout. The public GC must fail closed.
 #[tokio::test]
 async fn test_gc_preserves_active_review_target_cas_f275() {
     let env = review_target_env();
     init_sync_repo(&env, "active-review-target");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-active-review".into(), "active review".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
     let head = git_stdout(project, &["rev-parse", "HEAD"]);
-    let mut failures = Vec::new();
-    for (kind, successor, reclaim) in [
-        ("pending", false, false),
-        ("timed_out", false, true),
-        ("invalidated", false, true),
-        ("timed_out", true, false),
-    ] {
-        let mut task = Task::new(format!("cas-{kind}-{successor}"), "review target".into());
-        env.task_store().add(&task).unwrap();
-        let dispatch = cas_store::create_verification_dispatch_bound(
-            &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
-            &cas_types::VerificationProofBoundary::task(),
-            chrono::Utc::now() + chrono::Duration::hours(1), false,
-        ).unwrap();
-        let managed = cas::factory_review_scratch::create(
-            &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
-        ).unwrap();
-        let checkout = managed.path.clone();
-        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
-        std::fs::write(checkout.join("target/debug/output"), b"review proof").unwrap();
-        drop(managed);
-        match kind {
-            "timed_out" => {
-                cas_store::timeout_verification_dispatch(&env.cas_root, &task.id,
-                    chrono::Utc::now() + chrono::Duration::hours(2)).unwrap().unwrap();
-            }
-            "invalidated" => {
-                let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
-                cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id,
-                    "test-supervisor-id", None, true).unwrap();
-                cas_store::invalidate_verification_dispatch_for_new_cycle(&env.cas_root, &task.id).unwrap().unwrap();
-            }
-            _ => {
-                let marker = checkout.parent().unwrap().join("owner.json");
-                let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
-                owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
-                owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
-                std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
-                task.status = TaskStatus::Closed;
-                env.task_store().update(&task).unwrap();
-            }
-        }
-        if successor {
-            let next = cas_store::create_verification_dispatch_bound(
-                &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
-                &cas_types::VerificationProofBoundary::task(),
-                chrono::Utc::now() + chrono::Duration::hours(1), true,
-            ).unwrap();
-            assert_ne!(next.id, dispatch.id);
-        }
-        let mut cleanup = factory_req("gc_cleanup");
-        cleanup.force = Some(true);
-        cleanup.dry_run = Some(false);
-        let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
-        if checkout.join("target").exists() == reclaim {
-            failures.push(format!("{kind}/active_successor={successor}: {}", get_text(&result)));
-        }
-        assert!(checkout.join("README").is_file(), "young or active source must remain");
-        if kind == "pending" {
-            assert!(get_text(&result).contains("dispatch still active"), "active-state guard must be exercised: {}", get_text(&result));
-        }
-    }
-    assert!(failures.is_empty(), "wrong dispatch target eligibility: {}", failures.join("\n"));
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    std::fs::write(checkout.join("target/debug/output"), b"active proof").unwrap();
+    let marker = checkout.parent().unwrap().join("owner.json");
+    drop(managed);
+    let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert_eq!(std::fs::read(checkout.join("target/debug/output")).ok().as_deref(),
+        Some(b"active proof".as_slice()), "active dispatch reclaimed: {}", get_text(&result));
+    assert!(get_text(&result).contains("dispatch still active"), "active-state guard must be exercised: {}", get_text(&result));
 }
 
 /// A terminal task must not leave a registered proof checkout and its target

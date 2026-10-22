@@ -124,9 +124,6 @@ pub struct TargetCacheReport {
     pub candidate_bytes: u64,
     pub selected_bytes: u64,
     pub reclaimed_bytes: u64,
-    /// Verifier output atomically queued for deletion, still occupying disk.
-    #[serde(default)]
-    pub pending_reclaim_bytes: u64,
     pub dry_run: bool,
     pub remediation: String,
     pub caches: Vec<TargetCacheRecord>,
@@ -404,7 +401,6 @@ fn inspect_scoped_with_probe(
         candidate_bytes,
         selected_bytes,
         reclaimed_bytes: 0,
-        pending_reclaim_bytes: crate::factory_review_scratch::pending_reclaim_bytes(cas_root),
         dry_run,
         remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,

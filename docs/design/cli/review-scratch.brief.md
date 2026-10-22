@@ -3,9 +3,9 @@
 | Field | Contract |
 | --- | --- |
 | First two lines | `scratch-checkout` prints the absolute checkout path alone so a supervisor can use it directly; failures explain the rejected owner or commit. |
-| Scannable | GC adds one managed review category with task, disposition and bytes; its default context states total reclaimable bytes and pending deletion bytes, while large unmanaged directories stay review-only. |
+| Scannable | GC adds one managed review category with task, disposition and bytes; large unmanaged directories are explicitly review-only. |
 | Readable | The existing bounded GC projection fits 79 columns; complete paths remain in `--full` and JSON. |
-| Machine output | GC's existing single JSON document includes `REVIEW_SCRATCH_STATUS_JSON` with schema_version, rows, reclaimed_bytes, pending_reclaim_bytes and total/per-row reclaimable_bytes; target-cache/admission reports also expose pending_reclaim_bytes without treating queued bytes as free space. Checkout creation returns one raw path, or a single `{path, task_id, dispatch_id, head}` object under `--json`. |
+| Machine output | GC's existing single JSON document includes `REVIEW_SCRATCH_STATUS_JSON` with schema_version, rows, reclaimed_bytes and total/per-row reclaimable_bytes. Checkout creation returns one raw path, or a single `{path, task_id, dispatch_id, head}` object under `--json`. |
 | Omitted | No build output appears during checkout creation. GC never automatically adopts unmanaged directories. |
 
 Review output is ASCII, monochrome and append-only. The existing GC renderer
@@ -21,18 +21,11 @@ creation-time fallback for legacy records. Unmanaged size inventory stops at
 1 GiB and prints an explicit lower bound. Correction proof and the same-command
 before/after real-build ledger are stored in task artifacts under `correction/`.
 
-Finished review targets (resolved, timed out or invalidated), or terminal tasks' targets without an active dispatch,
+Resolved review targets, or terminal tasks' targets without an active dispatch,
 are reclaimed on verdict/close or the next guarded GC pass (at most 16 per pass).
 Only source and its registration retain the two-hour idle grace period. A young
 checkout's `reclaimable_bytes` counts its build target; `bytes` remains the total
 inventory. Pending/claimed dispatches, held leases and live output remain protected.
-
-Verdict/close responses wait only for ownership-checked atomic target handoff to
-the private checkout's `trash/target`, with the owner marker written first.
-Measurement and unlinking run in the background under the existing build lane;
-GC/admission recover interrupted trash. A project collector lock serializes bulk
-deletion, and pending trash remains counted until it is actually removed.
-Source and ownership records remain available while trash still needs collection.
 
 ## Original delivery critique
 

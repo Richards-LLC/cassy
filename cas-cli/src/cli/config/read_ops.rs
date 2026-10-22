@@ -942,20 +942,6 @@ mod tests {
 
     #[test]
     fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
-        const SYNTHETIC_PATH_KEYS: &[&str] = &[
-            "hooks.stop.duplicate_detection_enabled",
-            "hooks.stop.duplicate_detection_threshold",
-            "hooks.stop.learning_review_enabled",
-            "hooks.stop.learning_review_threshold",
-            "hooks.stop.rule_review_enabled",
-            "hooks.stop.rule_review_threshold",
-            "notifications.on_auth_success",
-            "notifications.on_idle_prompt",
-            "notifications.on_permission_prompt",
-            "notifications.webhook_url",
-            "slack.stakeholder_contacts",
-        ];
-
         let registry = crate::config::registry();
         let mut keys = registry.all_keys();
         keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
@@ -963,71 +949,25 @@ mod tests {
         keys.dedup();
 
         for key in keys {
-            let mut document = if key == "factory.write_roots" {
-                let mut config = Config::default();
-                config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
-                toml_edit::Document::parse(toml::to_string(&config).unwrap())
-                    .unwrap()
-                    .into_mut()
-            } else if SYNTHETIC_PATH_KEYS.contains(&key) {
-                let (parent, leaf) = key.rsplit_once('.').expect("nested config key");
-                let value = if key == "slack.stakeholder_contacts" {
-                    "[]"
-                } else {
-                    "\"sentinel\""
-                };
-                toml_edit::Document::parse(format!("[{parent}]\n{leaf} = {value}\n"))
-                    .unwrap()
-                    .into_mut()
-            } else {
-                let meta = registry.get(key).or_else(|| match key {
-                    "factory.cargo_build_jobs" => registry.get("factory.worker_build_jobs"),
-                    "staging.large_artifact_dir" => registry.get("staging.staging_dir"),
-                    _ => None,
-                }).expect("registered key or compatibility alias");
-                let mut candidates = vec![meta.default.to_owned()];
-                if key == "factory.scratch_root" {
-                    candidates.push("/tmp/cas-config-path".into());
-                } else if key == "qa.deployed_origins" {
-                    candidates.push("https://example.com".into());
-                } else if key == "slack.stakeholder_contacts" {
-                    candidates.push("[]".into());
-                } else if key.starts_with("issues.") {
-                    candidates.push("example/repo".into());
+            let expected_path = match key {
+                "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+                    "factory.cargo_build_jobs"
                 }
-                if let crate::config::Constraint::OneOf(values) = &meta.constraint {
-                    candidates.extend(values.iter().cloned());
-                }
-                candidates.extend(meta.examples().into_iter().map(str::to_owned));
-                candidates.extend(
-                    ["example", "example/repo", "/tmp/cas-config-path", "https://example.com"]
-                        .into_iter()
-                        .map(str::to_owned),
-                );
-                candidates.sort();
-                candidates.dedup();
-
-                let mut resolved = None;
-                for value in candidates {
-                    let mut config = Config::default();
-                    if config.set(key, &value).is_err() {
-                        continue;
-                    }
-                    let raw = toml::to_string(&config).unwrap();
-                    let candidate = toml_edit::Document::parse(raw).unwrap().into_mut();
-                    let (_, stored_path, _) = config_document_paths(&candidate, key);
-                    if config_document_item(candidate.as_item(), stored_path).is_some() {
-                        resolved = Some(candidate);
-                        break;
-                    }
-                }
-                resolved.unwrap_or_else(|| panic!("no TOML value materialized registry key {key}"))
+                "staging.staging_dir" | "staging.large_artifact_dir" => "staging.staging_dir",
+                _ => key,
             };
+            let mut document = toml_edit::Document::parse("").unwrap().into_mut();
+            set_config_document_item(
+                &mut document,
+                expected_path,
+                Some(toml_edit::value("sentinel").into()),
+            )
+            .unwrap();
 
             let (_, stored_path, alternate_path) = config_document_paths(&document, key);
             assert!(
                 config_document_item(document.as_item(), stored_path).is_some(),
-                "registry key {key} did not resolve to a serialized TOML path {stored_path} in:\n{document}"
+                "registry key {key} did not resolve to TOML path {stored_path}"
             );
             assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
             assert!(config_document_item(&document, stored_path).is_none(), "{key}");

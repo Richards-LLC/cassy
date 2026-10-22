@@ -1410,7 +1410,7 @@ mod tests {
     mod pending_release_tests {
         use super::*;
         use std::sync::{Arc, Mutex};
-        use wiremock::matchers::{method, path_regex};
+        use wiremock::matchers::{method, path, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         const TASK: &str = "cas-af26";
@@ -1435,6 +1435,14 @@ mod tests {
                 .respond_with(move |_: &wiremock::Request| {
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "lock": read.lock().unwrap().clone(),
+                    }))
+                }).mount(&server).await;
+            let listed = held.clone();
+            Mock::given(method("GET")).and(path("/api/agents/locks"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let locks: Vec<_> = listed.lock().unwrap().clone().into_iter().collect();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "status":"success", "locks":locks,
                     }))
                 }).mount(&server).await;
             let release = held.clone();

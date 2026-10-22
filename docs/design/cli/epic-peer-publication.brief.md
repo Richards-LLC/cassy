@@ -86,3 +86,28 @@ variation selectors ([Unicode UAX31](https://www.unicode.org/reports/tr31/#Layou
 [pinned data](https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt)).
 This is a display policy for recovery advice; Git still receives the original
 refs through argv. It does not claim to detect every confusable identifier.
+
+### v58 critique
+
+terminal-qa: PASS epic-invisible-ref-fixture · 11 runs · 0 fail · 0 warn · 0 allowed
+
+terminal-qa: PASS epic-control-ref-fixture · 11 runs · 0 fail · 0 warn · 0 allowed
+
+terminal-qa: PASS epic-brace-ref-fixture · 11 runs · 0 fail · 0 warn · 0 allowed
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Invisible-ref verdict exposes the original ref on line one; line two names manual recovery and the unavailable command. |
+| Fit | 4 | The new two-line capture is 78/63 columns and passes 80/120-column gates; existing C1 and printable-ref captures still pass. |
+| Craft | 4 | RLO is a visible Unicode escape; the real peer-readiness test pins this capture and suppresses executable advice for RLO and zero-width space. |
+| Theme safety | 5 | Default-foreground ASCII is readable on dark, light and both Solarized captures, with clean pipe, NO_COLOR and C-locale runs. |
+| Machine contract | 4 | The existing error transports and MCP code remain unchanged; safe merge diagnostics retain their commands and refused advice retains the original cause. |
+
+Scored by wise-sparrow-74 on 2026-10-22. These gates prove fixture layout,
+not an actual CLI walk. The 80-column HTML was rendered with disposable headless
+Chrome and inspected on all four palettes. Playwright MCP launch failed because
+the host Chrome SUID sandbox is misconfigured; no application server was used.
+The Rust regressions separately exercise real Git branch materialization,
+two-clone peer preparation and both printed stale-hook remedies in interactive
+Bash. Existing full stale-hook and merge diagnostics retain their prose layout;
+unbounded paths/refs can still exceed terminal width.

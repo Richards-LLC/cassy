@@ -642,7 +642,11 @@ mod tests {
         use std::io::BufRead;
         let (_temp, root, worker) = fixture();
         let runner = write_release_runner(&root.join("worker-check-slots")).unwrap();
+        let fd_guards: Vec<_> = (0..16)
+            .map(|_| fs::File::open("/dev/null").unwrap())
+            .collect();
         let lease = acquire(&root, &worker).unwrap().unwrap();
+        assert!(lease.fd() >= 10, "fd guards must force a two-digit lease fd");
         let lock_path = lease.lock_path.clone();
         // The runner execs the "test binary", which leaks a sleeping child.
         let mut command = std::process::Command::new(&runner);
@@ -667,6 +671,7 @@ mod tests {
             "a leaked test grandchild still holds the lease"
         );
         assert!(!holders.contains(&(grandchild as u32)), "{holders:?}");
+        drop(fd_guards);
     }
 
     /// cas-4ad0: a held lease refuses with the lock path and the holder PID,

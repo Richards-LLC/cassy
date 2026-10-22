@@ -219,6 +219,7 @@ impl CasCore {
             crate::cloud::peer_claims::ClaimKind::Task
         };
         let mut cloud_claimed = false;
+        let mut peer_claim_fence = None;
         let mut cloud_local_holder: Option<String> = None;
         let peer_note = match peer_claims.clone() {
             Some(claims) => {
@@ -226,18 +227,20 @@ impl CasCore {
                 let kind = claim_kind;
                 let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                let answer = {
+                let (answer, fence) = {
+                    let cas_root = self.cas_root.clone();
                     let (id, agent, name) =
                         (req.task_id.clone(), agent_id.clone(), agent_name.clone());
                     peer_budget
                         .run(move || {
-                            claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                            claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                                 local.contains(holder)
                             })
                         })
                         .await
-                        .unwrap_or_else(Acquire::Unavailable)
+                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
                 };
+                peer_claim_fence = fence;
                 match answer {
                     Acquire::Claimed => {
                         cloud_claimed = true;
@@ -323,6 +326,9 @@ impl CasCore {
             }
         }
 
+        // Keep an old release excluded through local publication and any
+        // Cloud handoff or rollback decided by that local arbitration.
+        drop(peer_claim_fence);
         match result {
             ClaimResult::Success(lease) => {
                 // Update task to in_progress if it's open

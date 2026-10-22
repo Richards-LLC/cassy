@@ -153,6 +153,55 @@ fn stale_owner_temp(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Worker worktrees inherit the main checkout's Cargo config in addition to
+/// their own copy. Review checkouts live outside that tree. Restore inherited
+/// flag arrays outside Git so Cargo keeps the same artifact identity, including
+/// its own target/cfg selection and environment override precedence.
+fn inherit_worker_rustflags(cas: &Path, directory: &Path) -> Result<()> {
+    let source = cas.parent().context("project root missing")?.join(".cargo/config.toml");
+    let mut inherited = toml::Table::new();
+    match fs::read_to_string(source) {
+        Ok(text) => {
+            let config: toml::Table = toml::from_str(&text)?;
+            for section in ["build", "target"] {
+                let Some(table) = config.get(section).and_then(toml::Value::as_table) else {
+                    continue;
+                };
+                let flags = |table: &toml::Table| -> toml::Table {
+                    ["rustflags", "rustdocflags"].into_iter().filter_map(|key| {
+                        table.get(key).map(|value| (key.to_owned(), value.clone()))
+                    }).collect()
+                };
+                let selected: toml::Table = if section == "build" {
+                    flags(table)
+                } else {
+                    table.iter().filter_map(|(target, value)| {
+                        let selected = flags(value.as_table()?);
+                        (!selected.is_empty()).then(|| (target.clone(), toml::Value::Table(selected)))
+                    }).collect()
+                };
+                if !selected.is_empty() {
+                    inherited.insert(section.to_owned(), toml::Value::Table(selected));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let config_dir = directory.join(".cargo");
+    let destination = config_dir.join("config.toml");
+    safe_path(&destination)?;
+    if inherited.is_empty() {
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+    } else {
+        private_dir(&config_dir)?;
+        fs::write(destination, toml::to_string(&inherited)?)?;
+    }
+    Ok(())
+}
+
 /// Create or reuse one detached, disposable checkout per task/dispatch/head.
 /// No legacy directory is adopted, and changed source is never reset.
 /// Callers retain this value while running tests; standalone creation releases
@@ -259,6 +308,7 @@ pub fn create(
             ],
         )?;
     }
+    inherit_worker_rustflags(&cas, &directory)?;
     // Successful reuse starts a new idle grace period; admission retries can
     // return to a checkout long after its original creation.
     let mut record = owner(&cas, &directory)?;
@@ -324,6 +374,28 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     }
     owner(cas, directory)
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
+}
+
+/// Resolve the task's assigned worker rather than another dispatch's output.
+/// Called only inside the review lane's existing build admission and lease.
+pub(crate) fn seed_target_from_worker(cas: &Path, checkout: &Path) -> Result<()> {
+    if !is_managed_checkout(cas, checkout) || checkout.join("target/debug").exists() {
+        return Ok(());
+    }
+    let record = owner(cas, checkout.parent().context("review directory missing")?)?;
+    let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
+    let agents = crate::store::open_agent_store(cas)?;
+    let worker = task.assignee.as_deref().and_then(|assignee| {
+        crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+    }).filter(|agent| agent.role == cas_types::AgentRole::Worker);
+    if let Some(worker) = worker {
+        let source = worker.metadata.get("clone_path").map(PathBuf::from)
+            .unwrap_or_else(|| cas.join("worktrees").join(&worker.name));
+        if let Some(stats) = crate::ui::factory::seed_review_target_from_worker(cas, &source, checkout)? {
+            tracing::info!(source=%stats.snapshot, files=stats.files, bytes=stats.bytes, "review target seeded from assigned worker");
+        }
+    }
+    Ok(())
 }
 
 fn eligible(cas: &Path, record: &Owner) -> Result<()> {

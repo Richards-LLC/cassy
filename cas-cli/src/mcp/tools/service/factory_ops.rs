@@ -8087,6 +8087,11 @@ mod gc_report_render_tests {
         assert!(summary.starts_with("[INFO] GC review: 2 inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n"), "verdict and accurate next action come first: {summary}");
         assert!(summary.contains("- Cargo target cache pressure: 1 items"));
         assert!(summary.contains("Note: these are not auto-deleted."));
+        let note_start = summary.find("Note: these are not auto-deleted.").unwrap();
+        assert!(
+            summary[..note_start].ends_with("\n\n"),
+            "the WIP note needs a blank line after inventory samples: {summary}"
+        );
         assert!(!summary.contains("- Note:"), "notes are not inventory categories");
         assert!(summary.contains("--full"));
         assert_eq!(

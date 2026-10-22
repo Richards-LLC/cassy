@@ -188,6 +188,12 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         .clone();
     let report = String::from_utf8(report).unwrap();
     assert!(report.starts_with("[INFO] GC review:"), "{report}");
+    // pin: the real CLI report names the cleanup-tier help before inventory detail.
+    assert_eq!(
+        report.lines().nth(1),
+        Some("Review cleanup tiers: cas factory gc cleanup --help"),
+        "{report}"
+    );
     assert!(report.is_ascii() && report.lines().all(|line| line.len() <= 79), "{report}");
     assert!(!report.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report}");
     let json = gc_command_at(project.path(), &home)

@@ -213,7 +213,10 @@ fn reconcile_reused_factory_branch(
     // cas-32fa: only anchors on this worker's branch count. A task
     // transferred from another worker carries that worker's anchors, and
     // this worker's leftover edits are not its prior work.
-    let has_prior_task_work = || {
+    // Equal-tip starts consult this before checking a dirty tree; reuse the
+    // answer rather than walking the same attribution history twice.
+    let prior_task_work = std::cell::OnceCell::new();
+    let has_prior_task_work = || *prior_task_work.get_or_init(|| {
         task_identity.is_some_and(|identity| {
             identity
                 .known_commits
@@ -226,7 +229,7 @@ fn reconcile_reused_factory_branch(
                 )
                 .is_some_and(|(own, _)| own.is_some())
         })
-    };
+    });
 
     // Fresh tasks must not inherit another task's edits; resets must not
     // discard edits. Proven task continuations may retain their own dirty
@@ -251,7 +254,8 @@ fn reconcile_reused_factory_branch(
             if !has_prior_task_work() {
                 return Err(format!(
                     "Cannot start task: {expected_branch} has uncommitted changes from earlier work, \
-                     not this task. Stash them with `git stash push -u -m \"<tag>\"` before starting; \
+                     not this task. Stash them, including untracked files, with \
+                     `git stash push -u -m \"<tag>\"` before starting; \
                      committing them on this branch would later be refused as unattributed work."
                 ));
             }

@@ -11448,6 +11448,11 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 error.message.contains("git stash push") && !error.message.contains("Commit or stash"),
                 "{after}: {error}"
             );
+            // pin: `-u` includes untracked files, so the refusal must say so.
+            assert!(
+                error.message.contains("untracked files"),
+                "{after}: {error}"
+            );
             assert_eq!(
                 env.task_store().get(&task.id).unwrap().status,
                 TaskStatus::Open
@@ -11630,6 +11635,43 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             status_before
         );
     }
+}
+
+#[test]
+fn failed_ancestry_check_warns_without_epic_specific_wording() {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let repo = TempDir::new().unwrap();
+    git_stdout(repo.path(), &["init", "-b", "main"]);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let writer_log = Arc::clone(&log);
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || LogWriter(Arc::clone(&writer_log)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let git = cas::worktree::GitOperations::new(repo.path().to_path_buf());
+        assert!(!git.is_ancestor("missing-ancestor", "HEAD"));
+    });
+
+    let warning = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    // pin: this shared check runs on task start as well as epic stacking.
+    assert!(warning.contains("ancestry relationship"), "{warning}");
+    assert!(!warning.contains("epic stack"), "{warning}");
 }
 
 /// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for

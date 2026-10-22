@@ -222,10 +222,13 @@ deleted.
 receipt bound to them stays valid. Before deleting a pack entry, retention
 records its path and digest in `pruned.json` beside the pack, atomically.
 Loading accepts a missing entry only when `pruned.json` records it with the
-pack's own digest. It refuses a record the pack does not list. An entry whose
+pack's own path and digest; a record with another digest does not excuse it.
+Records for files that are present, which are rehashed anyway, or for paths
+the pack no longer lists are ignored. An entry whose
 file changed is not pruned, so loading keeps refusing it. A reseal writes the
-new `pack.json` first and only then drops the records it no longer lists, so
-a reseal that fails leaves the previous pack loadable.
+new `pack.json` first and only then drops the records it no longer lists.
+A reseal that fails leaves the previous pack loadable, and so does a crash
+between the two writes.
 
 ## Promotion: `cassy/release-gate`
 

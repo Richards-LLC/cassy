@@ -253,22 +253,19 @@ impl Pack {
         self.verify_media_with(dir, &pruned(dir)?)
     }
 
+    /// Records only ever excuse a missing file, and only with this pack's own
+    /// path, sha256 and bytes. Records for present files (digest-checked
+    /// anyway) or for paths the pack no longer lists are ignored, so a crash
+    /// between a reseal's `pack.json` and `pruned.json` writes still loads.
     fn verify_media_with(&self, dir: &Path, pruned: &[Pruned]) -> Result<(), PackError> {
-        // Every pruned record must be one of this pack's own entries, exactly.
-        if let Some(stray) = pruned
-            .iter()
-            .find(|p| !self.media.iter().any(|m| m.path == p.path && m.sha256 == p.sha256 && m.bytes == p.bytes))
-        {
-            return Err(PackError::Media(format!("{PRUNED_FILE} records {}, which the pack does not list with that digest", stray.path)));
-        }
         for media in &self.media {
             let path = match media_path(dir, &media.path) {
                 Ok(path) => path,
-                Err(_)
-                    if std::fs::symlink_metadata(dir.join(&media.path)).is_err()
-                        && pruned.iter().any(|p| p.path == media.path) =>
-                {
-                    continue;
+                Err(error) if std::fs::symlink_metadata(dir.join(&media.path)).is_err() => {
+                    if pruned.iter().any(|p| p.path == media.path && p.sha256 == media.sha256 && p.bytes == media.bytes) {
+                        continue;
+                    }
+                    return Err(error);
                 }
                 Err(error) => return Err(error),
             };

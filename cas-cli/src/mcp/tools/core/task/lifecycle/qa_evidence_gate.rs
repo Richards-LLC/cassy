@@ -421,11 +421,19 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     // An empty attributed set is authoritative: a merge-only or formatting-
     // only task delivered no reviewable UI, even if the branch's merge diff
     // contains UI files from the other parent (GH #1037).
-    let changed = match attributed_paths {
-        Some(paths) => Some(paths.to_vec()),
-        None => range
+    let changed = if carried_bundle.is_some() {
+        // Exact aggregate equivalence supplies the delivery boundary even
+        // when legacy attribution can recover only the final cherry-pick.
+        range
             .as_ref()
-            .and_then(|(from, to)| range_paths(repo, from, to)),
+            .and_then(|(from, to)| range_paths(repo, from, to))
+    } else {
+        match attributed_paths {
+            Some(paths) => Some(paths.to_vec()),
+            None => range
+                .as_ref()
+                .and_then(|(from, to)| range_paths(repo, from, to)),
+        }
     };
     let journeys = changed
         .as_deref()

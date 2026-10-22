@@ -223,7 +223,7 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         // Local managed setup is deliberately absent from the landed history.
         let base = commit_file(&fx.repo, ".claude/settings.json", "{}\n");
         let first = commit_file(&fx.repo, "web/composer.css", ".composer{gap:4px}\n");
-        commit_file(&fx.repo, "web/composer.js", "export const ready = true;\n");
+        let second = commit_file(&fx.repo, "web/composer.js", "export const ready = true;\n");
         let reviewed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:8px}\n");
         let tasks = open_task_store(&cas_dir).unwrap();
         let mut task = tasks.get(TASK).unwrap();
@@ -284,15 +284,16 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         .unwrap();
         git(&fx.repo, &["checkout", "-q", "main"]);
         commit_file(&fx.repo, "unrelated.txt", "another task\n");
-        git(&fx.repo, &["cherry-pick", &format!("{first}^..{reviewed}")]);
-        let receipt = if changed_diff {
-            std::fs::write(fx.repo.join("web/composer.css"), ".composer{gap:12px}\n").unwrap();
-            git(&fx.repo, &["add", "web/composer.css"]);
+        git(&fx.repo, &["cherry-pick", &format!("{first}^..{second}")]);
+        if changed_diff {
+            // The final CSS patch still matches; an earlier unreviewed
+            // change must fail the aggregate comparison.
+            std::fs::write(fx.repo.join("web/composer.js"), "export const ready = false;\n").unwrap();
+            git(&fx.repo, &["add", "web/composer.js"]);
             git(&fx.repo, &["commit", "-q", "--amend", "--no-edit"]);
-            git(&fx.repo, &["rev-parse", "HEAD"])
-        } else {
-            git(&fx.repo, &["rev-parse", "HEAD"])
-        };
+        }
+        git(&fx.repo, &["cherry-pick", &reviewed]);
+        let receipt = git(&fx.repo, &["rev-parse", "HEAD"]);
         assert_ne!(reviewed, receipt);
         git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
         let mut request = close_req(TASK);

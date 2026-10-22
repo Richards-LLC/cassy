@@ -1871,9 +1871,9 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         .current_dir(&repo.root).output().unwrap();
     assert!(merge.status.success() || merge.status.code() == Some(1), "{merge:?}");
     let union = ledger(&[&bob_hash, &base_hash, &alice_hash]);
-    write_ledger(&repo.root, &union);
+    write_ledger(&repo.root, &ledger(&[&base_hash, &bob_hash]));
     run_git(&["add", LEDGER], &repo.root);
-    run_git(&["commit", "-m", "merge Bob with union of shipped histories"], &repo.root);
+    run_git(&["commit", "-m", "merge Bob losing Alice's guide history"], &repo.root);
     let cores: Vec<_> = tasks.iter().map(|task| {
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(register_worker_agent(&cas_root, task.assignee.as_deref().unwrap(), None));
@@ -1891,15 +1891,13 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     };
     // Remove Alice's delivered hash only from its correct key: its presence
     // under `other` and Bob's retained hash must not authorize Alice's close.
-    write_ledger(&repo.root, &ledger(&[&base_hash, &bob_hash]));
-    run_git(&["commit", "-am", "drop Alice's guide history"], &repo.root);
     let rejected = cores[0].cas_task_close(Parameters(close_request(&tasks[0]))).await.unwrap();
     let text = get_text(&rejected);
     assert!(text.contains("DELIVERY CONTENT DROPPED") && text.contains(LEDGER), "{text}");
     assert_eq!(store.get(&tasks[0].id).unwrap().status, TaskStatus::AwaitingMerge);
 
     write_ledger(&repo.root, &union);
-    run_git(&["commit", "-am", "restore the full union"], &repo.root);
+    run_git(&["commit", "-a", "--amend", "-m", "merge Bob with union of shipped histories"], &repo.root);
     for (task, core) in tasks.iter().zip(cores) {
         let result = core.cas_task_close(Parameters(close_request(task))).await.unwrap();
         let text = get_text(&result);

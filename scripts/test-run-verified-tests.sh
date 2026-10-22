@@ -162,10 +162,10 @@ fake.write_text('''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
 leave_child = os.environ.get('LEAVE_CHILD') == '1'
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+marker = Path(os.environ['PID_FILE'])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)],
                          stdout=subprocess.DEVNULL if leave_child else None,
                          stderr=subprocess.DEVNULL if leave_child else None)
-marker = Path(os.environ['PID_FILE'])
 ready = marker.with_suffix('.ready')
 ready.write_text(json.dumps([os.getpid(), child.pid]))
 ready.replace(marker)
@@ -205,7 +205,7 @@ def cleanup(wrapper, pids, failed):
     for index, pid in enumerate(pids if failed else []):
         command = subprocess.run(['ps', '-ww', '-p', str(pid), '-o', 'command='],
                                  capture_output=True, text=True, timeout=2).stdout
-        owned = str(fake) in command if index == 0 else 'time.sleep(60)' in command
+        owned = str(fake) in command if index == 0 else str(root) in command and 'time.sleep(60)' in command
         if owned and live(pid):
             try:
                 os.kill(pid, signal.SIGKILL)

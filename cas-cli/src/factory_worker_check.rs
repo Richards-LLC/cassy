@@ -2053,8 +2053,8 @@ os.killpg = slow_group_term
 "#).unwrap();
         std::fs::write(&fake, r#"#!/usr/bin/env python3
 import os, pathlib, subprocess, sys
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
 marker = pathlib.Path(os.environ['PID_FILE'])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)])
 ready = marker.with_suffix('.ready')
 ready.write_text(f'{os.getpid()} {child.pid}')
 ready.replace(marker)
@@ -2103,7 +2103,7 @@ child.wait()
                 .output().unwrap();
             let command = String::from_utf8_lossy(&output.stdout);
             let owned = if *index == 0 { command.contains(fake.to_str().unwrap()) }
-                        else { command.contains("time.sleep(60)") };
+                        else { command.contains(root.path().to_str().unwrap()) && command.contains("time.sleep(60)") };
             if owned {
                 unsafe { libc::kill(*pid, libc::SIGKILL) };
             }

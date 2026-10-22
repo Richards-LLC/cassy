@@ -182,8 +182,9 @@ all, is `OWED`, and the gate names each owed row or PR and its cause.
 first-parent history: `Merge pull request #N` merges and squash subjects
 ending in `(#N)`. It maps each PR's diff to journeys through `cas qa impact`.
 A PR that no row exercises keeps the gate OWED until a manual row records
-`covers_prs: [N]`. Every other first-parent commit is a direct push and its
-own coverage unit, `push <sha7>`. It is owed the same way until a row
+`covers_prs: [N]`. Every other first-parent commit, including a root
+commit, which is diffed against the empty tree, is a direct push and its own
+coverage unit, `push <sha7>`. It is owed the same way until a row
 exercises it or a manual row records `covers_commits: [<sha7>]`.
 
 **Sealing.** Sealing rehashes every media file and refuses a link or any path
@@ -199,8 +200,9 @@ is refused. A changed `pack.json` stops the receipt satisfying close, exactly
 as a changed `LEDGER.md` does.
 
 **Slack.** The Violet bundle posts `pack.json`, with the summary as its
-comment, and then each image or video in that thread. Other media (traces,
-logs, archives) can carry credentials. They are never uploaded; the summary
+comment, and then each image or video in that thread. An image or video
+must also have matching magic bytes, so a zip named `x.png` is not uploaded.
+Other media (traces, logs, archives) can carry credentials. They are never uploaded; the summary
 names them by local path. Every file is rechecked
 against the pack digest and is at most 25 MiB. Video over the limit is
 re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
@@ -221,7 +223,9 @@ receipt bound to them stays valid. Before deleting a pack entry, retention
 records its path and digest in `pruned.json` beside the pack, atomically.
 Loading accepts a missing entry only when `pruned.json` records it with the
 pack's own digest. It refuses a record the pack does not list. An entry whose
-file changed is not pruned, so loading keeps refusing it.
+file changed is not pruned, so loading keeps refusing it. A reseal writes the
+new `pack.json` first and only then drops the records it no longer lists, so
+a reseal that fails leaves the previous pack loadable.
 
 ## Promotion: `cassy/release-gate`
 

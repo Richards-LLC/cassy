@@ -72,7 +72,8 @@ fn pr_number(subject: &str) -> Option<u64> {
 }
 
 /// Every first-parent commit on `head` since `base`, as its PR or as a direct
-/// push, each with its diff against its first parent. Local git only.
+/// push, each with its diff against its first parent (a root commit against
+/// the empty tree). Local git only.
 pub fn candidate_prs(repo: &Path, base: &str, head: &str) -> anyhow::Result<Vec<PrChange>> {
     let git = qa_impact::io::git;
     let log = git(
@@ -85,9 +86,13 @@ pub fn candidate_prs(repo: &Path, base: &str, head: &str) -> anyhow::Result<Vec<
         let (Some(commit), Some(parents), Some(subject)) = (fields.next(), fields.next(), fields.next()) else {
             continue;
         };
-        let Some(parent) = parents.split_whitespace().next() else {
-            continue;
-        };
+        // A root commit has no parent: diff it against the empty tree rather
+        // than skip it, which would let its paths go uncovered.
+        let parent = parents.split_whitespace().next().unwrap_or(if commit.len() == 64 {
+            "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+        } else {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        });
         let number = pr_number(subject);
         prs.push(PrChange {
             number,

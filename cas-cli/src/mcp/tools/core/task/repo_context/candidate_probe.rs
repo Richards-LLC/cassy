@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::{BoundedRepoProbe, Deadline, bounded_git_layout, bounded_repo_identities};
+use super::{
+    BoundedRepoError, BoundedRepoProbe, Deadline, bounded_git_layout, bounded_repo_identities,
+};
 
 pub(super) const SCAN_BUDGET: Duration = Duration::from_secs(5);
 const ROOT_BUDGET: Duration = Duration::from_secs(1);
@@ -21,8 +23,8 @@ pub(super) struct Candidate {
 
 struct PendingCandidate {
     started: Instant,
-    // None: running; Some(None): unavailable; Some(Some(_)): fresh evidence.
-    result: Mutex<Option<Option<Candidate>>>,
+    // None: running; Ok(None): absent; Err(_): incomplete probe; Ok(Some(_)): fresh evidence.
+    result: Mutex<Option<Result<Option<Candidate>, BoundedRepoError>>>,
     ready: Condvar,
 }
 
@@ -45,8 +47,8 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
                 .unwrap_or_else(|error| error.into_inner());
             match result.as_ref() {
                 None => true,
-                Some(None) => pending.started.elapsed() < NEGATIVE_RETRY,
-                Some(Some(_)) => false, // Healthy identities must always be read fresh.
+                Some(Ok(None) | Err(_)) => pending.started.elapsed() < NEGATIVE_RETRY,
+                Some(Ok(Some(_))) => false, // Healthy identities must always be read fresh.
             }
         });
         if let Some(pending) = probes.get(path) {
@@ -79,17 +81,21 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
                 .spawn(move || {
                     let result = std::panic::catch_unwind(|| {
                         if !path.exists() {
-                            return None;
+                            return Ok(None);
                         }
-                        let (repo_root, git_common_dir) = bounded_git_layout(&path, &probe).ok()?;
-                        let identities = bounded_repo_identities(&repo_root, &probe).ok()?;
-                        Some(Candidate {
+                        let (repo_root, git_common_dir) = match bounded_git_layout(&path, &probe) {
+                            Ok(layout) => layout,
+                            Err(BoundedRepoError::Unavailable) => return Ok(None),
+                            Err(error) => return Err(error),
+                        };
+                        let identities = bounded_repo_identities(&repo_root, &probe)?;
+                        Ok(Some(Candidate {
                             repo_root,
                             git_common_dir,
                             identities,
-                        })
+                        }))
                     })
-                    .unwrap_or_default();
+                    .unwrap_or(Err(BoundedRepoError::Unavailable));
                     *worker
                         .result
                         .lock()
@@ -100,7 +106,8 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
                 *pending
                     .result
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(None);
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some(Err(BoundedRepoError::Unavailable));
                 pending.ready.notify_all();
             }
             pending
@@ -117,5 +124,9 @@ pub(super) fn probe(path: &Path, deadline: Deadline) -> Result<Option<Candidate>
         .ready
         .wait_timeout_while(result, budget, |result| result.is_none())
         .unwrap_or_else(|error| error.into_inner());
-    Ok(result.clone().flatten())
+    // Neither a still-running filesystem read nor a cached Git timeout proves
+    // that a repository is absent. Preserve that distinction on every retry.
+    result.clone().unwrap_or(Err(BoundedRepoError::TimedOut)).map_err(|_| {
+        "WORK TARGET REPOSITORY UNAVAILABLE: known-root probe did not complete; retry after storage access recovers".to_string()
+    })
 }

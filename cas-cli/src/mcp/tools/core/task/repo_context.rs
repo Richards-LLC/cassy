@@ -741,27 +741,33 @@ pub(crate) fn unanchored_task_start_warning(
     )
 }
 
-fn candidate_paths(cas_root: &Path) -> Result<Vec<candidate_probe::Candidate>, String> {
+fn candidate_paths(cas_root: &Path) -> (Vec<candidate_probe::Candidate>, bool) {
     let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
     let mut raw = vec![cas_root.to_path_buf()];
+    let mut scan_incomplete = false;
     if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
         && let Ok(known) = store.list()
     {
         raw.extend(known.into_iter().map(|repo| repo.path));
+    } else {
+        scan_incomplete = true;
     }
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for path in raw {
         if deadline.remaining().is_zero() {
-            return Err("WORK TARGET REPOSITORY UNAVAILABLE: known-root scan exceeded its 5s budget; retry after storage access recovers".to_string());
+            scan_incomplete = true;
+            break;
         }
-        if let Some(candidate) = candidate_probe::probe(&path, deadline)?
-            && seen.insert(candidate.repo_root.clone())
-        {
-            candidates.push(candidate);
+        match candidate_probe::probe(&path, deadline) {
+            Ok(Some(candidate)) if seen.insert(candidate.repo_root.clone()) => {
+                candidates.push(candidate);
+            }
+            Ok(_) => {}
+            Err(_) => scan_incomplete = true,
         }
     }
-    Ok(candidates)
+    (candidates, scan_incomplete)
 }
 
 fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
@@ -921,9 +927,27 @@ pub(crate) fn resolve_repo_context(
             target_branch,
         });
     }
+    // The caller's checkout is direct repository evidence. Resolve it before
+    // unrelated host roots can exhaust the scan budget or stall on storage.
+    // Explicit bindings above remain authoritative, including stale refusals.
+    if let Ok(Some(local)) =
+        candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET))
+        && local.identities.iter().any(|identity| {
+            canonical_selector(identity) == canonical_selector(&target.repo_selector)
+        })
+    {
+        let target_branch = validate_target_branch(&local.repo_root, &target.target_branch)?;
+        return Ok(RepoContext {
+            repo_selector: target.repo_selector.clone(),
+            repo_root: local.repo_root,
+            git_common_dir: local.git_common_dir,
+            target_branch,
+        });
+    }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    for candidate in candidate_paths(cas_root)? {
+    let (candidates, scan_incomplete) = candidate_paths(cas_root);
+    for candidate in candidates {
         let identities = candidate.identities;
         if identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
@@ -959,6 +983,9 @@ pub(crate) fn resolve_repo_context(
                 target_branch,
             })
         }
+        [] if scan_incomplete => Err(
+            "WORK TARGET REPOSITORY UNAVAILABLE: known-root scan did not complete; retry after storage access recovers".to_string(),
+        ),
         [] => Err(format!(
             "⚠️ WORK TARGET REPOSITORY MISMATCH\n\n\
              Task targets `{}` (normalized `{}`), but no current-host known \
@@ -1382,7 +1409,7 @@ mod tests {
                 repo_selector: "project:healthy".to_string(),
                 target_branch: "main".to_string(),
             };
-            let cas_root = healthy.join(".cas");
+            let cas_root = fixtures.join("linked/.cas");
             let first = std::thread::scope(|scope| {
                 let peer = scope.spawn(|| resolve_repo_context(&cas_root, &target));
                 let first = resolve_repo_context(&cas_root, &target)
@@ -1391,8 +1418,10 @@ mod tests {
                 first
             });
             assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
-            let first_calls = std::fs::read_to_string(&calls).expect("blocked root was probed");
-            assert_eq!(first_calls.lines().count(), 1, "overlapping callers share one probe");
+            assert!(
+                !calls.exists(),
+                "a matching worker checkout must bypass host scanning"
+            );
             std::fs::write(
                 healthy.join(".cas/config.toml"),
                 "[project]\ncanonical_id = \"healthy-renamed\"\n",
@@ -1405,9 +1434,27 @@ mod tests {
             let second = resolve_repo_context(&cas_root, &renamed).unwrap();
             assert_eq!(second.repo_root, first.repo_root);
             assert_eq!(second.repo_selector, renamed.repo_selector);
+            let from_foreign = resolve_repo_context(&fixtures, &renamed)
+                .expect("a healthy known target must resolve despite an unrelated blocked root");
+            assert_eq!(from_foreign, second);
+            let missing = WorkTarget {
+                repo_selector: "project:missing".to_string(),
+                ..renamed
+            };
+            for _ in 0..2 {
+                let error = resolve_repo_context(&cas_root, &missing).unwrap_err();
+                assert!(
+                    error.contains("WORK TARGET REPOSITORY UNAVAILABLE"),
+                    "{error}"
+                );
+                assert!(
+                    !error.contains("MISMATCH"),
+                    "an incomplete scan cannot prove a mismatch"
+                );
+            }
             assert_eq!(
-                std::fs::read_to_string(&calls).unwrap(),
-                first_calls,
+                std::fs::read_to_string(&calls).unwrap().lines().count(),
+                1,
                 "a timed-out root must not start another probe while negatively cached"
             );
             return;
@@ -1432,6 +1479,34 @@ mod tests {
                 "[project]\ncanonical_id = \"healthy\"\n",
             )
             .unwrap();
+            std::fs::write(healthy.join("base"), "base").unwrap();
+            git(&healthy, &["add", "base"]);
+            git(
+                &healthy,
+                &[
+                    "-c",
+                    "user.name=Cassy",
+                    "-c",
+                    "user.email=cas@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "base",
+                ],
+            );
+            let linked = fixtures.path().join("linked");
+            git(
+                &healthy,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "factory/worker",
+                    linked.to_str().unwrap(),
+                ],
+            );
+            std::fs::create_dir(linked.join(".cas")).unwrap();
             let fifo = if mode == "config" {
                 blocked.join(".cas/config.toml")
             } else {
@@ -1590,7 +1665,7 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             repo_selector: "remote:github.com/org/shared".to_string(),
             target_branch: "main".to_string(),
         };
-        let ambiguous = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap_err();
+        let ambiguous = resolve_repo_context(fixtures.path(), &target).unwrap_err();
         assert!(ambiguous.contains("AMBIGUOUS WORK TARGET"));
         assert!(ambiguous.contains("known-repos bind --repo"));
 

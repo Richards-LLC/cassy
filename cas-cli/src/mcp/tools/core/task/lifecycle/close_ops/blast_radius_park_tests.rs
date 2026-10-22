@@ -388,8 +388,8 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     // measured. That newer HEAD must not let the old receipt cover its asset.
     let untested_delivery = git(&f.worker_path, &["rev-parse", "HEAD"]);
     git(&f.worker_path, &["checkout", "-q", "-b", "factory/without-include"]);
-    std::fs::write(f.worker_path.join(source_path), "pub fn turn() {}\n").unwrap();
-    git(&f.worker_path, &["add", source_path]);
+    std::fs::write(f.worker_path.join("crates/widget/src/lib.rs"), "pub mod gear;\n").unwrap();
+    git(&f.worker_path, &["add", "crates/widget/src/lib.rs"]);
     git(&f.worker_path, &["commit", "-q", "-m", "next task removes include"]);
     assert!(
         crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &untested_delivery).is_empty(),
@@ -437,6 +437,11 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     ).unwrap();
     git(&f.worker_path, &["add", source_path]);
     git(&f.worker_path, &["commit", "-q", "-m", "next task embeds brief"]);
+    let receipts = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &delivered_tip);
+    assert!(receipts.iter().any(|receipt| receipt.contains(&format!("rebound from {tested_tip} to {delivered_tip}"))), "the parked tree still permits doc rebind after HEAD changes: {receipts:?}");
+    // The executable pre-close hook requires the task's own lane, so restore
+    // it after exercising the parked delivery's receipt reader on another HEAD.
+    git(&f.worker_path, &["checkout", "-q", LANE]);
 
     git(&f.dir.path(), &["merge", "--ff-only", LANE]);
     git(&f.dir.path(), &["push", "-q", "origin", "main"]);

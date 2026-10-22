@@ -8,7 +8,6 @@ No factory agents are started: a disposable Unix socket supplies the frame.
 
 import argparse
 import errno
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -48,17 +47,13 @@ def check_exit(binary, case, out):
         peer = None
         captured = bytearray()
 
-        def controlling_terminal():
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-
         try:
             with socket.socket(socket.AF_UNIX) as listener:
                 listener.bind(address)
                 listener.listen(1)
                 child = subprocess.Popen(
                     [binary, "attach", "terminal-proof"], cwd=scratch, env=env,
-                    stdin=slave, stdout=slave, stderr=slave, preexec_fn=controlling_terminal,
+                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
                 )
                 triggered = False
                 was_raw = False

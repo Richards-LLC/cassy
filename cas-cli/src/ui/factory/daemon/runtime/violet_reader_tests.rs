@@ -377,27 +377,62 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     cloud.registration_id = SUCCESSOR;
     cloud.ack_response = None;
     cloud.recover = fixture(RECOVER, "successor on another machine");
+    // cas-30c0: a disorderly recovery batch, including equal numeric times
+    // written with different fractional precision and a duplicate admission.
+    let pending = cloud.recover["admissions"][0].clone();
+    let notice = cloud.recover["admissions"][1].clone();
+    let early = "0000de10-1111-4111-8111-00000000de10";
+    let tie_first = "0000de11-1111-4111-8111-00000000de11";
+    let tie_last = "0000de12-1111-4111-8111-00000000de12";
+    let late = "0000de13-1111-4111-8111-00000000de13";
+    let admission = |id: &str, ts: &str| {
+        let mut row = pending.clone();
+        row["delivery"]["id"] = json!(id);
+        row["target"]["message_ts"] = json!(ts);
+        row
+    };
+    cloud.recover["admissions"] = json!([
+        admission(late, "1760616001.9"),
+        admission(tie_last, "1760616001.100000"),
+        pending,
+        admission(early, "1760615999.900000"),
+        admission(tie_first, "1760616001.1"),
+        admission(early, "1760615999.900000"),
+        notice,
+    ]);
     let mut successor = VioletReader::new("factory-session");
     for _ in 0..2 {
         tick_as(&mut successor, &cloud);
     }
-    assert_eq!(
-        cloud.log(),
-        [
-            format!("ack {DELIVERY} admitted"),
-            format!("receipt {DELIVERY} dispatch_uncertain"),
-            format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
-            format!("receipt {DELIVERY} consumed"),
-            format!("rebind {resumed} 2"),
-            format!("receipt {resumed} dispatch_uncertain"),
-            format!("typed {resumed} into factory-session: body for 1760616000.123456"),
-            format!("receipt {resumed} consumed"),
-            format!("rebind {uncertain} 2"),
-            format!("notice {uncertain} into factory-session"),
-            format!("receipt {uncertain} consumed"),
-            format!("ack {DELIVERY} admitted"),
-        ]
-    );
+    let mut expected = vec![
+        format!("ack {DELIVERY} admitted"),
+        format!("receipt {DELIVERY} dispatch_uncertain"),
+        format!("typed {DELIVERY} into factory-session: body for 1760616042.000200"),
+        format!("receipt {DELIVERY} consumed"),
+    ];
+    // Hand-written chronological expectation: new claims remain first, then
+    // recovery uses numeric message_ts, delivery id for ties, and types once.
+    for (id, ts) in [
+        (early, "1760615999.900000"),
+        (resumed, "1760616000.123456"),
+        (tie_first, "1760616001.1"),
+        (tie_last, "1760616001.100000"),
+        (late, "1760616001.9"),
+    ] {
+        expected.extend([
+            format!("rebind {id} 2"),
+            format!("receipt {id} dispatch_uncertain"),
+            format!("typed {id} into factory-session: body for {ts}"),
+            format!("receipt {id} consumed"),
+        ]);
+    }
+    expected.extend([
+        format!("rebind {uncertain} 2"),
+        format!("notice {uncertain} into factory-session"),
+        format!("receipt {uncertain} consumed"),
+        format!("ack {DELIVERY} admitted"),
+    ]);
+    assert_eq!(cloud.log(), expected, "recovered backlog must be chronological without delaying fresh claims or typing twice");
 }
 
 fn tick_as(reader: &mut VioletReader, cloud: &FixtureCloud) -> ClaimOutcome {

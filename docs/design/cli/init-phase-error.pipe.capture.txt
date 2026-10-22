@@ -14,7 +14,7 @@
 [ERROR] Initialization is incomplete.
 Fix the reported error, then re-run: cas init --force
 Failed to parse .codex/config.toml: TOML parse error at line 1, column
-14 | 1 | deliberately invalid configuration with enough separate words
-to require natural wrapping while retaining every part of this
-complete diagnostic and its original parser explanation | ^ key with
-no value, expected `=`
+  14 | 1 | deliberately invalid configuration with enough separate words
+  to require natural wrapping while retaining every part of this
+  complete diagnostic and its original parser explanation | ^ key with
+  no value, expected `=`

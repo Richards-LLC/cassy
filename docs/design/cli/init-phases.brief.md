@@ -127,3 +127,35 @@ wraps the diagnostic body once with its hanging indent. The existing CLI
 regression includes a real unwritable project before store creation and checks
 that `Permission denied` appears once. Prior candidate receipts above describe
 the rejected round; corrective candidate proof will be recorded separately.
+
+
+## Corrective candidate proof
+The round-two supervisor candidate is `c08cd120f91f4f333c94131010e0bf5d1c33ff83`,
+`cas 3.72.0 (c08cd12 2026-10-22)`, SHA-256
+`c2839d0187c9cd0d7abf188524da4129f2f1bf4f3bc9077164d22991abb14baa`.
+This evidence supersedes the rejected generic-failure candidate above.
+
+The supervisor ran the repository `scripts/terminal-qa.mjs` (message #543000):
+
+- `terminal-qa: PASS init-r2-wizard-existing-codex · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-r2-wizard-new-codex · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-r2-yes-existing-codex · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-r2-yes-new-codex · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-r2-yes-new-gitignore · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-r2-yes-new-readonly · 11 runs · 0 fail · 0 warn · 0 allowed`
+
+The six flows cover 80/120 columns, four palettes, pipe, NO_COLOR and C locale:
+66 runs with no failures, warnings or exceptions. Worker direct captures add
+12 human runs and one adjacent JSON run; all 79 state read-backs match the
+expected store/config creation state and preserve prior configuration and
+obstructing bytes. The read-only project fails before store/config creation and
+prints exactly `[ERROR] io error: Permission denied (os error 13)` once on
+stderr. Long causes retain their complete text and two-space hanging indent.
+The linked pipe capture now comes from this corrected candidate.
+
+The hierarchy/fit/craft scores remain 4/4/4; mechanical theme safety and the
+scoped machine contract score 5/5. HTML visual inspection remains **NOT
+EXERCISED**, with the mechanical substitute approved in #542582. The corrective
+ledger is `cas-d258/r2/LEDGER.md` in the task proof artifact; it records seven
+real-build PASS cells and one unavailable visual-inspection cell. Full-command
+and full-suite claims are outside these scoped receipts.

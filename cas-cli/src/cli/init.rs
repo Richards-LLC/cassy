@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use anyhow::Context;
 use crossterm::{
     execute,
     style::{Color, Print, SetForegroundColor},
@@ -548,6 +549,9 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     if config.agents.claude {
         hooks_configured = configure_claude_hooks(cwd, false).unwrap_or(false);
+        // MCP registration is required for a usable Claude install, just as
+        // Codex provisioning below is. Never report initialized if it fails.
+        configure_mcp_server(cwd).context("Failed to configure Claude MCP server (.mcp.json)")?;
         claude_md_updated = update_claude_md(cwd).unwrap_or(false);
         skill_generated = generate_cas_skill(cwd).unwrap_or(false);
 

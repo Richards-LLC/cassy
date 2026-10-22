@@ -793,7 +793,14 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     let Some(config) = super::configured_checked(cas_root).map_err(anyhow::Error::msg)? else {
         return Ok(());
     };
-    let Some(run) = active(cas_root)? else {
+    let live = active(cas_root)?;
+    // Idempotent: posts only new heads or a changed state, so a PR opened
+    // between runs gets its release.
+    let frozen = live.as_ref().is_some_and(|run| run.frozen(Utc::now()));
+    if let Err(error) = super::promotion::publish_freeze(cas_root, project_root(cas_root)?, &config, frozen) {
+        tracing::warn!(%error, "release-gate freeze status not published");
+    }
+    let Some(run) = live else {
         return Ok(());
     };
     let sha = run.sha.clone();

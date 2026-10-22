@@ -1284,60 +1284,58 @@ fn print_next_steps(cwd: &Path) {
         return;
     }
 
-    let _ = (|| -> anyhow::Result<()> {
-        print_colored(
-            "  ┌─ Next steps ──────────────────────────────────────────┐\n",
-            colors::CYAN,
-        )?;
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "  Commit Cassy config so factory workers can access it:   ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "    git add .claude/ CLAUDE.md .mcp.json .gitignore     ",
-            colors::GREEN,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "    git commit -m \"Configure Cassy\"                       ",
-            colors::GREEN,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored(
-            "  └────────────────────────────────────────────────────────┘\n",
-            colors::CYAN,
-        )?;
+    if render_next_steps(print_colored).is_ok() {
         println!();
-        Ok(())
-    })();
+    }
+}
+
+fn render_next_steps(
+    mut write: impl FnMut(&str, Color) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    use ratatui::text::Span;
+
+    let title = "─ Next steps ";
+    let rows = [
+        ("", colors::WHITE),
+        (
+            "  Commit Cassy config so factory workers can access it:",
+            colors::WHITE,
+        ),
+        ("", colors::WHITE),
+        (
+            "    git add .claude/ CLAUDE.md .mcp.json .gitignore",
+            colors::GREEN,
+        ),
+        ("    git commit -m \"Configure Cassy\"", colors::GREEN),
+        ("", colors::WHITE),
+    ];
+    let inner_width = rows
+        .iter()
+        .map(|(text, _)| Span::raw(*text).width())
+        .max()
+        .unwrap_or(0)
+        .max(Span::raw(title).width())
+        + 2;
+    write(
+        &format!(
+            "  ┌{title}{}┐\n",
+            "─".repeat(inner_width - Span::raw(title).width())
+        ),
+        colors::CYAN,
+    )?;
+    for (text, color) in rows {
+        write("  │", colors::CYAN)?;
+        write(
+            &format!(
+                "{text}{}",
+                " ".repeat(inner_width - Span::raw(text).width())
+            ),
+            color,
+        )?;
+        write("│\n", colors::CYAN)?;
+    }
+    write(&format!("  └{}┘\n", "─".repeat(inner_width)), colors::CYAN)?;
+    Ok(())
 }
 
 /// Returns next steps as JSON-friendly data (for --json mode).
@@ -1427,8 +1425,15 @@ mod integration_flag_tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let frame = "╭─╮\n│ ● → Cassy │\n╰─╯\n";
         let mut remaining_decor = Vec::new();
-        for locale in ["C", "en_US.ISO-8859-1", "C.UTF-8"] {
-            env.set("LC_ALL", locale);
+        env.remove("LANG");
+        env.remove("LC_CTYPE");
+        for locale in [Some("C"), Some("en_US.ISO-8859-1"), Some("C.UTF-8"), None] {
+            if let Some(locale) = locale {
+                env.set("LC_ALL", locale);
+            } else {
+                env.remove("LC_ALL");
+            }
+            let locale = locale.unwrap_or("unset");
             for mode in [OutputMode::Styled, OutputMode::Plain] {
                 let wordmark = cassy_wordmark_lines_for_mode(mode);
                 let text = init_text_for_mode(frame, mode);
@@ -1456,6 +1461,46 @@ mod integration_flag_tests {
             }
         }
         assert!(remaining_decor.is_empty(), "init decor missed fallback: {}", remaining_decor.join("; "));
+    }
+
+    #[test]
+    fn init_next_steps_box_has_one_width_for_every_row() {
+        use ratatui::text::Line;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for locale in ["C", "C.UTF-8"] {
+            env.set("LC_ALL", locale);
+            let mut output = String::new();
+            render_next_steps(|text, _| {
+                output.push_str(&init_text_for_mode(text, OutputMode::Styled));
+                Ok(())
+            })
+            .unwrap();
+            let widths: Vec<_> = output.lines().map(|line| Line::raw(line).width()).collect();
+            assert!(
+                widths
+                    .iter()
+                    .all(|width| *width == widths[0] && *width <= 80),
+                "{locale}: border and content must align within 80 cells: {widths:?}\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_design_capture_uses_a_portable_project_path() {
+        // The published transcript is a data artifact: its project path must
+        // stay portable rather than naming the machine that captured it.
+        let capture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/design/cli/init-full-yes.ascii.capture.txt"
+        ));
+        let path = capture
+            .lines()
+            .find_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
+            .unwrap();
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "non-portable capture path: {path}"
+        );
     }
 
     #[test]

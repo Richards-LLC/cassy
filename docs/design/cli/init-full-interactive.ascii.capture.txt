@@ -8,7 +8,7 @@
   | Multi-agent coding factory with persistent memory and task coordination.
 
 
-  Cassy is already initialized at /mnt/rewind/cas/scratch/232e/full/p/.cas
+  Cassy is already initialized at <project>/.cas
 
 What would you like to do:
   1. Reconfigure settings
@@ -46,7 +46,7 @@ Select (1-2): 1
   [OK] Setting up factory tooling              .env.worktree.template, scripts/worktree-boot.sh, .gitignore updated
   Integrations: skipped (--no-integrations)
 
-  [OK] Cassy initialized at /mnt/rewind/cas/scratch/232e/full/p/.cas
+  [OK] Cassy initialized at <project>/.cas
 
 
   +-------------------------+--------------------------------+
@@ -59,12 +59,12 @@ Select (1-2): 1
   | cas doctor              | Run diagnostics                |
   +-------------------------+--------------------------------+
 
-  +- Next steps ------------------------------------------+
-  |                                                        |
-  |  Commit Cassy config so factory workers can access it:   |
-  |                                                        |
-  |    git add .claude/ CLAUDE.md .mcp.json .gitignore     |
-  |    git commit -m "Configure Cassy"                       |
-  |                                                        |
-  +--------------------------------------------------------+
+  +- Next steps --------------------------------------------+
+  |                                                         |
+  |  Commit Cassy config so factory workers can access it:  |
+  |                                                         |
+  |    git add .claude/ CLAUDE.md .mcp.json .gitignore      |
+  |    git commit -m "Configure Cassy"                      |
+  |                                                         |
+  +---------------------------------------------------------+
 

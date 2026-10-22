@@ -129,6 +129,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "epic_split",
     "restart_spawn_queue",
     "record_test_receipt",
+    "recover_branch",
     "agent_list",
     "agent_cleanup",
     "lease_history",

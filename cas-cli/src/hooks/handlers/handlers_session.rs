@@ -30,6 +30,7 @@ pub fn handle_session_start(
     // after context building (cas-ae09). None for non-factory sessions.
     let mut factory_session_title: Option<String> = None;
     let mut registration_role_warning: Option<String> = None;
+    let mut lane_handoff = String::new();
 
     // Record session start for analytics and register agent
     if let Some(cas_root) = cas_root {
@@ -179,6 +180,15 @@ pub fn handle_session_start(
             eprintln!("cas: Warning: Failed to write OTEL context: {e}");
         }
 
+        // Capture/surface succession before generic orphan cleanup changes task state.
+        if agent_role.as_deref() == Some("supervisor") {
+            register_directly(&mut stores);
+            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input)) {
+                Ok(context) => lane_handoff = context,
+                Err(error) => eprintln!("cas: Supervisor handoff unavailable: {error}"),
+            }
+        }
+
         // Cleanup orphaned tasks from crashed/interrupted previous sessions
         let reopened = cleanup_orphaned_tasks(cas_root);
         if reopened > 0 {
@@ -255,6 +265,7 @@ pub fn handle_session_start(
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
+    if !lane_handoff.is_empty() { assembler.prepend_protected(lane_handoff); }
 
     if let Some(warning) = registration_role_warning {
         assembler.append_protected(warning);
@@ -1368,6 +1379,8 @@ pub fn handle_session_end(
         None => return Ok(HookOutput::empty()),
     };
 
+    cleanup_agent_leases_for_end(cas_root, &input.session_id, input.reason.as_deref());
+
     let mut stores = HookStores::new(cas_root);
 
     // Get observations from this session
@@ -1393,10 +1406,6 @@ pub fn handle_session_end(
     if let Some(minutes) = supervisor_actionable_idle_minutes {
         eprintln!("cas: Supervisor actionable-idle minutes: {minutes}");
     }
-
-    // Clean up agent leases and reset task status - ALWAYS do this regardless of observation count
-    // cas-e9fc: a worker's `/clear` keeps its identity; see the function docs.
-    cleanup_agent_leases_for_end(cas_root, &input.session_id, input.reason.as_deref());
 
     // A default reminder is a one-shot thought attached to this exact session.
     // Cancel it synchronously at SessionEnd so a later session never receives

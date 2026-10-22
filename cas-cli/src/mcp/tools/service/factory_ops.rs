@@ -3944,7 +3944,8 @@ impl CasService {
                 })
                 .unwrap_or_default();
             let shutdown = crate::cloud::shutdown::health(&self.inner.cas_root, chrono::Utc::now());
-            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}");
+            let session_ends = crate::supervisor_continuity::status_section(&self.inner.cas_root);
+            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}{session_ends}");
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
@@ -5321,6 +5322,7 @@ impl CasService {
             ));
         }
 
+        output.push_str(&crate::supervisor_continuity::status_section(&self.inner.cas_root));
         Ok(Self::success(output))
     }
 
@@ -6001,6 +6003,7 @@ impl CasService {
         &self,
         req: CoordinationRequest,
     ) -> Result<CallToolResult, McpError> {
+        let include_session_ends = !req.json.unwrap_or(false);
         let cas_root = self.inner.cas_root.clone();
         // Read-only: never auto-register or revive the caller for a lookup.
         let self_id = self.inner.get_registered_agent_id_read_only().ok();
@@ -6051,6 +6054,9 @@ impl CasService {
             )
         })?
         .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+        let text = if include_session_ends {
+            format!("{text}{}", crate::supervisor_continuity::status_section(&self.inner.cas_root))
+        } else { text };
         Ok(Self::success(text))
     }
 

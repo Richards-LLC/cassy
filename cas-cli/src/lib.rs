@@ -57,6 +57,8 @@ pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod supervisor_continuity;
+pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod supervisor_message_wakes;
 pub(crate) mod factory_scratch;
 pub mod factory_target_cache;

@@ -18,6 +18,45 @@ WebSocket connection, or a device's first history-page request resets that retry
 schedule. Each scheduled retry logs its next delay; intervening daemon passes
 neither rebroadcast the reply nor stamp it selected again.
 
+## Supervisor succession and committed-work recovery
+
+Supervisor retirement keeps a project/host-scoped handoff before clearing registry
+ownership. The next local supervisor receives its tasks, worker registrations,
+parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in
+`.cas/supervisor-handoffs/`. Later successors retain fresh task/worker rows for
+unadopted inherited lane IDs and references to earlier receipts. Receiving evidence preserves live worker leases;
+explicitly adopt the listed epics before dispatching more work. `worker_status`
+and text `coordination action=peers` show recent session-end reasons locally.
+Harness reasons are retained verbatim; pane exits include code/signal, MCP ends
+name transport EOF or the parent watchdog, and unobserved causes stay `unknown`.
+
+A live registered successor can recover a dead worker's committed, unpushed work
+with one authenticated action:
+
+```text
+factory action=recover_branch task_id=cas-1234 payload='{"branch":"factory/old-worker-cas-1234","head":"<full-40-character-SHA>","expected_remote":""}'
+```
+
+The CLI equivalent is `cas factory recover-branch --task-id cas-1234 --request
+recovery.json` (global `--json` prints the full receipt). The JSON file contains
+the same `branch`, `head` and `expected_remote` fields. Empty `expected_remote`
+requires the successor's destination ref to be absent; otherwise supply its
+observed full SHA. The source must belong to the task's recorded worker, whose
+registration or retirement evidence must exist and whose process/heartbeat must
+be dead. Live task leases, moved source tips, unrelated refs, changed remote tips
+and divergent successor branches refuse recovery. A destination already at the
+requested SHA is an idempotent replay.
+
+Recovery publishes on `factory/<successor>-<task>` through the ordinary private
+push guard, records intent and result on the task, and rebinds its assignee and
+anchor after verifying the push. A bounded temporary task lease prevents another
+worker from acquiring the task during recovery; only that exact lease generation
+is released afterward. It preserves the original worker checkout and
+ref. A failure retains source work and records the incomplete attempt; a push
+that succeeded before a concurrent task edit can be retried with the same exact
+source SHA after reviewing its intent. Dirty/uncommitted worker files still
+require an explicit separate recovery; this operation only copies commits.
+
 ## Coordination messages and reminders
 
 Authenticated messages directed to a supervisor wake its idle pane, including

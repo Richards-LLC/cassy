@@ -16,6 +16,7 @@ use std::time::Duration;
 pub mod blocked;
 pub mod fixtures;
 pub mod flags;
+pub mod independence;
 
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;

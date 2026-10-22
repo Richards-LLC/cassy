@@ -39,7 +39,11 @@ Write one ledger row per live journey the impact lists, with the journey id as
 the row's `id` cell and one verdict: `PASS`, `FAIL`, `NOT A ROUTE`, or
 `NOT EXERCISED: <reason>`. `verification action=qa_record status=approved`
 refuses a ledger missing a row once a registry exists (G8). Prove a dark
-journey stays unreachable; a dead one is `NOT A ROUTE`. Example:
+journey stays unreachable; a dead one is `NOT A ROUTE`. A provider outage is
+`BLOCKED_EXTERNAL` with `blocked: provider=<provider> error=<error>`; it stays
+owed. Only the verdict column counts. When the journey declares
+`independence_key`, each run row records a distinct `<key>=<id>`; duplicates
+are refused. Example:
 
 ```text
 | B2-home-signup | / → Get started → workspace | one claimed workspace | INV-ONE-WORKSPACE read back: 1 row, claimed_at set | PASS | real-build | qa/J03.png | - |

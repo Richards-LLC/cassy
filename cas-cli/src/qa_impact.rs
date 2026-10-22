@@ -72,6 +72,9 @@ pub struct JourneyImpact {
     pub known_failure: Option<String>,
     pub matches: Vec<Match>,
     pub evidence_required: String,
+    /// G8 counts distinct `<key>=<id>` run identities (cas-d863).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independence_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +260,7 @@ fn impact_for_selected_changes(
                 known_failure: journey.known_failure.clone(),
                 matches,
                 evidence_required: evidence_required(journey),
+                independence_key: journey.independence_key.clone(),
             });
         }
         let seeded = registry.journeys.iter().filter(|j| j.seeded).count();
@@ -349,7 +353,7 @@ fn evidence_required(journey: &crate::qa_registry::Journey) -> String {
         "dark" => "prove it stays unreachable".into(),
         "dead" => "none (NOT A ROUTE)".into(),
         _ => format!(
-            "walk {} on staging with a fresh persona; read back {} from the system of record; fixtures: {}",
+            "walk {} on staging with a fresh persona; read back {} from the system of record; fixtures: {}{}",
             journey
                 .entry
                 .as_ref()
@@ -364,7 +368,12 @@ fn evidence_required(journey: &crate::qa_registry::Journey) -> String {
                 "none declared".into()
             } else {
                 journey.fixtures.join(", ")
-            }
+            },
+            journey
+                .independence_key
+                .as_ref()
+                .map(|key| format!("; each run row records {key}=<id>, counted once per id"))
+                .unwrap_or_default()
         ),
     }
 }

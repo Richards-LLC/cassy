@@ -203,21 +203,106 @@ impl CasCore {
     }
 }
 
-fn verdict(cell: &str) -> bool {
-    ["PASS", "FAIL", "NOT A ROUTE"].iter().any(|verdict| {
+/// One ledger row: its id cell, its verdict cell and all its cells.
+struct Row<'a> {
+    id: &'a str,
+    verdict: &'a str,
+    cells: Vec<&'a str>,
+}
+
+/// Ledger rows outside code fences. Only the verdict column is read: a
+/// table's `verdict` header column, else the eight-column ledger grammar's
+/// fifth cell, else a compact `| ID | verdict |` row's second cell. A compact
+/// list row reads `- ID: verdict`.
+fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
+    let mut fenced = false;
+    let mut column = None;
+    let mut rows = Vec::new();
+    for line in ledger.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if !line.contains('|') {
+            column = None;
+            let row = line.trim_start_matches("- ");
+            if let Some((id, verdict)) = row.split_once(':') {
+                let (id, verdict) = (id.trim(), verdict.trim());
+                rows.push(Row {
+                    id,
+                    verdict,
+                    cells: vec![id, verdict],
+                });
+            }
+            continue;
+        }
+        let cells: Vec<_> = line
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim().trim_matches('`').trim())
+            .collect();
+        if let Some(index) = cells.iter().position(|c| c.eq_ignore_ascii_case("verdict")) {
+            column = Some(index);
+            continue;
+        }
+        let index = column.unwrap_or(if cells.len() >= 5 { 4 } else { 1 });
+        if let Some(verdict) = cells.get(index).copied() {
+            rows.push(Row {
+                id: cells[0],
+                verdict,
+                cells,
+            });
+        }
+    }
+    rows
+}
+
+/// What one verdict cell records for its journey.
+enum Disposition {
+    /// PASS or FAIL: a run of the journey.
+    Run,
+    /// NOT A ROUTE or NOT EXERCISED: <reason>.
+    Recorded,
+    /// BLOCKED_EXTERNAL: neither PASS nor FAIL, so the journey is still owed.
+    Owed(Option<crate::qa_release::blocked::BlockedExternal>),
+}
+
+fn disposition(row: &Row<'_>) -> Option<Disposition> {
+    use crate::qa_release::blocked::{self, BlockedExternal};
+    let cell = row.verdict;
+    if cell.starts_with(blocked::VERDICT) {
+        return Some(Disposition::Owed(BlockedExternal::from_row(
+            cell, &row.cells,
+        )));
+    }
+    let word = |verdict: &str| {
         cell.strip_prefix(verdict).is_some_and(|rest| {
             rest.is_empty()
                 || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'))
         })
-    }) || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
-        let reason = reason.trim();
-        !reason.is_empty() && reason != "<reason>"
-    })
+    };
+    if word("PASS") || word("FAIL") {
+        Some(Disposition::Run)
+    } else if word("NOT A ROUTE")
+        || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
+            let reason = reason.trim();
+            !reason.is_empty() && reason != "<reason>"
+        })
+    {
+        Some(Disposition::Recorded)
+    } else {
+        None
+    }
 }
 
 /// G8 reads the park-time report, never a new diff. Legacy catalog adoption
 /// remains advisory; enforcement arms when a YAML registry exists.
 pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option<String> {
+    use crate::qa_release::independence::{Runs, identity};
     if impact["registry"]["present"] != true {
         return None;
     }
@@ -225,7 +310,7 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
         .as_array()?
         .iter()
         .filter(|j| j["status"] == "live")
-        .filter_map(|j| j["id"].as_str())
+        .filter_map(|j| Some((j["id"].as_str()?, j["independence_key"].as_str())))
         .collect();
     if live.is_empty() {
         return None;
@@ -233,38 +318,47 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
     if impact["head_sha"].as_str() != Some(head) {
         return Some("QA RECORD REJECTED: journey impact is for a different delivery head; refresh the QA dispatch for this round before recording approval.".into());
     }
-    let mut fenced = false;
-    let rows: Vec<_> = ledger
-        .lines()
-        .filter(|line| {
-            if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                fenced = !fenced;
-                return false;
+    let rows = ledger_rows(ledger);
+    let (mut missing, mut owed, mut dependent) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, key) in live {
+        let recorded: Vec<_> = rows
+            .iter()
+            .filter(|row| row.id == id)
+            .filter_map(|row| Some((row, disposition(row)?)))
+            .collect();
+        if recorded.is_empty() {
+            missing.push(id);
+        }
+        for (row, disposition) in &recorded {
+            if let Disposition::Owed(blocked) = disposition {
+                let cell = (row.cells.len() >= 5).then(|| row.cells[1]);
+                owed.push(match blocked {
+                    Some(blocked) => blocked.owed(id, cell),
+                    None => format!(
+                        "{id} is BLOCKED_EXTERNAL without `blocked: provider=<provider> error=<error>`"
+                    ),
+                });
             }
-            !fenced
-        })
-        .collect();
-    let missing: Vec<_> = live
-        .into_iter()
-        .filter(|id| {
-            !rows.iter().any(|line| {
-                let cells: Vec<_> = line
-                    .trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|c| c.trim().trim_matches('`').trim())
-                    .collect();
-                if cells.len() >= 2 {
-                    cells.iter().any(|cell| cell == id) && cells.iter().any(|cell| verdict(cell))
-                } else {
-                    // Also accept a compact Markdown list row: `- ID: PASS`.
-                    let row = line.trim().trim_start_matches("- ");
-                    row.strip_prefix(id)
-                        .and_then(|rest| rest.strip_prefix(':'))
-                        .is_some_and(|rest| verdict(rest.trim()))
-                }
-            })
-        })
-        .collect();
-    (!missing.is_empty()).then(|| format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")))
+        }
+        if let Some(key) = key {
+            let runs = Runs::count(
+                recorded
+                    .iter()
+                    .filter(|(_, d)| matches!(d, Disposition::Run))
+                    .map(|(row, _)| identity(key, &row.cells)),
+            );
+            dependent.extend(runs.refusal(id, key, 0));
+        }
+    }
+    let mut refusals = Vec::new();
+    if !missing.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: the ledger has no row for live journeys {}. Add one row per journey: PASS, FAIL, NOT A ROUTE, or NOT EXERCISED: <reason>.", missing.join(", ")));
+    }
+    if !owed.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: owed: {}: neither PASS nor FAIL; re-walk once the provider recovers.", owed.join("; ")));
+    }
+    if !dependent.is_empty() {
+        refusals.push(format!("QA RECORD REJECTED: {}. A duplicate or unidentified run is not independent; record one distinct <key>=<id> per run.", dependent.join("; ")));
+    }
+    (!refusals.is_empty()).then(|| refusals.join("\n"))
 }

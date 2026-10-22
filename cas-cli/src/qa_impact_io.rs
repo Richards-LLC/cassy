@@ -239,6 +239,7 @@ pub(super) fn analyze(
                 known_failure: None,
                 matches: vec![],
                 evidence_required: evidence_required(journey),
+                independence_key: None,
             });
         }
         sort_journeys(&mut report.journeys);

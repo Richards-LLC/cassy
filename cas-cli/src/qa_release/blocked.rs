@@ -47,6 +47,24 @@ impl BlockedExternal {
             },
         )
     }
+
+    /// Finds the provider and error for a row whose verdict cell starts with
+    /// [`VERDICT`]: after the verdict word, or in any `blocked:` cell.
+    pub fn from_row(verdict: &str, cells: &[&str]) -> Option<Self> {
+        let rest = verdict.strip_prefix(VERDICT)?;
+        let rest =
+            rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'));
+        Self::from_evidence(rest)
+            .or_else(|| cells.iter().find_map(|cell| Self::from_evidence(cell)))
+    }
+
+    /// `<row> (cell <cell>) is BLOCKED_EXTERNAL{…}`, shared by every ledger gate.
+    pub fn owed(&self, row: &str, cell: Option<&str>) -> String {
+        match cell.filter(|cell| !cell.is_empty()) {
+            Some(cell) => format!("{row} (cell {cell}) is {self}"),
+            None => format!("{row} is {self}"),
+        }
+    }
 }
 
 impl fmt::Display for BlockedExternal {

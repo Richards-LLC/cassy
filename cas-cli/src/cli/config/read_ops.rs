@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
@@ -170,13 +170,16 @@ pub(crate) fn update_config_in_place<T>(
     update: impl FnOnce(&Config, &mut Config) -> anyhow::Result<T>,
     guard: impl FnOnce(&Config, &Config) -> anyhow::Result<()>,
 ) -> anyhow::Result<T> {
-    let _lock = crate::config::lock_project_config(cas_root)?;
-    let path = cas_root.join("config.toml");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let config_root = config_root_for_key(key, cas_root);
+    let _lock = crate::config::lock_project_config(&config_root)?;
+    let ConfigKeyDocument {
+        path,
+        raw,
+        mut document,
+        serialized_path,
+        stored_path,
+        alternate_path,
+    } = load_config_key_document(key, cas_root)?;
     let before: Config = if raw.is_empty() {
         config.clone()
     } else {
@@ -187,9 +190,6 @@ pub(crate) fn update_config_in_place<T>(
 
     let serialized_after = toml::to_string(&after)?;
     let after_document = toml_edit::Document::parse(serialized_after)?;
-    let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    let (serialized_path, stored_path, alternate_path) =
-        config_document_paths(&document, key);
     let replacement = config_document_item(after_document.as_item(), serialized_path).cloned();
     set_config_document_item(&mut document, stored_path, replacement)?;
     if let Some(alternate_path) = alternate_path {
@@ -209,6 +209,110 @@ pub(crate) fn update_config_in_place<T>(
         crate::cli::viktor::reconcile_managed_proxy(config.viktor_enabled())?;
     }
     Ok(result)
+}
+
+/// Persist changed editor fields individually, then remove requested
+/// overrides. This keeps comments and unknown keys and sends host-scoped
+/// fields to the same file used by config get/set/reset.
+pub(crate) fn save_editor_changes(
+    original: &Config,
+    edited: &Config,
+    pending_resets: &HashSet<String>,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !pending_resets.contains("factory.write_roots"),
+        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it"
+    );
+    let original_values = original.list().into_iter().collect::<HashMap<_, _>>();
+    let mut changes_by_root = BTreeMap::<PathBuf, Vec<(String, Option<String>)>>::new();
+    for (key, value) in edited.list() {
+        if pending_resets.contains(&key) || original_values.get(&key) == Some(&value) {
+            continue;
+        }
+
+        let config_root = config_root_for_key(&key, cas_root);
+        changes_by_root
+            .entry(config_root)
+            .or_default()
+            .push((key, Some(value)));
+    }
+
+    for key in pending_resets {
+        let config_root = config_root_for_key(key, cas_root);
+        changes_by_root
+            .entry(config_root)
+            .or_default()
+            .push((key.clone(), None));
+    }
+
+    let mut saved_config = edited.clone();
+    for (key, value) in changes_by_root.values().flatten() {
+        if let Some(value) = value {
+            saved_config.set(key, value)?;
+        }
+    }
+    let edited_document = toml_edit::Document::parse(toml::to_string(&saved_config)?)?.into_mut();
+    for (config_root, mut changes) in changes_by_root {
+        changes.sort_by(|left, right| left.0.cmp(&right.0));
+        let fallback = Config::load(&config_root)?;
+        persist_editor_changes_for_root(&config_root, &fallback, &edited_document, &changes)?;
+    }
+    Ok(())
+}
+
+/// Apply all editor writes and resets for one config file under one stable
+/// lock, keeping comments and unknown keys intact until the atomic replace.
+fn persist_editor_changes_for_root(
+    config_root: &Path,
+    fallback: &Config,
+    edited_document: &toml_edit::DocumentMut,
+    changes: &[(String, Option<String>)],
+) -> anyhow::Result<()> {
+    let _lock = crate::config::lock_project_config(config_root)?;
+    let path = config_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = if raw.is_empty() {
+        fallback.clone()
+    } else {
+        toml::from_str(&raw)?
+    };
+    let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    let mut reconcile_viktor = false;
+
+    for (key, value) in changes {
+        let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
+        if value.is_some() {
+            let replacement = config_document_item(edited_document.as_item(), serialized_path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("edited config omitted {key}"))?;
+            set_config_document_item(&mut document, stored_path, Some(replacement))?;
+            if let Some(alternate_path) = alternate_path {
+                set_config_document_item(&mut document, alternate_path, None)?;
+            }
+            if let Some(marker) = upkeep_observe_marker_for_set(key) {
+                set_config_document_item(&mut document, marker, None)?;
+            }
+        } else {
+            remove_config_document_key(&mut document, stored_path, alternate_path)?;
+        }
+        reconcile_viktor |= key == "viktor.enabled";
+    }
+
+    let contents = document.to_string();
+    let after: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &after, InvocationContext::from_process)?;
+    if contents != raw {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    if reconcile_viktor {
+        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
+    }
+    Ok(())
 }
 
 fn config_document_item<'a>(item: &'a toml_edit::Item, path: &str) -> Option<&'a toml_edit::Item> {
@@ -248,11 +352,44 @@ fn config_document_paths<'a>(
     (serialized_path, stored_path, remove_path)
 }
 
+struct ConfigKeyDocument<'a> {
+    path: PathBuf,
+    raw: String,
+    document: toml_edit::DocumentMut,
+    serialized_path: &'a str,
+    stored_path: &'a str,
+    alternate_path: Option<&'a str>,
+}
+
+/// Resolve a key's host/project file and canonical/alias paths once for all
+/// editor, override-detection and reset operations.
+fn load_config_key_document<'a>(
+    key: &'a str,
+    cas_root: &Path,
+) -> anyhow::Result<ConfigKeyDocument<'a>> {
+    let path = config_root_for_key(key, cas_root).join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
+    Ok(ConfigKeyDocument {
+        path,
+        raw,
+        document,
+        serialized_path,
+        stored_path,
+        alternate_path,
+    })
+}
+
 fn remove_config_document_key(
     document: &mut toml_edit::DocumentMut,
-    key: &str,
+    stored_path: &str,
+    alternate_path: Option<&str>,
 ) -> anyhow::Result<bool> {
-    let (_, stored_path, alternate_path) = config_document_paths(document, key);
     let stored_exists = config_document_item(document.as_item(), stored_path).is_some();
     let alternate_exists = alternate_path
         .is_some_and(|path| config_document_item(document.as_item(), path).is_some());
@@ -336,17 +473,13 @@ fn set_config_document_path(
 
 /// Whether the file contains a stored override for this key or its serde alias.
 pub(in crate::cli) fn config_key_has_override(key: &str, cas_root: &Path) -> anyhow::Result<bool> {
-    let path = cas_root.join("config.toml");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    let (_, stored_path, alternate_path) = config_document_paths(&document, key);
-    Ok(config_document_item(document.as_item(), stored_path).is_some()
-        || alternate_path
-            .is_some_and(|path| config_document_item(document.as_item(), path).is_some()))
+    let key_document = load_config_key_document(key, cas_root)?;
+    let stored_exists =
+        config_document_item(key_document.document.as_item(), key_document.stored_path).is_some();
+    let alternate_exists = key_document.alternate_path.is_some_and(|path| {
+        config_document_item(key_document.document.as_item(), path).is_some()
+    });
+    Ok(stored_exists || alternate_exists)
 }
 
 /// Remove the stored override without serializing defaults back into the file.
@@ -357,16 +490,18 @@ pub(in crate::cli) fn reset_config_value(
 ) -> anyhow::Result<(String, String)> {
     anyhow::ensure!(key != "factory.write_roots",
         "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it");
-    let _lock = crate::config::lock_project_config(cas_root)?;
-    let path = cas_root.join("config.toml");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let config_root = config_root_for_key(key, cas_root);
+    let _lock = crate::config::lock_project_config(&config_root)?;
+    let ConfigKeyDocument {
+        path,
+        raw,
+        mut document,
+        stored_path,
+        alternate_path,
+        ..
+    } = load_config_key_document(key, cas_root)?;
     let before: Config = toml::from_str(&raw)?;
-    let mut document = toml_edit::Document::parse(&raw)?.into_mut();
-    let removed = remove_config_document_key(&mut document, key)?;
+    let removed = remove_config_document_key(&mut document, stored_path, alternate_path)?;
     let contents = document.to_string();
     let after: Config = toml::from_str(&contents)?;
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
@@ -1025,7 +1160,10 @@ mod tests {
                 config_document_item(document.as_item(), stored_path).is_some(),
                 "registry key {key} did not resolve to TOML path {stored_path}"
             );
-            assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
+            assert!(
+                remove_config_document_key(&mut document, stored_path, alternate_path).unwrap(),
+                "{key}"
+            );
             assert!(
                 config_document_item(document.as_item(), stored_path).is_none(),
                 "reset did not remove the serialized TOML path {stored_path} for {key}"

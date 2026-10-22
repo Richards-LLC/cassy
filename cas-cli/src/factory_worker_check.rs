@@ -2000,10 +2000,12 @@ mod tests {
         const FIXTURE: &str = "CAS_WORKER_TERM_PARENT_FIXTURE";
         if let Some(root) = std::env::var_os(FIXTURE) {
             let root = PathBuf::from(root);
-            let mut command = Command::new("bash");
-            command.arg("-c").arg(include_str!("../../scripts/run-verified-tests.sh"))
-                .arg("worker-verified-tests")
-                .args(["nextest", "run", "-p", "cas", "--lib"])
+            let mut command = Command::new("python3");
+            command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/worker-proof-guards.py"))
+                .arg(root.join("verified.sh"))
+                .arg(root.join("fake-cargo.py"))
+                .arg(root.join("count"))
                 .env("VERIFIED_TEST_REPO_ROOT", &root)
                 .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
                 .env("PID_FILE", root.join("pids"))
@@ -2020,6 +2022,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let fake = root.path().join("fake-cargo.py");
+        std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
         std::fs::write(&fake, r#"#!/usr/bin/env python3
 import os, pathlib, subprocess, sys
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
@@ -2033,6 +2036,7 @@ child.wait()
             .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
             .env(FIXTURE, root.path())
             .stdout(Stdio::null()).stderr(Stdio::inherit())
+            .process_group(0)
             .spawn().unwrap();
         let marker = root.path().join("pids");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2053,7 +2057,8 @@ child.wait()
             std::thread::sleep(Duration::from_millis(20));
         }
         if status.is_none() {
-            let _ = parent.kill();
+            // The fixture's leader is still unreaped; only its owned group.
+            unsafe { libc::killpg(parent.id() as i32, libc::SIGKILL) };
             status = Some(parent.wait().unwrap());
         }
         let survivors: Vec<_> = pids.into_iter().filter(|pid| {

@@ -2656,6 +2656,105 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
 }
 
 #[tokio::test]
+async fn cas_01dc_empty_checkpoint_proves_task_content_but_not_empty_only_delivery() {
+    let mut env = test_env();
+    let fixture_cwd = std::env::current_dir().unwrap();
+    for has_content in [false, true] {
+        let repo = GitRepo::new();
+        // A real earlier task must not supply content for an empty delivery.
+        std::fs::write(repo.root.join("baseline.txt"), "prior task\n").unwrap();
+        run_git(&["add", "baseline.txt"], &repo.root);
+        run_git(&["commit", "-m", "feat(cas-a0a0): prior task"], &repo.root);
+        let base = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+        let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+        disable_system_a(&cas_root);
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[verification]\nenabled=false\n[project]\ncanonical_id='checkpoint'\n",
+        )
+        .unwrap();
+        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+        register_delivery_agent(
+            &cas_root,
+            "checkpoint-supervisor",
+            "supervisor",
+            AgentRole::Supervisor,
+            "checkpoint-session",
+        );
+        let task_id = "cas-01dc";
+        let branch = "factory/alice-cas-01dc";
+        let worker = cas_root.join("worktrees/alice");
+        repo.add_worktree(&worker, branch);
+        let mut task = Task::new(task_id.into(), "Checkpointed delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
+        task.depth = TaskDepth::Light;
+        task.assignee = Some("alice".into());
+        let target = WorkTarget {
+            repo_selector: "project:checkpoint".into(),
+            target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+            work_target: target,
+            assignee: "alice".into(),
+            branch: branch.into(),
+            base_sha: base,
+        });
+        if has_content {
+            for name in ["first.txt", "second.txt"] {
+                std::fs::write(worker.join(name), "real task delivery\n").unwrap();
+                run_git(&["add", name], &worker);
+                run_git(&["commit", "-m", "fix(cas-01dc): real delivery"], &worker);
+            }
+        }
+        for _ in 0..2 {
+            run_git(
+                &["commit", "--allow-empty", "-m", "wip(cas-01dc): checkpoint"],
+                &worker,
+            );
+        }
+        let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some(branch.into());
+        let tasks = open_task_store(&cas_root).unwrap();
+        tasks.add(&task).unwrap();
+        run_git(
+            &[
+                "merge",
+                "--no-ff",
+                branch,
+                "-m",
+                "integrate checkpoint delivery",
+            ],
+            &repo.root,
+        );
+        env.set_current_dir(&repo.root);
+        let response = delivery_service(&cas_root, "checkpoint-supervisor")
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close", "id": task_id, "reason": "merged checkpointed delivery",
+            }))))
+            .await
+            .unwrap();
+        let stored = tasks.get(task_id).unwrap();
+        if has_content {
+            assert_eq!(stored.status, TaskStatus::Closed, "{}", get_text(&response));
+        } else {
+            assert!(
+                get_text(&response).contains("DELIVERY CONTENT UNVERIFIABLE"),
+                "{}",
+                get_text(&response)
+            );
+            assert_eq!(stored.status, TaskStatus::AwaitingMerge);
+        }
+        assert_eq!(
+            stored.deliverables.factory_branch_anchor.as_deref(),
+            Some(anchor.as_str())
+        );
+        env.set_current_dir(&fixture_cwd);
+    }
+}
+#[tokio::test]
 async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     let mut env = test_env();
     let repo = GitRepo::new();

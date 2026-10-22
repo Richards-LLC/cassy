@@ -49,7 +49,7 @@ impl TaskLifecycleGateError {
 }
 
 pub(crate) mod close_ops;
-mod epic_lane;
+pub(crate) mod epic_lane;
 mod epic_overlap;
 pub(crate) mod merge_close;
 #[cfg(test)]

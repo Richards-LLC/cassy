@@ -120,6 +120,8 @@ fn write_owner_with_directory_sync(
     serde_json::to_writer(file.as_file_mut(), record)?;
     file.as_file().sync_all()?;
     file.persist(directory.join("owner.json"))?;
+    // The synced payload alone does not make the renamed directory entry durable.
+    sync_directory(directory)?;
     Ok(())
 }
 

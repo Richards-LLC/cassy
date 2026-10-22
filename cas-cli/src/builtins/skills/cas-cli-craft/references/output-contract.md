@@ -77,7 +77,7 @@ state the **cause** in the reader's words, give **one remedy** as a command. A s
 an internal type name, or a paragraph is a defect. Repeated findings collapse to one row with a
 count and one remedy; the reader sees the instances under `--verbose`.
 
-```
+```text
 ⚠ registered project roots   14 stale /tmp roots are excluded from discovery
   → cas known-repos forget --stale
 ```

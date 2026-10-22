@@ -583,6 +583,12 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("{error:#}"))
 }
 
+/// Render the diagnostic for a person while leaving [`json_error_message`]
+/// as the stable machine-readable representation.
+pub fn human_error_message(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
 /// Run the CLI with the given arguments
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let tracer_timer = std::time::Instant::now();
@@ -966,6 +972,25 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
+
+    #[test]
+    fn operator_config_refusal_has_a_wrapped_human_form() {
+        let error = anyhow::anyhow!(
+            "refused: CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+        );
+        let rendered = super::human_error_message(&error);
+
+        assert_eq!(
+            rendered,
+            "Operator-only configuration change refused.\n  CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed\n  is operator-only because it relaxes a Cassy guard; run `cas config set\n  verification.force_bypass_allowed <value>` yourself from your own terminal. If\n  this is your own terminal, it inherited CLAUDECODE from an agent pane: open a\n  fresh terminal and run it there."
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
+        assert_eq!(
+            super::json_error_message(&error),
+            error.to_string(),
+            "machine output keeps the original one-line refusal"
+        );
+    }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was

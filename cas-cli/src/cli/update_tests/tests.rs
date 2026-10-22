@@ -496,6 +496,7 @@ fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
 /// Install/update must not depend on a personal HOME seed, and both legacy
 /// overrides and edits to an installed managed finish remain the operator's.
 #[test]
+// pin: installation and update preserve the operator's exact Markdown bytes.
 fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     use cas_mux::SupervisorCli;
     let env = crate::test_support::TestEnvGuard::temp_home();

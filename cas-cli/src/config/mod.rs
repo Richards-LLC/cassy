@@ -317,6 +317,7 @@ impl Config {
 
 mod access;
 pub(crate) use access::{ConfigRetirement, retire_config};
+pub(crate) use access::validate_notification_webhook_url;
 pub(crate) use access::{RetiredConfigNotice, RetiredNoticeScope, represented_retired_config};
 pub use access::{
     get_telemetry_consent, global_cas_dir, load_global_config, prompt_telemetry_consent,

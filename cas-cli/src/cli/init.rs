@@ -5,7 +5,7 @@
 //! 2. Confirmation with file summary
 //! 3. Animated execution
 
-use std::io::{Write, stdout};
+use std::io::{IsTerminal, Write, stdout};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -291,11 +291,32 @@ const CASSY_PLAIN_WORDMARK: [&str; 1] = ["Cassy"];
 const INIT_WORDMARK_WIDTH: usize = 52;
 
 fn cassy_wordmark_lines() -> &'static [&'static str] {
-    if OutputMode::detect() == OutputMode::Plain {
-        &CASSY_PLAIN_WORDMARK
-    } else {
+    cassy_wordmark_lines_for_mode(OutputMode::detect())
+}
+
+fn cassy_wordmark_lines_for_mode(mode: OutputMode) -> &'static [&'static str] {
+    if super::supports_styled_glyphs(mode) {
         &CASSY_WORDMARK
+    } else {
+        &CASSY_PLAIN_WORDMARK
     }
+}
+
+fn init_text_for_mode(text: &str, mode: OutputMode) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() || super::supports_styled_glyphs(mode) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    // Init's frame corners and section dot extend the shared punctuation
+    // fallback. Leave user content (paths and names) intact.
+    let decor: String = text
+        .chars()
+        .map(|ch| match ch {
+            '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' => '+',
+            '●' => '*',
+            other => other,
+        })
+        .collect();
+    std::borrow::Cow::Owned(crate::ui::components::ascii_fallback(&decor).into_owned())
 }
 
 fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
@@ -307,6 +328,14 @@ fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
 
 // Spinner frames (braille pattern)
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn spinner_frames_for_mode(mode: OutputMode) -> &'static [char] {
+    if super::supports_styled_glyphs(mode) {
+        SPINNER_FRAMES
+    } else {
+        &['|', '/', '-', '\\']
+    }
+}
 
 // ============================================================================
 // Configuration (simplified - uses smart defaults)
@@ -1120,23 +1149,28 @@ where
     F: FnOnce() -> anyhow::Result<String>,
 {
     let mut stdout = stdout();
+    let is_tty = stdout.is_terminal();
     let started = Instant::now();
     info!(phase = label, "cas init: phase starting");
 
-    // Show spinner
-    print_colored("  ", colors::WHITE)?;
-    print_colored(&format!("{}", SPINNER_FRAMES[0]), colors::ORANGE)?;
-    print_colored(&format!(" {label}..."), colors::WHITE)?;
-    stdout.flush()?;
+    // Transient progress belongs only on a terminal. Pipes receive the
+    // completed phase once, including when the wizard requests animation.
+    let frames = spinner_frames_for_mode(OutputMode::detect());
+    if is_tty {
+        print_colored("  ", colors::WHITE)?;
+        print_colored(&format!("{}", frames[0]), colors::ORANGE)?;
+        print_colored(&format!(" {label}..."), colors::WHITE)?;
+        stdout.flush()?;
+    }
 
-    if animate {
+    if animate && is_tty {
         // Animate spinner briefly
         for i in 0..8 {
             thread::sleep(Duration::from_millis(50));
             print!("\r");
             print_colored("  ", colors::WHITE)?;
             print_colored(
-                &format!("{}", SPINNER_FRAMES[i % SPINNER_FRAMES.len()]),
+                &format!("{}", frames[i % frames.len()]),
                 colors::ORANGE,
             )?;
             print_colored(&format!(" {label}..."), colors::WHITE)?;
@@ -1148,7 +1182,9 @@ where
     match action() {
         Ok(result) => {
             // Show success
-            print!("\r");
+            if is_tty {
+                print!("\r");
+            }
             print_colored("  ✓ ", colors::GREEN)?;
             print_colored(label, colors::WHITE)?;
             // Pad to clear any remnants
@@ -1166,7 +1202,9 @@ where
         }
         Err(e) => {
             // Show failure
-            print!("\r");
+            if is_tty {
+                print!("\r");
+            }
             print_colored("  ✗ ", colors::RED)?;
             print_colored(label, colors::WHITE)?;
             print_colored(" — ", colors::GRAY)?;
@@ -1187,11 +1225,13 @@ where
 // Quick start guide
 // ============================================================================
 
-fn print_quick_start() {
-    use crate::ui::components::{Formatter, Renderable, Table};
-    use crate::ui::theme::ActiveTheme;
-
-    let table = Table::new()
+fn quick_start_table_for_mode(mode: OutputMode) -> crate::ui::components::Table {
+    crate::ui::components::Table::new()
+        .border(if super::supports_styled_glyphs(mode) {
+            crate::ui::components::Border::Unicode
+        } else {
+            crate::ui::components::Border::Ascii
+        })
         .columns(&["Command", "Description"])
         .rows(vec![
             vec!["cas", "Launch multi-agent factory"],
@@ -1200,7 +1240,14 @@ fn print_quick_start() {
             vec!["cas hub service install", "Start persistent Commander hub"],
             vec!["cas doctor", "Run diagnostics"],
         ])
-        .indent(2);
+        .indent(2)
+}
+
+fn print_quick_start() {
+    use crate::ui::components::{Formatter, Renderable};
+    use crate::ui::theme::ActiveTheme;
+
+    let table = quick_start_table_for_mode(OutputMode::detect());
 
     let theme = ActiveTheme::default();
     let mut out = std::io::stdout();
@@ -1245,60 +1292,58 @@ fn print_next_steps(cwd: &Path) {
         return;
     }
 
-    let _ = (|| -> anyhow::Result<()> {
-        print_colored(
-            "  ┌─ Next steps ──────────────────────────────────────────┐\n",
-            colors::CYAN,
-        )?;
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "  Commit Cassy config so factory workers can access it:   ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "    git add .claude/ CLAUDE.md .mcp.json .gitignore     ",
-            colors::GREEN,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "    git commit -m \"Configure Cassy\"                       ",
-            colors::GREEN,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored("  │", colors::CYAN)?;
-        print_colored(
-            "                                                        ",
-            colors::WHITE,
-        )?;
-        print_colored("│\n", colors::CYAN)?;
-
-        print_colored(
-            "  └────────────────────────────────────────────────────────┘\n",
-            colors::CYAN,
-        )?;
+    if render_next_steps(print_colored).is_ok() {
         println!();
-        Ok(())
-    })();
+    }
+}
+
+fn render_next_steps(
+    mut write: impl FnMut(&str, Color) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    use ratatui::text::Span;
+
+    let title = "─ Next steps ";
+    let rows = [
+        ("", colors::WHITE),
+        (
+            "  Commit Cassy config so factory workers can access it:",
+            colors::WHITE,
+        ),
+        ("", colors::WHITE),
+        (
+            "    git add .claude/ CLAUDE.md .mcp.json .gitignore",
+            colors::GREEN,
+        ),
+        ("    git commit -m \"Configure Cassy\"", colors::GREEN),
+        ("", colors::WHITE),
+    ];
+    let inner_width = rows
+        .iter()
+        .map(|(text, _)| Span::raw(*text).width())
+        .max()
+        .unwrap_or(0)
+        .max(Span::raw(title).width())
+        + 2;
+    write(
+        &format!(
+            "  ┌{title}{}┐\n",
+            "─".repeat(inner_width - Span::raw(title).width())
+        ),
+        colors::CYAN,
+    )?;
+    for (text, color) in rows {
+        write("  │", colors::CYAN)?;
+        write(
+            &format!(
+                "{text}{}",
+                " ".repeat(inner_width - Span::raw(text).width())
+            ),
+            color,
+        )?;
+        write("│\n", colors::CYAN)?;
+    }
+    write(&format!("  └{}┘\n", "─".repeat(inner_width)), colors::CYAN)?;
+    Ok(())
 }
 
 /// Returns next steps as JSON-friendly data (for --json mode).
@@ -1318,11 +1363,13 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 
 fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
     let mut stdout = stdout();
-    if OutputMode::detect() == OutputMode::Plain {
+    let mode = OutputMode::detect();
+    let text = init_text_for_mode(text, mode);
+    if mode == OutputMode::Plain {
         write!(stdout, "{text}")?;
         return Ok(());
     }
-    execute!(stdout, SetForegroundColor(color), Print(text))?;
+    execute!(stdout, SetForegroundColor(color), Print(text.as_ref()))?;
     execute!(stdout, SetForegroundColor(Color::Reset))?;
     Ok(())
 }
@@ -1383,6 +1430,85 @@ mod integration_flag_tests {
         assert!(CASSY_WORDMARK
             .iter()
             .all(|row| row.chars().count() <= INIT_WORDMARK_WIDTH));
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let frame = "╭─╮\n│ ● → Cassy │\n╰─╯\n";
+        let mut remaining_decor = Vec::new();
+        env.remove("LANG");
+        env.remove("LC_CTYPE");
+        for locale in [Some("C"), Some("en_US.ISO-8859-1"), Some("C.UTF-8"), None] {
+            if let Some(locale) = locale {
+                env.set("LC_ALL", locale);
+            } else {
+                env.remove("LC_ALL");
+            }
+            let locale = locale.unwrap_or("unset");
+            for mode in [OutputMode::Styled, OutputMode::Plain] {
+                let wordmark = cassy_wordmark_lines_for_mode(mode);
+                let text = init_text_for_mode(frame, mode);
+                let spinner = spinner_frames_for_mode(mode);
+                let mut table = Vec::new();
+                use crate::ui::components::{Formatter, Renderable};
+                quick_start_table_for_mode(mode).render(&mut Formatter::plain(&mut table)).unwrap();
+                let table = String::from_utf8(table).unwrap();
+                if mode == OutputMode::Styled && locale == "C.UTF-8" {
+                    assert_eq!(wordmark, CASSY_WORDMARK);
+                    assert_eq!(text, frame, "UTF-8 styled init frame is unchanged");
+                    assert_eq!(spinner, SPINNER_FRAMES, "UTF-8 animation is unchanged");
+                    assert!(table.contains('─'), "UTF-8 table retains its border");
+                } else {
+                    assert!(wordmark.iter().all(|line| line.is_ascii()), "{locale} {mode:?}: {wordmark:?}");
+                    assert!(text.is_ascii(), "{locale} {mode:?}: {text}");
+                    assert!(text.contains("Cassy"), "fallback retains welcome content");
+                    if !spinner.iter().all(char::is_ascii) {
+                        remaining_decor.push(format!("{locale} {mode:?}: spinner {spinner:?}"));
+                    }
+                    if !table.is_ascii() {
+                        remaining_decor.push(format!("{locale} {mode:?}: quick-start table {table}"));
+                    }
+                }
+            }
+        }
+        assert!(remaining_decor.is_empty(), "init decor missed fallback: {}", remaining_decor.join("; "));
+    }
+
+    #[test]
+    fn init_next_steps_box_has_one_width_for_every_row() {
+        use ratatui::text::Line;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for locale in ["C", "C.UTF-8"] {
+            env.set("LC_ALL", locale);
+            let mut output = String::new();
+            render_next_steps(|text, _| {
+                output.push_str(&init_text_for_mode(text, OutputMode::Styled));
+                Ok(())
+            })
+            .unwrap();
+            let widths: Vec<_> = output.lines().map(|line| Line::raw(line).width()).collect();
+            assert!(
+                widths
+                    .iter()
+                    .all(|width| *width == widths[0] && *width <= 80),
+                "{locale}: border and content must align within 80 cells: {widths:?}\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_design_capture_uses_a_portable_project_path() {
+        // The published transcript is a data artifact: its project path must
+        // stay portable rather than naming the machine that captured it.
+        let capture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/design/cli/init-full-yes.ascii.capture.txt"
+        ));
+        let path = capture
+            .lines()
+            .find_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
+            .unwrap();
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "non-portable capture path: {path}"
+        );
     }
 
     #[test]

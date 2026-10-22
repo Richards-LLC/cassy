@@ -18,6 +18,9 @@ pub(crate) struct Receipt {
     /// note, a parked anchor) sets `commit` but never this, so an early
     /// answer can only ever describe the mutation the caller asked for.
     pub terminal: OnceLock<std::time::Instant>,
+    /// cas-3937 review: the outcome of the work after a merge's commit (its
+    /// task close), for the note recorded once that work finishes.
+    pub followup: std::sync::Mutex<Option<String>>,
 }
 
 tokio::task_local! { static CURRENT: Arc<Receipt>; }
@@ -30,6 +33,7 @@ impl Receipt {
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
+            followup: std::sync::Mutex::new(None),
         })
     }
 }
@@ -124,6 +128,38 @@ pub(crate) fn task_terminal_committed(id: &str) {
             .is_none_or(|expected| expected == id)
     {
         let _ = receipt.terminal.set(std::time::Instant::now());
+    }
+}
+
+/// cas-3937: a `worktree_merge` reached its merged, published (or not)
+/// target. That is the request's terminal mutation; the task close and
+/// verification dispatch after it are post-commit work.
+pub(crate) fn merge_committed(commit: &str, target: &str, push_state: &str) {
+    // The action alone: legacy `coordination action=worktree_merge` calls
+    // forward to the same handler.
+    if let Some(receipt) = current()
+        && receipt.action == "worktree_merge"
+    {
+        let _ = receipt.commit.set(Commit {
+            description: format!(
+                "merge {commit} into {target}; push: {push_state}; the task close and \
+                 verifier dispatch after it continue, and their result is recorded as a \
+                 task note"
+            ),
+            notification_id: None,
+        });
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
+}
+
+/// cas-3937 review: record what the task close after a merge concluded, so
+/// the post-commit note says it rather than the merge's first answer line.
+pub(crate) fn merge_followup(outcome: &str) {
+    if let Some(receipt) = current()
+        && receipt.action == "worktree_merge"
+        && let Ok(mut followup) = receipt.followup.lock()
+    {
+        *followup = Some(outcome.trim().to_string());
     }
 }
 

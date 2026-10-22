@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Bump when the verdict semantics or the key inputs change.
-const CACHE_VERSION: u32 = 7; // cas-2b10: retired shared lanes measured
+const CACHE_VERSION: u32 = 8; // cas-5993: attributed ordinary retirement, closed-child authority
 /// Bound on stored verdicts; the oldest are evicted first.
 const MAX_ENTRIES: usize = 8192;
 const CACHE_DIR: &str = "cas";
@@ -132,6 +132,7 @@ pub(super) fn verdict_key(
     anchor_resolved: bool,
     branches: &[String],
     snapshot: &EpicGitSnapshot,
+    children: &[Task],
 ) -> String {
     use sha2::Digest;
     use std::fmt::Write as _;
@@ -162,6 +163,16 @@ pub(super) fn verdict_key(
             commit(branch),
             commit(&format!("origin/{branch}"))
         );
+    }
+    // A newly closed child can establish authority for an otherwise
+    // unattributed retirement without moving any Git ref.
+    let closed: std::collections::BTreeSet<_> = children.iter()
+        .filter(|child| child.status == cas_types::TaskStatus::Closed && child.has_delivery_to_integrate())
+        .filter_map(|child| child.deliverables.factory_branch_anchor.as_deref()
+            .map(|anchor| (child.id.as_str(), anchor)))
+        .collect();
+    for (id, anchor) in closed {
+        let _ = writeln!(material, "closed-child={id} {anchor}");
     }
     let digest = sha2::Sha256::digest(material.as_bytes());
     let mut key = String::with_capacity(64);

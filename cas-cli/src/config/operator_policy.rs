@@ -543,6 +543,12 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     "qa.evidence_gate",
     "qa.independent_pass",
     "release.claude_account_allowlist",
+    // cas-ae37c: both the destination and the hook-event switches can send
+    // notification text to an external webhook.
+    "notifications.webhook_url",
+    "notifications.on_permission_prompt",
+    "notifications.on_idle_prompt",
+    "notifications.on_auth_success",
     // cas-d58d: the operator's privacy rule for same-repo peers; `team`
     // admits other users' supervisors again.
     "peers.same_repo_scope",

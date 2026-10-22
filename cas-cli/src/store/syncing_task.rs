@@ -109,6 +109,9 @@ pub(crate) enum TaskSyncReconcileOutcome {
     /// A live mutation owned an entity, or the database stayed write-busy:
     /// the remaining intents stay durable for a later pass.
     Deferred,
+    /// One or more entities have ambiguous durable intents. They remain
+    /// available to the authenticated recovery command, but do not fail opens.
+    Blocked,
 }
 
 /// A task store wrapper that queues changes for cloud sync
@@ -254,6 +257,7 @@ impl SyncingTaskStore {
                 .or_default()
                 .push(intent);
         }
+        let mut blocked_count = 0;
         for (entity_id, mut intents) in by_entity {
             match self.inner.get(&entity_id) {
                 Ok(_) => {}
@@ -274,16 +278,32 @@ impl SyncingTaskStore {
                     TaskSyncFulfillResult::Deferred => {
                         return Ok(TaskSyncReconcileOutcome::Deferred);
                     }
+                    TaskSyncFulfillResult::Blocked {
+                        diagnostic,
+                        first_report,
+                    } => {
+                        blocked_count += 1;
+                        if first_report {
+                            tracing::warn!(%entity_id, %diagnostic, "task sync recovery is blocked; durable intent retained for supervisor resolution");
+                        }
+                        // Preserve this entity's whole intent chain until a
+                        // supervisor resolves the ambiguous revision evidence.
+                        break;
+                    }
                 }
             }
         }
-        Ok(TaskSyncReconcileOutcome::Clean)
+        if blocked_count == 0 {
+            Ok(TaskSyncReconcileOutcome::Clean)
+        } else {
+            Ok(TaskSyncReconcileOutcome::Blocked)
+        }
     }
 
     /// The task-store open path's reconcile: once per process and `.cas`
     /// directory, then again only when the schedule is due
-    /// ([`RECONCILE_PERIOD`] after a clean pass, [`RECONCILE_RETRY`] after a
-    /// deferred or failed one). Between passes an open does no reconcile
+    /// ([`RECONCILE_PERIOD`] after a clean or blocked pass, [`RECONCILE_RETRY`]
+    /// after a deferred or failed one). Between passes an open does no reconcile
     /// work; it re-reports the last pass's failure, if any (cas-afe1).
     pub(crate) fn reconcile_if_due(&self) -> Result<()> {
         let cas_dir = self.queue.cas_dir().to_path_buf();
@@ -434,7 +454,9 @@ impl SyncingTaskStore {
 
 fn record_reconcile(cas_dir: PathBuf, result: &Result<TaskSyncReconcileOutcome>) {
     let (delay, failure) = match result {
-        Ok(TaskSyncReconcileOutcome::Clean) => (RECONCILE_PERIOD, None),
+        Ok(TaskSyncReconcileOutcome::Clean | TaskSyncReconcileOutcome::Blocked) => {
+            (RECONCILE_PERIOD, None)
+        }
         Ok(TaskSyncReconcileOutcome::Deferred) => (RECONCILE_RETRY, None),
         Err(error) => {
             tracing::warn!(%error, "task sync reconcile failed; pending intents retained for retry");
@@ -1579,8 +1601,14 @@ mod tests {
     }
 
     #[test]
-    fn unbound_advanced_intent_is_retained_without_queue_output() {
-        let (_temp, store) = create_test_store();
+    fn unclassified_intent_does_not_abort_unrelated_task_recovery() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let inner = SqliteTaskStore::open(&cas_dir).unwrap();
+        inner.init().unwrap();
+        let queue = SyncQueue::open(&cas_dir).unwrap();
+        queue.init().unwrap();
+        let store = SyncingTaskStore::new(Arc::new(inner), Arc::new(queue));
         let mut task = Task::new("task-ambiguous-intent".to_string(), "before".to_string());
         store.inner.add(&task).unwrap();
         let previous = store.inner.get(&task.id).unwrap();
@@ -1595,15 +1623,41 @@ mod tests {
         task.title = "advanced outside the receipt protocol".to_string();
         store.inner.update(&task).unwrap();
 
-        let error = store.reconcile_pending_task_sync().unwrap_err();
+        // A separate, receipt-bound task mutation is the ordinary progress
+        // update that must still recover while this entity remains ambiguous.
+        let mut unrelated = Task::new("task-unrelated-recovery".to_string(), "before".to_string());
+        store.add(&unrelated).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(&cas_dir, "");
+        unrelated.title = "committed while sync was degraded".to_string();
+        assert_degraded(store.update(&unrelated).unwrap_err(), "update", &unrelated.id);
+        remove_task_enqueue_failure(&cas_dir);
 
-        assert!(error.to_string().contains("unclassified"), "{error}");
-        assert!(error.to_string().contains("evidence retained"), "{error}");
-        assert!(store.queue.pending(10, 5).unwrap().is_empty());
+        let cloud = CloudConfig {
+            token: Some("offline-fixture-token".into()),
+            endpoint: "http://127.0.0.1:9".into(),
+            ..Default::default()
+        };
+        cloud.save_to_cas_dir(&cas_dir).unwrap();
+        reconcile_schedule().remove(&cas_dir);
+        let reopened = crate::store::open_task_store(&cas_dir);
+        assert!(
+            reopened.is_ok(),
+            "an ambiguous intent must not make unrelated task-store opens fail"
+        );
+        let reopened = reopened.unwrap();
+        assert_eq!(reopened.get(&unrelated.id).unwrap().title, unrelated.title);
         assert_eq!(
             store.queue.pending_task_sync_intents().unwrap(),
-            vec![intent]
+            vec![intent],
+            "the unresolved intent remains durable for supported operator recovery"
         );
+        let records = store.queue.task_sync_recovery_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].blocked_reason.contains("unclassified"));
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1, "the unrelated intent should be recovered");
+        assert_eq!(pending[0].entity_id, unrelated.id);
     }
 
     #[test]

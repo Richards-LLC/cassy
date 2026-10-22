@@ -1,11 +1,10 @@
 //! Public coordination-surface tests for the director worker-hold gate.
 //!
-//! Kept in a dedicated test process because session metadata is rooted under
-//! `HOME`; changing that process-global variable inside the broad factory MCP
-//! test binary would race unrelated Codex-availability tests.
+//! Session metadata is rooted under HOME. Use the grouped harness's canonical
+//! environment guard so these fixtures cannot race messaging/status fixtures.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use crate::test_env_guard::TestEnvGuard;
 
 use cas::mcp::{CasCore, CasService};
 use cas::store::{ReminderTriggerType, init_cas_dir, open_agent_store, open_reminder_store};
@@ -43,42 +42,6 @@ impl TestEnv {
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).unwrap();
         agent.id
-    }
-}
-
-fn env_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-}
-
-struct EnvGuard {
-    saved: Vec<(String, Option<String>)>,
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl EnvGuard {
-    fn set(vars: &[(&str, &str)]) -> Self {
-        let lock = env_lock();
-        let mut saved = Vec::new();
-        for (key, value) in vars {
-            let key = (*key).to_string();
-            saved.push((key.clone(), std::env::var(&key).ok()));
-            unsafe { std::env::set_var(key, value) };
-        }
-        Self { saved, _lock: lock }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.saved.drain(..) {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
     }
 }
 
@@ -124,14 +87,11 @@ fn write_metadata(env: &TestEnv, session: &str, workers: &[String]) -> PathBuf {
 
 #[tokio::test]
 async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold";
     let worker = "lively-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "supervisor"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "supervisor");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     let worker_id = env.register_worker(worker, session);
     let reminders = open_reminder_store(&env.cas_root).unwrap();
@@ -219,14 +179,11 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
 
 #[tokio::test]
 async fn worker_cannot_change_hold_state_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold-policy";
     let worker = "lively-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "worker"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "worker");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     env.register_worker(worker, session);
     let path = write_metadata(&env, session, &[worker.to_string()]);
@@ -244,14 +201,11 @@ async fn worker_cannot_change_hold_state_cas_60dd() {
 
 #[tokio::test]
 async fn supervisor_cannot_hold_foreign_session_worker_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold-scope";
     let worker = "foreign-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "supervisor"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "supervisor");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     env.register_worker(worker, "another-factory-session");
     let path = write_metadata(&env, session, &[]);

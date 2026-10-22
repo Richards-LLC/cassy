@@ -75,6 +75,9 @@ use assigned work; `ready` and `available` are backlog
 
 ## Blockers and review waits
 
+For build-admission capacity refusals, follow
+[Capacity waits](references/discipline.md#capacity-waits) before the blocker sequence below.
+
 When required supervisor review or approval blocks work (e.g. publication),
 enter awaiting supervisor review:
 

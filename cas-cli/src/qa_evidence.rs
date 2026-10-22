@@ -2346,23 +2346,28 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 /// from `head` to `target` that brings `head` in through a merged parent
 /// (`M^1..M`), skipping the lane's own target syncs. A merge on the target's first-parent
 /// chain is the integration receipt itself and contributes `head^1..head`;
-/// the same holds for non-merge squash/FF receipts (cas-a173). Later target
-/// merges cannot replace their diff. `None` when Git cannot resolve a boundary.
-pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
+/// non-merge squash/FF receipts use the recorded delivery base when known,
+/// otherwise their own parent (cas-420af). Later target merges cannot replace
+/// their diff. `None` when Git cannot resolve a boundary.
+pub fn delivery_range(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    recorded_base: Option<&str>,
+) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
         // GH #1181 / cas-a173: any receipt on the target's first-parent
         // chain is already integrated, whether merged or squash/FF. A
         // worker-tip sync merge is not on that chain: retain the ancestry
         // search for its later integration merge to exclude incoming code.
-        let full_head = git(repo, &["rev-parse", "--verify", head])?;
-        if git(repo, &["rev-list", "--first-parent", target])?
-            .lines()
-            .any(|commit| commit == full_head)
-        {
-            // A root commit has no parent-relative delivery to measure.
-            git(repo, &["rev-parse", "--verify", &format!("{head}^1")])?;
-            return Some((format!("{head}^1"), head.to_string()));
+        if receipt_on_first_parent(repo, head, target)? {
+            let base = if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_none() {
+                receipt_delivery_base(repo, head, recorded_base)?
+            } else {
+                format!("{head}^1")
+            };
+            return Some((base, head.to_string()));
         }
         let merges = git(
             repo,
@@ -2388,6 +2393,32 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
     } else {
         Some((git(repo, &["merge-base", target, head])?, head.to_string()))
     }
+}
+
+/// Bound the first-parent search to the receipt's parent, rather than walking
+/// the target to its root. Unlike --boundary, this cannot mistake a merged
+/// second parent for a first-parent receipt. Roots have no delivery boundary.
+pub(crate) fn receipt_on_first_parent(repo: &Path, head: &str, target: &str) -> Option<bool> {
+    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    let commits = git(repo, &["rev-list", "--first-parent", &format!("{head}^1..{target}")])?;
+    Some(commits.lines().any(|commit| commit == full_head))
+}
+
+/// A recorded base must resolve and precede the receipt. An unreadable supplied
+/// boundary cannot silently narrow a multi-commit delivery to its last commit.
+pub(crate) fn receipt_delivery_base(
+    repo: &Path,
+    head: &str,
+    recorded_base: Option<&str>,
+) -> Option<String> {
+    let base = recorded_base.map(str::to_owned).unwrap_or_else(|| format!("{head}^1"));
+    let full_base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?;
+    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    if full_base == full_head {
+        return None;
+    }
+    git(repo, &["merge-base", "--is-ancestor", &full_base, &full_head])?;
+    Some(base)
 }
 
 /// Whether `head` reaches `merge` through one of its non-first parents.

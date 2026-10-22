@@ -143,6 +143,7 @@ fn close_gate(repo: &Path, task: &Task) -> MergeStateGateOutcome {
     run_factory_branch_merge_gate(
         task,
         &TaskCloseRequest {
+            no_delivery: None,
             id: task.id.clone(),
             reason: None,
             supervisor_override: None,

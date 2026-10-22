@@ -9,8 +9,10 @@ proof.
 Factory startup checks filesystem capacity before spawning workers. At the
 configured high watermark it blocks new worker builds and tells the operator to
 start supervisor-only (`--workers 0`) for inspection. The same status is exposed
-by `factory action=gc_report` as both a readable list and a stable
-`TARGET_CACHE_STATUS_JSON=...` record.
+by `cas factory gc report` (`factory action=gc_report`) as a bounded readable
+summary. Use `cas factory gc report --full` (MCP `full=true`) for the complete
+inventory and stable `TARGET_CACHE_STATUS_JSON=...` record, or `--json` (MCP
+`json=true`) for one document with typed `machine_status` records.
 
 The defaults are:
 
@@ -22,10 +24,14 @@ target_cache_min_idle_secs = 7200
 target_cache_retention_count = 1
 ```
 
-Use `factory action=gc_cleanup force=true dry_run=true` to preview. The
-preview names every exact cache path, logical bytes, classification, reason,
-and selected reclaim total. Cargo cache deletion requires both `force=true`
-and the explicit `dry_run=false`; omitting `dry_run` remains preview-only.
+Review cleanup tiers with `cas factory gc cleanup --help` before running
+cleanup. Use `factory action=gc_cleanup force=true dry_run=true` to preview
+Cargo cache deletion. The cache preview names every exact cache path, logical
+bytes, classification, reason, and selected reclaim total. Cargo cache deletion
+requires both `force=true` and the explicit `dry_run=false`; omitting `dry_run`
+keeps this cache tier in preview. Baseline stale metadata cleanup still runs,
+including dead process-group records, stale agents and old skill markers;
+`dry_run=true` does not make the whole operation read-only.
 
 Cleanup is oldest-first and stops selecting caches once their projected bytes
 would reach the low watermark. With `factory.scratch_root` set, it probes the

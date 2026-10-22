@@ -235,6 +235,11 @@ pub(crate) fn cleanup_agent_leases_for_end(
         return Some(Vec::new());
     }
 
+    if let Err(error) = crate::supervisor_continuity::record_end(cas_root, &agent.id, end_reason) {
+        tracing::error!(agent_id = %agent.id, %error, "SessionEnd handoff failed; preserving identity");
+        return None;
+    }
+
     if let Err(error) = crate::supervisor_notices::orphan_epics(cas_root, &agent) {
         tracing::error!(agent_id = %agent.id, %error, "SessionEnd epic orphan notice failed; preserving identity for recovery");
         return None;
@@ -881,12 +886,14 @@ mod supervisor_handoff_tests {
 
     #[test]
     fn ct2_p3_session_end_hands_off_epics() {
+        let mut env = crate::test_support::TestEnvGuard::new();
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = open_agent_store(&root).unwrap();
         let tasks = open_task_store(&root).unwrap();
         let mut ending = Agent::new("ending-id".into(), "ending".into());
         ending.role = AgentRole::Supervisor;
+        ending.machine_id = Some(Agent::get_or_generate_machine_id());
         ending.factory_session = Some("old-session".into());
         agents.register(&ending).unwrap();
         let mut peer = Agent::new("peer-id".into(), "peer".into());
@@ -902,15 +909,46 @@ mod supervisor_handoff_tests {
             let mut task = Task::new(id.into(), id.into());
             task.task_type = TaskType::Epic;
             task.epic_verification_owner = Some(owner.into());
+            task.notes = "long prior task history ".repeat(300);
             if terminal {
                 task.status = TaskStatus::Closed;
             }
             tasks.add(&task).unwrap();
         }
+        let mut leased = Task::new("cas-leased".into(), "Supervisor lease without assignee".into());
+        leased.status = TaskStatus::InProgress;
+        tasks.add(&leased).unwrap();
+        agents.try_claim(&leased.id, &ending.id, 600, None).unwrap();
+        let mut worker = Agent::new("live-worker-id".into(), "live-worker".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = ending.factory_session.clone();
+        agents.register(&worker).unwrap();
+        let mut live_task = Task::new("cas-live".into(), "Live lease".into());
+        live_task.status = TaskStatus::InProgress;
+        live_task.assignee = Some(worker.name.clone());
+        tasks.add(&live_task).unwrap();
+        agents.try_claim(&live_task.id, &worker.id, 600, None).unwrap();
+        let mut parked = Task::new("cas-parked".into(), "Pending delivery".into());
+        parked.assignee = Some(worker.name.clone());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.parked_branch = Some("factory/live-worker-cas-parked".into());
+        parked.external_ref = Some("https://example.test/pull/42".into());
+        tasks.add(&parked).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
+        let ask = queue.enqueue_with_session("ending", "operator", "Previously delivered open ask: select branch", "old-session").unwrap();
+        queue.mark_processed(ask).unwrap();
+        crate::store::open_reminder_store(&root).unwrap().create(
+            &ending.id, None, "Unanswered operator ask deadline", cas_store::ReminderTriggerType::Time,
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)), None,
+            Some(&serde_json::json!({"operator_ask": ask})), 0, Some("old-session"),
+        ).unwrap();
+
         // Exercise the real SessionEnd handler, including unconditional cleanup.
         handle_session_end(
             &HookInput {
                 session_id: ending.id.clone(),
+                reason: Some("compaction".into()),
                 ..Default::default()
             },
             Some(&root),
@@ -944,12 +982,12 @@ mod supervisor_handoff_tests {
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         crate::supervisor_notices::adopt_operator_notices(&root, "old-session").unwrap();
         assert_eq!(
-            queue.peek_all(100).unwrap().len(),
+            queue.peek_all(100).unwrap().iter().filter(|r| r.source.starts_with("supervisor-notice:")).count(),
             2,
             "a surviving daemon can adopt its own session's orphan notice"
         );
         crate::supervisor_notices::adopt_operator_notices(&root, "peer-session").unwrap();
-        let rows = queue.peek_all(100).unwrap();
+        let rows: Vec<_> = queue.peek_all(100).unwrap().into_iter().filter(|r| r.source.starts_with("supervisor-notice:")).collect();
         assert_eq!(rows.len(), 2, "one grouped notice per peer and operator");
         assert!(
             rows.iter()
@@ -970,9 +1008,39 @@ mod supervisor_handoff_tests {
         )
         .unwrap();
         assert_eq!(
-            queue.peek_all(100).unwrap().len(),
+            queue.peek_all(100).unwrap().iter().filter(|r| r.source.starts_with("supervisor-notice:")).count(),
             2,
             "repeated SessionEnd does not repeat the event"
         );
+        // Reopen through the real startup handler after the predecessor was deleted.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "successor");
+        let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
+        let output = handle_session_start(&start, Some(&root)).unwrap();
+        let value = serde_json::to_value(&output).unwrap();
+        let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("\"id\":\"cas-leased\""), "supervisor lease ownership must survive even without an assignee: {context}");
+        assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
+        let handoff_start = context.find("Supervisor handoff").unwrap();
+        let handoff_end = context.find("verify current liveness before recovery.").unwrap();
+        assert!(handoff_end - handoff_start < 2800, "long history must stay in the full receipt, inside startup's context budget");
+        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "Previously delivered open ask: select branch", "compaction"] {
+            assert!(context.contains(expected), "startup lost {expected}: {context}");
+        }
+        assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
+        assert_eq!(agents.get_lease(&live_task.id).unwrap().unwrap().agent_id, worker.id);
+        assert_eq!(tasks.get(&live_task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(crate::supervisor_continuity::status_section(&root).contains("compaction"));
+        let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
+        assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+        handle_session_end(&HookInput { session_id: "successor-id".into(), reason: Some("operator".into()), ..Default::default() }, Some(&root)).unwrap();
+        env.set("CAS_AGENT_NAME", "third-supervisor");
+        let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
+        let third = serde_json::to_value(third).unwrap();
+        let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("\"id\":\"cas-owned-id\""), "an unadopted inherited epic must survive another succession: {context}");
+        assert!(context.contains("\"name\":\"live-worker\""), "the inherited live worker must remain visible: {context}");
+
+
     }
 }

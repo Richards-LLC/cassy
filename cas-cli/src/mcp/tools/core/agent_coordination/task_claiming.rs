@@ -219,6 +219,7 @@ impl CasCore {
             crate::cloud::peer_claims::ClaimKind::Task
         };
         let mut cloud_claimed = false;
+        let mut peer_claim_fence = None;
         let mut cloud_local_holder: Option<String> = None;
         let peer_note = match peer_claims.clone() {
             Some(claims) => {
@@ -226,18 +227,20 @@ impl CasCore {
                 let kind = claim_kind;
                 let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                let answer = {
+                let (answer, fence) = {
+                    let cas_root = self.cas_root.clone();
                     let (id, agent, name) =
                         (req.task_id.clone(), agent_id.clone(), agent_name.clone());
                     peer_budget
                         .run(move || {
-                            claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                            claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                                 local.contains(holder)
                             })
                         })
                         .await
-                        .unwrap_or_else(Acquire::Unavailable)
+                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
                 };
+                peer_claim_fence = fence;
                 match answer {
                     Acquire::Claimed => {
                         cloud_claimed = true;
@@ -284,26 +287,21 @@ impl CasCore {
             None => Some(peer_note),
         };
 
-        let result = agent_store
-            .try_claim(
-                &req.task_id,
-                &agent_id,
-                req.duration_secs,
-                req.reason.as_deref(),
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to claim task: {e}")),
-                data: None,
-            })?;
+        let result = agent_store.try_claim(
+            &req.task_id,
+            &agent_id,
+            req.duration_secs,
+            req.reason.as_deref(),
+        );
 
         // cas-0078: the cloud claim follows the local lease. The winner takes
         // a claim another local agent held; a refused claimant leaves behind
-        // no claim of its own, and never touches anyone else's.
+        // no claim of its own, including when the local write fails, and
+        // never touches anyone else's.
         if let Some(claims) = peer_claims {
             let won = match &result {
-                ClaimResult::Success(_) => true,
-                ClaimResult::AlreadyClaimed { held_by, .. } => held_by == &agent_id,
+                Ok(ClaimResult::Success(_)) => true,
+                Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by == &agent_id,
                 _ => false,
             };
             let (id, agent, name) = (req.task_id.clone(), agent_id.clone(), agent_name.clone());
@@ -323,6 +321,14 @@ impl CasCore {
             }
         }
 
+        // Keep an old release excluded through local publication and any
+        // Cloud handoff or rollback decided by that local arbitration.
+        drop(peer_claim_fence);
+        let result = result.map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to claim task: {e}")),
+            data: None,
+        })?;
         match result {
             ClaimResult::Success(lease) => {
                 // Update task to in_progress if it's open
@@ -506,7 +512,13 @@ impl CasCore {
         match release_result {
             Ok(()) => {
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
-                crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+                let (root, id) = (self.cas_root.clone(), req.task_id.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::cloud::peer_claims::release_task_claim(&root, &id);
+                })
+                .await;
+                // cas-c55f: and the file leases taken for the task.
+                crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -743,7 +755,13 @@ impl CasCore {
             .release_lease_for_task(&req.task_id, "Task reset")
             .unwrap_or(false);
         // cas-5f28: and its Cassy Cloud claim, so peers may start it.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        let (root, id) = (self.cas_root.clone(), req.task_id.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::cloud::peer_claims::release_task_claim(&root, &id);
+        })
+        .await;
+        // cas-c55f: and the file leases taken for it.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         let prior_status = task.status;
         let prior_assignee = task.assignee.clone();
@@ -974,6 +992,10 @@ impl CasCore {
             data: None,
         })?;
 
+        // A supervisor issues the transfer but is not its previous holder.
+        // Capture the source before the assignee is overwritten below.
+        let previous_holder = lease.as_ref().map(|lease| lease.agent_id.clone())
+            .or_else(|| task.assignee.clone()).unwrap_or_else(|| "<unassigned>".into());
         // prior_lease_holder is Some(<agent_id>) when we force-released a live lease.
         // Used below for the audit note.
         let prior_lease_holder: Option<String> = match &lease {
@@ -1186,14 +1208,20 @@ impl CasCore {
                 })?;
         }
         // cas-5f28: the receiver's start takes the cloud claim afresh.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        let (root, id) = (self.cas_root.clone(), req.task_id.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::cloud::peer_claims::release_task_claim(&root, &id);
+        })
+        .await;
+        // cas-978d: and the previous holder's file leases end with its work.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         // Try to claim for target agent (best effort - they may need to claim themselves)
         let claim_result = agent_store.try_claim(
             &req.task_id,
             &target_agent.id,
             DEFAULT_LEASE_DURATION_SECS,
-            Some(&format!("Transferred from {agent_id}")),
+            Some(&format!("Transferred from {previous_holder}")),
         );
 
         let claim_msg = match claim_result {
@@ -1223,7 +1251,7 @@ impl CasCore {
         Ok(Self::success(format!(
             "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
-            agent_id,
+            previous_holder,
             target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),

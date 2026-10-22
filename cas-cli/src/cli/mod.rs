@@ -134,12 +134,21 @@ const CASSY_WORDMARK: &str = r#"
 const CASSY_PLAIN_WORDMARK: &str = "Cassy";
 
 /// Select the wordmark that is safe for the destination before clap renders
-/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+/// help. Piped output, `NO_COLOR` and non-UTF-8 locales get a compact text fallback.
 pub fn help_wordmark() -> &'static str {
-    match crate::ui::components::OutputMode::detect() {
-        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
-        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+    help_wordmark_for_mode(crate::ui::components::OutputMode::detect())
+}
+
+fn help_wordmark_for_mode(mode: crate::ui::components::OutputMode) -> &'static str {
+    if supports_styled_glyphs(mode) {
+        CASSY_WORDMARK
+    } else {
+        CASSY_PLAIN_WORDMARK
     }
+}
+
+fn supports_styled_glyphs(mode: crate::ui::components::OutputMode) -> bool {
+    mode == crate::ui::components::OutputMode::Styled && crate::ui::components::locale_is_utf8()
 }
 
 /// Parse with a destination-aware top-level help banner.
@@ -197,15 +206,15 @@ fn hub_tracing_root(
 /// Cassy - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
-#[command(about = "Cassy — a multi-agent coding factory with persistent memory and task coordination")]
+#[command(about = "Cassy - a multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
-#[command(before_help = CASSY_WORDMARK)]
+#[command(before_help = CASSY_PLAIN_WORDMARK)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Show full JSON content, service paths, or dry-run service definitions
+    /// Show complete JSON, service paths/definitions, or GC report details
     #[arg(long, global = true)]
     pub full: bool,
 
@@ -219,7 +228,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Interactive project picker — scan ~/projects/, select, launch or attach
+    /// Interactive project picker: scan ~/projects/, select, launch or attach
     Open(OpenArgs),
 
     /// Initialize Cassy in current directory
@@ -270,7 +279,7 @@ pub enum Commands {
 
     /// Set the default supervisor provider without launching (persist only)
     ///
-    /// `cas default codex` — persists `[llm.supervisor] harness = "codex"` to
+    /// `cas default codex` persists `[llm.supervisor] harness = "codex"` to
     /// `~/.cas/config.toml` and exits.  `cas default claude` is symmetric.
     /// `cas default grok` is symmetric. To launch immediately AND persist,
     /// use `cas factory --supervisor-cli <provider> --default`.
@@ -573,6 +582,37 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .downcast_ref::<crate::error::CasError>()
         .map(ToString::to_string)
         .unwrap_or_else(|| format!("{error:#}"))
+}
+
+/// Render the diagnostic for a person while leaving [`json_error_message`]
+/// as the stable machine-readable representation.
+pub fn human_error_message(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    let Some(detail) = message
+        .strip_prefix("refused: ")
+        .filter(|_| message.contains("operator-only because"))
+    else {
+        return message;
+    };
+
+    let detail = if let Some((reason, remedy)) = detail.split_once("; run `") {
+        if let Some((command, context)) = remedy.split_once('`') {
+            let context = context
+                .strip_prefix(" yourself from your own terminal.")
+                .unwrap_or(context)
+                .trim_start();
+            format!(
+                "  {}\n  Run this command yourself from your own terminal:\n  {command}\n  {}",
+                crate::cloud::presence::wrap_line(&format!("{reason}.")).trim_end(),
+                crate::cloud::presence::wrap_line(context).trim_end()
+            )
+        } else {
+            format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+        }
+    } else {
+        format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+    };
+    format!("Operator-only config change refused.\n{detail}")
 }
 
 /// Run the CLI with the given arguments
@@ -957,7 +997,26 @@ const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::fro
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli, hub_tracing_root, run};
+    use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
+
+    #[test]
+    fn operator_config_refusal_has_a_wrapped_human_form() {
+        let error = anyhow::anyhow!(
+            "refused: CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+        );
+        let rendered = super::human_error_message(&error);
+
+        assert_eq!(
+            rendered,
+            "Operator-only config change refused.\n  CLAUDECODE is set, so this runs inside an agent session.\n  verification.force_bypass_allowed is operator-only because it relaxes\n  a Cassy guard.\n  Run this command yourself from your own terminal:\n  cas config set verification.force_bypass_allowed <value>\n  If this is your own terminal, it inherited CLAUDECODE from an agent\n  pane: open a fresh terminal and run it there."
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
+        assert_eq!(
+            super::json_error_message(&error),
+            error.to_string(),
+            "machine output keeps the original one-line refusal"
+        );
+    }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
@@ -1027,6 +1086,10 @@ mod tests {
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+        // cas-a0f8: authored help stays ASCII when the destination uses the
+        // plain banner. The actual C-locale CLI also exercises that selection.
+        let help = Cli::command().before_help("Cassy").render_long_help().to_string();
+        assert!(help.is_ascii(), "plain global help must be ASCII: {help}");
     }
 
     #[test]
@@ -1067,12 +1130,33 @@ mod tests {
 
     #[test]
     fn cassy_wordmark_stays_compact_for_80_column_terminals() {
+        use crate::ui::components::OutputMode;
+
         let rows: Vec<_> = CASSY_WORDMARK
             .lines()
             .filter(|row| !row.is_empty())
             .collect();
         assert_eq!(rows.len(), 6, "the splash must remain at most eight rows");
         assert!(rows.iter().all(|row| row.chars().count() <= 80));
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (locale, expected_styled) in [
+            ("C", "Cassy"),
+            ("en_US.ISO-8859-1", "Cassy"),
+            ("C.UTF-8", CASSY_WORDMARK),
+        ] {
+            env.set("LC_ALL", locale);
+            let wordmark = help_wordmark_for_mode(OutputMode::Styled);
+            assert_eq!(wordmark, expected_styled, "styled root help in {locale}");
+            assert_eq!(help_wordmark_for_mode(OutputMode::Plain), "Cassy");
+            let help = Cli::command().before_help(wordmark).render_long_help().to_string();
+            assert!(help.contains("Usage:"), "root help retains command entry");
+            if expected_styled.is_ascii() {
+                assert!(help.is_ascii(), "root help must be ASCII in {locale}: {help}");
+                let default_help = Cli::command().render_long_help().to_string();
+                assert!(default_help.is_ascii(), "raw clap entry must not bypass the locale fallback: {default_help}");
+            }
+        }
     }
 
     #[test]

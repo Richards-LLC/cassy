@@ -111,7 +111,7 @@ pub use trace_archive::{
 };
 
 // Agent store for multi-agent coordination
-pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
+pub use agent_store::{AGENT_SESSION_END_SCHEMA,AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
 
 // Event store for activity tracking (sidecar)
 pub use event_store::{
@@ -289,6 +289,7 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
+    QUIET_MESSAGE_MARKER,
     PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, missing_prompt_queue_columns,
     repair_legacy_prompt_queue_schema,
     AdmissionOutcome, OperatorCommandAdmission,

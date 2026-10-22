@@ -51,13 +51,25 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     base="$remote_sha"
     [[ "$base" != "$zero" ]] || base="${ZERO_BASE_REF:-origin/main}"
     printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "${base:0:12}" >&2
-    output="$(bash scripts/release-gate.sh --fast-rows --base "$base" </dev/null 2>&1)"
+    # The gate's guardian removes its scratch tree on exit. Keep each push
+    # attempt's complete diagnostics outside that tree, even if the gate exits
+    # before it can write a receipt. A later attempt must not overwrite it.
+    if ! mkdir -p "$receipts" || ! attempt_logs="$(mktemp -d "$receipts/$local_sha.logs.XXXXXX")"; then
+        printf 'pre-push: refused: cannot create durable fast-row logs for %s\n' "${local_sha:0:12}" >&2
+        status=1
+        continue
+    fi
+    CAS_RELEASE_GATE_LOG_DIR="$attempt_logs" bash scripts/release-gate.sh --fast-rows --base "$base" \
+        </dev/null >"$attempt_logs/gate.log" 2>&1
     if ! head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then
-        printf '%s\n' "$output" | grep -E '^(FAIL |FIX |RELEASE GATE FAILED)' >&2 \
-            || printf '%s\n' "$output" | tail -n 20 >&2
+        printf 'pre-push: fast-row logs: %s\n' "$attempt_logs" >&2
+        grep -E '^(FAIL |FIX |RELEASE GATE FAILED)' "$attempt_logs/gate.log" >&2 \
+            || tail -n 20 "$attempt_logs/gate.log" >&2
         printf 'pre-push: refused: fast rows failed on %s. Apply each FIX, commit, push again. Override (logged): CAS_SKIP_FAST_ROWS=<reason> git push\n' \
             "${local_sha:0:12}" >&2
         status=1
+    else
+        rm -rf -- "$attempt_logs"
     fi
 done
 exit "$status"

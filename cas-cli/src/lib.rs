@@ -48,6 +48,7 @@ pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
 pub(crate) mod factory_build_memory;
 pub(crate) mod factory_worker_check;
+pub(crate) mod factory_capacity_wait;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_permission_relay;
@@ -56,8 +57,11 @@ pub mod factory_daemon_health;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod supervisor_continuity;
+pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod supervisor_message_wakes;
 pub(crate) mod factory_scratch;
+pub mod factory_review_scratch;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;
@@ -134,6 +138,55 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
+    /// Declare after `TestEnvGuard` and keep both alive through rendering, so
+    /// color-policy changes are serialized and restored before the env lock.
+    #[must_use]
+    pub(crate) struct StyledColorGuard(bool);
+
+    impl StyledColorGuard {
+        pub(crate) fn new(_env: &TestEnvGuard) -> Self {
+            use crossterm::style::{Colored, force_color_output};
+            let enabled = !Colored::ansi_color_disabled_memoized();
+            force_color_output(true);
+            Self(enabled)
+        }
+    }
+
+    impl Drop for StyledColorGuard {
+        fn drop(&mut self) {
+            crossterm::style::force_color_output(self.0);
+        }
+    }
+
+    #[test]
+    fn styled_color_guard_restores_cached_policy() {
+        use crossterm::style::{Color, SetForegroundColor, force_color_output};
+        let env = TestEnvGuard::new();
+        let _restore = StyledColorGuard::new(&env);
+        for enabled in [false, true] {
+            force_color_output(enabled);
+            for unwind in [false, true] {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _colors = StyledColorGuard::new(&env);
+                    assert_eq!(
+                        SetForegroundColor(Color::Green).to_string(),
+                        "\x1b[38;5;10m"
+                    );
+                    if unwind {
+                        panic!("exercise styled-color guard unwinding");
+                    }
+                }));
+                assert_eq!(result.is_err(), unwind);
+                assert_eq!(
+                    SetForegroundColor(Color::Green).to_string(),
+                    if enabled { "\x1b[38;5;10m" } else { "\x1b[m" },
+                    "cached policy not restored (enabled={enabled}, unwind={unwind})"
+                );
+            }
+        }
+    }
+
     /// Cargo's in-process test harness runs otherwise isolated Tantivy
     /// fixtures concurrently. Keep the tests that intentionally exercise
     /// short-lived disk writers out of each other's lock lifecycle; nextest
@@ -197,19 +250,105 @@ pub(crate) mod test_support {
 
     #[test]
     fn temp_home_uses_canonical_path_namespace() {
+        let machine = tempfile::tempdir().unwrap();
+        let xdg_keys = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"];
+        let _ambient =
+            xdg_keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, machine.path()));
+        let poisoned_config = machine.path().join("code-mode-mcp/config.toml");
+        std::fs::create_dir_all(poisoned_config.parent().unwrap()).unwrap();
+        let poison = "[servers.machine]\ntransport = \"stdio\"\ncommand = \"must-not-run\"\n";
+        std::fs::write(&poisoned_config, poison).unwrap();
+
+        let assert_private_home = |home: &Path| {
+            assert_eq!(home, home.canonicalize().unwrap());
+            assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
+            #[cfg(feature = "mcp-proxy")]
+            {
+                let project = crate::cli::integrate::proxy::proxy_config_path();
+                let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+                assert!(
+                    config.servers.is_empty(),
+                    "machine proxy config leaked into temp HOME"
+                );
+                let private_config = home.join(".config/code-mode-mcp/config.toml");
+                std::fs::create_dir_all(private_config.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &private_config,
+                    "[servers.private]\ntransport = \"stdio\"\ncommand = \"fixture-only\"\n",
+                )
+                .unwrap();
+                let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+                assert_eq!(
+                    config
+                        .servers
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    ["private"]
+                );
+            }
+            for (key, directory) in xdg_keys
+                .into_iter()
+                .zip([".config", ".local/share", ".cache"])
+            {
+                assert_eq!(
+                    std::env::var_os(key).as_deref(),
+                    Some(home.join(directory).as_os_str()),
+                    "{key}"
+                );
+            }
+        };
         let guard = TestEnvGuard::temp_home();
-        assert_eq!(guard.home(), guard.home().canonicalize().unwrap());
-        assert_eq!(
-            std::env::var_os("HOME").as_deref(),
-            Some(guard.home().as_os_str())
-        );
+        assert_private_home(guard.home());
+        drop(guard);
+        TestEnvGuard::run_with_temp_home(assert_private_home);
+        for key in xdg_keys {
+            assert_eq!(
+                std::env::var_os(key).as_deref(),
+                Some(machine.path().as_os_str()),
+                "restore {key}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(poisoned_config).unwrap(), poison);
     }
 
     #[test]
     fn test_env_guard_scrubs_ambient_cas_and_factory_environment() {
         let ambient_build_guard =
             crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_BUILD_GUARD", "inherit");
+        let provider_keys = [
+            "VIKTOR_API_KEY",
+            "NEON_API_KEY",
+            "VERCEL_TOKEN",
+            "OPENAI_API_KEY",
+            "VOYAGE_API_KEY",
+            "EXA_API_KEY",
+            "GITHUB_TOKEN",
+            "VIOLET_SLACK_TOKEN_CASSY_PROXY",
+        ];
+        let _ambient_credentials = provider_keys
+            .map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "fixture-credential"));
+        {
+            let mut guard = TestEnvGuard::new();
+            for key in provider_keys {
+                assert!(
+                    std::env::var_os(key).is_none(),
+                    "ambient provider credential {key} leaked"
+                );
+            }
+            guard.set("VIKTOR_API_KEY", "explicit-fixture");
+            assert_eq!(
+                std::env::var("VIKTOR_API_KEY").as_deref(),
+                Ok("explicit-fixture")
+            );
+        }
         let guard = TestEnvGuard::temp_home();
+        for key in provider_keys {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "ambient provider credential {key} leaked"
+            );
+        }
         assert_eq!(
             std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
             Ok("off"),
@@ -261,6 +400,13 @@ pub(crate) mod test_support {
             "the default gh fixture must fail before any process or network call"
         );
         drop(guard);
+        for key in provider_keys {
+            assert_eq!(
+                std::env::var(key).as_deref(),
+                Ok("fixture-credential"),
+                "restore {key}"
+            );
+        }
         assert_eq!(
             std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
             Ok("inherit"),

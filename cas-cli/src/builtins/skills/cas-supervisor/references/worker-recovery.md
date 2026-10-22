@@ -21,6 +21,19 @@ abandons only pending prompts older than one day and preserves the rows for fore
 Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
 destructive whole-queue clear and should not be used for targeted recovery.
 
+## Disposable verification and walk checkouts
+
+Create review scratch with `cas factory scratch-checkout --cas-root <root>
+--task-id <task-id> --head <full SHA>`; add `--dispatch-id` for a dispatch.
+Use the printed path instead of creating an ad-hoc clone on the scratch drive.
+Run named Rust tests with `cas factory verifier-test` using the same owner
+arguments so Zig, the private target and capped admission stay consistent.
+Publish durable evidence to task artifacts. `gc_report` shows managed review
+state and large unmanaged leftovers; `gc_cleanup force=true dry_run=false`
+removes two-hour-old idle checkouts after task termination or dispatch resolution,
+including their Git worktree registrations. Live leases and process users retain
+the checkout. Unmanaged leftovers remain operator review items.
+
 ## Is the worker actually dead?
 
 Before you shut down a pane that *looks* broken, spend 60 seconds on triage. The supervisor TUI is not ground truth for worker liveness — the most common false positive is a worker mid-way through a long tool call or showing Claude Code's Bun/React-Ink crash screen (process alive, UI unresponsive). Destructive recovery on a live worker rips its worktree out from under itself and turns a recoverable hang into a real crash.

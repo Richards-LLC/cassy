@@ -23,6 +23,7 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     let mut shutdown_delivered = false;
     let mut stale_fallback_suppressed = false;
+    let mut stale_sync_fallbacks = Vec::new();
     for scenario in [
         "merged",
         "positive",
@@ -30,14 +31,22 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         "missing",
         "shutdown",
         "merged_fallback",
+        "superseded_refused",
+        "superseded_unreported",
     ] {
+        let synchronous_fallback =
+            matches!(scenario, "superseded_refused" | "superseded_unreported");
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         // A dropped incident must count as zero rows, not an uninitialized schema.
         let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         fixture
             .app
-            .set_supervisor_cli_for_test(cas_mux::SupervisorCli::Claude);
+            .set_supervisor_cli_for_test(if synchronous_fallback {
+                cas_mux::SupervisorCli::Codex
+            } else {
+                cas_mux::SupervisorCli::Claude
+            });
         let (_, mut prompts, _) = fixture
             .app
             .revalidate_and_prompt_for_delivery(std::slice::from_ref(&fixture.event));
@@ -49,7 +58,10 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 .contains("CI completed successfully for delivery")
         );
         assert!(prompts[0].retract_task.is_some());
-        let verdicts = fixture.app.deliverability_request().read(None, &mut prompts);
+        let verdicts = fixture
+            .app
+            .deliverability_request()
+            .read(None, &mut prompts);
         assert_eq!(
             verdicts,
             vec![true],
@@ -65,7 +77,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let inbox = teams.teams_dir().join("inboxes/supervisor.json");
         daemon.teams = Some(teams);
 
-        if scenario == "superseded" {
+        if scenario == "superseded" || synchronous_fallback {
             let store = crate::store::open_task_store_local(&cas_dir).unwrap();
             let mut task = store.get("cas-9efb-test").unwrap();
             task.deliverables.decline_factory_branch_anchor();
@@ -74,32 +86,40 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         }
         // Exercise the real batch job: relabelled prompts must survive its handoff.
         let mut refresh = DirectorRefresh::new();
-        refresh
-            .start_deliverability_check(
-                &daemon.app,
-                &mut daemon.queue_jobs,
-                prompts.clone(),
-                vec![fixture.event.clone()],
-                Instant::now(),
-            )
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let batch = loop {
-            let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
-            if let Some(batch) = batches.pop() {
-                break batch;
+        let batch = if synchronous_fallback {
+            None
+        } else {
+            refresh
+                .start_deliverability_check(
+                    &daemon.app,
+                    &mut daemon.queue_jobs,
+                    prompts.clone(),
+                    vec![fixture.event.clone()],
+                    Instant::now(),
+                )
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let batch = loop {
+                let mut batches = refresh.take_deliverability(&mut daemon.queue_jobs);
+                if let Some(batch) = batches.pop() {
+                    break batch;
+                }
+                assert!(Instant::now() < deadline, "batch recheck did not complete");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            if scenario == "superseded" {
+                // pin: this failure identifies the missing superseded-body batch handoff.
+                assert!(
+                    batch.prompts[0].1,
+                    "superseded prompt must survive the batch handoff"
+                );
             }
-            assert!(Instant::now() < deadline, "batch recheck did not complete");
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            Some(batch)
         };
-        if scenario == "superseded" {
-            // pin: this failure identifies the missing superseded-body batch handoff.
-            assert!(batch.prompts[0].1, "superseded prompt must survive the batch handoff");
-        }
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.join("fallback.txt");
-        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") {
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback {
             let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
             std::fs::remove_dir_all(&tree).unwrap();
             // A missing live tree with no saved roster exercises the real ENOENT path.
@@ -133,7 +153,11 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                     pty,
                     24,
                     80,
-                    cas_mux::SupervisorCli::Claude,
+                    if synchronous_fallback {
+                        cas_mux::SupervisorCli::Codex
+                    } else {
+                        cas_mux::SupervisorCli::Claude
+                    },
                 )
                 .unwrap(),
             );
@@ -141,8 +165,90 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             // Preserve the successful verdict while the integration target moves.
             fixture.advance_target(true);
         }
+        if synchronous_fallback {
+            let store_worker = super::super::store_worker::global();
+            if scenario == "superseded_refused" {
+                daemon.queue_jobs.close_lanes_for_test();
+                daemon
+                    .deliver_director_events(
+                        &mut refresh,
+                        vec![fixture.event.clone()],
+                        (vec![fixture.event.clone()], prompts, None),
+                        Instant::now(),
+                        0.0,
+                        store_worker,
+                        &super::super::loop_watchdog::LoopProgress::new(),
+                    )
+                    .await;
+            } else {
+                // The real read job cannot report until shutdown has used its
+                // unchecked fallback; no scheduling race or timed sleep.
+                let gate = Arc::new(ReadGate::default());
+                refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
+                refresh
+                    .start_deliverability_check(
+                        &daemon.app,
+                        &mut daemon.queue_jobs,
+                        prompts,
+                        vec![fixture.event.clone()],
+                        Instant::now(),
+                    )
+                    .unwrap();
+                daemon
+                    .drain_director_deliveries_for_shutdown(
+                        &mut refresh,
+                        store_worker,
+                        Duration::ZERO,
+                    )
+                    .await;
+                gate.open();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while daemon.queue_jobs.external_completions_ready() == 0 {
+                    assert!(Instant::now() < deadline, "late recheck did not finish");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                // The original pending batch was already consumed by shutdown.
+                assert!(
+                    refresh
+                        .take_deliverability(&mut daemon.queue_jobs)
+                        .is_empty()
+                );
+            }
+            let name = daemon.app.supervisor_name().to_string();
+            // A Codex inject retains the submit boundary after writing its body.
+            // Wait for ownership to clear before issuing the marker; otherwise
+            // inject correctly defers it and there is nothing for cat to drain.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while daemon.app.mux.pane_submit_pending(&name) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(!daemon.app.mux.pane_submit_pending(&name));
+            let marker = "sync-fallback-check-finished";
+            assert_eq!(
+                daemon.app.mux.inject(&name, marker).await.unwrap(),
+                cas_mux::InjectOutcome::Delivered
+            );
+            while !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains(marker)
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let written = std::fs::read_to_string(&capture).unwrap_or_default();
+            assert!(
+                written.contains(marker),
+                "PTY did not drain its complete body"
+            );
+            // pin: both direct transport fallbacks must preserve the Superseded label and remove merge instructions.
+            if !written.contains("Superseded delivery") || written.contains("MERGE REQUIRED") {
+                stale_sync_fallbacks.push((scenario, written));
+            }
+            assert!(daemon.finish_shutdown_writes(store_worker, Duration::from_secs(10)));
+            continue;
+        }
         daemon
-            .inject_rechecked_batch(batch, super::super::store_worker::global())
+            .inject_rechecked_batch(batch.unwrap(), super::super::store_worker::global())
             .await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while daemon.queue_jobs.external_completions_ready() == 0 {
@@ -255,6 +361,11 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             }
         }
     }
+    // pin: failure reports each real fallback route that delivered stale merge instructions.
+    assert!(
+        stale_sync_fallbacks.is_empty(),
+        "stale fallback bodies: {stale_sync_fallbacks:?}"
+    );
     assert!(
         shutdown_delivered,
         "shutdown must consume the completed native failure and deliver its PTY fallback plus incident (stale fallback suppressed: {stale_fallback_suppressed})"
@@ -1075,10 +1186,15 @@ async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
 async fn c3b16_refused_reminder_scan_keeps_its_edges() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    // The reminder's owner has shut down, so it falls back to this factory's
-    // supervisor and has a recipient without a director read.
+    // A retired supervisor's reminder can fall back to its successor;
+    // a retired worker's reminder must remain addressed to that worker.
+    // This gives the scan a recipient without reading the director.
     let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-    let mut gone = cas_types::Agent::new("gone".into(), "gone-worker".into());
+    let mut gone = cas_types::Agent::new_with_role(
+        "gone".into(),
+        "previous-supervisor".into(),
+        cas_types::AgentRole::Supervisor,
+    );
     agents.register(&gone).unwrap();
     gone.status = cas_types::AgentStatus::Shutdown;
     agents.update(&gone).unwrap();
@@ -1088,7 +1204,7 @@ async fn c3b16_refused_reminder_scan_keeps_its_edges() {
         worker: "edge-worker".into(),
     };
     let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
-    reminders
+    let reminder_id = reminders
         .create_with_scope(
             "gone",
             None,
@@ -1118,6 +1234,14 @@ async fn c3b16_refused_reminder_scan_keeps_its_edges() {
         assert!(Instant::now() < deadline, "the refused scan's event reminder never fired");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let fired = reminders.list_recently_fired(60).unwrap();
+    let reminder = fired
+        .iter()
+        .find(|r| r.id == reminder_id)
+        .expect("the refused scan must fire the reminder, not expire it");
+    let context = reminder.fired_event.as_ref().expect("the consumed edge is preserved");
+    assert_eq!(context["event_type"], event.event_type());
+    assert_eq!(context["data"]["task_id"], "cas-ed9e");
 }
 
 /// A `WorkerIdle` event for a worker with a task, and cached panel data that

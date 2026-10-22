@@ -430,6 +430,29 @@ impl WorktreeManager {
         force: bool,
         will_cleanup: bool,
     ) -> WorktreeResult<Option<String>> {
+        let source = worktree.branch.clone();
+        self.merge_preserving_worktree_at(worktree, force, will_cleanup, &source)
+    }
+
+    /// Merge one immutable reviewed source, retaining the worktree's branch
+    /// identity for metadata and cleanup. All path checks and merge venues use
+    /// the same resolved commit, even if the worker advances its branch.
+    pub(crate) fn merge_preserving_worktree_at(
+        &self,
+        worktree: &mut Worktree,
+        force: bool,
+        will_cleanup: bool,
+        source_sha: &str,
+    ) -> WorktreeResult<Option<String>> {
+        let source = if self.config.auto_merge {
+            self.git.resolve_commit(source_sha).ok_or_else(|| {
+                WorktreeError::Git(GitError::CommandFailed(format!(
+                    "Cannot resolve reviewed merge source {source_sha}; no merge was attempted"
+                )))
+            })?
+        } else {
+            source_sha.to_string()
+        };
         // cas-4702 / GH #68: where the merge runs decides everything below.
         // `SharedCheckout` (the main checkout is already on the target branch)
         // writes the shared working tree; `TempWorktree` runs in an ephemeral
@@ -463,7 +486,7 @@ impl WorktreeManager {
             if target_dirty.is_blocked() {
                 let merge_paths = self
                     .git
-                    .merge_touched_paths(&worktree.parent_branch, &worktree.branch);
+                    .merge_touched_paths(&worktree.parent_branch, &source);
                 let blocking = target_dirty.blocking.clone();
                 let conflicting = match merge_paths {
                     Ok(paths) => residue_overlapping_merge(&blocking, &paths),
@@ -518,7 +541,7 @@ impl WorktreeManager {
             // mid-merge state in the first place.
             let conflicts = self
                 .git
-                .preflight_merge_conflicts(&worktree.parent_branch, &worktree.branch)
+                .preflight_merge_conflicts(&worktree.parent_branch, &source)
                 .map_err(WorktreeError::Git)?;
             if !conflicts.is_empty() {
                 worktree.mark_conflict();
@@ -534,11 +557,11 @@ impl WorktreeManager {
             let merge_result = match self.merge_venue(&worktree.parent_branch) {
                 MergeVenue::SharedCheckout => {
                     self.git
-                        .merge_branch(&worktree.parent_branch, &worktree.branch, true)
+                        .merge_branch(&worktree.parent_branch, &source, true)
                 }
                 MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
                     &worktree.parent_branch,
-                    &worktree.branch,
+                    &source,
                     true,
                 ),
             };

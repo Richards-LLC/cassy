@@ -194,7 +194,7 @@ fn main() -> ExitCode {
                         let _ = fmt.indent_block(suggestion);
                     }
                 } else {
-                    let _ = fmt.error(&format!("{e:#}"));
+                    let _ = fmt.error(&cli::human_error_message(&e));
                 }
             }
 

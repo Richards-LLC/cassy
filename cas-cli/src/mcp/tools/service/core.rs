@@ -484,6 +484,7 @@ impl CasService {
             }
         });
         let inner_req = TaskCloseRequest {
+            no_delivery: req.no_delivery,
             // cas-b192: forwarded, not dropped — this is the only path by which
             // the unified `task` tool can reach the epic close override.
             stranded_branch_override: req.stranded_branch_override,

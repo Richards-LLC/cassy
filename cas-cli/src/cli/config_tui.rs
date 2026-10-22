@@ -196,15 +196,14 @@ impl ConfigTuiApp {
 
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let footer_height = self.status_message.as_ref().map_or(3, |(message, _)| {
-            message
-                .lines()
-                .count()
-                .max(1)
-                .saturating_add(2)
-                .try_into()
-                .unwrap_or(u16::MAX)
-        });
+        let footer = ratatui::widgets::Paragraph::new(self.footer_text())
+            .block(ratatui::widgets::Block::default().borders(Borders::ALL))
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        let footer_height = footer
+            .line_count(area.width)
+            .max(3)
+            .try_into()
+            .unwrap_or(u16::MAX);
 
         // Main layout: header, body, footer
         let chunks = Layout::default()
@@ -226,6 +225,26 @@ impl ConfigTuiApp {
             ViewMode::ResetConfirm => self.render_reset_confirm(frame, area),
             ViewMode::ValueEdit => self.render_value_edit(frame, area),
             _ => {}
+        }
+    }
+
+    fn footer_text(&self) -> String {
+        if let Some((message, _)) = &self.status_message {
+            return message.clone();
+        }
+
+        match self.mode {
+            ViewMode::SectionList => {
+                "↑↓/jk:Move │ Enter:Edit │ d:Diff │ a:Advanced │ s:Save │ q:Quit │ ?:Help"
+                    .to_string()
+            }
+            ViewMode::SectionEdit => {
+                "↑↓/jk:Navigate │ Enter:Edit │ r:Reset │ Esc:Back │ s:Save │ q:Quit".to_string()
+            }
+            ViewMode::DiffView => "Esc:Back │ r:Reset All │ q:Quit".to_string(),
+            ViewMode::Help | ViewMode::ResetConfirm | ViewMode::ValueEdit => {
+                "Esc:Cancel │ Enter:Confirm".to_string()
+            }
         }
     }
 

@@ -252,32 +252,17 @@ impl ConfigTuiApp {
     }
 
     pub(crate) fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let (message, style) = if let Some((msg, is_error)) = &self.status_message {
-            (
-                msg.clone(),
-                if *is_error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::Green)
-                },
-            )
+        let style = if let Some((_, is_error)) = &self.status_message {
+            if *is_error {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Green)
+            }
         } else {
-            let help_text = match self.mode {
-                ViewMode::SectionList => {
-                    "↑↓/jk:Navigate │ Enter:Edit │ d:Diff │ a:Toggle Advanced │ s:Save │ q:Quit │ ?:Help"
-                }
-                ViewMode::SectionEdit => {
-                    "↑↓/jk:Navigate │ Enter:Edit │ r:Reset │ Esc:Back │ s:Save │ q:Quit"
-                }
-                ViewMode::DiffView => "Esc:Back │ r:Reset All │ q:Quit",
-                ViewMode::Help | ViewMode::ResetConfirm | ViewMode::ValueEdit => {
-                    "Esc:Cancel │ Enter:Confirm"
-                }
-            };
-            (help_text.to_string(), Style::default().fg(Color::DarkGray))
+            Style::default().fg(Color::DarkGray)
         };
 
-        let footer = Paragraph::new(message)
+        let footer = Paragraph::new(self.footer_text())
             .style(style)
             .block(Block::default().borders(Borders::ALL))
             .wrap(Wrap { trim: true });

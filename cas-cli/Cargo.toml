@@ -83,7 +83,7 @@ grep-matcher = "0.1"
 rayon = "1.10"
 
 # Terminal UI
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
 
 # Interactive prompts (one-shot CLI Q&A flows for `cas integrate` — purpose-built

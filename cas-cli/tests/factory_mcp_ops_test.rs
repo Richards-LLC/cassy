@@ -6635,6 +6635,72 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     assert!(checkout.join("README").is_file(), "target GC must retain young source");
 }
 
+/// A verifier can exit between any two unlinks. The public GC path must still
+/// account for and collect the legacy marker-first interruption state.
+#[tokio::test]
+async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
+    use fs2::FileExt;
+    let env = review_target_env();
+    init_sync_repo(&env, "interrupted-review-trash");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-interrupted-trash".into(), "interrupted trash".into());
+    task.status = TaskStatus::Closed;
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, None, &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    drop(managed);
+    let wrapper = checkout.parent().unwrap();
+    let trash = wrapper.join("trash");
+    std::fs::create_dir(&trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(wrapper.join("owner.json"), trash.join("owner.json")).unwrap();
+    std::fs::create_dir(trash.join("target")).unwrap();
+    std::fs::write(trash.join("target/output"), b"queued-output").unwrap();
+    // Old remove_dir_all could unlink this first, then lose its process.
+    std::fs::remove_file(trash.join("owner.json")).unwrap();
+
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    assert_eq!(review["pending_reclaim_bytes"], 13, "{report}");
+    assert_eq!(review["reclaimable_bytes"], 13, "{report}");
+    assert_eq!(report["machine_status"]["TARGET_CACHE_STATUS_JSON"]["pending_reclaim_bytes"], 13);
+
+    let slots = env.cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    let collector = std::fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(slots.join("review-trash.lock")).unwrap();
+    collector.lock_exclusive().unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    cleanup.full = Some(true);
+    let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
+    assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
+    assert_eq!(std::fs::read(trash.join("target/output")).unwrap(), b"queued-output");
+    FileExt::unlock(&collector).unwrap();
+
+    let result = get_text(&env.service.factory_request(Parameters(cleanup)).await.unwrap());
+    let status: serde_json::Value = serde_json::from_str(result.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full cleanup must include review status: {result}"))).unwrap();
+    assert_eq!(status["reclaimed_bytes"], 13, "{result}");
+    assert_eq!(status["pending_reclaim_bytes"], 0, "{result}");
+    assert!(!trash.exists(), "interrupted trash must be fully drained: {result}");
+    assert!(checkout.join("README").is_file(), "young source must remain");
+    assert!(wrapper.join("owner.json").is_file());
+}
+
 /// Terminal dispatches may release targets on open tasks; active proof work
 /// remains protected even after a task closes or an earlier dispatch times out.
 #[tokio::test]

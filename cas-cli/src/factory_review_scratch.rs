@@ -113,6 +113,34 @@ fn write_owner(directory: &Path, record: &Owner) -> Result<()> {
     Ok(())
 }
 
+fn stale_owner_temp(path: &Path) -> Result<bool> {
+    let Some(suffix) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".tmp"))
+    else {
+        return Ok(false);
+    };
+    if suffix.len() != 6 || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Ok(false);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() < 64 * 1024,
+        "invalid review ownership temp file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = fs::metadata(path.parent().context("owner temp parent missing")?)?;
+        ensure!(
+            metadata.uid() == parent.uid() && metadata.nlink() == 1,
+            "review ownership temp file has another owner"
+        );
+    }
+    Ok(true)
+}
+
 /// Create or reuse one detached, disposable checkout per task/dispatch/head.
 /// No legacy directory is adopted, and changed source is never reset.
 /// Callers retain this value while running tests; standalone creation releases
@@ -352,9 +380,10 @@ fn trash(cas: &Path, directory: &Path) -> Result<Option<PathBuf>> {
         Err(error) => return Err(error.into()),
     }
     for entry in fs::read_dir(&path)? {
-        let name = entry?.file_name();
+        let entry = entry?;
+        let name = entry.file_name();
         ensure!(
-            name == "owner.json" || name == "target",
+            name == "owner.json" || name == "target" || stale_owner_temp(&entry.path())?,
             "unexpected file in review trash"
         );
     }
@@ -439,6 +468,36 @@ fn bytes(path: &Path, limit: Option<u64>) -> u64 {
     size
 }
 
+#[derive(Default)]
+struct ReviewBytes {
+    total: u64,
+    target: u64,
+    pending: u64,
+}
+
+/// One walk supplies the row size and both disposable payload sizes.
+fn review_bytes(directory: &Path) -> ReviewBytes {
+    let target = directory.join("repo/target");
+    let pending = directory.join("trash/target");
+    let mut sizes = ReviewBytes::default();
+    for entry in walkdir::WalkDir::new(directory)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        if let Ok(metadata) = entry.metadata() {
+            sizes.total = sizes.total.saturating_add(metadata.len());
+            if entry.path().starts_with(&target) {
+                sizes.target = sizes.target.saturating_add(metadata.len());
+            } else if entry.path().starts_with(&pending) {
+                sizes.pending = sizes.pending.saturating_add(metadata.len());
+            }
+        }
+    }
+    sizes
+}
+
 fn entries(path: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(path)
         .into_iter()
@@ -456,6 +515,7 @@ fn reclaim(
     directory: &Path,
     mode: ReclaimMode,
     targets_only: bool,
+    measured: Option<&ReviewBytes>,
 ) -> Result<(&'static str, u64)> {
     let clean = mode == ReclaimMode::Collect;
     let lock = lease(directory, false)?;
@@ -554,9 +614,9 @@ fn reclaim(
         }
         return Ok(("target queued; source retained", 0));
     }
-    let queued_bytes = queued
-        .as_ref()
-        .map_or(0, |path| bytes(&path.join("target"), None));
+    let queued_bytes = queued.as_ref().map_or(0, |path| {
+        measured.map_or_else(|| bytes(&path.join("target"), None), |sizes| sizes.pending)
+    });
     if clean && let Some(path) = &queued {
         // Keep ownership durable until every payload byte is gone. A verifier
         // process can exit during recursive deletion, or between these steps.
@@ -569,6 +629,14 @@ fn reclaim(
             && error.kind() != std::io::ErrorKind::NotFound
         {
             return Err(error.into());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            ensure!(
+                stale_owner_temp(&entry.path())?,
+                "unexpected file in review trash"
+            );
+            fs::remove_file(entry.path())?;
         }
         fs::remove_dir(path)?;
     }
@@ -597,7 +665,9 @@ fn reclaim(
             git(&checkout, &["ls-files", "--", "target"])?.is_empty(),
             "review target contains tracked source"
         );
-        let size = bytes(&target, None).saturating_add(queued_bytes);
+        let size = measured
+            .map_or_else(|| bytes(&target, None), |sizes| sizes.target)
+            .saturating_add(queued_bytes);
         if clean {
             fs::remove_dir_all(&target)?;
         }
@@ -610,7 +680,10 @@ fn reclaim(
             size,
         ));
     }
-    let size = bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 });
+    let size = measured.map_or_else(
+        || bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 }),
+        |sizes| sizes.total,
+    );
     if !clean {
         return Ok(("reclaimable", size));
     }
@@ -664,7 +737,7 @@ fn candidates(cas: &Path, task_id: Option<&str>) -> Vec<PathBuf> {
 fn collect_targets(cas: &Path, task_id: Option<&str>) -> u64 {
     candidates(cas, task_id)
         .into_iter()
-        .filter_map(|directory| reclaim(cas, &directory, ReclaimMode::Collect, true).ok())
+        .filter_map(|directory| reclaim(cas, &directory, ReclaimMode::Collect, true, None).ok())
         .map(|(_, size)| size)
         .sum()
 }
@@ -692,7 +765,13 @@ pub(crate) async fn reclaim_task_targets(cas: &Path, task_id: &str) {
     let staged = tokio::task::spawn_blocking(move || {
         candidates(&staging_root, Some(&task_id))
             .into_iter()
-            .filter(|directory| reclaim(&staging_root, directory, ReclaimMode::Stage, true).is_ok())
+            .filter(|directory| match reclaim(&staging_root, directory, ReclaimMode::Stage, true, None) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(%error, path=%directory.display(), "review target handoff deferred to GC");
+                    false
+                }
+            })
             .count()
     })
     .await;
@@ -727,35 +806,47 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
     let mut rows = Vec::new();
     let mut reclaimed = 0u64;
     let mut reclaimable = 0u64;
+    let mut pending_total = 0u64;
     let mut cleaned = 0usize;
     let collector = clean
         .then(|| collector_lock(cas, false).ok().flatten())
         .flatten();
     for task in entries(&base) {
         for directory in entries(&task) {
-            let size = bytes(&directory, None);
+            let sizes = review_bytes(&directory);
+            let size = sizes.total;
             let mutate = collector.is_some() && cleaned < MAX_RECLAIMS_PER_PASS;
             let pending = trash(cas, &directory)
                 .ok()
                 .flatten()
-                .map_or(0, |path| bytes(&path.join("target"), None));
-            let mut candidate_bytes = pending;
+                .map_or(0, |_| sizes.pending);
+            let mut candidate_bytes = 0;
             let mode = if mutate {
                 ReclaimMode::Collect
             } else {
                 ReclaimMode::Inspect
             };
-            let disposition = match reclaim(cas, &directory, mode, false) {
+            let disposition = match reclaim(cas, &directory, mode, false, Some(&sizes)) {
                 Ok((status, bytes)) => {
-                    candidate_bytes = candidate_bytes.max(bytes);
+                    candidate_bytes = bytes;
                     if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained")
                     {
                         reclaimed += bytes;
                         cleaned += 1;
                     }
+                    if !(mutate
+                        && matches!(status, "reclaimed" | "target reclaimed; source retained"))
+                    {
+                        pending_total = pending_total.saturating_add(pending);
+                    }
                     status.to_owned()
                 }
-                Err(error) => format!("retained: {error:#}"),
+                Err(error) => {
+                    // A failed collection may have unlinked part of the queue;
+                    // retain the pre-pass snapshot as a conservative bound.
+                    pending_total = pending_total.saturating_add(pending);
+                    format!("retained: {error:#}")
+                }
             };
             reclaimable += candidate_bytes;
             rows.push(
@@ -763,14 +854,15 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
             );
         }
     }
-    let pending = pending_reclaim_bytes(cas);
-    let deferred = if clean && collector.is_none() {
+    let pending = pending_total;
+    let deferred = clean && collector.is_none();
+    let deferred_text = if deferred {
         "; deletion deferred (collector busy or unavailable)"
     } else {
         ""
     };
     let mut out = format!(
-        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes{deferred}\n",
+        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes{deferred_text}\n",
         rows.len()
     );
     for row in &rows {
@@ -781,7 +873,7 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
             row["bytes"]
         ));
     }
-    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "pending_reclaim_bytes": pending, "dry_run": !clean})));
+    out.push_str(&format!("REVIEW_SCRATCH_STATUS_JSON={}\n", serde_json::json!({"schema_version": 1, "rows": rows, "reclaimable_bytes": reclaimable, "reclaimed_bytes": reclaimed, "pending_reclaim_bytes": pending, "dry_run": !clean, "deferred": deferred})));
     out
 }
 

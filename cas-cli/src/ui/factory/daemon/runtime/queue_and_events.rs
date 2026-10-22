@@ -13162,7 +13162,9 @@ mod tests {
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
         let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
-        let mut old_owner = cas_types::Agent::new("supervisor-1".into(), "old-supervisor".into());
+        let mut old_owner = cas_types::Agent::new_with_role(
+            "supervisor-1".into(), "old-supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
         old_owner.status = cas_types::AgentStatus::Shutdown;
         old_owner.factory_session = Some("old-factory-session".into());
         agent_store.register(&old_owner).unwrap();
@@ -13371,6 +13373,7 @@ mod tests {
     fn reminder_delivery_preserves_owner_and_target_across_retirement_cas_923c() {
         use cas_types::{Agent, AgentRole, AgentStatus};
 
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let mut mismatches = Vec::new();
         for role in [
             AgentRole::Worker,

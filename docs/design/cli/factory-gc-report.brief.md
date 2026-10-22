@@ -3,7 +3,7 @@
 | Field | Contract |
 | --- | --- |
 | First two lines | State the number of inventory categories to review, then direct the reader to `cas factory gc cleanup --help` to review cleanup tiers. Default cleanup still removes stale metadata; cache/process/journey deletion has separate preview controls. A completed inventory is not a promise that every item is reclaimable. |
-| Scannable | Show project metrics, one category/count row (excluding informational notes), a short context and up to three sample items per category; preserve unavailable and review-only findings. |
+| Scannable | Show project metrics, one category/count row (excluding informational notes), a short context and up to three sample items per category; preserve unavailable and review-only findings. Durable artifacts get a separate counts row for closed-task candidates, strays and review-only mode, so a long root cannot hide these values. |
 | Readable | Wrap prose below 80 columns with hanging indentation, use ASCII punctuation and escaped dynamic values, and shorten oversized tokens without splitting them. |
 | Machine output | `--json` returns one object with `schema_version`, bounded `report_text`, complete `full_report`, and `machine_status` containing typed status objects, including `TARGET_CACHE_STATUS_JSON`; no banner or ANSI escapes surround it. MCP `json=true` returns the same text document. |
 | Omitted | Raw status JSON and complete long values are absent from the default summary; `--full` or MCP `full=true` returns the original report. Existing MCP `limit`/`offset` pages retain original-line offsets and byte caps. |
@@ -53,3 +53,42 @@ baseline cleanup mutations were not induced during this wording pass.
 The first screenshot attempt through the Playwright MCP failed at the local
 Chrome sandbox setup; local Playwright rendered the same static gate HTML
 successfully, and the resulting dark/light images were inspected.
+
+## Durable artifact counts (cas-f467)
+
+The durable category uses a short heading followed by a counts row. Long roots
+remain in full detail, so they cannot hide closed-task candidates, stray inventory
+or review-only mode. The actual bounded excerpt is committed in
+[factory-gc-artifacts.capture.txt](factory-gc-artifacts.capture.txt).
+
+Reviewed the supervisor-built `76593bd73bf851956515e8b55b0250ba46f2e189`
+candidate (`cas 3.71.0`, SHA-256
+`80fb4d4432d9acade448b4f332f7968e73b931d145eda4ca06ef924ebcd35761`).
+Portable evidence: `art-7a5e5154` contains the six-cell real CLI/MCP ledger,
+terminal reports, eight inspected screenshots, candidate receipts and RED/GREEN
+logs. Every walk cell passed; no production GC ran, fixture evidence retained
+its exact bytes, and the owned fixture was removed afterward.
+
+| Receipt | Runs | Failures | Warnings | Allowed |
+| --- | ---: | ---: | ---: | ---: |
+| `terminal-qa: PASS gc-artifacts` | 12 | 0 | 0 | 0 |
+| `terminal-qa: PASS gc-artifacts-C` | 12 | 0 | 0 | 0 |
+
+Both gates cover 80/120 columns on four palettes, pipe, NO_COLOR, C and JSON.
+The six cells cover a long Unicode/spaced root, C/NO_COLOR, JSON/full, MCP/pages,
+zero counts and adjacent cleanup help. All 17 requested GC integration tests,
+including both cas-3fb4 tests, pass. Full/JSON/pages preserve the exact root.
+
+| Dimension | Score | Observed evidence |
+| --- | ---: | --- |
+| Hierarchy | 4 | The first two lines retain the inventory verdict and cleanup-help command. |
+| Fit | 4 | The complete candidate/stray/mode counts precede retention and sample paths. |
+| Craft | 4 | Counts fit on one line; hanging context/sample indentation remains consistent at 80/120 columns. Eight dark/light screenshots show client width equal to scroll width. |
+| Theme safety | 5 | All palettes and monochrome controls pass with no exceptions. |
+| Machine contract | 5 | CLI/MCP JSON, full text and pages retain the exact root and original counts. |
+
+Source-guided Git bisection isolates `5190b3d95`: its category-heading budget
+changed from 512 characters to 60, with prefix-only truncation. This was a source
+predicate, not historical binary execution. The real `29e13c2` negative control
+also loses the counts without a managed-scratch category. The same committed
+long-root MCP regression fails before the fix and passes afterward.

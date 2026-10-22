@@ -1288,18 +1288,36 @@ impl CasCore {
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
         let changed = head.as_deref().and_then(|head| {
-            // Match the close's task window: once a multi-commit FF/rebase
-            // reaches the target, merge-base collapses onto its last commit.
-            let history = self.open_agent_store().ok()
+            // Match the close's durable task boundary: once a multi-commit
+            // FF/rebase reaches the target, merge-base collapses onto its last
+            // commit. A task-creation timestamp alone is not a delivery base;
+            // its clock-skew allowance can pull a just-preceding target commit
+            // (for example an unrelated template update) into a squash's QA
+            // diff. Without recorded start/lease/park evidence, the integrated
+            // single-parent receipt's own parent is the safe boundary.
+            let history = self
+                .open_agent_store()
+                .ok()
                 .and_then(|store| store.get_lease_history(&task.id, None).ok())
                 .unwrap_or_default();
-            let window = super::close_ops::resolve_task_commit_receipt_window(
-                task.created_at, &history,
-                super::close_ops::task_commit_identity(task, Some(head.to_owned())),
-            );
-            let base = super::close_ops::task_attribution::delivery_base(
-                repo, &classification_target, &window, Some(head),
-            );
+            let has_recorded_boundary = task.deliverables.factory_branch_start.is_some()
+                || task.deliverables.factory_branch_anchor.is_some()
+                || !task.deliverables.historical_factory_branch_anchors.is_empty()
+                || history.iter().any(|entry| {
+                    matches!(entry.event_type.as_str(), "claimed" | "transferred")
+                });
+            let base = if has_recorded_boundary {
+                let window = super::close_ops::resolve_task_commit_receipt_window(
+                    task.created_at,
+                    &history,
+                    super::close_ops::task_commit_identity(task, Some(head.to_owned())),
+                );
+                super::close_ops::task_attribution::delivery_base(
+                    repo, &classification_target, &window, Some(head),
+                )
+            } else {
+                None
+            };
             crate::qa_pass::integrated_paths(repo, head, &classification_target, base.as_deref())
         });
         // cas-2387: a no-code task owes no review only while it delivered no

@@ -128,6 +128,7 @@ mod tests {
         drop(conn);
 
         let agent_store = SqliteAgentStore::open(temp.path()).unwrap();
+        agent_store.init().unwrap();
         let worktree_store = SqliteWorktreeStore::open(temp.path()).unwrap();
 
         (temp, agent_store, worktree_store)

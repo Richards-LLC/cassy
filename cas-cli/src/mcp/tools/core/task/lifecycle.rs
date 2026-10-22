@@ -2204,7 +2204,15 @@ impl CasCore {
                         .unwrap_or_else(|| {
                             crate::factory_isolation::expected_worker_branch(&worker.name)
                         });
-                    let reset_note = if task.status == TaskStatus::Open {
+                    // A proof-scope correction can reopen the same task while
+                    // its delivery branch remains checked out. That branch is
+                    // the task's own history, not a reusable worker lane to
+                    // reconcile against a temporarily missing retarget.
+                    let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
+                        &worker.name,
+                        &worker_branch,
+                    ) == Some(task.id.as_str());
+                    let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
                         let identity =
                             close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
                                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;

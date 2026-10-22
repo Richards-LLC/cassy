@@ -393,7 +393,7 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon escalates a recorded wait once after 20 minutes. Report an actual need for assistance immediately.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon can queue one supervisor notice per recorded wait after 20 minutes, subject to normal delivery readiness. Report an actual need for assistance immediately.")
 }
 
 #[derive(Debug)]
@@ -3357,6 +3357,22 @@ PY"#);
             assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
             assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
         }
+        // The actual deadline row must reach a quiet supervisor, not merely
+        // exist in the outbox. Use its stored origin and the daemon's real
+        // pane-wake policy; queue acceptance alone cannot prove AC3.
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
+        let wake_rows: Vec<_> = rows.iter().filter(|row| row.source.starts_with("supervisor-notice:")).collect();
+        assert_eq!(wake_rows.len(), 1, "one episode queues one supervisor wake row");
+        let row = wake_rows[0];
+        use crate::ui::factory::daemon::{FactoryDaemon, runtime::queue_and_events::{PaneWakeState, ToolCallEvidence}};
+        let data = cas_factory::DirectorData::load_fast(&root).unwrap();
+        let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
+        let wake = FactoryDaemon::supervisor_wake_decision(
+            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt,
+            PaneWakeState { composer_dirty: false, ready_for_injection: true,
+                silent_for: Some(std::time::Duration::from_secs(45)), tool_call: ToolCallEvidence::Idle },
+            wait.since + chrono::Duration::minutes(30));
+        assert!(wake.allowed, "deadline notice must wake a quiet supervisor: {}", wake.reason);
         drop(held);
         execute_at(&root, &args, &repo, &fake).unwrap();
         assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "admission clears the episode");

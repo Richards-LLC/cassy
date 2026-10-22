@@ -5014,6 +5014,9 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
     let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
     env.set("HOME", home.path());
+    // Pin an unknown caller instead of inheriting an authenticated harness.
+    // Scope-lock refusals and progress notes do not need priority authority.
+    env.set("CAS_SESSION_ID", "unregistered-scope-client");
     let repo = GitRepo::new();
     run_git(
         &[

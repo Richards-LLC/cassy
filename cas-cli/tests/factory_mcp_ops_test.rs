@@ -6082,7 +6082,7 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 #[tokio::test]
 async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248() {
     let env = FactoryTestEnv::new();
-    let base = env.cas_root.join("durable-artifacts");
+    let base = env.cas_root.join("durable-artifacts-with-a-deliberately-long-root");
     let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
     let task_store = env.task_store();
     let closed_id = task_store.generate_id().expect("generate closed task id");
@@ -6149,9 +6149,25 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         .lines()
         .find(|line| line.starts_with("- Durable task artifacts:"))
         .expect("durable artifact heading and summary");
-    assert!(artifact_summary.contains(&format!("root={}", root.display())));
-    assert!(artifact_summary.contains("closed-task candidates=1"));
-    assert!(artifact_summary.contains("stray inventory=2 mode=review-only"));
+    // Counts belong in the bounded preview; the exact long root belongs in
+    // full detail. Requiring them on the same heading defeats the 80-column UI.
+    assert!(artifact_summary.contains("Durable task artifacts"));
+    assert!(report_text.contains("stray inventory=2 mode=review-only"), "{report_text}");
+    assert!(
+        report_text.is_ascii() && report_text.lines().all(|line| line.len() <= 79),
+        "{report_text}"
+    );
+    let mut full_request = factory_req("gc_report");
+    full_request.full = Some(true);
+    let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
+    assert!(
+        get_text(&full).contains(&format!(
+            "Durable task artifacts: root={} closed-task candidates=1 stray inventory=2 mode=review-only",
+            root.display()
+        )),
+        "full report must retain the complete root and counts: {}",
+        get_text(&full)
+    );
     assert!(
         report_text.contains("review-only stray artifact"),
         "{report_text}"

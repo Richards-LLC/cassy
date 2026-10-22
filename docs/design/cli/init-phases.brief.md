@@ -3,7 +3,7 @@
 | Field | Contract |
 | --- | --- |
 | First two lines | During initialization, each completed phase identifies its result; the existing final initialized location remains the overall verdict. |
-| Scannable | A pipe gets one completed success or failure line per phase, with its label and detail; a real TTY keeps the existing spinner frames and completion redraw. |
+| Scannable | A pipe gets one completed line per phase; failure rows carry the phase label and leave the complete cause to stderr; a real TTY keeps the existing spinner frames and completion redraw. |
 | Readable | Configuration and file paths stay beside their phase label so a log shows which operation completed or failed. |
 | Machine output | `cas init --json` keeps one result object with status, path, agent and integration outcomes and next_steps; it bypasses these human phase messages. |
 | Omitted | Piped output omits transient spinner frames, carriage-return redraws and animation delays; terminal output retains its existing bytes. |
@@ -62,3 +62,22 @@ unchanged; it is not a full-theme or full-command quality claim. The adjoining
 [pipe excerpt](init-phases.pipe.capture.txt) comes from the actual full init;
 the ledger retains all complete captures and durable read-backs. Published
 portable artifact references are recorded on the task.
+
+
+## Generic failure diagnostic (cas-d258)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | A failed phase names the blocked operation; the final stderr diagnostic gives the full cause and, for incomplete new stores, the existing `cas init --force` remedy. |
+| Scannable | Completed successes keep their detail column; a failed phase shows its label once without copying the cause onto stdout. |
+| Readable | Init-only stderr wraps prose at word boundaries within 80/120 columns, including forced retries of existing stores; every cause and remedy token remains complete. |
+| Machine output | `cas init --json` keeps its existing result/error behavior and receives no human phase rows; other commands retain their current diagnostic formatter. |
+| Omitted | The repeated phase cause is removed from stdout; no error detail is discarded from stderr, and no new escape flag or file is introduced. |
+
+Supervisor approval #542326 permits an indivisible token wider than the terminal
+on its own line, following the existing `wrap_line` contract. Ordinary prose is
+wrapped without splitting or truncating tokens. The short MCP refusal remains
+unchanged. One existing CLI init regression covers defaults and wizard input,
+new and existing stores, real malformed Codex configuration, unchanged obstructing
+bytes, and the complete parser cause at 80/120 columns. Terminal QA uses the
+supervisor-built candidate; its receipt and critique follow after execution.

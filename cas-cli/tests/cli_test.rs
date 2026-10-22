@@ -487,47 +487,128 @@ fn test_init_yes_flag() {
     let mut redraws = Vec::new();
     // Both human entry paths share execute_step; exercise completion and an
     // actual filesystem failure through their piped CLI, not a renderer copy.
-    for interactive in [false, true] {
-        for fail_gitignore in [false, true] {
-            let temp = TempDir::new().unwrap();
-            assert!(!temp.path().join(".git").exists());
-            std::fs::create_dir(temp.path().join(".claude")).unwrap();
-            if fail_gitignore {
-                std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+    for (interactive, failure, width, existing_store) in [
+        (false, "none", 80, false),
+        (true, "none", 80, false),
+        (false, "gitignore", 80, false),
+        (true, "gitignore", 80, false),
+        (false, "codex", 80, false),
+        (true, "codex", 120, false),
+        (false, "codex", 120, true),
+        (true, "codex", 80, true),
+    ] {
+        let temp = TempDir::new().unwrap();
+        assert!(!temp.path().join(".git").exists());
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        let fail_gitignore = failure == "gitignore";
+        let long_cause = "deliberately invalid configuration with enough separate words to require natural wrapping while retaining every part of this complete diagnostic and its original parser explanation";
+        if failure == "codex" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            if existing_store {
+                cas_cmd(temp.path())
+                    .current_dir(&temp)
+                    .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
+                    .args(["init", "--json", "--no-integrations"])
+                    .assert()
+                    .success();
             }
-            let mut cmd = cas_cmd(temp.path());
-            cmd.current_dir(&temp)
-                .args(["init", "--no-integrations"])
-                .env("LC_ALL", "C")
-                .env("NO_COLOR", "1");
-            if interactive {
-                cmd.write_stdin("y\n");
+            std::fs::write(temp.path().join(".codex/config.toml"), long_cause).unwrap();
+        }
+        let saved_config =
+            existing_store.then(|| std::fs::read(temp.path().join(".cas/config.toml")).unwrap());
+        if fail_gitignore {
+            std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+        }
+        let mut cmd = cas_cmd(temp.path());
+        cmd.current_dir(&temp)
+            .args(["init", "--no-integrations"])
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .env("COLUMNS", width.to_string())
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"));
+        if existing_store {
+            cmd.arg("--force");
+        }
+        if interactive {
+            cmd.write_stdin("y\n");
+        } else {
+            cmd.arg("--yes");
+        }
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            failure == "none",
+            "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("Saving configuration"), "{text}");
+        assert!(text.contains("Updating .gitignore"), "{text}");
+        if text
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
+            || text.matches("Saving configuration").count() != 1
+            || text.matches("Updating .gitignore").count() != 1
+        {
+            redraws.push(format!(
+                "interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"
+            ));
+        }
+        assert!(temp.path().join(".cas/cas.db").exists());
+        assert!(temp.path().join(".cas/config.toml").exists());
+        if failure == "codex" {
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let diagnostic = "TOML parse error";
+            assert!(
+                !text.contains(diagnostic),
+                "phase stdout must carry context without repeating the cause: {text}"
+            );
+            assert_eq!(stderr.matches(diagnostic).count(), 1, "{stderr}");
+            let normalized = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains(long_cause),
+                "full parser input must survive wrapping: {stderr}"
+            );
+            assert!(
+                stderr.contains("expected"),
+                "retain the actionable parser explanation: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .all(|line| ratatui::text::Line::raw(line).width() <= width),
+                "{width} columns, existing={existing_store}: {stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join(".codex/config.toml")).unwrap(),
+                long_cause
+            );
+            if let Some(config) = saved_config {
+                assert_eq!(
+                    std::fs::read(temp.path().join(".cas/config.toml")).unwrap(),
+                    config
+                );
             } else {
-                cmd.arg("--yes");
-            }
-            let output = cmd.output().unwrap();
-            assert_eq!(output.status.success(), !fail_gitignore,
-                "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
-                String::from_utf8_lossy(&output.stderr));
-            let text = String::from_utf8(output.stdout).unwrap();
-            assert!(text.contains("Saving configuration"), "{text}");
-            assert!(text.contains("Updating .gitignore"), "{text}");
-            if text.bytes().any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
-                || text.matches("Saving configuration").count() != 1
-                || text.matches("Updating .gitignore").count() != 1
-            {
-                redraws.push(format!("interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"));
-            }
-            assert!(temp.path().join(".cas/cas.db").exists());
-            assert!(temp.path().join(".cas/config.toml").exists());
-            if !fail_gitignore {
-                assert!(text.contains("Cassy initialized"), "{text}");
-                assert!(text.contains("cas hub service install"), "{text}");
-                cas_cmd(temp.path()).current_dir(&temp).arg("status").assert().success();
+                assert!(
+                    stderr.contains("cas init --force"),
+                    "retain recovery remedy: {stderr}"
+                );
             }
         }
+        if failure == "none" {
+            assert!(text.contains("Cassy initialized"), "{text}");
+            assert!(text.contains("cas hub service install"), "{text}");
+            cas_cmd(temp.path())
+                .current_dir(&temp)
+                .arg("status")
+                .assert()
+                .success();
+        }
     }
-    assert!(redraws.is_empty(), "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}");
+    assert!(
+        redraws.is_empty(),
+        "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}"
+    );
 }
 
 #[test]

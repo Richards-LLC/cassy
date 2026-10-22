@@ -1289,57 +1289,52 @@ fn print_next_steps(cwd: &Path) {
     }
 }
 
-fn render_next_steps(mut write: impl FnMut(&str, Color) -> anyhow::Result<()>) -> anyhow::Result<()> {
+fn render_next_steps(
+    mut write: impl FnMut(&str, Color) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    use ratatui::text::Span;
+
+    let title = "─ Next steps ";
+    let rows = [
+        ("", colors::WHITE),
+        (
+            "  Commit Cassy config so factory workers can access it:",
+            colors::WHITE,
+        ),
+        ("", colors::WHITE),
+        (
+            "    git add .claude/ CLAUDE.md .mcp.json .gitignore",
+            colors::GREEN,
+        ),
+        ("    git commit -m \"Configure Cassy\"", colors::GREEN),
+        ("", colors::WHITE),
+    ];
+    let inner_width = rows
+        .iter()
+        .map(|(text, _)| Span::raw(*text).width())
+        .max()
+        .unwrap_or(0)
+        .max(Span::raw(title).width())
+        + 2;
     write(
-        "  ┌─ Next steps ──────────────────────────────────────────┐\n",
+        &format!(
+            "  ┌{title}{}┐\n",
+            "─".repeat(inner_width - Span::raw(title).width())
+        ),
         colors::CYAN,
     )?;
-    write("  │", colors::CYAN)?;
-    write(
-        "                                                        ",
-        colors::WHITE,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write("  │", colors::CYAN)?;
-    write(
-        "  Commit Cassy config so factory workers can access it:   ",
-        colors::WHITE,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write("  │", colors::CYAN)?;
-    write(
-        "                                                        ",
-        colors::WHITE,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write("  │", colors::CYAN)?;
-    write(
-        "    git add .claude/ CLAUDE.md .mcp.json .gitignore     ",
-        colors::GREEN,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write("  │", colors::CYAN)?;
-    write(
-        "    git commit -m \"Configure Cassy\"                       ",
-        colors::GREEN,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write("  │", colors::CYAN)?;
-    write(
-        "                                                        ",
-        colors::WHITE,
-    )?;
-    write("│\n", colors::CYAN)?;
-
-    write(
-        "  └────────────────────────────────────────────────────────┘\n",
-        colors::CYAN,
-    )?;
+    for (text, color) in rows {
+        write("  │", colors::CYAN)?;
+        write(
+            &format!(
+                "{text}{}",
+                " ".repeat(inner_width - Span::raw(text).width())
+            ),
+            color,
+        )?;
+        write("│\n", colors::CYAN)?;
+    }
+    write(&format!("  └{}┘\n", "─".repeat(inner_width)), colors::CYAN)?;
     Ok(())
 }
 
@@ -1478,10 +1473,15 @@ mod integration_flag_tests {
             render_next_steps(|text, _| {
                 output.push_str(&init_text_for_mode(text, OutputMode::Styled));
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
             let widths: Vec<_> = output.lines().map(|line| Line::raw(line).width()).collect();
-            assert!(widths.iter().all(|width| *width == widths[0] && *width <= 80),
-                "{locale}: border and content must align within 80 cells: {widths:?}\n{output}");
+            assert!(
+                widths
+                    .iter()
+                    .all(|width| *width == widths[0] && *width <= 80),
+                "{locale}: border and content must align within 80 cells: {widths:?}\n{output}"
+            );
         }
     }
 
@@ -1489,10 +1489,18 @@ mod integration_flag_tests {
     fn init_design_capture_uses_a_portable_project_path() {
         // The published transcript is a data artifact: its project path must
         // stay portable rather than naming the machine that captured it.
-        let capture = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-            "/../docs/design/cli/init-full-yes.ascii.capture.txt"));
-        let path = capture.lines().find_map(|line| line.split_once("initialized at ").map(|(_, path)| path)).unwrap();
-        assert!(!std::path::Path::new(path).is_absolute(), "non-portable capture path: {path}");
+        let capture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/design/cli/init-full-yes.ascii.capture.txt"
+        ));
+        let path = capture
+            .lines()
+            .find_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
+            .unwrap();
+        assert!(
+            !std::path::Path::new(path).is_absolute(),
+            "non-portable capture path: {path}"
+        );
     }
 
     #[test]

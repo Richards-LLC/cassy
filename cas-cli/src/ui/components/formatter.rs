@@ -49,8 +49,8 @@ impl Verdict {
 ///
 /// `LC_ALL` overrides `LC_CTYPE`, which overrides `LANG`; a locale that names
 /// no UTF-8 encoding (`C`, `POSIX`, `en_US.ISO-8859-1`) gets ASCII. With no
-/// locale variable set at all the terminal is assumed to be UTF-8, which is
-/// what every modern emulator defaults to.
+/// nonempty locale variable, POSIX defaults to C: do not infer UTF-8 from
+/// terminal styling support.
 pub fn locale_is_utf8() -> bool {
     for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         if let Ok(value) = std::env::var(key) {
@@ -62,7 +62,7 @@ pub fn locale_is_utf8() -> bool {
             return lower.contains("utf-8") || lower.contains("utf8");
         }
     }
-    true
+    false
 }
 
 /// Text punctuation for a locale that cannot show it: `×` → `x`, `…` → `...`,

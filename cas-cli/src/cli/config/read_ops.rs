@@ -334,6 +334,21 @@ fn set_config_document_path(
     set_config_document_path(child, rest, replacement)
 }
 
+/// Whether the file contains a stored override for this key or its serde alias.
+pub(super) fn config_key_has_override(key: &str, cas_root: &Path) -> anyhow::Result<bool> {
+    let path = cas_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    let (_, stored_path, alternate_path) = config_document_paths(&document, key);
+    Ok(config_document_item(document.as_item(), stored_path).is_some()
+        || alternate_path
+            .is_some_and(|path| config_document_item(document.as_item(), path).is_some()))
+}
+
 /// Remove the stored override without serializing defaults back into the file.
 /// Keep the same operator guard and atomic writer as other config mutations.
 pub(in crate::cli) fn reset_config_value(

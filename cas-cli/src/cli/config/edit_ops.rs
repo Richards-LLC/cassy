@@ -150,10 +150,18 @@ fn execute_edit_line_based_with_input(
                 break;
             }
             "d" | "D" => {
-                config.set(meta.key, meta.default)?;
-                pending_resets.push(meta.key.to_owned());
-                changes_made += 1;
-                fmt.success(&format!("   Reset to: {}", meta.default))?;
+                let has_override =
+                    crate::cli::config::config_key_has_override(meta.key, cas_root)?;
+                if current_value != meta.default || has_override {
+                    config.set(meta.key, meta.default)?;
+                    pending_resets.push(meta.key.to_owned());
+                    changes_made += 1;
+                    fmt.success(&format!("   Reset to: {}", meta.default))?;
+                } else {
+                    fmt.write_raw("   ")?;
+                    fmt.write_muted("Already at default")?;
+                    fmt.newline()?;
+                }
             }
             new_value => {
                 // Validate and set

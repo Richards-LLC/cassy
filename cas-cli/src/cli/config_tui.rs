@@ -501,11 +501,25 @@ impl ConfigTuiApp {
         if let Some(i) = self.option_state.selected() {
             if let Some(key) = self.option_keys.get(i) {
                 if let Some(meta) = self.registry.get(key) {
-                    self.config.set(key, meta.default)?;
-                    self.values.insert(key.clone(), meta.default.to_string());
-                    self.pending_resets.insert(key.clone());
-                    self.has_unsaved = true;
-                    self.status_message = Some((format!("Reset {key} to default"), false));
+                    let current_value = self
+                        .values
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| meta.default.to_string());
+                    let has_override = crate::cli::config::config_key_has_override(
+                        key,
+                        &self.cas_root,
+                    )?;
+                    if current_value != meta.default || has_override {
+                        self.config.set(key, meta.default)?;
+                        self.values.insert(key.clone(), meta.default.to_string());
+                        self.pending_resets.insert(key.clone());
+                        self.has_unsaved = true;
+                        self.status_message = Some((format!("Reset {key} to default"), false));
+                    } else {
+                        self.status_message =
+                            Some((format!("{key} is already at default"), false));
+                    }
                 }
             }
         }

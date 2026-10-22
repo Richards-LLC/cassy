@@ -6550,6 +6550,30 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     assert!(!checkout.join("target").exists(), "resolved review target leaked: {verdict:?}");
     assert!(checkout.join("README").is_file(), "young review source must remain");
     assert!(checkout.parent().unwrap().join("owner.json").is_file());
+
+    // A lease held while the verdict was written can defer eager cleanup.
+    // The ordinary GC reports those closed-task bytes and frees them in one pass.
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
+    let mut closed = env.task_store().get(&task.id).unwrap();
+    closed.status = TaskStatus::Closed;
+    env.task_store().update(&closed).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(checkout.join("target/output").exists(), "held review lease was ignored");
+    drop(managed);
+    let report = get_text(&env.service.factory_request(Parameters(factory_req("gc_report"))).await.unwrap());
+    let status: serde_json::Value = serde_json::from_str(report.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON=")).unwrap()).unwrap();
+    assert_eq!(status["reclaimable_bytes"], b"regenerable".len(), "{report}");
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(!checkout.join("target").exists(), "one GC pass must reclaim deferred output: {}", get_text(&result));
+    assert!(checkout.join("README").is_file(), "target GC must retain young source");
 }
 
 /// Closing a task cannot dispose of an exact dispatch that is still pending,
@@ -6588,6 +6612,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
     let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     assert_eq!(std::fs::read(checkout.join("target/debug/output")).ok().as_deref(),
         Some(b"active proof".as_slice()), "active dispatch reclaimed: {}", get_text(&result));
+    assert!(get_text(&result).contains("dispatch still active"), "active-state guard must be exercised: {}", get_text(&result));
 }
 
 /// A terminal task must not leave a registered proof checkout and its target

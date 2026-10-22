@@ -980,6 +980,10 @@ mod tests {
                                 | "issues.components.cassy"
                                 | "issues.components.violet"
                                 | "issues.components.cloud" => "example/repo",
+                                _ if matches!(
+                                    meta.constraint,
+                                    crate::config::Constraint::ValidPath
+                                ) => "/tmp/cas-config-path",
                                 _ => "example",
                             }
                         } else {

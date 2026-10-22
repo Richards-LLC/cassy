@@ -173,6 +173,12 @@ test("clean fixture passes with zero findings across every run", async (t) => {
   assert.ok(report.runs.every((r) => r.exit_code === 0));
 });
 
+test("literal progress ellipses pass without a truncation escape", async (t) => {
+  const { report } = await gate(t, "literal-progress-ellipsis.sh");
+  assert.equal(report.verdict, "PASS", JSON.stringify(report.findings, null, 2));
+  assert.deepEqual(report.findings, []);
+});
+
 const DEFECTS = [
   ["wrapped-table.sh", "overflow"],
   ["low-contrast.sh", "contrast"],

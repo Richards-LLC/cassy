@@ -5,8 +5,9 @@ user-facing delivery parks for merge. You are the second pair of eyes: you
 did not build this change, and Cassy refuses the implementer here. Judge the
 running product the way a customer meets it, and judge what the delivery
 changed: the pages, controls and journeys its diff touches, and its acceptance
-criteria. A defect that was already on the base build is not this delivery's
-to fix, unless fixing it is the delivery's stated purpose. Do not fix anything.
+criteria. A defect shared with base is in scope when the delivery's stated
+purpose or acceptance criteria cover it, or its diff adds or edits a journey
+invariant that covers it. Do not fix anything.
 
 The task description names the delivery, its branch and exact tip, the base
 branch, the reasons the pass applies, the ledger directory, and the deadline.
@@ -109,9 +110,14 @@ and a screenshot per cell.
 
 When a cell fails, check the base build before you blame the delivery: serve
 `git merge-base <base> <bound_head>` the same way and repeat the cell. If the
-base build fails it the same way, the finding is **pre-existing**. Record it
-(step 5) and do not count it toward the verdict, unless the delivery claims to
-fix it; then it is an unmet acceptance criterion.
+base build fails it the same way, classify the finding as **pre-existing** only
+when it falls outside the delivery's stated purpose, acceptance criteria and
+demo statement, and outside any journey invariant the delivery diff adds or
+edits. A failure inside any of those scopes is unmet even when base shares it.
+For example, cas-1073's `am-deal-to-quote-3` required preserving the chosen
+quote From address after a 409 split-conflict response; resetting it to the
+recommended sender was unmet even though base did the same. Record only
+qualifying pre-existing findings in step 5; do not count them toward the verdict.
 
 ## 4. Polish
 
@@ -210,18 +216,18 @@ states the same bar, so decide by it, not by impression:
 - `visual-qa.mjs --strict` ran against anything but your local serves
 - any rubric dimension below 3 for what the delivery changed, or
   distinctiveness, fit, or hierarchy below 4 on a public surface
-- an acceptance criterion or the demo statement not met on the running build;
-  a defect the delivery claims to fix that still reproduces counts here
+- the delivery's stated purpose, an acceptance criterion, the demo statement,
+  or a journey invariant its diff adds or edits is not met on the running build,
+  even if base shares the same failure (see §3)
 - a required mode that was not proven: forced colors, reduced motion and more
   contrast count only when the capture shows `matchMedia(...)` matching, and
   keyboard-only must reach and complete the demo's primary action. An unrun
   mode is `NOT EXERCISED`, never PASS.
 
-A pre-existing defect never rejects, even on a page the delivery touches.
-Record it under **Pre-existing** in the ledger and pass it to `qa_record` with
-`"scope": "pre-existing"`. Cassy files each one as a follow-up task linked to
-the delivery and lists the new task ids in the verdict. A rejection whose
-every issue is pre-existing is refused.
+Record each finding classified as pre-existing under §3 in the ledger and pass
+it to `qa_record` with `"scope": "pre-existing"`. Cassy files each one as a
+follow-up task linked to the delivery and lists the new task ids in the verdict.
+A rejection whose every issue is pre-existing is refused.
 
 Otherwise approve. List Normal and Note findings in the summary so the
 supervisor can turn them into follow-ups.

@@ -329,6 +329,10 @@ fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
 // Spinner frames (braille pattern)
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+fn spinner_frames_for_mode(_mode: OutputMode) -> &'static [char] {
+    SPINNER_FRAMES
+}
+
 // ============================================================================
 // Configuration (simplified - uses smart defaults)
 // ============================================================================
@@ -1145,8 +1149,9 @@ where
     info!(phase = label, "cas init: phase starting");
 
     // Show spinner
+    let frames = spinner_frames_for_mode(OutputMode::detect());
     print_colored("  ", colors::WHITE)?;
-    print_colored(&format!("{}", SPINNER_FRAMES[0]), colors::ORANGE)?;
+    print_colored(&format!("{}", frames[0]), colors::ORANGE)?;
     print_colored(&format!(" {label}..."), colors::WHITE)?;
     stdout.flush()?;
 
@@ -1157,7 +1162,7 @@ where
             print!("\r");
             print_colored("  ", colors::WHITE)?;
             print_colored(
-                &format!("{}", SPINNER_FRAMES[i % SPINNER_FRAMES.len()]),
+                &format!("{}", frames[i % frames.len()]),
                 colors::ORANGE,
             )?;
             print_colored(&format!(" {label}..."), colors::WHITE)?;
@@ -1208,11 +1213,8 @@ where
 // Quick start guide
 // ============================================================================
 
-fn print_quick_start() {
-    use crate::ui::components::{Formatter, Renderable, Table};
-    use crate::ui::theme::ActiveTheme;
-
-    let table = Table::new()
+fn quick_start_table_for_mode(_mode: OutputMode) -> crate::ui::components::Table {
+    crate::ui::components::Table::new()
         .columns(&["Command", "Description"])
         .rows(vec![
             vec!["cas", "Launch multi-agent factory"],
@@ -1221,7 +1223,14 @@ fn print_quick_start() {
             vec!["cas hub service install", "Start persistent Commander hub"],
             vec!["cas doctor", "Run diagnostics"],
         ])
-        .indent(2);
+        .indent(2)
+}
+
+fn print_quick_start() {
+    use crate::ui::components::{Formatter, Renderable};
+    use crate::ui::theme::ActiveTheme;
+
+    let table = quick_start_table_for_mode(OutputMode::detect());
 
     let theme = ActiveTheme::default();
     let mut out = std::io::stdout();
@@ -1408,21 +1417,36 @@ mod integration_flag_tests {
             .all(|row| row.chars().count() <= INIT_WORDMARK_WIDTH));
         let mut env = crate::test_support::TestEnvGuard::new();
         let frame = "╭─╮\n│ ● → Cassy │\n╰─╯\n";
+        let mut remaining_decor = Vec::new();
         for locale in ["C", "en_US.ISO-8859-1", "C.UTF-8"] {
             env.set("LC_ALL", locale);
             for mode in [OutputMode::Styled, OutputMode::Plain] {
                 let wordmark = cassy_wordmark_lines_for_mode(mode);
                 let text = init_text_for_mode(frame, mode);
+                let spinner = spinner_frames_for_mode(mode);
+                let mut table = Vec::new();
+                use crate::ui::components::{Formatter, Renderable};
+                quick_start_table_for_mode(mode).render(&mut Formatter::plain(&mut table)).unwrap();
+                let table = String::from_utf8(table).unwrap();
                 if mode == OutputMode::Styled && locale == "C.UTF-8" {
                     assert_eq!(wordmark, CASSY_WORDMARK);
                     assert_eq!(text, frame, "UTF-8 styled init frame is unchanged");
+                    assert_eq!(spinner, SPINNER_FRAMES, "UTF-8 animation is unchanged");
+                    assert!(table.contains('─'), "UTF-8 table retains its border");
                 } else {
                     assert!(wordmark.iter().all(|line| line.is_ascii()), "{locale} {mode:?}: {wordmark:?}");
                     assert!(text.is_ascii(), "{locale} {mode:?}: {text}");
                     assert!(text.contains("Cassy"), "fallback retains welcome content");
+                    if !spinner.iter().all(char::is_ascii) {
+                        remaining_decor.push(format!("{locale} {mode:?}: spinner {spinner:?}"));
+                    }
+                    if !table.is_ascii() {
+                        remaining_decor.push(format!("{locale} {mode:?}: quick-start table {table}"));
+                    }
                 }
             }
         }
+        assert!(remaining_decor.is_empty(), "init decor missed fallback: {}", remaining_decor.join("; "));
     }
 
     #[test]

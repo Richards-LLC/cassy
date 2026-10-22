@@ -196,10 +196,20 @@ impl ReleaseConfig {
             Self::parse_migration_paths(&migrations.paths.join(","))?;
         }
         Self::check_suites(&self.suites)?;
-        if !plain_name(&self.gate_env) {
-            return Err("qa.release.gate_env must be a plain environment name".into());
-        }
+        Self::parse_gate_env(&self.gate_env)?;
         Ok(())
+    }
+
+    /// Validates `qa.release.gate_env`: a plain environment name.
+    pub fn parse_gate_env(value: &str) -> Result<String, String> {
+        let value = value.trim();
+        if plain_name(value) {
+            Ok(value.to_owned())
+        } else {
+            Err(format!(
+                "qa.release.gate_env {value:?} must be a plain environment name (letters, digits, `_` or `-`)"
+            ))
+        }
     }
 
     /// Parses and validates `qa.release.migrations.paths`.

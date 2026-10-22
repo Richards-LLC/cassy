@@ -117,7 +117,14 @@ fn run_scope_freeze_seal() {
     assert_eq!(frozen(&gate.cas).map(|f| f.sha), Some(gate.sha.clone()));
     assert!(active_freeze(&gate.cas, Some(&config), "main", chrono::Utc::now()).is_none());
 
-    run::tick(&gate.cas, &AtomicBool::new(false)).unwrap();
+    // One server holds the driver lease; another takes it over once it exits.
+    let no = AtomicBool::new(false);
+    let mut holder = None;
+    assert!(run::drive(&gate.cas, &mut holder, &no).unwrap(), "the first server leases and ticks");
+    let mut standby = None;
+    assert!(!run::drive(&gate.cas, &mut standby, &no).unwrap(), "a held lease is not shared");
+    drop(holder);
+    assert!(run::drive(&gate.cas, &mut standby, &no).unwrap(), "the lease is taken over");
     let walked = run::load(&gate.cas, &gate.sha).unwrap().unwrap();
     assert_eq!(walked.state, State::Manual);
     assert_eq!(verdicts(&walked), [("checkout".into(), "PASS"), ("web".into(), "PASS")]);
@@ -216,6 +223,43 @@ fn run_preflight_refusals() {
     let blocked = run::load(&gate.cas, &gate.sha).unwrap().unwrap();
     assert_eq!(verdicts(&blocked), [("checkout".into(), "BLOCKED_EXTERNAL"), ("web".into(), "BLOCKED_EXTERNAL")]);
     run::abort(&gate.cas, None, "provider outage").unwrap();
+
+    // A driver that first ticks after the TTL walks nothing: every row times
+    // out and the run seals. A row recorded after that seal reseals.
+    let runs = |gate: &run_support::Gate| {
+        std::fs::read_to_string(&gate.log).unwrap().matches(r#""verb":"run""#).count()
+    };
+    run::start(&gate.cas, &gate.sha).unwrap();
+    let path = gate.cas.join("release-gate").join(format!("{}.json", gate.sha));
+    let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["freeze_until"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::minutes(1));
+    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let before = runs(&gate);
+    run::tick(&gate.cas, &AtomicBool::new(false)).unwrap();
+    let expired = run::load(&gate.cas, &gate.sha).unwrap().unwrap();
+    assert_eq!(runs(&gate), before, "no suite starts after the TTL");
+    assert_eq!(expired.state, run::State::Sealed);
+    assert!(expired.rows.len() == 3 && expired.rows.iter().all(|r| r.verdict.to_string().starts_with("NOT_EXERCISED{timed_out}")));
+    let record = run::Record {
+        row: "support".into(),
+        verdict: "PASS".into(),
+        evidence: Some(gate.evidence("support")),
+        ..run::Record::default()
+    };
+    let resealed = run::record(&gate.cas, Some(&gate.sha), &record).unwrap();
+    assert_eq!(resealed.generation, 2);
+    assert_eq!(resealed.row("support").unwrap().verdict.word(), "PASS");
+
+    // A corrupt run file, or one naming another SHA, is reported, never sliced.
+    let dir = gate.cas.join("release-gate");
+    std::fs::write(dir.join(format!("{}.json", "b".repeat(40))), "{not json").unwrap();
+    std::fs::copy(&path, dir.join(format!("{}.json", "c".repeat(40)))).unwrap();
+    let bad: Vec<String> = run::unreadable(&gate.cas).iter().map(|(_, e)| e.clone()).collect();
+    assert!(bad.len() == 2 && bad.iter().any(|e| e.contains("not its own")), "{bad:?}");
+    assert!(run::active(&gate.cas).unwrap().is_none());
+    let until = chrono::Utc::now();
+    assert!(run::Freeze { sha: "abc".into(), until }.refusal("staging").contains("for abc holds"));
+    assert!(crate::config::Config::default().set("qa.release.gate_env", "stag ing").is_err());
 
     let path = gate.cas.join("config.toml");
     let text = std::fs::read_to_string(&path).unwrap().replace(r#""apps/backend""#, r#""../outside""#);

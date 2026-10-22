@@ -147,6 +147,16 @@ fn resources() {
             latest: minute
         }
     );
+    // The children exited without releasing, as crashed holders do: their
+    // slots stay held until the hold expires, and are granted exactly then.
+    assert!(matches!(
+        take(root, "uploads", held, minute - 1),
+        ResourceGrant::RetryAt { .. }
+    ));
+    assert!(matches!(
+        take(root, "uploads", held, minute),
+        ResourceGrant::Granted(_)
+    ));
     // Each env has its own bucket.
     assert!(matches!(
         try_take(root, "prod", "staging-api", rate, 1, NOW, Duration::ZERO).unwrap(),
@@ -260,7 +270,7 @@ fn resources_throttle() {
     );
     env.set("FAKE_CALL_LOG", &log);
     let registry = metered_registry(
-        "resources:\n  staging-api: {kind: rate, per_min: 3, concurrency: 1}\n  credits: {kind: balance}\njourneys:\n  - id: audit\n    consumes: {staging-api: 1}\n  - id: checkout\n    consumes: {credits: 5}\n",
+        "resources:\n  staging-api: {kind: rate, per_min: 3, concurrency: 1}\n  credits: {kind: balance}\njourneys:\n  - id: audit\n    consumes: {staging-api: 1}\n  - id: checkout\n    consumes: {credits: 5}\n  - id: bulk\n    consumes: {staging-api: 4}\n",
     );
     let sha = "a".repeat(40);
     let run = |journey: &crate::qa_registry::Journey, clock_secs: u64| {
@@ -279,7 +289,11 @@ fn resources_throttle() {
         call_metered(project.path(), &config, &meter, journey, Verb::Run, request)
     };
     let calls = || std::fs::read_to_string(&log).map_or(0, |log| log.lines().count());
-    let (audit, checkout) = (&registry.journeys[0], &registry.journeys[1]);
+    let (audit, checkout, bulk) = (
+        &registry.journeys[0],
+        &registry.journeys[1],
+        &registry.journeys[2],
+    );
 
     env.set("FAKE_ERROR_KIND", "rate_limited");
     match run(audit, 5) {
@@ -304,6 +318,15 @@ fn resources_throttle() {
         matches!(run(audit, 5), Err(MeteredError::Budget { resource }) if resource == "staging-api")
     );
     assert_eq!(calls(), 3, "a full bucket refuses before the adapter");
+    // A run that can never fit is the rate refusal, not a wall-clock timeout.
+    match run(bulk, 5) {
+        Err(MeteredError::Refused(refusal)) => assert_eq!(
+            refusal.to_string(),
+            "RESOURCE SHORTFALL: bulk needs 4 staging-api per run, above per_min 3"
+        ),
+        other => panic!("expected the rate refusal, got {other:?}"),
+    }
+    assert_eq!(calls(), 3);
 
     env.set("FAKE_ERROR_KIND", "insufficient");
     assert!(

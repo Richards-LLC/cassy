@@ -301,23 +301,36 @@ pub(crate) fn try_take(
 /// holds; their use keeps counting in its window.
 pub(crate) struct Permits<'a> {
     cas_root: &'a Path,
-    ids: Vec<i64>,
+    env: &'a str,
+    /// Ledger row id and resource name.
+    ids: Vec<(i64, String)>,
 }
 
 impl Permits<'_> {
     /// The request never ran: remove its use as well.
     fn refund(mut self) {
-        for id in std::mem::take(&mut self.ids) {
-            let _ = cas_store::release_resource(self.cas_root, id, true);
+        self.release(true);
+    }
+
+    /// A failed release keeps the slot held until its hold expires.
+    fn release(&mut self, refund: bool) {
+        for (id, resource) in self.ids.drain(..) {
+            if let Err(error) = cas_store::release_resource(self.cas_root, id, refund) {
+                tracing::warn!(
+                    resource = %resource,
+                    env = %self.env,
+                    refund,
+                    %error,
+                    "release-gate resource slot not released; it stays held until its hold expires"
+                );
+            }
         }
     }
 }
 
 impl Drop for Permits<'_> {
     fn drop(&mut self) {
-        for id in self.ids.drain(..) {
-            let _ = cas_store::release_resource(self.cas_root, id, false);
-        }
+        self.release(false);
     }
 }
 
@@ -367,6 +380,7 @@ fn acquire<'a>(
     let hold = Duration::from_secs(u64::from(config.timeout_secs.max(1)) + 5);
     let mut permits = Permits {
         cas_root: meter.cas_root,
+        env: meter.env,
         ids: Vec::new(),
     };
     // BTreeMap order: every process takes resources in the same order.
@@ -380,13 +394,37 @@ fn acquire<'a>(
             let (earliest, latest) = match grant {
                 None => break,
                 Some(ResourceGrant::Granted(id)) => {
-                    permits.ids.push(id);
+                    permits.ids.push((id, name.clone()));
                     break;
                 }
                 Some(ResourceGrant::RetryAt { earliest, latest }) => {
                     (after(earliest), after(latest))
                 }
-                Some(ResourceGrant::Never) => (Duration::MAX, Duration::MAX),
+                // No wait can fit it: the same refusal preflight gives.
+                Some(ResourceGrant::Never) => {
+                    permits.refund();
+                    return Err(match limit {
+                        Limit::Quota { per_day } => ResourceRefusal::Quota {
+                            resource: name.clone(),
+                            need: u64::from(amount),
+                            left: u64::from(per_day),
+                            per_day,
+                            env: printable(meter.env),
+                        },
+                        Limit::Rate { per_min, .. } => ResourceRefusal::Rate {
+                            journey: journey.into(),
+                            resource: name.clone(),
+                            need: amount,
+                            per_min,
+                        },
+                        // try_take never meters a balance.
+                        Limit::Balance => ResourceRefusal::Invalid {
+                            resource: name.clone(),
+                            message: "a balance is not metered per request".into(),
+                        },
+                    }
+                    .into());
+                }
             };
             let left = meter.deadline.saturating_duration_since(Instant::now());
             if earliest > left {

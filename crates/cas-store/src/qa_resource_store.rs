@@ -43,13 +43,26 @@ pub enum ResourceGrant {
     Never,
 }
 
+/// Databases whose ledger schema this process has already ensured.
+static SCHEMA_READY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+
+/// The shared connection, with the ledger schema ensured once per database
+/// path per process rather than on every take and release.
 fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
-    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
-    {
+    let path = root.join("cas.db");
+    let conn = crate::shared_db::shared_connection(&path)?;
+    let ready = SCHEMA_READY.get_or_init(Default::default);
+    let mut ready = ready
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !ready.contains(&path) {
         let guard = crate::shared_db::lock_connection(&conn)?;
         for sql in QA_RESOURCE_SCHEMA_STATEMENTS {
             guard.execute(sql, [])?;
         }
+        ready.insert(path);
     }
     Ok(conn)
 }
@@ -148,4 +161,26 @@ pub fn resource_used(root: &Path, env: &str, resource: &str, since_ms: i64) -> R
         .optional()?
         .flatten();
     Ok(used.unwrap_or(0).max(0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The schema runs once per database path: a second path still gets it,
+    /// and a table dropped behind the process is not silently recreated.
+    #[test]
+    fn qa_resource_store_schema_runs_once_per_db_path() {
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        assert_eq!(resource_used(first.path(), "staging", "api", 0).unwrap(), 0);
+        rusqlite::Connection::open(first.path().join("cas.db"))
+            .unwrap()
+            .execute("DROP TABLE qa_resource_use", [])
+            .unwrap();
+        assert!(resource_used(first.path(), "staging", "api", 0).is_err());
+        assert_eq!(
+            resource_used(second.path(), "staging", "api", 0).unwrap(),
+            0
+        );
+    }
 }

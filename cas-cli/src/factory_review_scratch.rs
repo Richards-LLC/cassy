@@ -524,7 +524,7 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
                 Ok((status, bytes)) => {
                     candidate_bytes = bytes;
                     reclaimable += bytes;
-                    if mutate && bytes > 0 {
+                    if mutate && matches!(status, "reclaimed" | "target reclaimed; source retained") {
                         reclaimed += bytes;
                         cleaned += 1;
                     }

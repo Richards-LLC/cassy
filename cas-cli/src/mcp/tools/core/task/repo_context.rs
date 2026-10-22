@@ -1616,32 +1616,65 @@ exec "$CAS_TEST_REAL_GIT" "$@"
 
     #[test]
     fn declared_repo_b_resolves_from_repo_a_spawn_context() {
-        TestEnvGuard::run_with_temp_home(|_home| {
-            crate::store::known_repos::ensure_host_schema().unwrap();
-            let fixtures =
-                tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
-            let repo_a = fixtures.path().join("spawn-a");
-            let repo_b = fixtures.path().join("work-b");
-            for (repo, remote) in [
-                (&repo_a, "git@github.com:org/spawn-a.git"),
-                (&repo_b, "git@github.com:org/work-b.git"),
-            ] {
-                std::fs::create_dir(repo).unwrap();
-                git(repo, &["init", "-q", "-b", "main"]);
-                git(repo, &["remote", "add", "origin", remote]);
-                std::fs::create_dir(repo.join(".cas")).unwrap();
-            }
-            let target = declare_work_target(
-                &repo_a.join(".cas"),
-                Some(repo_b.to_str().unwrap()),
-                Some("main"),
-            )
-            .unwrap()
-            .unwrap();
-            let context = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
-            assert_eq!(context.repo_root, repo_b.canonicalize().unwrap());
-            assert_eq!(context.repo_selector, "remote:github.com/org/work-b");
-        });
+        let mut guard = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let fixtures =
+            tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+        let repo_a = fixtures.path().join("spawn-a");
+        let repo_b = fixtures.path().join("work-b");
+        for (repo, remote) in [
+            (&repo_a, "git@github.com:org/spawn-a.git"),
+            (&repo_b, "git@github.com:org/work-b.git"),
+        ] {
+            std::fs::create_dir(repo).unwrap();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(repo, &["remote", "add", "origin", remote]);
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+        }
+        let target = declare_work_target(
+            &repo_a.join(".cas"),
+            Some(repo_b.to_str().unwrap()),
+            Some("main"),
+        )
+        .unwrap()
+        .unwrap();
+        #[cfg(unix)]
+        let calls = fixtures.path().join("caller-probes");
+        #[cfg(unix)]
+        {
+            // Count actual Git layout reads through the resolver, retaining
+            // real Git for the identity and target-branch checks.
+            let actual_git = cmcp_core::resolve_stdio_executable("git").unwrap();
+            let bin = fixtures.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            crate::test_paths::warm_stub(
+                &bin.join("git"),
+                r#"#!/bin/sh
+if [ "$4" = --show-toplevel ]; then
+    printf '%s\n' "$2" >> "$CAS_TEST_CALLER_PROBES"
+fi
+exec "$CAS_TEST_REAL_GIT" "$@"
+"#,
+            );
+            let mut paths = vec![bin];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            guard.set("PATH", std::env::join_paths(paths).unwrap());
+            guard.set("CAS_TEST_REAL_GIT", actual_git);
+            guard.set("CAS_TEST_CALLER_PROBES", &calls);
+        }
+        let context = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
+        assert_eq!(context.repo_root, repo_b.canonicalize().unwrap());
+        assert_eq!(context.repo_selector, "remote:github.com/org/work-b");
+        #[cfg(unix)]
+        {
+            let caller = repo_a.canonicalize().unwrap();
+            let probes = std::fs::read_to_string(calls).unwrap();
+            let caller_probes = probes.lines().filter(|path| {
+                let path = Path::new(path);
+                path == caller.as_path() || path == caller.join(".cas")
+            }).count();
+            assert_eq!(caller_probes, 1, "caller layout read more than once: {probes}");
+        }
     }
 
     #[test]
@@ -1668,6 +1701,12 @@ exec "$CAS_TEST_REAL_GIT" "$@"
         let ambiguous = resolve_repo_context(fixtures.path(), &target).unwrap_err();
         assert!(ambiguous.contains("AMBIGUOUS WORK TARGET"));
         assert!(ambiguous.contains("known-repos bind --repo"));
+
+        for caller in [&repo_a, &repo_b] {
+            let local = resolve_repo_context(&caller.join(".cas"), &target).unwrap();
+            assert_eq!(local.repo_root, caller.canonicalize().unwrap(),
+                "an unbound caller inside a matching checkout uses its own checkout");
+        }
 
         let (_, root_b, common_b) = binding_identity_for_path(&repo_b).unwrap();
         {
@@ -2004,6 +2043,20 @@ exec "$CAS_TEST_REAL_GIT" "$@"
                 !error.contains(home.to_string_lossy().as_ref()),
                 "host paths must not be disclosed: {error}"
             );
+
+            let connection = rusqlite::Connection::open(
+                crate::store::known_repos::host_cas_dir().join("cas.db"),
+            ).unwrap();
+            connection.execute_batch("DROP TABLE known_repos").unwrap();
+            let missing = resolve_repo_context(&repo.join(".cas"), &target).unwrap_err();
+            assert!(missing.contains("WORK TARGET REPOSITORY MISMATCH"),
+                "a host without known_repos is a complete empty scan: {missing}");
+
+            // An existing but unreadable schema is not evidence of absence.
+            connection.execute_batch("CREATE TABLE known_repos (path TEXT)").unwrap();
+            let broken = resolve_repo_context(&repo.join(".cas"), &target).unwrap_err();
+            assert!(broken.contains("WORK TARGET REPOSITORY UNAVAILABLE"), "{broken}");
+            assert!(!broken.contains("MISMATCH"), "{broken}");
         });
     }
 

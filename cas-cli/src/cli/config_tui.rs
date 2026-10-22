@@ -711,7 +711,7 @@ mod tests {
 
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
-        assert_eq!(document["sync"]["enabled"], false, "{saved}");
+        assert_eq!(document["sync"]["enabled"].as_bool(), Some(false), "{saved}");
         assert!(saved.contains("# preserve project comment"), "{saved}");
         assert!(document.get("hub").and_then(|hub| hub.get("transport_mode")).is_none(), "{saved}");
         let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();

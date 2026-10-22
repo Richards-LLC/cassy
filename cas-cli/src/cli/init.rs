@@ -481,7 +481,13 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
             "cas init: aborted with error"
         ),
     }
-    result
+    if result.is_err() && cas_store_present(&cwd.join(".cas")) {
+        result.context(
+            "Initialization is incomplete.\nFix the reported error, then re-run: cas init --force",
+        )
+    } else {
+        result
+    }
 }
 
 // ============================================================================
@@ -550,7 +556,8 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         // Grok reads `.mcp.json` directly (verified via `grok mcp doctor`) —
         // no separate config writer needed, just make sure it exists.
         // Reuses the same idempotent writer Claude uses.
-        grok_configured = configure_mcp_server(cwd).unwrap_or(false);
+        grok_configured = configure_mcp_server(cwd)
+            .context("Failed to configure Grok MCP server (.mcp.json)")?;
 
         let builtins_result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, cwd).ok();
         builtins_count += builtins_result

@@ -143,7 +143,7 @@ impl Freeze {
     pub fn refusal(&self, target: &str) -> String {
         format!(
             "{FREEZE_LABEL}: the release gate for {} holds {target} until {}. Seal it, or abort it with `cas qa release-gate abort --sha {} --reason <why>`, then retry.",
-            &self.sha[..12],
+            short(&self.sha),
             self.until.format("%Y-%m-%d %H:%M UTC"),
             self.sha,
         )
@@ -194,12 +194,27 @@ fn lock(cas_root: &Path, sha: &str) -> Result<File> {
     lock_file(run_path(cas_root, sha)?.with_extension("lock"))
 }
 
+/// The first 12 characters, or all of a shorter string; never panics.
+pub fn short(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
+/// Reads the run for `sha`. A run whose recorded SHA is not the 40-hex SHA
+/// its file is named for is refused, so no caller slices a malformed SHA.
 pub fn load(cas_root: &Path, sha: &str) -> Result<Option<Run>> {
-    match fs::read(run_path(cas_root, sha)?) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).context("release-gate run file")?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    let path = run_path(cas_root, sha)?;
+    let run: Run = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("release-gate run file")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    ensure!(
+        full_sha(&run.sha).is_ok() && run.sha.eq_ignore_ascii_case(sha),
+        "release-gate run file {} records sha {:?}, not its own",
+        path.display(),
+        printable(&run.sha)
+    );
+    Ok(Some(run))
 }
 
 fn save(cas_root: &Path, run: &mut Run) -> Result<()> {
@@ -220,26 +235,49 @@ fn update<T>(cas_root: &Path, sha: &str, change: impl FnOnce(&mut Run) -> Result
     Ok(out)
 }
 
-/// The project's live run, if any (at most one).
-pub fn active(cas_root: &Path) -> Result<Option<Run>> {
+/// Every `<40-hex>.json` run file: the runs that load and, by path, the
+/// errors of those that do not.
+fn scan(cas_root: &Path) -> (Vec<Run>, Vec<(PathBuf, String)>) {
+    let (mut runs, mut bad) = (Vec::new(), Vec::new());
     let Ok(entries) = fs::read_dir(dir(cas_root)) else {
-        return Ok(None);
+        return (runs, bad);
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let Some(sha) = path.file_stem().and_then(|s| s.to_str()) else {
+        // Other JSON here (promotion's freeze-status.json) is not a run.
+        let Some(sha) = path.file_stem().and_then(|s| s.to_str()).filter(|s| full_sha(s).is_ok()) else {
             continue;
         };
-        if let Ok(Some(run)) = load(cas_root, sha)
-            && run.state.live()
-        {
-            return Ok(Some(run));
+        match load(cas_root, sha) {
+            Ok(Some(run)) => runs.push(run),
+            Ok(None) => {}
+            Err(error) => bad.push((path, format!("{error:#}"))),
         }
     }
-    Ok(None)
+    (runs, bad)
+}
+
+/// Run files that cannot be read, for `status`. The freeze stays fail-open
+/// on them by design: row-end SERVED_DRIFT still guards the verdicts.
+pub fn unreadable(cas_root: &Path) -> Vec<(PathBuf, String)> {
+    scan(cas_root).1
+}
+
+/// The project's live run, if any (at most one). An unreadable run file is
+/// warned about once per process.
+pub fn active(cas_root: &Path) -> Result<Option<Run>> {
+    static WARNED: std::sync::OnceLock<Mutex<BTreeSet<PathBuf>>> = std::sync::OnceLock::new();
+    let (runs, bad) = scan(cas_root);
+    for (path, error) in bad {
+        let warned = WARNED.get_or_init(Default::default);
+        if warned.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone()) {
+            tracing::warn!(path = %path.display(), %error, "unreadable release-gate run file skipped");
+        }
+    }
+    Ok(runs.into_iter().find(|run| run.state.live()))
 }
 
 /// The run `--sha` names, or the live run when it is omitted.
@@ -518,7 +556,10 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
             .cloned()
             .with_context(|| format!("row {} names no registry journey", printable(&input.row)))?
     };
-    let reseal = update(cas_root, &sha, |run| {
+    // Whether `input` may be written to `run`, and whether that reseals.
+    // Checked before the walk and again in the write step: a TTL seal may
+    // land in between, and its timed-out row is then owed and reseals.
+    let admit = |run: &Run| -> Result<bool> {
         let planned = run.plan.iter().find(|p| p.id == input.row);
         match run.state {
             State::Sealed => {
@@ -549,9 +590,12 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
             input.row
         );
         Ok(run.state == State::Sealed)
-    })?;
+    };
+    admit(&load(cas_root, &sha)?.context("no release-gate run")?)?;
     let walked = walk_manual(cas_root, root, &config, &sha, &journey, input)?;
+    let mut reseal = false;
     let mut run = update(cas_root, &sha, |run| {
+        reseal = admit(run)?;
         run.put(walked);
         if reseal {
             run.note(format!("RECORD {} after seal; resealing", input.row));
@@ -805,9 +849,9 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     };
     let sha = run.sha.clone();
     let (registry, _) = registry(cas_root)?;
-    // Suites run in name order.
+    // Suites run in name order; none starts once the freeze has ended.
     let suites: BTreeSet<String> = run.pending().filter_map(|p| p.suite.clone()).collect();
-    for suite in suites {
+    for suite in suites.into_iter().filter(|_| Utc::now() < run.freeze_until) {
         match walk_suite(cas_root, &config, &registry, &sha, &suite, cancel)? {
             Stop::Done => {}
             Stop::Cancelled | Stop::Aborted => return Ok(()),
@@ -816,11 +860,13 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     let run = load(cas_root, &sha)?.context("run vanished")?;
     let automated_done = run.pending().all(|p| p.manual);
     let expired = Utc::now() >= run.freeze_until;
-    if run.state.live() && automated_done && (run.pending().next().is_none() || expired) {
+    // At the TTL every row still without a verdict, automated or manual, is
+    // timed out: merges are allowed again, so nothing more is walked.
+    if run.state.live() && (expired || (automated_done && run.pending().next().is_none())) {
         update(cas_root, &sha, |run| {
             let timed_out: Vec<PlannedRow> = run.pending().cloned().collect();
             for p in timed_out {
-                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not recorded before the freeze ended")));
+                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not walked before the freeze ended")));
             }
             Ok(())
         })?;
@@ -854,10 +900,11 @@ fn walk_suite(
         run.suites.push(SuiteTiming { name: suite.into(), started_at: now, finished_at: None });
         Ok(now)
     })?;
-    let clock = ChronoDuration::minutes(i64::from(settings.wall_clock_mins));
-    let left = (started + clock - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-    let deadline = Instant::now() + left;
     let run = load(cas_root, sha)?.context("run vanished")?;
+    let clock = ChronoDuration::minutes(i64::from(settings.wall_clock_mins));
+    let end = (started + clock).min(run.freeze_until);
+    let left = (end - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+    let deadline = Instant::now() + left;
     let pending: Vec<PlannedRow> = run.pending().filter(|p| p.suite.as_deref() == Some(suite)).cloned().collect();
     let root = project_root(cas_root)?;
     let mut fixtures = BTreeMap::new();
@@ -1080,14 +1127,6 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
     if super::configured(&cas_root).is_none() {
         return;
     }
-    let lease = match lock_lease(&cas_root) {
-        Ok(Some(lease)) => lease,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(%error, "could not acquire the release-gate driver lease");
-            return;
-        }
-    };
     struct CancelOnDrop(std::sync::Arc<AtomicBool>);
     impl Drop for CancelOnDrop {
         fn drop(&mut self) {
@@ -1095,24 +1134,18 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
         }
     }
     tokio::spawn(async move {
-        let _lease = lease;
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(cancel.clone());
-        // A crash left fixture handles: replay their teardown once.
-        let root = cas_root.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let config = super::configured(&root)?;
-            super::fixtures::sweep(root.parent()?, &root, &config).ok()
-        })
-        .await;
+        let lease = std::sync::Arc::new(Mutex::new(None));
         loop {
             let root = cas_root.clone();
             let flag = cancel.clone();
+            let held = lease.clone();
             let result = tokio::task::spawn_blocking(move || {
                 if super::configured(&root).is_none() {
                     return Ok(false);
                 }
-                tick(&root, &flag).map(|()| true)
+                drive(&root, &mut held.lock().unwrap_or_else(|p| p.into_inner()), &flag).map(|_| true)
             })
             .await
             .unwrap_or_else(|error| Err(error.into()));
@@ -1124,6 +1157,27 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
+}
+
+/// One driver interval: takes the project's driver lease if no server holds
+/// it (so another `cas serve` takes over when the holder exits), then ticks.
+/// On acquiring it, replays expired fixture cleanups once. Returns whether
+/// this process holds the lease and ticked.
+pub(crate) fn drive(cas_root: &Path, lease: &mut Option<File>, cancel: &AtomicBool) -> Result<bool> {
+    if lease.is_none() {
+        let Some(acquired) = lock_lease(cas_root)? else {
+            return Ok(false);
+        };
+        *lease = Some(acquired);
+        // A crashed holder left fixture handles: replay their teardown.
+        if let (Some(config), Some(project)) = (super::configured(cas_root), cas_root.parent())
+            && let Err(error) = super::fixtures::sweep(project, cas_root, &config)
+        {
+            tracing::warn!(%error, "release-gate fixture sweep failed");
+        }
+    }
+    tick(cas_root, cancel)?;
+    Ok(true)
 }
 
 fn lock_lease(cas_root: &Path) -> Result<Option<File>> {

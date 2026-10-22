@@ -651,7 +651,7 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 
 **Sealing.** The pack is sealed when the last row gets its verdict. At
 the freeze TTL, unrecorded manual rows become `NOT_EXERCISED{timed_out}` and
-the pack is sealed. After the seal, Cassy does two things:
+the pack is sealed. After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

@@ -23,9 +23,9 @@
 //!   the remediation command — that replaces the full rendering when the
 //!   payload is over budget.
 //! * If compacting every degradable segment still leaves the payload over
-//!   budget (i.e. the protected content alone exceeds it), degradable segments
-//!   are dropped entirely rather than cut mid-sentence. Their information is
-//!   always one named command away.
+//!   budget, optional segments are dropped entirely rather than cut mid-sentence.
+//!   The compact current-handoff pointer is a protected minimum: dropping it
+//!   would lose the saved state and the command naming the memory to retrieve.
 //!
 //! Degradation order is deterministic: lower-value sections compact first,
 //! then the largest saving wins within one value tier, with assembly order as
@@ -117,7 +117,7 @@ const DEGRADABLE_BASE_SECTIONS: &[(&str, &str, DegradationPriority)] = &[
     ),
     // WP2: the current handoff can run to 6,000 chars. Its compact form keeps
     // the id and title (see `compact_section`) so the session still knows a
-    // handoff exists and how to read it.
+    // handoff exists and how to read it. The drop pass retains that pointer.
     (
         HANDOFF_HEADING_PREFIX,
         "memory action=get id=",
@@ -456,6 +456,11 @@ impl SessionContextAssembler {
 
         let mut dropped = 0usize;
         for &idx in &order {
+            // cas-5058: the body may compact, but the saved id/title and pull
+            // command are the minimum continuity contract for every role.
+            if self.segments[idx].full.starts_with(HANDOFF_HEADING_PREFIX) {
+                continue;
+            }
             self.segments[idx].level = Level::Dropped;
             dropped += 1;
             out = self.joined();
@@ -470,8 +475,8 @@ impl SessionContextAssembler {
         }
 
         eprintln!(
-            "cas: SessionStart payload is {} bytes with every degradable section dropped — \
-             protected guidance/context alone exceeds the {budget}B budget. Trim role guidance \
+            "cas: SessionStart payload is {} bytes with every optional section dropped — \
+             protected guidance/context and handoff pointer exceed the {budget}B budget. Trim role guidance \
              (see test_supervisor_guidance_under_8kb) rather than truncating it here.",
             out.len()
         );
@@ -953,16 +958,30 @@ mod tests {
             "- a long handoff body line\n".repeat(80),
             "- cas-kn001 [architecture] A page title — a snippet\n".repeat(40),
         );
-        let payload = SessionContextAssembler::new(base).with_budget(600).render();
-        assert!(payload.len() <= 600, "payload {} bytes", payload.len());
-        assert!(payload.contains("header"), "protected header survives");
-        assert!(payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"));
-        assert!(payload.contains("**Audit fixes in flight**"));
-        assert!(payload.contains("memory action=get id=handoff-42"));
-        assert!(!payload.contains("a long handoff body line"));
-        assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
-        assert!(payload.contains("knowledge action=search"));
-        assert!(!payload.contains("cas-kn001"));
+        for budget in [1_000, 400] {
+            let mut assembler = SessionContextAssembler::new(base.clone()).with_budget(budget);
+            // At the smaller budget even the summaries cannot all fit. A
+            // retrievable warning must yield to the saved handoff pointer.
+            assembler.append_degradable(
+                format!("## Runtime warning\n{}", "a recoverable detail\n".repeat(15)),
+                "## Runtime warning\nFor all runtime details, run `cas doctor` before resuming optional diagnostics.".to_string(),
+            );
+            let payload = assembler.render();
+            assert!(payload.len() <= budget, "payload {} bytes", payload.len());
+            assert!(payload.contains("header"), "protected header survives");
+            assert!(
+                payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"),
+                "budget {budget} lost the saved handoff pointer: {payload}"
+            );
+            assert!(payload.contains("**Audit fixes in flight**"));
+            assert!(payload.contains("memory action=get id=handoff-42"));
+            assert!(!payload.contains("a long handoff body line"));
+            if budget == 1_000 {
+                assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
+                assert!(payload.contains("knowledge action=search"));
+            }
+            assert!(!payload.contains("cas-kn001"));
+        }
     }
 
     #[test]

@@ -147,12 +147,19 @@ fake = root / 'discovery-cargo.py'
 fake.write_text('''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+leave_child = os.environ.get('LEAVE_CHILD') == '1'
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                         stdout=subprocess.DEVNULL if leave_child else None,
+                         stderr=subprocess.DEVNULL if leave_child else None)
 marker = Path(os.environ['PID_FILE'])
 ready = marker.with_suffix('.ready')
 ready.write_text(json.dumps([os.getpid(), child.pid]))
 ready.replace(marker)
 print('    Finished `test` profile in 0.01s', flush=True)
+if leave_child:
+    print('    Starting 2 tests across 1 binary (0 skipped)', flush=True)
+    print('     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped', flush=True)
+    sys.exit(0)
 child.wait()
 ''')
 fake.chmod(0o755)
@@ -162,12 +169,63 @@ def live(pid):
                             capture_output=True, text=True, timeout=2)
     return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
 
-for interrupted in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-    pid_file = root / f'pids-{interrupted}'
+def exited_without_reaping(process, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        event = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if event is not None:
+            return event
+        time.sleep(0.02)
+    raise AssertionError(f'wrapper PID {process.pid} did not exit')
+
+def cleanup(wrapper, pids):
+    # The wrapper is still unreaped, so its group id cannot be reused.
+    try:
+        os.killpg(wrapper.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    # Fake Cargo is not our child, so use only the recorded PIDs, never its PGID.
+    for pid in pids:
+        if live(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    wrapper.wait(timeout=3)
+
+pid_file = root / 'pids-normal-exit'
+env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file), LEAVE_CHILD='1',
+           CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+pids = []
+with (root / 'normal-exit.log').open('wb') as log:
+    wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                               env=env, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists(), 'normal-exit fixture did not start'
+        pids = json.loads(pid_file.read_text())
+        assert exited_without_reaping(wrapper, 5).si_status == 0, 'normal nextest exit must pass'
+        deadline = time.monotonic() + 5
+        while live(pids[1]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not live(pids[1]), f'normal-exit Cargo descendant survived: {pids}'
+    finally:
+        cleanup(wrapper, pids)
+
+for interrupted, target in [
+    (signal.SIGTERM, 'group'),
+    (signal.SIGINT, 'group'),
+    (signal.SIGHUP, 'group'),
+    (signal.SIGTERM, 'wrapper'),
+]:
+    pid_file = root / f'pids-{interrupted}-{target}'
     env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file),
                CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
     pids = []
-    with (root / f'signal-{interrupted}.log').open('wb') as log:
+    with (root / f'signal-{interrupted}-{target}.log').open('wb') as log:
         wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
                                    env=env, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
@@ -178,21 +236,18 @@ for interrupted in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             assert pid_file.exists(), 'fixture did not reach discovery'
             pids = json.loads(pid_file.read_text())
             assert all(live(pid) for pid in pids), 'fixture children must be alive before signal'
-            os.killpg(wrapper.pid, interrupted)
-            assert wrapper.wait(timeout=5) != 0, 'interrupted run must not report success'
+            if target == 'group':
+                os.killpg(wrapper.pid, interrupted)
+            else:
+                os.kill(wrapper.pid, interrupted)
+            assert exited_without_reaping(wrapper, 5).si_status != 0, 'interrupted run must not report success'
             deadline = time.monotonic() + 5
             while any(live(pid) for pid in pids) and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert not any(live(pid) for pid in pids), f'{interrupted}: discovery children survived: {pids}'
         finally:
-            # Cleanup is needed on RED as well: both groups are fixture-owned.
-            for group in [wrapper.pid, *pids[:1]]:
-                try:
-                    os.killpg(group, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            wrapper.wait(timeout=3)
-print('signal cleanup passed: TERM, INT, HUP; no live discovery children')
+            cleanup(wrapper, pids)
+print('signal cleanup passed: normal exit, TERM, INT, HUP and wrapper TERM; no live discovery children')
 PYKILL
 expect pass 'signal cleanup passed' 'terminated discovery wrapper leaves no live children' \
     python3 "${tmpdir}/kill-discovery.py" "${guard}" "${tmpdir}"

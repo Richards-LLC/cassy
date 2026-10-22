@@ -8231,6 +8231,7 @@ mod team_cmd_tests {
         render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
 
         assert!(tf.output().contains("Pull incomplete · 1 errors"));
+        assert!(!tf.output().contains("nothing newer"));
         assert!(
             tf.output()
                 .contains("- task deserialize error (id=cas-bad)")

@@ -108,11 +108,18 @@ impl FactoryDaemon {
         self.disconnect_tui_clients(&disconnected);
     }
 
-    /// Get the smallest terminal dimensions among clients of a given view mode.
+    /// Get the input owner's terminal dimensions for a view mode.
     ///
-    /// Uses the smallest attached viewport so all clients see the complete TUI.
-    /// When a client detaches, the daemon recalibrates to the new smallest.
+    /// A detached launch client may stay connected at 80x24 after an operator
+    /// attaches from a larger terminal. It remains a viewer, not a geometry
+    /// constraint. If the owner has gone, use the smallest remaining client
+    /// until another client takes ownership.
     pub(super) fn dims_for_mode(&self, mode: ClientViewMode) -> (u16, u16) {
+        if let Some(owner) = self.owner_client_id.and_then(|id| self.clients.get(&id)) {
+            if owner.view_mode == mode && owner.client_cols > 0 && owner.client_rows > 0 {
+                return (owner.client_cols, owner.client_rows);
+            }
+        }
         let mut min_cols: u16 = u16::MAX;
         let mut min_rows: u16 = u16::MAX;
         let mut found = false;

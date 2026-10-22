@@ -23,7 +23,8 @@ import time
 
 
 RESETS = (b"\x1b[?1000l", b"\x1b[?1006l", b"\x1b[?2004l", b"\x1b[?1049l")
-CASES = {"detach": None, "sigterm": signal.SIGTERM, "sighup": signal.SIGHUP, "sigint": signal.SIGINT}
+CASES = {"detach": None, "sigterm": signal.SIGTERM, "sighup": signal.SIGHUP,
+         "sigint": signal.SIGINT, "blocked-output": signal.SIGTERM}
 
 
 def check_exit(binary, case, out):
@@ -46,20 +47,39 @@ def check_exit(binary, case, out):
         child = None
         peer = None
         captured = bytearray()
+        frozen = case == "blocked-output"
+        # crossterm may make stdin nonblocking. A separate open keeps that
+        # read-side flag from also making the frozen output writer nonblocking.
+        output = os.open(os.ttyname(slave), os.O_WRONLY | os.O_NOCTTY) if frozen else slave
+        queued = 0
+        signalled_at = None
+        timed_out = False
 
         try:
+            if frozen:
+                # Fill the output PTY before starting the client and never drain
+                # it. Once the client enters raw mode, its setup write must block.
+                os.set_blocking(output, False)
+                while queued < 8 * 1024 * 1024:
+                    try:
+                        queued += os.write(output, b"x" * 65536)
+                    except BlockingIOError:
+                        break
+                else:
+                    raise AssertionError("fixture did not fill terminal output")
+                os.set_blocking(output, True)
             with socket.socket(socket.AF_UNIX) as listener:
                 listener.bind(address)
                 listener.listen(1)
                 child = subprocess.Popen(
                     [binary, "attach", "terminal-proof"], cwd=scratch, env=env,
-                    stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                    stdin=slave, stdout=output, stderr=output, start_new_session=True,
                 )
                 triggered = False
                 was_raw = False
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
-                    sources = [master] + ([] if peer else [listener])
+                    sources = ([] if frozen else [master]) + ([] if peer else [listener])
                     readable, _, _ = select.select(sources, [], [], 0.05)
                     if listener in readable:
                         peer, _ = listener.accept()
@@ -74,25 +94,37 @@ def check_exit(binary, case, out):
                         if not data:
                             break
                         captured.extend(data)
-                    if not triggered and peer and b"\x1b[?1006h" in captured and b"fixture frame" in captured:
+                    raw_now = not (termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON))
+                    ready = raw_now if frozen else b"\x1b[?1006h" in captured and b"fixture frame" in captured
+                    if not triggered and peer and ready:
                         was_raw = not (termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON))
                         triggered = True
+                        if frozen:
+                            deadline = time.monotonic() + 5
                         if CASES[case] is None:
                             peer.shutdown(socket.SHUT_RDWR)
                         else:
+                            signalled_at = time.monotonic()
                             child.send_signal(CASES[case])
-                    if child.poll() is not None and not readable:
+                    if child.poll() is not None and (frozen or not readable):
                         break
                 else:
-                    raise AssertionError(f"{case}: client did not become ready and exit within 15s")
+                    if not triggered:
+                        raise AssertionError(f"{case}: client did not become ready within 15s")
+                    timed_out = True
+                    child.kill()  # Only test cleanup; a timeout must remain FAIL.
                 status = child.wait(timeout=1)
+                signal_elapsed = time.monotonic() - signalled_at if signalled_at else None
                 missing = [value.decode("ascii") for value in RESETS if value not in captured]
                 restored = termios.tcgetattr(slave) == before
-                expected_exit = status == 0 if CASES[case] is None else status in (-CASES[case], 128 + CASES[case])
+                expected_exit = status == 0 if CASES[case] is None else status == -CASES[case]
+                terminal_ok = bool(queued) if frozen else restored and not missing
                 result = {
                     "case": case, "exit_status": status, "entered_raw_mode": was_raw,
                     "raw_restored": restored, "missing_resets": missing,
-                    "pass": triggered and was_raw and restored and not missing and expected_exit,
+                    "blocked_output_bytes": queued, "signal_elapsed_seconds": signal_elapsed,
+                    "timed_out": timed_out,
+                    "pass": triggered and was_raw and terminal_ok and expected_exit and not timed_out,
                 }
                 return result
         finally:
@@ -102,6 +134,8 @@ def check_exit(binary, case, out):
             if peer:
                 peer.close()
             (out / f"{case}.ansi").write_bytes(captured)
+            if output != slave:
+                os.close(output)
             os.close(master)
             os.close(slave)
 
@@ -120,7 +154,8 @@ def main():
     (args.out / "report.json").write_text(json.dumps({"binary": binary, "results": results}, indent=2) + "\n")
     for row in results:
         print(f"{row['case']}: {'PASS' if row['pass'] else 'FAIL'} exit={row['exit_status']} "
-              f"raw_restored={row['raw_restored']} missing_resets={row['missing_resets']!r}")
+              f"raw_restored={row['raw_restored']} missing_resets={row['missing_resets']!r} "
+              f"signal_seconds={row['signal_elapsed_seconds']} timed_out={row['timed_out']}")
     return 0 if all(row["pass"] for row in results) else 1
 
 

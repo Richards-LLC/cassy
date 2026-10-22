@@ -63,3 +63,35 @@ the disposable project unmodified.
 | Craft | 5 | All eleven captures pass without warnings; stream redirection preserves text and the existing exit code. |
 | Theme safety | 5 | Four palettes at 80 and 120 columns pass; C locale and no-color retain readable plain output. |
 | Machine contract | 5 | Raw mixed-stream captures prove piped stderr has no ANSI; status refusal retains its existing stderr-only contract. |
+
+## Command-owned stderr critique (cas-62e0)
+
+terminal-qa: PASS cas-62e0 · 11 runs · 0 fail · 0 warn · 0 allowed
+
+Candidate `cas 3.72.0 (ca6209b 2026-10-22)` maps to
+`ca6209bf1181fa7eb41b02abd7f6b94c7dab624c`. The actual config-export error
+passes the strict inherited-stream gate at 80/120 columns, four palettes,
+pipe, C locale and NO_COLOR. Separate actual-command PTY readbacks verify
+plain piped stderr with terminal stdout, styled terminal stderr with piped
+stdout, and NO_COLOR suppression; all preserve exit1. A separate successful
+JSON-export control returns one document with no escapes and exit0. It is not
+presented as a JSON error response for the unsupported-format command.
+
+The probe preserves the worker identity and uses disposable HOME/project
+fixtures. All 13 readback files confirm config bytes are unchanged. Source
+audit records 19 direct stderr sinks before and zero after; this supplements
+the representative runtime path rather than claiming every network, auth or
+update failure was exercised. Captures and raw split-stream bytes are in the
+cas-62e0 task's `terminal-qa/config-export/` and `stderr-*/` artifacts.
+
+| Dimension | Score | Evidence |
+| --- | ---: | --- |
+| Hierarchy | 5 | One error mark names the unknown format and gives the supported formats immediately. |
+| Fit | 5 | The diagnostic is one line, with no extra metadata or repeated advice. |
+| Craft | 5 | The line is 51 cells styled and 57 plain, without wrapping at 80 columns. |
+| Theme safety | 5 | The strict four-palette gate has no findings; C locale and NO_COLOR remain readable. |
+| Machine contract | 5 | Three actual split-stream checks prove destination-based styling, and the separate successful JSON control remains clean. |
+
+Scoped text and mechanical captures reviewed by fierce-marten-72 on 2026-10-22.
+No live auth/update flow or GUI screenshot is claimed. Subsequent brief-only
+edits do not change the candidate's runtime, test inputs or probe.

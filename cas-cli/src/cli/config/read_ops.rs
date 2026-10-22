@@ -974,6 +974,7 @@ mod tests {
                     "llm.worker.harness" => "claude",
                     "llm.worker.model" => "roundtrip-worker-model",
                     "llm.worker.reasoning_effort" => "high",
+                    "qa.deployed_origins" => "https://example.com",
                     _ => {
                         let meta = registry.get(key).expect("registered key");
                         if meta.default.is_empty() {

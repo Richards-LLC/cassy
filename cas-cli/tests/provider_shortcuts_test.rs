@@ -14,6 +14,7 @@ use tempfile::TempDir;
 fn cas_cmd() -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.env_remove("CAS_ROOT");
+    cmd.env_remove("COLUMNS");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }

@@ -10,10 +10,12 @@ fn read_jsonl(path: &std::path::Path) -> Vec<Value> {
 }
 
 fn cas_cmd() -> Command {
-    Command::new(cas::test_paths::binary(
+    let mut command = Command::new(cas::test_paths::binary(
         "cas",
         option_env!("CARGO_BIN_EXE_cas").map(Into::into),
-    ))
+    ));
+    command.env_remove("COLUMNS");
+    command
 }
 
 fn write_jsonl(path: &std::path::Path, values: &[Value]) {

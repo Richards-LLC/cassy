@@ -20,6 +20,7 @@ adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
 grant_envs = ["staging"]
+target_env = "prod"
 
 [qa.release.components]
 backend = ["apps/backend", "packages/shared"]
@@ -41,6 +42,7 @@ env = "staging"
 | `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
 | `components` | Served component name to the repository paths it is built from. |
 | `grant_envs` | Environments where preflight may `grant` a balance shortfall (default `["staging"]`). |
+| `target_env` | Environment promotion serves; promotion reads its `flags` once (default `prod`). |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
 
@@ -207,6 +209,55 @@ local-only and the row's frames carry the evidence.
 **Retention.** `qa.release.retention_days` (default 30) deletes old media
 files only inside each pack's own `media/`. Links are never followed or
 deleted, and `pack.json` stays as the record.
+
+## Promotion: `cassy/release-gate`
+
+Promotion reads the pack. A head passes when either of these sealed packs
+is CLEAN and the target serves the flags the evidence ran under:
+
+- the pack for that SHA;
+- a pack for a commit with the same whole tree. A merge commit whose tree
+  equals the walked SHA counts as walked.
+
+Each evaluation reads `target_env` through the `flags` verb once, for the
+walked journeys' `depends_on_flags`, and compares the result with the pack's
+snapshot.
+
+| Result | When | Description names |
+|---|---|---|
+| `success` | A CLEAN pack and no flag mismatch. | The walked SHA. |
+| `pending` | No sealed pack exists yet. | The head. |
+| `failure` | Packs exist, but none walked this tree. | The head and the latest walked SHA. |
+| `failure` | The pack is FAILED or OWED. | The FAILED rows, or each OWED row or PR and its cause. |
+| `failure` | A flag differs on `target_env`, or the read failed. | Each `CONFIG_MISMATCH`, or `FLAGS UNKNOWN`. |
+
+`cas qa release-gate verify --sha X` prints the verdict and exits nonzero
+unless it passes, so projects without GitHub can use it as their check. With
+`qa.github_status = true`, it also publishes the verdict as the commit status
+`cassy/release-gate` on X. After each seal, the run publishes the status on
+the head of every open PR into `branches`. Require `cassy/release-gate` in
+branch protection on each promotion branch. Statuses use the same `gh`
+publisher as `cassy/independent-qa`.
+
+**Override.** A live registered supervisor may record the operator's
+decision as one decision note on any task:
+
+```text
+task action=notes note_type=decision notes="RELEASE-GATE OVERRIDE sha=<full 40-char sha>: <reason>"
+```
+
+The override passes that exact SHA, or a commit with the same whole tree,
+for 6 hours from the note. The status description names the override and
+when it expires. Each head it passes is logged once as a decision note on
+that task. Cassy refuses the marker with a concrete SHA from any other
+writer and from every other note path.
+
+**Freeze status.** While a run walks `integration_branch`, Cassy publishes a
+pending `cassy/release-freeze` status on the head of every open PR into
+that branch. At seal or abort it publishes success on the open PRs. Require
+the context on `integration_branch` so merges from outside Cassy wait too.
+A head pushed while no run is active has no freeze status until the next
+seal or abort.
 
 ## Independent runs: `independence_key`
 

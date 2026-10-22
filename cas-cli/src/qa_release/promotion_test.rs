@@ -9,7 +9,6 @@ fn promotion() {
     use super::pack::{Pack, pack_dir};
     use super::promotion::{PromotionState, evaluate, publish_freeze, publish_promotions};
     use super::verdict::RowVerdict;
-    use cas_store::TaskStore;
     use chrono::{Duration, NaiveDateTime};
     use std::os::unix::fs::PermissionsExt;
 

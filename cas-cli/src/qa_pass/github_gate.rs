@@ -329,13 +329,9 @@ fn put_pull_merge(tokens: &[&str]) -> Option<(u64, Option<String>)> {
     })
 }
 
-/// Run a command with a hard deadline; stdout on success.
-fn run_bounded(command: Command, timeout: Duration) -> Option<Vec<u8>> {
-    run_bounded_detailed(command, timeout).ok()
-}
-
-/// [`run_bounded`] that says why it produced nothing: the program could not
-/// start, it timed out, or it exited non-zero (with its first stderr line).
+/// Run a command with a hard deadline; stdout on success, else why it
+/// produced nothing: the program could not start, it timed out, or it exited
+/// non-zero (with its first stderr line).
 fn run_bounded_detailed(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command

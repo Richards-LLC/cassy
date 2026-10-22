@@ -568,14 +568,11 @@ def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
-        download_url = envelope.get("download_url")
-        if download_url is None:
-            fail("PDF post returned no verified PDF download URL; message permalink is not a PDF endpoint")
-        return message_id, message_permalink, checked_download_url(download_url)
-    file_id = file_block.get("file_id") or file_block.get("id") or message_id
-    file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
-    if not isinstance(file_id, str) or not file_id.strip():
         fail("PDF post returned no file id")
+    file_id = file_block.get("file_id") or file_block.get("id")
+    file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
+    if not isinstance(file_id, str) or not file_id.strip() or file_id == message_id:
+        fail("PDF post returned no distinct file id")
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
     download_url = file_block.get("download_url")

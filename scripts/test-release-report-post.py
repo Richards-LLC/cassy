@@ -637,7 +637,7 @@ def main() -> int:
         state.include_download_url = False
         result, fields = run_adapter(server, state, pdf)
         assert result.returncode != 0
-        assert "message permalink is not a PDF endpoint" in result.stderr
+        assert "no file id" in result.stderr
         assert fields is None
         assert state.download_requests == []
         methods = [request.get("method") for request in state.requests]

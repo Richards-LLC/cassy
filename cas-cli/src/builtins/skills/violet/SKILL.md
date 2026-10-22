@@ -34,13 +34,14 @@ Every call answers `{"ok": true, "schema_version": 1, …}` or `{"ok": false, "e
 
    - **Posted at:** `<16 October 2026 · 9:45 AM ET>`
    - **Channel:** `#<project>-internal` (`<channel_id>`)
-   - **User top-level:** `message_id=<id>` · <permalink>
-   - **User reply:** `message_id=<id>` · <permalink>
-   - **Dev top-level:** `message_id=<id>` · <permalink>
-   - **Dev reply:** `message_id=<id>` · <permalink>
+   - **User top-level:** `message_id=<id>` · `part_ids=["<id>"]` · <permalink>
+   - **User reply:** `message_id=<id>` · `part_ids=["<id>"]` · <permalink>
+   - **Dev top-level:** `message_id=<id>` · `part_ids=["<id>"]` · <permalink>
+   - **Dev reply:** `message_id=<id>` · `part_ids=["<id>"]` · <permalink>
+   - **PDF upload:** `message_id=<upload-message-id>` · `file_id=<pdf-file-id>` · <upload-message-permalink>
    ```
 
-   A response without `ok: true` and a permalink is not posted; preserve partial receipts and name the operation that stopped. Done when every post/reply has `message_id` and permalink in `## POSTED`.
+   Replace each `part_ids` list with every returned part ID in order; when absent, use the singular message ID as a one-element list. Keep the returned opaque permalink; do not invent links for individual parts. Include the PDF row only for an upload, using its own message ID/permalink and distinct file ID. A response without `ok: true` and a permalink is not posted; preserve partial receipts and name the operation that stopped. Done when every post/reply has its message ID, ordered part IDs and permalink in `## POSTED`, and every upload also has its file ID.
 
 ## Following up a thread and push wakes
 

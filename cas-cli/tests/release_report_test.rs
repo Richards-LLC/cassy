@@ -606,12 +606,16 @@ Dev reply
          CHANNEL=cas-internal\n\
          CHANNEL_ID=C01234567\n\
          USER_TOP_LEVEL_ID=user-1\n\
+         USER_TOP_LEVEL_PART_IDS=[\"user-1\"]\n\
          USER_TOP_LEVEL_PERMALINK=https://example.test/user-1\n\
          USER_REPLY_ID=user-2\n\
+         USER_REPLY_PART_IDS=[\"user-2a\",\"user-2\"]\n\
          USER_REPLY_PERMALINK=https://example.test/user-2\n\
          DEV_TOP_LEVEL_ID=dev-1\n\
+         DEV_TOP_LEVEL_PART_IDS=[\"dev-1\"]\n\
          DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1\n\
          DEV_REPLY_ID=dev-2\n\
+         DEV_REPLY_PART_IDS=[\"dev-2\"]\n\
          DEV_REPLY_PERMALINK=https://example.test/dev-2\n",
     )
     .unwrap();

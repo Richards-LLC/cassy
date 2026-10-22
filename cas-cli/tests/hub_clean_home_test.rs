@@ -65,7 +65,9 @@ fn private_home() -> hub_fixture::PrivateHubTempDir {
 /// Reserve an established client's local port, which cannot accept new
 /// connections. A merely bound, non-listening socket times out on macOS;
 /// this connected socket instead rejects unrelated connections on both OSes.
-/// Keeping both ends open reserves the port without any close/rebind window.
+/// Keeping both ends open excludes the port from automatic ephemeral allocation
+/// without any close/rebind window. This does not exclude an explicit bind with
+/// SO_REUSEADDR, which macOS permits over an established connection.
 #[cfg(unix)]
 fn reserve_refused_loopback_port() -> (u16, (TcpStream, TcpStream)) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -77,11 +79,6 @@ fn reserve_refused_loopback_port() -> (u16, (TcpStream, TcpStream)) {
         TcpStream::connect_timeout(&endpoint, Duration::from_millis(100))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused),
         "reserved loopback target must be connection-refused"
-    );
-    assert!(
-        TcpListener::bind(endpoint)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse),
-        "the dead target port must stay reserved against competing fixtures"
     );
     (port, (client, peer))
 }

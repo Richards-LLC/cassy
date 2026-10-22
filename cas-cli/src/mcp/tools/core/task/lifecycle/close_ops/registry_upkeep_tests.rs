@@ -90,6 +90,61 @@ impl Fixture {
 }
 
 #[test]
+fn registry_upkeep_receipt_uses_target_ownership_for_delivery_files() {
+    for owner_added in [false, true] {
+        let mut f = Fixture::new(YAML);
+        write(f.repo.path(), "src/pages/email.ts", "delivered entry");
+        let receipt = commit(f.repo.path());
+        // The target advances after the delivery, including an unrelated surface
+        // that must never become part of this task's ownership check.
+        write(f.repo.path(), "src/pages/unrelated.ts", "another task");
+        if owner_added {
+            write(
+                f.repo.path(),
+                crate::qa_registry::DEFAULT_PATH,
+                &YAML.replace(
+                    "owners: ['src/pages/signup.ts']",
+                    "owners: ['src/pages/signup.ts', 'src/pages/email.ts']",
+                ),
+            );
+        }
+        commit(f.repo.path());
+        // A different checkout cannot supply an unlanded ownership escape.
+        git(f.repo.path(), &["checkout", "-qb", "other-work"]);
+        write(
+            f.repo.path(),
+            crate::qa_registry::DEFAULT_PATH,
+            &format!("{YAML}ignore: ['src/pages/**']\n"),
+        );
+        commit(f.repo.path());
+        let mut config = crate::config::Config::default();
+        config.qa = Some(f.qa.clone());
+        config.save(f._db.path()).unwrap();
+        let result = at_park(
+            &f.store,
+            &mut f.task,
+            f._db.path(),
+            f.repo.path(),
+            "main",
+            None,
+            Some(&receipt),
+            None,
+        );
+        if owner_added {
+            assert!(result.is_ok(), "target ownership repair must allow close: {result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("UNOWNED USER-FACING FILE")
+                    && error.contains("src/pages/email.ts")
+                    && !error.contains("src/pages/unrelated.ts"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
     let mut f = Fixture::new(YAML);
     write(f.repo.path(), "src/pages/email.ts", "new entry");

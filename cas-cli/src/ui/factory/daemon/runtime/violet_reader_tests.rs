@@ -237,7 +237,16 @@ fn managed_event_kind_classifies_mentions_without_escalating_other_activity_cas_
         let target = &mut cloud.claim["deliveries"][0]["target"];
         if let Some(event_kind) = event_kind { target["event_kind"] = event_kind; }
         if root { target["message_ts"] = target["external_ref"]["root_ts"].clone(); }
-        let body = violet_body(None);
+        let message_ts = target["message_ts"].clone();
+        let root_ts = target["external_ref"]["root_ts"].clone();
+        let body = super::super::violet_body::VioletBodySource(move |args: Value| {
+            assert_eq!(args["external_ref"]["message_ts"], message_ts);
+            Ok(json!({"structuredContent": {
+                "ok": true, "schema_version": 1,
+                "identity": {"workspace_id": "T07ABCDEF", "channel_id": "C08COORD01", "root_thread_ts": root_ts},
+                "messages": [{"message_id": message_ts, "thread_id": root_ts, "text": "Slack body is not classification metadata"}]
+            }}))
+        });
         let io = ReaderIo { body: &body, typer: &PromptQueueTyper(&queue), quarantine: &Quarantined(&cloud) };
         // A restarted reader may see the same claim again: one durable wake.
         for _ in 0..2 {

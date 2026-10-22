@@ -1111,7 +1111,7 @@ fn test_not_initialized_error() {
         // SAFETY: openpty initializes two fresh owned descriptors on success.
         assert_eq!(unsafe { libc::openpty(
             &mut master_fd, &mut slave_fd, std::ptr::null_mut(),
-            std::ptr::null(), std::ptr::null(),
+            std::ptr::null_mut(), std::ptr::null_mut(),
         ) }, 0, "{}", std::io::Error::last_os_error());
         let (mut master, slave) = unsafe {
             (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd))

@@ -234,6 +234,13 @@ fn run_preflight_refusals() {
     run::start(&gate.cas, &gate.sha).unwrap();
     let path = gate.cas.join("release-gate").join(format!("{}.json", gate.sha));
     let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // The TTL tick has timed support out but not sealed yet.
+    file["rows"].as_array_mut().unwrap().push(serde_json::json!({"id": "support", "journey": "support",
+        "verdict": {"verdict": "NOT_EXERCISED", "cause": "timed_out", "detail": "not walked before the freeze ended"}}));
+    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let early = run::Record { row: "support".into(), verdict: "PASS".into(), evidence: Some(gate.evidence("early")), ..run::Record::default() };
+    let refusal = run::record(&gate.cas, Some(&gate.sha), &early).unwrap_err().to_string();
+    assert_eq!(refusal, "the TTL timed row support out; retry after the run seals to reseal it");
     file["freeze_until"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::minutes(1));
     std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     let before = runs(&gate);

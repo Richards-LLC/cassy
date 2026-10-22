@@ -3367,7 +3367,11 @@ impl SyncSummary {
         self.team_healed_task_dependencies_from_cloud += team.healed_task_dependencies_from_cloud;
         self.deleted_task_dependencies += team.deleted_task_dependencies;
         self.skipped_task_dependencies_by_tombstone += team.skipped_task_dependencies_by_tombstone;
-        self.team_errors.extend(team.errors.clone());
+        for error in &team.errors {
+            if !self.errors.contains(error) && !self.team_errors.contains(error) {
+                self.team_errors.push(error.clone());
+            }
+        }
         self.skipped_lww += team.skipped_lww;
         for (reason, count) in &team.rejected_by_reason {
             *self.rejected_by_reason.entry(reason.clone()).or_default() += count;

@@ -50,6 +50,8 @@ struct BackoffEntry {
 #[derive(Debug, Default)]
 pub(crate) struct ExternalWakeBackoff {
     entries: HashMap<ExternalProbeKey, BackoffEntry>,
+    // Carried between scans with the probe state, independently per scanner.
+    ttl_orphan_count: usize,
 }
 
 impl ExternalWakeBackoff {
@@ -205,9 +207,9 @@ fn session_gone(
 }
 
 /// Pending reminders whose owner and target sessions are both gone (see
-/// [`session_gone`]), and whether each would otherwise never end: an
+/// [`session_gone`]), and whether each should expire: an
 /// external wake (`branch_contained_in`, `tag_exists`, `ci_completed`), or
-/// (cas-c634) an internal-event wake set never to expire.
+/// a never-expiring internal-event or already-due time wake.
 fn orphaned_reminders(
     cas_dir: &Path,
     now: chrono::DateTime<chrono::Utc>,
@@ -235,8 +237,9 @@ fn orphaned_reminders(
                 Some(EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT)
             );
             let never_ends = external
-                || (reminder.trigger_type == cas_store::ReminderTriggerType::Event
-                    && reminder.ttl_secs == 0);
+                || (reminder.ttl_secs == 0
+                    && (reminder.trigger_type == cas_store::ReminderTriggerType::Event
+                        || reminder.trigger_at.is_some_and(|due| due <= now)));
             (reminder, never_ends)
         })
         .collect();
@@ -247,12 +250,14 @@ fn orphaned_reminders(
 /// and target sessions are both gone: external wakes, durable by design and
 /// otherwise re-probed forever (GH #1208), and (cas-c634) never-expiring
 /// internal-event wakes, such as a retired worker's own `task_completed`
-/// wait, which the TTL pass skips. Other orphans keep their TTL and are
-/// logged. Returns the number expired.
+/// wait, which the TTL pass skips, and due time reminders without a TTL.
+/// Other orphans keep their TTL; log their count only when it changes.
+/// Returns the number expired.
 pub(crate) fn expire_dead_session_reminders(
     cas_dir: &Path,
     now: chrono::DateTime<chrono::Utc>,
     process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+    last_ttl_orphan_count: &mut usize,
 ) -> usize {
     let Some((reminders, orphaned)) = orphaned_reminders(cas_dir, now, process_alive) else {
         return 0;
@@ -261,7 +266,9 @@ pub(crate) fn expire_dead_session_reminders(
     let mut left_to_ttl = 0;
     for (reminder, never_ends) in orphaned {
         if !never_ends {
-            left_to_ttl += 1;
+            if reminder.ttl_secs > 0 {
+                left_to_ttl += 1;
+            }
             continue;
         }
         match reminders.expire(reminder.id) {
@@ -283,12 +290,13 @@ pub(crate) fn expire_dead_session_reminders(
             ),
         }
     }
-    if left_to_ttl > 0 {
+    if left_to_ttl > 0 && left_to_ttl != *last_ttl_orphan_count {
         tracing::info!(
             count = left_to_ttl,
             "pending reminders whose issuer and recipient are both gone; they end at their TTL"
         );
     }
+    *last_ttl_orphan_count = left_to_ttl;
     expired
 }
 
@@ -313,6 +321,7 @@ fn run_external_wake_scan(
         cas_dir,
         chrono::Utc::now(),
         &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
+        &mut backoff.ttl_orphan_count,
     );
     let candidates = external_wake_candidates(cas_dir, session_name);
     if candidates.is_empty() {
@@ -693,8 +702,15 @@ mod tests {
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
         // cas-c634: the never-expiring internal-event reminder of a retired
         // worker (director_event) is expired with the external ones.
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 5);
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 0);
+        let mut ttl_orphan_count = 0;
+        assert_eq!(
+            expire_dead_session_reminders(&cas_dir, now, &process_alive, &mut ttl_orphan_count),
+            5
+        );
+        assert_eq!(
+            expire_dead_session_reminders(&cas_dir, now, &process_alive, &mut ttl_orphan_count),
+            0
+        );
         assert_eq!(
             orphaned_reminder_count(&cas_dir, now, &process_alive),
             2,
@@ -756,9 +772,18 @@ mod tests {
             for _ in 0..2 {
                 assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
             }
+            // Clearing the set must allow a notice when the same count returns.
+            for reminder in reminders.list_all_pending().unwrap() {
+                assert!(reminders.expire(reminder.id).unwrap());
+            }
+            assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            create();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
         });
         let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert_eq!(logs.matches("they end at their TTL").count(), 2,
+        assert_eq!(logs.matches("they end at their TTL").count(), 3,
             "one notice per count change, not per scan: {logs}");
     }
 }

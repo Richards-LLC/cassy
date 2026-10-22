@@ -39,8 +39,43 @@ terminal-qa: PASS cas-artifact-show · 12 runs · 0 fail · 0 warn · 0 allowed
 
 Both gated at 80 and 120 columns on the dark, light and both Solarized
 palettes, plus piped, `NO_COLOR`, `LC_ALL=C` and `--json` runs; captures under
-`captures/after/`. `publish` is not gated because it mutates: each run mints a
-new record and a new id, so the capture would not be reproducible. Its two
-rendered lines are the same verdict-plus-detail shape as `show`, which is
-gated, and its refusal paths are covered by
-`cas-cli/tests/artifact_publish_test.rs`.
+`captures/after/`. `publish` is gated with a fresh private project and ephemeral fake Cloud per
+run. This isolates its mutations and gives every receipt a durable record and
+wire readback. No inherited account or provider state is used. Its refusal
+paths are also covered by `cas-cli/tests/artifact_publish_test.rs`.
+
+### Publish correction (cas-a483)
+
+Candidate `1563617a858295bfe22aee5c381f4730cdb351e3` passed the repository
+`scripts/terminal-qa.mjs` gate. The four human receipt flows each ran at 80 and
+120 columns on all four palettes, piped, with `NO_COLOR`, and with `LC_ALL=C`.
+Every human line fits 76 columns. The unchanged JSON evidence comes from
+candidate `8d15b5e2f86387a92a3f41514b06546dffdbbdb7`, as approved by the
+supervisor; the correction changes only the human digest line.
+
+```text
+terminal-qa: PASS artifact-publish-committed · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS artifact-publish-failed · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS artifact-publish-offline · 11 runs · 0 fail · 0 warn · 0 allowed
+terminal-qa: PASS artifact-publish-legacy · 11 runs · 0 fail · 0 warn · 0 allowed
+```
+
+The initial candidate exposed a preexisting Unicode digest ellipsis under C
+locale (cas-b0ef). Its four failing reports are preserved in the task's
+`qa-initial/`; the approved correction prints the complete ASCII digest.
+HTML visual inspection is **NOT EXERCISED** because the browser runtime lists
+no browser. Supervisor approval #543993 accepts mechanical palette/contrast
+checks as the substitute. No visual PASS is claimed.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | `[WARN] local-only` or `[OK] published` leads; the next line names storage, and failure ends with `cas artifact show <id>`. |
+| Fit | 4 | One receipt, one storage outcome, full digest; only failed uploads expand into the cause and remedy. |
+| Craft | 4 | Full ASCII SHA occupies 76 columns; HTTP403 detail wraps with hanging indents and appears once. |
+| Theme safety | 4 | Four palettes, pipe, NO_COLOR and C pass mechanically; plain marks retain their meaning without color. HTML inspection remains unexercised. |
+| Machine contract | 4 | Each JSON run is one object with explicit storage/status; exit0 means a usable local record, so callers inspect storage to establish remote delivery. |
+
+Pipe captures for all four outcomes are committed under
+`captures/after/cas-artifact-publish/`. Full receipts, isolated wrappers, wire
+readbacks, candidate identity and initial failures are under the task's
+artifact root and `LEDGER.md`.

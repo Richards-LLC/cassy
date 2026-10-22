@@ -29,6 +29,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Cloud receipts** — Keep guarded remote closes visible until the local delivery changes, deduplicate matching diagnostics across pull scopes, and include both scopes in transition totals.
 
+- **Readable sync warnings** — Shorten guarded cloud-pull receipts for an 80-column terminal by omitting redundant no-rows text when an error already explains the result.
+
 - **Plain-locale sync** — Use locale-aware separators in cloud push/pull receipts and preserve update cause/remedy extraction with either ASCII or Unicode separators.
 
 - **Readable diagnosis** — Fit the missing-backend footer from factory doctor within an 80-column terminal.

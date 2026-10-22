@@ -5232,6 +5232,12 @@ async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe()
             assert!(text.contains(&source_id), "{text}");
             let error = started.expect_err("a peer update must not revoke the live lease");
             assert!(error.message.contains("locked"), "{error}");
+            assert!(
+                error
+                    .message
+                    .contains(&format!("task action=release id={id}")),
+                "{error}"
+            );
             let before = agents.get_lease(&id).unwrap().unwrap();
             agents.heartbeat(&source_id).unwrap();
             let after = agents.get_lease(&id).unwrap().unwrap();

@@ -1000,8 +1000,8 @@ pub struct RenewReport {
     pub conflicts: Vec<(String, PeerHold)>,
 }
 
-/// Renew the cloud claims of every task and epic `agent_id` holds a local
-/// lease on, and of the epic its focus claims ([`META_FOCUS_CLAIM`]), for the
+/// Renew the cloud claims of running tasks still assigned to `agent_id` with
+/// local leases, and of the epic its focus claims ([`META_FOCUS_CLAIM`]), for the
 /// configured lease duration. Called from the daemon heartbeat, so claims
 /// stay alive while the agent works and run out after it stops.
 ///
@@ -1016,7 +1016,7 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {
         return report;
     };
-    let Ok(leases) = agents.list_agent_leases(agent_id) else {
+    let Ok(leases) = agents.list_renewable_task_leases(agent_id) else {
         return report;
     };
     let me = agents.get(agent_id).ok();

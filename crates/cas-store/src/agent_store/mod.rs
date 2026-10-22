@@ -273,7 +273,7 @@ pub trait AgentStore: Send + Sync {
         Ok(true)
     }
 
-    /// Renew a task lease
+    /// Renew a task lease only while the live holder owns its running task.
     fn renew_lease(&self, task_id: &str, agent_id: &str, duration_secs: i64) -> Result<()>;
 
     /// Get lease for a task
@@ -281,6 +281,11 @@ pub trait AgentStore: Send + Sync {
 
     /// List all leases for an agent
     fn list_agent_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>>;
+
+    /// Active execution leases whose running task is still assigned to this
+    /// live agent (canonical id or registered display name). Missing tasks
+    /// are ineligible; independent worktree/focus claims are not task leases.
+    fn list_renewable_task_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>>;
 
     /// List all active leases
     fn list_active_leases(&self) -> Result<Vec<TaskLease>>;

@@ -453,7 +453,6 @@ fn test_lease_renewal() {
 
     // cas-eb7ff: the registry accepts canonical ids and legacy names, but
     // renewal belongs only to the currently assigned, running task.
-    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
     let peer = Agent::new("peer-id".into(), "peer-name".into());
     store.register(&peer).unwrap();
     for role in [
@@ -464,30 +463,27 @@ fn test_lease_renewal() {
         let mut owner = agent.clone();
         owner.role = role;
         store.update(&owner).unwrap();
-        for assignee in [
-            Some("agent-renew"),
-            Some("  AGENT-RENEW  "),
-            Some("  RENEW TEST  "),
-            Some("peer-id"),
-            Some("peer-name"),
-            None,
+        for (assignee, owns_task) in [
+            (Some("agent-renew"), true),
+            (Some("  AGENT-RENEW  "), true),
+            (Some("\tRENEW TEST\n"), true),
+            (Some("peer-id"), false),
+            (Some("peer-name"), false),
+            (None, false),
         ] {
             for status in [
                 cas_types::TaskStatus::Open,
                 cas_types::TaskStatus::InProgress,
                 cas_types::TaskStatus::Blocked,
                 cas_types::TaskStatus::Closed,
+                cas_types::TaskStatus::Cancelled,
                 cas_types::TaskStatus::AwaitingMerge,
             ] {
                 let mut task = tasks.get("task-renew").unwrap();
                 task.assignee = assignee.map(str::to_string);
                 task.status = status;
                 tasks.update(&task).unwrap();
-                let eligible = status == cas_types::TaskStatus::InProgress
-                    && assignee.is_some_and(|a| {
-                        a.trim().eq_ignore_ascii_case(&agent.id)
-                            || a.trim().eq_ignore_ascii_case(&agent.name)
-                    });
+                let eligible = status == cas_types::TaskStatus::InProgress && owns_task;
                 let before = store.get_lease(&task.id).unwrap().unwrap();
                 let renewed = store.renew_lease(&task.id, &agent.id, 120);
                 assert_eq!(
@@ -506,9 +502,68 @@ fn test_lease_renewal() {
             }
         }
     }
+    // A display-name collision cannot steal an opaque id assignment.
+    let mut replacement = Agent::new("replacement-id".into(), agent.id.clone());
+    replacement.registered_at = agent.registered_at + Duration::seconds(1);
+    store.register(&replacement).unwrap();
+    let mut task = tasks.get("task-renew").unwrap();
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some(agent.id.clone());
+    tasks.update(&task).unwrap();
+    store.renew_lease(&task.id, &agent.id, 120).unwrap();
+
+    // Restarted sessions reuse a display name, never the old session's id.
+    replacement.name = agent.name.clone();
+    store.update(&replacement).unwrap();
+    task.assignee = Some(agent.name.clone());
+    tasks.update(&task).unwrap();
+    assert!(store.renew_lease(&task.id, &agent.id, 120).is_err());
+    task.assignee = Some(agent.id.clone());
+    tasks.update(&task).unwrap();
+    store.renew_lease(&task.id, &agent.id, 120).unwrap();
+
+    for status in [AgentStatus::Idle, AgentStatus::Stale, AgentStatus::Shutdown] {
+        let mut owner = agent.clone();
+        owner.status = status;
+        store.update(&owner).unwrap();
+        assert_eq!(
+            store.renew_lease(&task.id, &agent.id, 120).is_ok(),
+            status == AgentStatus::Idle,
+            "{status:?}"
+        );
+    }
+    store.update(&agent).unwrap();
+    tasks.delete(&task.id).unwrap();
+    let before = store.get_lease(&task.id).unwrap().unwrap();
+    store.heartbeat(&agent.id).unwrap();
+    assert!(store.renew_lease(&task.id, &agent.id, 120).is_err());
+    assert_eq!(
+        store.get_lease(&task.id).unwrap().unwrap().renewal_count,
+        before.renewal_count
+    );
+
+    let (_temp, bootstrap) = create_test_store();
+    bootstrap.register(&agent).unwrap();
+    bootstrap
+        .try_claim("missing-task", &agent.id, 60, None)
+        .unwrap();
+    bootstrap.heartbeat(&agent.id).unwrap();
+    assert!(
+        bootstrap
+            .renew_lease("missing-task", &agent.id, 120)
+            .is_err()
+    );
+    assert_eq!(
+        bootstrap
+            .get_lease("missing-task")
+            .unwrap()
+            .unwrap()
+            .renewal_count,
+        0
+    );
 }
 
-/// cas-85d9: `heartbeat` must renew ALL of an agent's active task leases,
+/// Heartbeat must renew an agent's assigned, running task leases,
 /// not just worktree leases — this is the root-cause fix for "task leases
 /// are never renewed" (found while verifying cas-d165). Before this fix,
 /// `renew_lease` had zero production call sites for task leases at all.

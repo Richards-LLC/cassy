@@ -1262,6 +1262,7 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
         (TaskStatus::Open, Some(alpha.agent_id.as_str())),
         (TaskStatus::Blocked, Some(alpha.agent_id.as_str())),
         (TaskStatus::Closed, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Cancelled, Some(alpha.agent_id.as_str())),
         (TaskStatus::AwaitingMerge, Some(alpha.agent_id.as_str())),
     ] {
         let mut task = tasks.get("cas-pb01").unwrap();
@@ -1405,6 +1406,11 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
     agents.register(&worker).unwrap();
     // The worker holds the local lease, but a peer holds the cloud claim.
     agents.try_claim("cas-pb02", &worker.id, 600, Some("Task started")).unwrap();
+    let tasks = open_task_store(&alpha.cas_dir).unwrap();
+    let mut task = tasks.get("cas-pb02").unwrap();
+    task.assignee = Some(worker.id.clone());
+    task.status = TaskStatus::InProgress;
+    tasks.update(&task).unwrap();
     cloud.live(&bravo, "bravo-sup");
     start(&bravo.core, "cas-pb02", false).await.expect("bravo claims it");
 

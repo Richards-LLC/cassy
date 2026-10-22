@@ -64,33 +64,36 @@ impl RuntimeInventory {
                 }
                 let socket = gui_socket_path(&metadata.name);
                 recorded_sockets.insert(socket.clone());
+                // Attribute the record before any process/socket refusal: the
+                // registry is machine-wide, but this drain is project-scoped.
+                if let Some(project) = metadata.project_dir.as_deref() {
+                    let session_root = crate::store::find_cas_root_ignoring_env(Path::new(project))
+                        .map_err(|_| "runtime project root is unresolved")?
+                        .canonicalize()
+                        .map_err(|_| "runtime project root unreadable")?;
+                    if session_root != root {
+                        continue;
+                    }
+                }
                 if !crate::mcp::daemon::pid_alive(metadata.daemon_pid) {
-                    if socket.exists() {
-                        return Err("dead runtime metadata still has a GUI endpoint; inspect factory sessions".into());
+                    if !inactive_endpoint(&socket) {
+                        return Err(endpoint_refusal("dead", &metadata.name)?);
                     }
                     continue;
                 }
                 let actual = crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid);
                 if matches!((metadata.daemon_pid_starttime, actual), (Some(expected), Some(actual)) if expected != actual)
                 {
-                    if socket.exists() {
-                        return Err("stale runtime identity still has a GUI endpoint; inspect factory sessions".into());
+                    if !inactive_endpoint(&socket) {
+                        return Err(endpoint_refusal("stale", &metadata.name)?);
                     }
                     continue;
                 }
                 if metadata.daemon_pid_starttime.is_none() || actual.is_none() {
                     return Err("runtime process start identity is unknown".into());
                 }
-                let project = metadata
-                    .project_dir
-                    .as_deref()
-                    .ok_or("running runtime has no project identity")?;
-                let session_root = crate::store::find_cas_root_ignoring_env(Path::new(project))
-                    .map_err(|_| "running runtime project root is unresolved")?
-                    .canonicalize()
-                    .map_err(|_| "runtime project root unreadable")?;
-                if session_root != root {
-                    continue;
+                if metadata.project_dir.is_none() {
+                    return Err("running runtime has no project identity".into());
                 }
                 let identity = RuntimeIdentity {
                     canonical_cas_dir: root.clone(),
@@ -108,7 +111,8 @@ impl RuntimeInventory {
             }
         }
         // An unrecorded GUI endpoint cannot be attributed to an unrelated root.
-        // Do not mutate or clean it just to make an activation eligible.
+        // Probe it without unlinking: macOS clean exits can leave inactive
+        // pathnames even after their metadata has been removed.
         if let Some(base) = directory.parent() {
             match fs::read_dir(base) {
                 Ok(entries) => {
@@ -123,6 +127,7 @@ impl RuntimeInventory {
                                 name.starts_with("factory-") && name.ends_with(".gui.sock")
                             })
                             && !recorded_sockets.contains(&path)
+                            && !inactive_endpoint(&path)
                         {
                             return Err("unattributed factory GUI socket; inspect factory sessions before reconciliation".into());
                         }
@@ -223,6 +228,44 @@ impl RuntimeInventory {
         Ok(())
     }
 }
+/// Probe only; never unlink a path based on a refused connection. A listener,
+/// timeout, permission error or unavailable connector cannot prove inactivity.
+/// A short bound prevents a full backlog from stalling every project's update.
+fn inactive_endpoint(path: &Path) -> bool {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return false;
+        };
+        runtime.block_on(async {
+            matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(250),
+                    tokio::net::UnixStream::connect(path),
+                )
+                .await,
+                Ok(Err(error)) if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                )
+            )
+        })
+    })
+    .join()
+    .unwrap_or(false)
+}
+
+fn endpoint_refusal(state: &str, session: &str) -> Result<String, String> {
+    let [remedy] = crate::worktree::GitOperations::shell_remedies([("cas", &["kill", "--", session])])?;
+    Ok(format!(
+        "{state} session {} still has a held or unknown GUI endpoint; run `{remedy}`",
+        crate::worktree::GitOperations::visible_git_label(session),
+    ))
+}
+
 fn receive(stream: &mut UnixStream, deadline: Instant) -> Result<DaemonMessage, String> {
     receive_frame(stream, deadline)?
         .map_err(|_| "unknown/corrupt runtime control response".into())

@@ -496,6 +496,9 @@ pub struct Journey {
     /// Subject kinds and invariant IDs the gate may read back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readback: Option<crate::qa_readback::Declaration>,
+    /// Flags whose target-environment values the journey's evidence depends on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub depends_on_flags: Vec<String>,
     pub seeded: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -521,6 +524,7 @@ deserialize_with_extra!(Journey {
     finisher,
     evidence,
     readback,
+    depends_on_flags,
     seeded,
 });
 
@@ -1116,6 +1120,18 @@ impl Registry {
                     report.problem("readback", id, message);
                 }
             }
+            for flag in &journey.depends_on_flags {
+                let valid = !flag.is_empty()
+                    && flag.len() <= 128
+                    && flag.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-:/".contains(&b));
+                if !valid {
+                    report.problem(
+                        "depends_on_flags",
+                        id,
+                        format!("flag {flag:?} must be 1-128 letters, digits or ._-:/"),
+                    );
+                }
+            }
             for invariant in &journey.invariants {
                 if !self.invariants.contains_key(invariant) {
                     report.problem(
@@ -1454,6 +1470,15 @@ journeys:
                 "",
             ),
         ];
+        cases.push((
+            "flag with a space",
+            GABBER.replace(
+                "    fixtures: [fresh]\n",
+                "    fixtures: [fresh]\n    depends_on_flags: [\"audio evidence\"]\n",
+            ),
+            "depends_on_flags",
+            "audio evidence",
+        ));
         for (name, value) in [
             ("tagged readback extra", "!custom value"),
             ("map readback extra", "{1: value}"),

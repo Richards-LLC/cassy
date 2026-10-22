@@ -6,7 +6,10 @@ and end, and any mixed build: [map the build](../SKILL.md#walk-rules)),
 one-line scope, surface, 30-minute budget, headline counts for
 cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
 sweep state (`sweep: configured — <path>` or the exact line
-`sweep: not configured`).
+`sweep: not configured`). When the release gate snapshots the walked
+journeys' `depends_on_flags`, copy its header line verbatim:
+`Flags: <env>@<sha> {"flag":value}`. Promotion diffs it against the target
+environment, and a different value is `CONFIG_MISMATCH`.
 
 Use this exact row grammar so the verifier can consume it:
 

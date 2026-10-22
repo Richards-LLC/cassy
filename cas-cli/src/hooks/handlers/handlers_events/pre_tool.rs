@@ -9273,17 +9273,26 @@ mod workspace_contract_tests {
         env.set("CAS_CLONE_PATH", &worktree);
 
         let mut mismatches = Vec::new();
-        for (command, workdir, expected, missing_workdir) in [
-            ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false),
-            ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false),
-            ("printf x > target/check.log 2>&1".to_string(), None, "allow", false),
-            ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true),
-            ("printf x > ../../outside.log".to_string(), Some(child), "deny", false),
-            (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false),
-            (format!("printf x > '{}'", outside.display()), None, "deny", false),
+        for (command, workdir, expected, missing_workdir, unbound) in [
+            ("printf x > ../target/check.log 2>&1".to_string(), Some(child.clone()), "allow", false, false),
+            ("printf x > ../target/check.log 2>&1".to_string(), Some("hub-web".into()), "allow", false, false),
+            ("printf x > target/check.log 2>&1".to_string(), None, "allow", false, false),
+            ("printf x > ../target/check.log 2>&1".to_string(), None, "deny", true, false),
+            ("printf x > ../../outside.log".to_string(), Some(child), "deny", false, false),
+            (format!("printf x > '{}'", worktree.join("target/check.log").display()), None, "allow", false, false),
+            (format!("printf x > '{}'", outside.display()), None, "deny", false, false),
             (format!(r#"printf x > '{}'; sh -c "cd '{}' && printf y > outside.log""#,
-                outside.display(), outside.parent().unwrap().display()), None, "deny", false),
+                outside.display(), outside.parent().unwrap().display()), None, "deny", false, false),
+            (format!("cd '{}' && printf x > outside.log", outside.parent().unwrap().display()),
+                None, "deny", false, false),
+            ("printf x > outside.log".to_string(), Some(outside.parent().unwrap().to_path_buf()),
+                "deny", false, true),
         ] {
+            if unbound {
+                env.remove("CAS_CLONE_PATH");
+            } else {
+                env.set("CAS_CLONE_PATH", &worktree);
+            }
             // Codex 0.163 projects exec_command as Bash/command with turn cwd.
             // The optional workdir models the upstream projection once fixed.
             let mut input = bash_input(&command, &worktree);
@@ -9309,7 +9318,8 @@ mod workspace_contract_tests {
                 {
                     mismatches.push(format!("missing-workdir refusal must explain uncertainty without a guessed escape: {value}"));
                 }
-            } else if expected == "deny" && !reason.contains(&outside.display().to_string()) {
+            } else if expected == "deny" && (!reason.contains(&outside.display().to_string())
+                || reason.contains("hook input omits workdir")) {
                 mismatches.push(format!("real escape must name its destination: {value}"));
             }
         }

@@ -2364,6 +2364,14 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         )
         .unwrap();
     assert_eq!(observations, 1, "the retry records one observation");
+    let pending_intents: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pending_observed_delivery_merges WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_intents, 0, "successful recovery clears its intent");
 }
 
 #[tokio::test]

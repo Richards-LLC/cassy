@@ -94,6 +94,21 @@ BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS observed_delivery_merges_immutable_delete
 BEFORE DELETE ON observed_delivery_merges
 BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
+
+-- Worktree merges are published before their durable observation is written.
+-- Keep an idempotent intent first so a failed observation can be resumed after
+-- origin already contains the parked source.
+CREATE TABLE IF NOT EXISTS pending_observed_delivery_merges (
+    task_id TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    source_commit_sha TEXT NOT NULL,
+    actor_agent_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, target_branch, source_commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_observed_delivery_merges_task
+    ON pending_observed_delivery_merges(task_id, created_at DESC);
 "#;
 
 /// Persist an authenticated worktree_merge observation after Git has advanced
@@ -141,6 +156,92 @@ pub fn record_observed_delivery_merge(
                 actor_agent_id,
                 Utc::now().to_rfc3339()
             ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Persist the recovery intent before a nontransactional Git merge starts.
+/// If the later observation write fails after publication, worktree_merge can
+/// distinguish its retry from an ordinary already-contained no-op.
+pub fn record_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+    actor_agent_id: &str,
+) -> Result<()> {
+    if [
+        task_id,
+        source_branch,
+        target_branch,
+        source_commit_sha,
+        actor_agent_id,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(StoreError::Parse(
+            "pending observed merge requires complete task, branch, commit, and actor identity"
+                .to_string(),
+        ));
+    }
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Whether this exact parked source has an unfinished observation recovery.
+pub fn has_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<bool> {
+    let conn = open(root)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pending_observed_delivery_merges
+             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+               AND source_commit_sha = ?4
+         )",
+        params![task_id, source_branch, target_branch, source_commit_sha],
+        |row| row.get(0),
+    )?)
+}
+
+/// Remove a pending intent after the observation and its close/dispatch path
+/// have been durably resumed. Repeated clears are harmless.
+pub fn clear_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<()> {
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "DELETE FROM pending_observed_delivery_merges
+             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+               AND source_commit_sha = ?4",
+            params![task_id, source_branch, target_branch, source_commit_sha],
         )?;
         Ok(())
     })

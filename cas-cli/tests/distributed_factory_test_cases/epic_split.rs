@@ -287,11 +287,22 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
 }
 
 fn with_broken_release_column<T>(root: &std::path::Path, probe: impl FnOnce() -> T) -> T {
+    struct RestoreReleaseColumn(rusqlite::Connection);
+    impl Drop for RestoreReleaseColumn {
+        fn drop(&mut self) {
+            if let Err(error) = self.0.execute_batch(
+                "ALTER TABLE epic_split_releases RENAME COLUMN broken_task_id TO task_id;",
+            ) {
+                // Do not panic again while unwinding a failed probe. The
+                // caller also checks restoration on normal/caught exits.
+                eprintln!("could not restore split release fixture column: {error}");
+            }
+        }
+    }
     let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
     conn.execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN task_id TO broken_task_id;").unwrap();
-    let result = probe();
-    conn.execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN broken_task_id TO task_id;").unwrap();
-    result
+    let _restore = RestoreReleaseColumn(conn);
+    probe()
 }
 
 #[tokio::test(flavor = "multi_thread")]

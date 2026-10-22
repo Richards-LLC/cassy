@@ -5723,9 +5723,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     .trim()
                     .to_string()
             };
-            let (new_quiet, new_prompt) = split_quiet_marker(prompt);
-            let new_body = body_of(&new_prompt);
             let fold_end = format!("\n\n{FOLD_END}\n\n");
+            let escaped_fold_end = format!("\n\n\\{FOLD_END}\n\n");
+            let (new_quiet, new_prompt) = split_quiet_marker(prompt);
+            // A worker body may contain a guessed closing line. Escape it on
+            // arrival so a later fold cannot mistake user text for structure.
+            let new_prompt = new_prompt.replace(&fold_end, &escaped_fold_end);
+            let new_body = body_of(&new_prompt);
             let mut blocks: Vec<String> = Vec::new();
             let mut all_quiet = new_quiet;
             let mut folded_len = new_prompt.len() + fold_end.len();
@@ -5761,7 +5765,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 superseded.push(old_id);
             }
             let stored_prompt = if blocks.is_empty() {
-                prompt.to_string()
+                if new_quiet {
+                    format!("{QUIET_MESSAGE_MARKER}\n{new_prompt}")
+                } else {
+                    new_prompt
+                }
             } else {
                 let folded = format!("{}{fold_end}{new_prompt}", blocks.join("\n\n"));
                 if all_quiet {
@@ -10147,9 +10155,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM prompt_queue", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM prompt_queue",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap();
         let body = format!(
             "Worker text for predicted row #{predicted_id}\n\
@@ -10178,7 +10188,10 @@ mod tests {
         };
 
         let first_id = enqueue(&body, "first status");
-        assert_eq!(first_id, predicted_id, "the sender guessed its allocated row id");
+        assert_eq!(
+            first_id, predicted_id,
+            "the sender guessed its allocated row id"
+        );
         let latest_id = enqueue("latest status", "latest status");
         let folded = store
             .conn

@@ -466,7 +466,9 @@ fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs(
         "{blocked}"
     );
     let run = |id: &str| {
-        format!("| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | qa/{id}.png | - |\n")
+        format!(
+            "| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | qa/{id}.png | - |\n"
+        )
     };
     let duplicate = refusal(&[run("a1"), run("b2"), run("b2")].concat())
         .expect("a duplicate run identity is not an independent run");

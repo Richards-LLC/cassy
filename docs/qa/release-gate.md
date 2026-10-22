@@ -142,6 +142,26 @@ differ, or that either side lacks, is
 `CONFIG_MISMATCH <flag>: test=<value> target=<value> (<journeys>)`, and the
 named journeys' evidence does not prove the target.
 
+## Independent runs: `independence_key`
+
+A product can dedupe a resubmission and answer with the same in-flight
+result, so three recorded runs may be two real ones. A journey names the
+result identity that makes runs independent:
+
+```yaml
+journeys:
+  - id: audit
+    independence_key: post_audit_v2_runs.id
+```
+
+`cas qa journeys --check` rejects a key that is not 1–128 letters, digits or
+`._-`. Each PASS or FAIL run row records `post_audit_v2_runs.id=<id>` in any
+cell. Only distinct ids count toward the runs a gate requires; a duplicate id
+or a row without one is refused by name, for example
+`3 audit runs recorded, 2 independent by post_audit_v2_runs.id: duplicate post_audit_v2_runs.id=b2 (2 rows)`.
+The approved `qa_record` journey check (G8) applies it today; the golden-set
+matrix (C8) passes its `runs` count to the same rule.
+
 ## Deploy failure alerts
 
 The factory daemon watches configured deploy workflows on the integration branch

@@ -134,6 +134,8 @@ pub enum QaCommand {
     Impact(super::qa_impact::ImpactArgs),
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
+    /// Walk a staging SHA through the release gate (run, status, record, abort)
+    ReleaseGate(super::qa_release_gate::ReleaseGateArgs),
     /// Tear down expired release fixture handles after a crash
     Fixtures {
         #[arg(long, required = true)]
@@ -162,6 +164,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
         QaCommand::Impact(args) => super::qa_impact::execute(args, cli, cas_root),
         QaCommand::PostRelease(args) => super::qa_post_release::execute(args, cli, cas_root),
+        QaCommand::ReleaseGate(args) => super::qa_release_gate::execute(args, cli, cas_root),
         QaCommand::Fixtures { sweep: _ } => {
             let root = cas_root.context("No Cassy project; run cas init first")?;
             let project =

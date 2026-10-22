@@ -565,6 +565,9 @@ pub struct Journey {
     /// Units of each declared resource one run of the journey uses.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub consumes: BTreeMap<String, u32>,
+    /// A main journey: the release gate walks it on every gate, impacted or not.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub release_always: bool,
     pub seeded: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -593,6 +596,7 @@ deserialize_with_extra!(Journey {
     depends_on_flags,
     independence_key,
     consumes,
+    release_always,
     seeded,
 });
 

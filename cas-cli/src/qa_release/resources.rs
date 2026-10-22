@@ -407,7 +407,8 @@ fn acquire<'a>(
                         Limit::Quota { per_day } => ResourceRefusal::Quota {
                             resource: name.clone(),
                             need: u64::from(amount),
-                            left: u64::from(per_day),
+                            left: cas_store::resource_used(meter.cas_root, meter.env, name, now - DAY_MS)
+                                .map_or(0, |used| u64::from(per_day).saturating_sub(used)),
                             per_day,
                             env: printable(meter.env),
                         },

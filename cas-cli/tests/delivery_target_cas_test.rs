@@ -714,7 +714,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
         "close must retain its configured durable artifact as queryable receipt metadata"
     );
 
-    let mut env = env.enter_dir(&fixture.repo.root);
+    let env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     assert!(
@@ -1086,7 +1086,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
-    let mut env = env.enter_dir(&fixture.repo.root);
+    let env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     let state = delivery_state(&fixture);
@@ -1133,7 +1133,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     );
     fixture.repo.arm_post_checkout_drift("cas0a21drift", "main");
 
-    let mut env = env.enter_dir(&fixture.repo.root);
+    let env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     // The hook must actually have fired, or this regression proves nothing.
@@ -1201,7 +1201,7 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
 
     let mut env = env.enter_dir(&first.repo.root);
     let first_output = run_merge(&first).await;
-    let mut env = env.enter_dir(&second.repo.root);
+    let env = env.enter_dir(&second.repo.root);
     let second_output = run_merge(&second).await;
 
     assert_eq!(

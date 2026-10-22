@@ -10949,6 +10949,10 @@ impl CasCore {
         };
         // cas-5f28: a closed task's Cassy Cloud claim is released too.
         crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.id);
+        // cas-8dbe: so are the file leases its worker took while editing.
+        if let Ok(agent_id) = self.get_agent_id() {
+            crate::cloud::file_leases::release_all(&self.cas_root, &agent_id);
+        }
 
         self.retire_delivered_worker_cache(&task);
 

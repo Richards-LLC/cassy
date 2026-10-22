@@ -96,7 +96,68 @@ pub fn handle_pre_tool_use(
         updated["command"] = serde_json::Value::String(rewritten);
         return handle_pre_tool_use_inner(input, cas_root, Some(updated));
     }
-    handle_pre_tool_use_inner(input, cas_root, None)
+    let mut output = handle_pre_tool_use_inner(input, cas_root, None)?;
+    // cas-8dbe: only an edit the policy above allows takes a file lease.
+    let denied = matches!(
+        &output.hook_specific_output,
+        Some(crate::hooks::types::HookSpecificOutput::PreToolUse { permission_decision: Some(decision), .. }) if decision == "deny"
+    );
+    if !denied
+        && let Some(note) = cas_root.and_then(|root| worker_file_lease_note(input, root))
+    {
+        output.append_pre_tool_context(&note);
+    }
+    Ok(output)
+}
+
+/// cas-8dbe: a worker about to edit a repository file claims it through Cassy
+/// Cloud, and learns when another session's worker already holds it.
+fn worker_file_lease_note(input: &HookInput, cas_root: &Path) -> Option<String> {
+    if !crate::harness_policy::is_worker(input)
+        || !matches!(input.tool_name.as_deref(), Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit"))
+    {
+        return None;
+    }
+    let tool_input = input.tool_input.as_ref()?;
+    let file = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("notebook_path"))
+        .and_then(|value| value.as_str())?;
+    let cwd = Path::new(&input.cwd);
+    let file = if Path::new(file).is_absolute() { std::path::PathBuf::from(file) } else { cwd.join(file) };
+    let toplevel = std::process::Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let repo = std::path::PathBuf::from(String::from_utf8_lossy(&toplevel.stdout).trim());
+    let relative = file.strip_prefix(&repo).ok()?.to_string_lossy().replace('\\', "/");
+    if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
+        return None;
+    }
+    let agent_id = current_agent_id(input);
+    let agent_name = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| agent_id.clone());
+    let task = crate::store::open_task_store(cas_root)
+        .ok()?
+        .list(Some(cas_types::TaskStatus::InProgress))
+        .ok()?
+        .into_iter()
+        .find(|task| {
+            task.assignee
+                .as_deref()
+                .is_some_and(|assignee| assignee == agent_id || assignee == agent_name)
+        })?;
+    match crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative) {
+        crate::cloud::file_leases::FileLease::HeldBy(holder) => {
+            Some(crate::cloud::file_leases::collision_note(&relative, &holder))
+        }
+        _ => None,
+    }
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.

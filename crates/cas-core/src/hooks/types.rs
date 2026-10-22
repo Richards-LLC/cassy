@@ -655,6 +655,43 @@ impl HookOutput {
         }
     }
 
+    /// cas-8dbe: add advisory `additionalContext` to a PreToolUse response
+    /// that does not deny, keeping any decision or rewritten input. Codex
+    /// treats a decision-less PreToolUse body as invalid output, so only the
+    /// Claude harness carries the advisory. Returns whether it was added.
+    pub fn append_pre_tool_context(&mut self, context: &str) -> bool {
+        self.append_pre_tool_context_for_harness(PreToolUseHarness::current(), context)
+    }
+
+    /// [`Self::append_pre_tool_context`] for an explicit harness.
+    pub fn append_pre_tool_context_for_harness(
+        &mut self,
+        harness: PreToolUseHarness,
+        context: &str,
+    ) -> bool {
+        if harness == PreToolUseHarness::Codex {
+            return false;
+        }
+        match self.hook_specific_output.get_or_insert(HookSpecificOutput::PreToolUse {
+            permission_decision: None,
+            permission_decision_reason: None,
+            updated_input: None,
+            additional_context: None,
+        }) {
+            HookSpecificOutput::PreToolUse { permission_decision, additional_context, .. } => {
+                if permission_decision.as_deref() == Some("deny") {
+                    return false;
+                }
+                *additional_context = Some(match additional_context.take() {
+                    Some(existing) => format!("{existing}\n\n{context}"),
+                    None => context.to_string(),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// PreToolUse with a modified tool input. Claude Code applies the updated
     /// input in place of the original before the tool runs.
     pub fn with_pre_tool_updated_input(updated_input: serde_json::Value) -> Self {

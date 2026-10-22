@@ -960,7 +960,7 @@ const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::fro
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli, hub_tracing_root, run};
+    use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was

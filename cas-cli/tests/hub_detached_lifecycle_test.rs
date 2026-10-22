@@ -340,7 +340,9 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         let barrier = race_home.path().join("stop-cleanup-barrier");
         fs::create_dir_all(&barrier).unwrap();
         let initial = cas_command(race_home.path(), &path)
-            .args(["--json", "hub", "--no-tailscale-serve", "start", "--port", "0"])
+            .args([
+                "--json", "hub", "--no-tailscale-serve", "start", "--port", "0",
+            ])
             .output()
             .expect("start old generation before cleanup race");
         assert!(initial.status.success(), "{initial:?}");
@@ -364,7 +366,9 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         }
         let mut starter = cas_command(race_home.path(), &path)
             .env("CAS_TEST_HUB_LAUNCH_WAIT_BARRIER", &barrier)
-            .args(["--json", "hub", "--no-tailscale-serve", "start", "--port", "0"])
+            .args([
+                "--json", "hub", "--no-tailscale-serve", "start", "--port", "0",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -397,9 +401,12 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
             "old stop erased the successful replacement's process record: {status}"
         );
         assert_eq!(status["record"]["pid"], replacement["pid"], "{status}");
-        assert!(paths.lock_holders().iter().any(|holder| {
-            Some(u64::from(holder.pid)) == replacement["pid"].as_u64()
-        }), "replacement record must identify the actual lock owner: {status}");
+        assert!(
+            paths.lock_holders().iter().any(|holder| {
+                Some(u64::from(holder.pid)) == replacement["pid"].as_u64()
+            }),
+            "replacement record must identify the actual lock owner: {status}"
+        );
         let stopped = cas_command(race_home.path(), &path)
             .args(["--json", "hub", "stop"])
             .output()

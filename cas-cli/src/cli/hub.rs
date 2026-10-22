@@ -693,7 +693,13 @@ impl HubRestartStopReceipt {
     }
 }
 
-/// Wait for the machine to go quiescent, unless the relaunch is already done.
+enum StopWait {
+    /// Keep the machine exclusive until old-generation cleanup finishes.
+    Quiescent(crate::hub::HubInstanceLock),
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for exclusive cleanup ownership, unless the relaunch is already done.
 ///
 /// `settle_pid` is the hub we just signalled: quiescence additionally requires
 /// that process to be gone. `stale_pid` is never accepted as satisfying — the
@@ -706,7 +712,7 @@ fn wait_for_stop_or_satisfying_hub(
     relaunch: Option<&RelaunchIntent<'_>>,
     force: bool,
     stop_deadline: Option<crate::bounded_process::Deadline>,
-) -> Result<Option<HubProcessRecord>> {
+) -> Result<StopWait> {
     #[cfg(debug_assertions)]
     mark_restart_stop_waiter_for_test()?;
 
@@ -728,10 +734,12 @@ fn wait_for_stop_or_satisfying_hub(
         // alone then reports a false stop timeout.
         let quiescent = lock.is_some()
             && (force || settle_pid.is_none_or(|pid| !process_is_running(pid)));
-        drop(lock);
         if quiescent {
-            return Ok(None);
+            let mut lock = lock.expect("quiescence requires the machine lock");
+            lock.set_phase("stopping")?;
+            return Ok(StopWait::Quiescent(lock));
         }
+        drop(lock);
         if let Some(intent) = relaunch
             && let Ok(record) = paths.read_process_record()
             && stale_pid != Some(record.pid)
@@ -745,7 +753,7 @@ fn wait_for_stop_or_satisfying_hub(
             )
             && record_is_ready(paths, &record)
         {
-            return Ok(Some(record));
+            return Ok(StopWait::AlreadySatisfied(Box::new(record)));
         }
         if Instant::now() >= deadline {
             if let Some(holder) = holder.as_ref()
@@ -3064,7 +3072,7 @@ fn stop_with_output_before(
     // foreground process now always tears it down on SIGTERM, so stop must
     // judge the final outcome instead of which process issued `serve off`.
     let owned_tailscale_receipt = tailscale_manager.owned_receipt();
-    if record.as_ref().is_some_and(record_is_live) {
+    let cleanup_lock = if record.as_ref().is_some_and(record_is_live) {
         let record = record.as_ref().expect("live record exists");
         #[cfg(unix)]
         nix::sys::signal::kill(
@@ -3075,7 +3083,7 @@ fn stop_with_output_before(
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
-        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+        wait_for_stop_or_satisfying_hub(
             &paths,
             Some(record.pid),
             stale_pid,
@@ -3083,13 +3091,11 @@ fn stop_with_output_before(
             relaunch.as_ref(),
             force,
             stop_deadline,
-        )? {
-            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
-        }
+        )?
     } else {
         // Record absence does not authorize stale cleanup: a shutting-down hub
         // may already have removed it while still holding the machine lock.
-        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+        wait_for_stop_or_satisfying_hub(
             &paths,
             None,
             stale_pid,
@@ -3097,10 +3103,12 @@ fn stop_with_output_before(
             relaunch.as_ref(),
             force,
             stop_deadline,
-        )? {
-            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
-        }
-    }
+        )?
+    };
+    let cleanup_lock = match cleanup_lock {
+        StopWait::AlreadySatisfied(record) => return Ok(StopOutcome::AlreadySatisfied(record)),
+        StopWait::Quiescent(lock) => lock,
+    };
     hold_hub_test_barrier(
         "CAS_TEST_HUB_STOP_CLEANUP_BARRIER",
         "stop-cleanup",
@@ -3131,6 +3139,10 @@ fn stop_with_output_before(
     };
     paths.remove_process_record()?;
     ensure_stop_budget(stop_deadline)?;
+    // Launchers and foreground hubs publish under this same machine lock.
+    // Releasing it before cleanup would let a replacement's record or owned
+    // Tailscale mapping be removed by the previous generation's stop.
+    drop(cleanup_lock);
     let receipt = HubStopReceipt {
         stopped: true,
         pid: record.as_ref().map(|record| record.pid),

@@ -629,6 +629,17 @@ mod pre_compact_flush_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[test]
+    fn notification_webhook_sender_rejects_external_http() {
+        let error = send_webhook_notification(
+            "http://127.0.0.1:1/webhook",
+            "notification text must not leave over HTTP",
+        )
+        .expect_err("external HTTP is not a valid notification destination")
+        .to_string();
+        assert!(error.contains("HTTPS"), "{error}");
+    }
+
     // -------------------------------------------------------------------------
     // Test helpers
     // -------------------------------------------------------------------------

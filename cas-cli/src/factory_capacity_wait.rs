@@ -15,6 +15,7 @@ use cas_types::{AgentRole, TaskStatus};
 
 const RETRY_SECONDS: i64 = 120;
 const ESCALATE_SECONDS: i64 = 20 * 60;
+const LOWEST_PRIORITY: i32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CapacityWait {
@@ -27,8 +28,37 @@ pub(crate) struct CapacityWait {
     session: Option<String>,
     pub since: DateTime<Utc>,
     pub next_retry: DateTime<Utc>,
-    cause: String,
+    pub(crate) cause: String,
     notified: bool,
+}
+
+fn effective_priority(priority: i32, since: DateTime<Utc>, now: DateTime<Utc>) -> i32 {
+    let waited_seconds = (now - since).num_seconds().max(0);
+    // Aging one level per escalation interval guarantees that a long-waiting
+    // task eventually ties P0 and FIFO order then prevents starvation.
+    (priority.clamp(0, LOWEST_PRIORITY) - (waited_seconds / ESCALATE_SECONDS) as i32).max(0)
+}
+
+fn same_identity(left: &CapacityWait, right: &CapacityWait) -> bool {
+    left.worker_id == right.worker_id
+        && left.task_id == right.task_id
+        && left.lease_epoch == right.lease_epoch
+        && left.checkout == right.checkout
+        && left.session == right.session
+}
+
+fn compare_position(
+    left_priority: i32,
+    left_since: &DateTime<Utc>,
+    left_name: &str,
+    right_priority: i32,
+    right_since: &DateTime<Utc>,
+    right_name: &str,
+) -> std::cmp::Ordering {
+    left_priority
+        .cmp(&right_priority)
+        .then_with(|| left_since.cmp(&right_since))
+        .then_with(|| left_name.cmp(right_name))
 }
 
 fn directory(root: &Path) -> PathBuf {
@@ -186,17 +216,77 @@ pub(crate) fn record_refusal(
     };
     let _lock = lock(root)?;
     if let Some(previous) = read(&path(root, &wait.worker_id))?
-        && previous.task_id == wait.task_id
-        && previous.lease_epoch == wait.lease_epoch
-        && previous.checkout == wait.checkout
-        && previous.session == wait.session
+        && same_identity(&previous, &wait)
     {
         wait = previous;
     }
-    wait.cause = cause.to_string();
+    let priority = open_task_store(root)?.get(&wait.task_id)?.priority.0;
+    let priority = effective_priority(priority, wait.since, now);
+    wait.cause = format!("priority=P{priority} {cause}");
     wait.next_retry = now + Duration::seconds(RETRY_SECONDS);
     write(root, &wait)?;
     Ok(Some(wait))
+}
+
+/// Refuse a lower-ranked retry while a live, higher-ranked waiter is ahead in
+/// the queue. Call while the worker-check admission lock is held.
+pub(crate) fn priority_refusal(
+    root: &Path,
+    repo: &Path,
+    now: DateTime<Utc>,
+) -> Result<Option<String>> {
+    let Some(mut requester) = binding(root, repo, now)? else {
+        return Ok(None);
+    };
+    let _lock = lock(root)?;
+    if let Some(previous) = read(&path(root, &requester.worker_id))?
+        && same_identity(&previous, &requester)
+    {
+        requester = previous;
+    }
+    let tasks = open_task_store(root)?;
+    let request_priority = effective_priority(
+        tasks.get(&requester.task_id)?.priority.0,
+        requester.since,
+        now,
+    );
+    let mut first_ahead: Option<(i32, DateTime<Utc>, String)> = None;
+    for (_, wait) in entries(root)? {
+        if wait.worker_id == requester.worker_id || !current(root, &wait, now)? {
+            continue;
+        }
+        let task = match tasks.get(&wait.task_id) {
+            Ok(task) => task,
+            Err(_) => continue,
+        };
+        let priority = effective_priority(task.priority.0, wait.since, now);
+        if compare_position(
+            priority,
+            &wait.since,
+            &wait.worker_name,
+            request_priority,
+            &requester.since,
+            &requester.worker_name,
+        ) != std::cmp::Ordering::Less
+        {
+            continue;
+        }
+        let position = (priority, wait.since.clone(), wait.worker_name);
+        if first_ahead.as_ref().is_none_or(|first| {
+            compare_position(
+                position.0,
+                &position.1,
+                &position.2,
+                first.0,
+                &first.1,
+                &first.2,
+            ) == std::cmp::Ordering::Less
+        }) {
+            first_ahead = Some(position);
+        }
+    }
+    Ok(first_ahead
+        .map(|(priority, _, worker)| format!("queued behind priority=P{priority} worker={worker}")))
 }
 
 /// Admission ends this checkout's wait before Cargo starts. Stale identities

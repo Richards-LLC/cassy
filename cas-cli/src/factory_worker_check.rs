@@ -406,13 +406,19 @@ impl std::fmt::Display for CapacityRefusal {
 impl std::error::Error for CapacityRefusal {}
 
 fn recorded_refusal(root: &Path, repo: &Path, cause: &str) -> anyhow::Error {
-    let mut message = waiting_for_admission(cause);
     match crate::factory_capacity_wait::record_refusal(root, repo, cause, chrono::Utc::now()) {
-        Ok(Some(wait)) => message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339())),
-        Ok(None) => {},
-        Err(error) => message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed.")),
+        Ok(Some(wait)) => {
+            let mut message = waiting_for_admission(&wait.cause);
+            message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
+            anyhow::anyhow!(message)
+        }
+        Ok(None) => anyhow::anyhow!(waiting_for_admission(cause)),
+        Err(error) => {
+            let mut message = waiting_for_admission(cause);
+            message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed."));
+            anyhow::anyhow!(message)
+        }
     }
-    anyhow::anyhow!(message)
 }
 
 #[derive(Debug)]
@@ -1461,8 +1467,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
+        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "));
         drop(admission);
-        return Err(recorded_refusal(&cas_root, &repo, &violations.join("; ")));
+        return Err(refusal);
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
@@ -1472,13 +1479,24 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
+    if let Some(cause) = crate::factory_capacity_wait::priority_refusal(
+        &cas_root,
+        &repo,
+        chrono::Utc::now(),
+    )? {
+        let refusal = recorded_refusal(&cas_root, &repo, &cause);
+        drop(admission);
+        return Err(refusal);
+    }
     let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
         Ok(slot) => slot,
         Err(error) => {
-            drop(admission);
             if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
-                return Err(recorded_refusal(&cas_root, &repo, &refusal.0));
+                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0);
+                drop(admission);
+                return Err(refusal);
             }
+            drop(admission);
             return Err(error);
         }
     };
@@ -2892,6 +2910,143 @@ PY"#);
         assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
         crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(30)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn higher_priority_capacity_waiter_gets_next_slot_and_lower_priority_progresses() {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus};
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders=1\n",
+        )
+        .unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+
+        let mut repos = Vec::new();
+        for (worker_id, worker_name, task_id, priority) in [
+            (
+                "priority-p2-worker",
+                "priority-p2",
+                "cas-priority-p2",
+                Priority::MEDIUM,
+            ),
+            (
+                "priority-p0-worker",
+                "priority-p0",
+                "cas-priority-p0",
+                Priority::CRITICAL,
+            ),
+        ] {
+            let mut agent = Agent::new_with_role(
+                worker_id.into(),
+                worker_name.into(),
+                AgentRole::Worker,
+            );
+            agent.factory_session = Some(format!("session-{worker_name}"));
+            agents.register(&agent).unwrap();
+            let mut task = Task::new(task_id.into(), "wait for a builder slot".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some(worker_name.into());
+            task.priority = priority;
+            tasks.add(&task).unwrap();
+            agents
+                .try_claim(task_id, worker_id, 3600, Some("working"))
+                .unwrap();
+            let repo = root.join("worktrees").join(worker_name);
+            fixture_commit(&repo);
+            repos.push(repo);
+        }
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        let p2_wait = execute_at(&root, &args, &repos[0], &fake)
+            .unwrap_err()
+            .to_string();
+        let p0_wait = execute_at(&root, &args, &repos[1], &fake)
+            .unwrap_err()
+            .to_string();
+        drop(held);
+
+        let p2_retried = execute_at(&root, &args, &repos[0], &fake)
+            .err()
+            .map(|error| error.to_string());
+        let p0_admitted_first = execute_at(&root, &args, &repos[1], &fake).is_ok();
+        let p2_admitted_after = execute_at(&root, &args, &repos[0], &fake).is_ok();
+
+        // A long-waiting P2 ages into P0 and breaks ties by its earlier wait
+        // time, so a stream of newly queued P0 work cannot starve it forever.
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        execute_at(&root, &args, &repos[0], &fake).unwrap_err();
+        execute_at(&root, &args, &repos[1], &fake).unwrap_err();
+        let p2_wait_path = std::fs::read_dir(root.join("capacity-waits"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|wait| wait["worker_id"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("priority-p2-worker")
+            })
+            .unwrap();
+        let mut p2_wait_record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&p2_wait_path).unwrap()).unwrap();
+        p2_wait_record["since"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339()
+        );
+        std::fs::write(&p2_wait_path, serde_json::to_vec(&p2_wait_record).unwrap()).unwrap();
+        drop(held);
+
+        let p0_aged_p2_block = execute_at(&root, &args, &repos[1], &fake)
+            .err()
+            .map(|error| error.to_string());
+        let p2_aged_admitted = execute_at(&root, &args, &repos[0], &fake).is_ok();
+        let p0_admitted_after_aged_p2 = execute_at(&root, &args, &repos[1], &fake).is_ok();
+
+        let mut failures = Vec::new();
+        if !p2_wait.contains("priority=P2") {
+            failures.push(format!("P2 refusal omitted its priority: {p2_wait}"));
+        }
+        if !p0_wait.contains("priority=P0") {
+            failures.push(format!("P0 refusal omitted its priority: {p0_wait}"));
+        }
+        if !p2_retried
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("P2 retry was not queued behind P0: {p2_retried:?}"));
+        }
+        if !p0_admitted_first || !p2_admitted_after {
+            failures.push("P0 did not go first while P2 later progressed".to_string());
+        }
+        if !p0_aged_p2_block
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("aged P2 did not precede fresh P0: {p0_aged_p2_block:?}"));
+        }
+        if !p2_aged_admitted || !p0_admitted_after_aged_p2 {
+            failures.push("aged P2 or the following P0 failed to make progress".to_string());
+        }
+        assert!(
+            failures.is_empty(),
+            "priority admission failed: {}",
+            failures.join("; ")
+        );
     }
 
     #[cfg(unix)]

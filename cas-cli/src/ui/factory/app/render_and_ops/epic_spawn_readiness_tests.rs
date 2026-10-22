@@ -267,7 +267,16 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .err()
                 .expect("unpublished peer lane must not be recreated")
                 .to_string();
-            if !error.contains(&format!("epic branch not published by {host}"))
+            let control_ref = branch.chars().any(char::is_control);
+            if control_ref {
+                // pin: control-bearing refs require visible identity and manual action, never a command.
+                if !error.contains("contains control characters") || !error.contains("\\u{85}")
+                    || error.lines().any(|line| line.starts_with("git "))
+                    || error.chars().any(|c| c.is_control() && c != '\n')
+                {
+                    failures.push(format!("control-bearing ref lacked safe refusal: {error:?}"));
+                }
+            } else if !error.contains(&format!("epic branch not published by {host}"))
                 || error.lines().count() != 3
                 || error.chars().any(|c| c.is_control() && c != '\n')
             {
@@ -301,10 +310,13 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let expected =
                 include_str!("../../../../../../docs/design/cli/epic-peer-publication.capture.txt")
                     .to_string();
-            if normalized != expected {
+            if !control_ref && normalized != expected {
                 failures.push(format!("diagnostic capture mismatch: {normalized:?}"));
             }
-            if let Some(command) = error.lines().find(|line| line.starts_with("git push ")) {
+            if control_ref {
+                // The source operator may push by hand; the refusal prints no command.
+                git(&f.repo, &["push", "origin", branch]);
+            } else if let Some(command) = error.lines().find(|line| line.starts_with("git push ")) {
                 // Paste the entire displayed line, without stripping any markup.
                 let published = run_bash_remedy(&f.repo, command, "");
                 if !published.status.success() {

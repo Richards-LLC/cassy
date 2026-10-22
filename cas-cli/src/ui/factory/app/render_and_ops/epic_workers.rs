@@ -4635,8 +4635,18 @@ mod spawn_base_tests {
         assert!(error.contains("git fetch origin epic/missing"), "{error}");
         assert!(full_sha(&repo, "epic/missing").is_none());
         let mut failures = Vec::new();
-        for branch in ["epic/{a,b}", "epic/a!e", "epic/$(touch${IFS}SUBSTITUTED)", "epic/a b", "epic/a'quote"] {
+        for branch in ["epic/{a,b}", "epic/a!e", "epic/$(touch${IFS}SUBSTITUTED)", "epic/a b", "epic/a'quote", "epic/control\u{85}label"] {
             let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+            if branch.chars().any(char::is_control) {
+                // pin: no shell command may be printed for a control-bearing ref.
+                if !error.contains("contains control characters") || !error.contains("\\u{85}")
+                    || error.lines().any(|line| line.starts_with("git "))
+                    || error.contains('`') || error.chars().any(|c| c.is_control() && c != '\n')
+                {
+                    failures.push(format!("unsafe control-ref advice: {error:?}"));
+                }
+                continue;
+            }
             let standalone = error.lines().find(|line| line.starts_with("git fetch "));
             if standalone.is_none() {
                 failures.push(format!("fetch remedy is not a standalone line: {error}"));

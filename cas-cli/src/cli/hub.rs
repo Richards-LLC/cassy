@@ -1215,7 +1215,7 @@ fn required_transport_refusal(
         message.push_str(issue);
     }
     message.push_str(&format!(
-        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}. Or run `{loopback}`."
+        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}.\nOr run `{loopback}`."
     ));
     message
 }

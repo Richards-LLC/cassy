@@ -54,15 +54,16 @@ fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::C
     let path = root.join("cas.db");
     let conn = crate::shared_db::shared_connection(&path)?;
     let ready = SCHEMA_READY.get_or_init(Default::default);
-    let mut ready = ready
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !ready.contains(&path) {
+    let lock = || ready.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The global lock covers only the set: the db wait happens outside it,
+    // and a racing duplicate `CREATE … IF NOT EXISTS` is harmless.
+    if !lock().contains(&path) {
         let guard = crate::shared_db::lock_connection(&conn)?;
         for sql in QA_RESOURCE_SCHEMA_STATEMENTS {
             guard.execute(sql, [])?;
         }
-        ready.insert(path);
+        drop(guard);
+        lock().insert(path);
     }
     Ok(conn)
 }

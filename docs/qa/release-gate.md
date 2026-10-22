@@ -20,6 +20,7 @@ adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
 grant_envs = ["staging"]
+gate_env = "staging"
 target_env = "prod"
 
 [qa.release.components]
@@ -45,6 +46,8 @@ env = "staging"
 | `target_env` | Environment promotion serves; promotion reads its `flags` once (default `prod`). |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
+| `gate_env` | The environment the gate walks, sent as every request's `env` (default `staging`). Not `target_env`, which is the environment promotion compares against. |
+| `suites` | Named suites, each `{journeys \| kinds, wall_clock_mins, concurrency}`; see [Running the gate](#running-the-gate). |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes
 the components as one JSON object. Paths must stay inside the repository: an
@@ -87,8 +90,7 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. All but `run` are
-implemented; the run state machine adds it.
+`fixture-teardown`, `run`, `readback` and `migrations`.
 
 ### `served`
 
@@ -565,3 +567,141 @@ A registered supervisor may override a refusal with `supervisor_override=true`,
 as red CI, does not accept a migration refusal the supervisor has not seen.
 The override is logged as a decision note on the task. Cassy never applies a migration to a
 shared environment.
+
+The same admission site refuses merges into `integration_branch` while a
+release gate runs; see [Merge freeze](#merge-freeze).
+
+## Running the gate
+
+`cas qa release-gate --sha <sha>` starts the gate for one staging commit.
+Starting again for the same SHA returns its run and makes no adapter call.
+Starting another SHA while one runs is refused until that run is sealed or
+aborted; an aborted SHA may be started again.
+
+```toml
+[qa.release.suites.e2e]
+journeys = ["checkout", "signup"]
+wall_clock_mins = 45
+concurrency = 2
+
+[qa.release.suites.smoke]
+kinds = ["api"]
+wall_clock_mins = 10
+```
+
+`cas config set qa.release.suites '<json object>'` takes the suites as one
+JSON object. Each suite names exactly one of `journeys` or `kinds`, with a
+positive `wall_clock_mins` and `concurrency` (default 1). Suites run in name
+order, and a journey runs in the first suite that selects it.
+
+**Scope.** Each gate walks every journey live in `gate_env` that is marked
+`release_always: true`, plus the journeys whose owners the range
+`<base>..<sha>` touches (`cas qa impact`). The base is the newest sealed
+CLEAN pack whose SHA is an ancestor, else the merge base with the first of
+`branches`. With no base, every live journey is in scope. The same base
+feeds per-PR coverage.
+
+**Preflight**, inside `start`, refuses before anything is frozen and saves
+nothing. It checks, once each:
+
+1. `[qa.release]` passes the same validation as `cas config set`, so a
+   hand-edited `..` component is refused (`RELEASE CONFIG INVALID`).
+2. Served-component equivalence.
+3. The flag snapshot.
+4. Resource preflight over the planned rows.
+
+**States.** The run lives in `.cas/release-gate/<sha>.json`:
+
+| State | Meaning |
+|---|---|
+| `frozen` | Preflight passed; merges into `integration_branch` are refused. |
+| `suites` | `cas serve` is walking the automated suites. |
+| `manual` | Automated rows are done; manual rows await `record`. |
+| `sealed` | The pack is written; the run's gate is CLEAN, FAILED or OWED. |
+| `aborted` | Ended by `abort`, with no pack. |
+
+**Driver.** One `cas serve` per project holds the driver lease
+(`.cas/release-gate/driver.lock`) and ticks every 30 seconds. A tick walks
+each unfinished suite, moves to `manual`, and seals once every planned row
+has a verdict. At driver start, expired fixture cleanups are replayed. Each
+row is written as soon as it is walked. A restart or shutdown resumes the run
+and reruns only rows with no verdict. The suite clock is stored with the run,
+so a restart never extends it.
+
+**Rows.** A journey with a `spec` is walked by its suite. A scoped journey
+that no suite selects is `NOT_EXERCISED{automation}`. A journey without a
+`spec` is a manual row. A suite sets up its journeys' recipe fixtures, then
+walks up to `concurrency` rows at once through the `run` verb, metered
+against `consumes` until the suite's wall clock. A row not finished by then
+is `NOT_EXERCISED{timed_out}`. After the run answers, Cassy reads back the
+declared invariants with the subject ids the run returned. It then asks
+`served` again: a changed component makes the row `SERVED_DRIFT`, which is
+also how a merge outside Cassy shows up.
+
+### `run`
+
+```json
+{"v":1,"verb":"run","env":"staging","sha":"<sha>","journey":"checkout","args":{"row":"checkout","spec":"e2e/checkout.spec.ts","media_dir":"<pack>/media/checkout","fixtures":{"persona":{"account_id":"acct_1"}}}}
+```
+
+```json
+{"v":1,"ok":true,"data":{"status":"pass","frames":["media/checkout/step-1.png"],"subjects":{"account_uid":"u_42"}}}
+```
+
+`status` is `pass`, `fail` (with `reason`) or `not_a_route`. Frames must be
+files the adapter wrote under `media/<row>/`. A 429 or 402 is
+`BLOCKED_EXTERNAL`.
+
+### Status, record and abort
+
+- `cas qa release-gate status [--sha <sha>]` shows the state, the freeze,
+  rows by verdict, owed rows and manual minutes. `--json` prints the run.
+- `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
+  records a manual row. Optional flags are `--reason`, `--cause`,
+  `--minutes`, `--subject kind=id`, `--covers-pr N` and `--covers-commit <sha>`. Files in `<dir>`
+  become the row's frames, and a PASS needs at least one. A declared
+  read-back runs with the given subjects. A row the plan lacks must name
+  `--covers-pr` or `--covers-commit`.
+- `cas qa release-gate abort [--sha <sha>] --reason <why>` ends a live run
+  and lifts the freeze.
+- `cas qa release-gate verify --sha <sha>` runs the
+  [promotion check](#promotion-cassyrelease-gate).
+
+`--sha` defaults to the live run.
+
+**Sealing.** The pack is sealed when the last row gets its verdict. At
+the freeze TTL, unrecorded manual rows become `NOT_EXERCISED{timed_out}` and
+the pack is sealed. After the seal, Cassy does two things:
+
+- prunes media past `retention_days`;
+- edits the gate comment on each open PR from `integration_branch` into a
+  promotion branch whose head is the SHA;
+- publishes the `cassy/release-freeze` release and the promotion statuses.
+
+`start` publishes the pending freeze status and `abort` releases it.
+
+Failures are noted on the run and never change the gate.
+
+**Re-walking an OWED gate.** A sealed OWED gate stays open on the same SHA,
+because a provider outage should not force a new commit. `record` may
+replace a row that is not PASS, FAIL or NOT_A_ROUTE, or add a row covering an
+owed PR. Each such record reseals the pack as a new generation. The previous
+`pack.json` is kept as `history/pack-<n>.json`, and the new one replaces it,
+so the batch receipt and promotion always read the latest. FAILED and CLEAN
+are final; a fix needs a new SHA.
+
+## Merge freeze
+
+From `start` until seal or abort, `worktree_merge` refuses factory merges
+into `integration_branch`. The freeze also lifts on its own after its TTL:
+the sum of the planned suites' wall clocks plus 30 minutes.
+
+```text
+RELEASE FREEZE: the release gate for <sha12> holds staging until <time>. Seal it, or abort it with `cas qa release-gate abort --sha <sha> --reason <why>`, then retry.
+```
+
+A registered supervisor may override with `supervisor_override=true`,
+`task_id` and a reason that names `RELEASE FREEZE`. That label is
+independent: a reason naming a CI or migration refusal does not accept the
+freeze. The override is logged as a decision note. Merges outside Cassy are
+not refused; they surface as `SERVED_DRIFT` rows.

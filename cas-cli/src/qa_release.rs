@@ -24,6 +24,7 @@ pub mod verdict;
 pub mod independence;
 pub mod promotion;
 pub mod resources;
+pub mod run;
 
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -57,6 +58,41 @@ pub struct ReleaseConfig {
     pub migrations: Option<MigrationsConfig>,
     /// Days evidence-pack media stay on disk (`pack.json` is kept).
     pub retention_days: u32,
+    /// The environment the gate walks, sent as every request's `env`.
+    pub gate_env: String,
+    /// Named suites, run in name order; a journey runs in the first that selects it.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub suites: BTreeMap<String, SuiteConfig>,
+}
+
+/// `[qa.release.suites.<name>]`: which journeys, under what wall clock.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteConfig {
+    /// Journey ids; exclusive with `kinds`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub journeys: Vec<String>,
+    /// Journey kinds; exclusive with `journeys`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// Rows not finished within this many minutes are NOT_EXERCISED{timed_out}.
+    pub wall_clock_mins: u32,
+    /// Rows walked at once.
+    pub concurrency: u32,
+}
+
+impl Default for SuiteConfig {
+    fn default() -> Self {
+        Self { journeys: Vec::new(), kinds: Vec::new(), wall_clock_mins: 0, concurrency: 1 }
+    }
+}
+
+impl SuiteConfig {
+    /// Whether this suite selects `journey`.
+    pub fn selects(&self, journey: &crate::qa_registry::Journey) -> bool {
+        self.journeys.contains(&journey.id)
+            || journey.kind.as_ref().is_some_and(|kind| self.kinds.contains(kind))
+    }
 }
 
 /// `[qa.release.migrations]`: which added files are migrations, and the
@@ -84,6 +120,8 @@ impl Default for ReleaseConfig {
             target_env: "prod".into(),
             migrations: None,
             retention_days: 30,
+            gate_env: "staging".into(),
+            suites: BTreeMap::new(),
         }
     }
 }
@@ -118,6 +156,52 @@ impl ReleaseConfig {
         Ok(components)
     }
 
+    /// Parses and validates the `qa.release.suites` JSON object.
+    pub fn parse_suites(value: &str) -> Result<BTreeMap<String, SuiteConfig>, String> {
+        let suites: BTreeMap<String, SuiteConfig> = serde_json::from_str(value).map_err(|error| {
+            format!("qa.release.suites must be a JSON object of suites: {error}")
+        })?;
+        Self::check_suites(&suites)?;
+        Ok(suites)
+    }
+
+    fn check_suites(suites: &BTreeMap<String, SuiteConfig>) -> Result<(), String> {
+        for (name, suite) in suites {
+            if !plain_name(name) {
+                return Err(format!(
+                    "qa.release.suites name {name:?} must be letters, digits, `_` or `-`"
+                ));
+            }
+            if suite.journeys.is_empty() == suite.kinds.is_empty() {
+                return Err(format!(
+                    "qa.release.suites.{name} needs exactly one of journeys or kinds"
+                ));
+            }
+            if suite.wall_clock_mins == 0 || suite.concurrency == 0 {
+                return Err(format!(
+                    "qa.release.suites.{name} needs a positive wall_clock_mins and concurrency"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-runs every `cas config set` check on a loaded config, so a
+    /// hand-edited `.cas/config.toml` cannot skip them.
+    pub fn validate(&self) -> Result<(), String> {
+        Self::parse_components(
+            &serde_json::to_string(&self.components).map_err(|e| e.to_string())?,
+        )?;
+        if let Some(migrations) = &self.migrations {
+            Self::parse_migration_paths(&migrations.paths.join(","))?;
+        }
+        Self::check_suites(&self.suites)?;
+        if !plain_name(&self.gate_env) {
+            return Err("qa.release.gate_env must be a plain environment name".into());
+        }
+        Ok(())
+    }
+
     /// Parses and validates `qa.release.migrations.paths`.
     pub fn parse_migration_paths(value: &str) -> Result<Vec<String>, String> {
         let paths: Vec<String> = value
@@ -147,6 +231,23 @@ pub fn configured(cas_root: &Path) -> Option<ReleaseConfig> {
         .qa?
         .release
         .filter(|c| !c.adapter.trim().is_empty())
+}
+
+/// [`configured`], refusing a config that fails [`ReleaseConfig::validate`].
+pub fn configured_checked(cas_root: &Path) -> Result<Option<ReleaseConfig>, String> {
+    let Some(config) = configured(cas_root) else {
+        return Ok(None);
+    };
+    config
+        .validate()
+        .map_err(|error| format!("RELEASE CONFIG INVALID: {error}; fix .cas/config.toml"))?;
+    Ok(Some(config))
+}
+
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 
 /// One verb per gate seam. C1 implements [`Verb::Served`]; later children add
@@ -546,12 +647,18 @@ impl MigrationRefusal {
             Self::AdapterBug(_) => {
                 "Fix the project adapter or [qa.release] configuration, then retry.".into()
             }
+            Self::CheckFailed(why) if why == NO_SHARED_HISTORY => {
+                "The delivery was not cut from the target; rebase it onto the target, then retry."
+                    .into()
+            }
             Self::CheckFailed(_) => {
                 "Make the target and delivery tip local commits (fetch them), then retry.".into()
             }
         }
     }
 }
+
+const NO_SHARED_HISTORY: &str = "the target and delivery tip share no history";
 
 /// The migration id `pattern`'s single `*` captures in `path`, if it matches.
 fn migration_id<'p>(pattern: &str, path: &'p str) -> Option<&'p str> {
@@ -596,10 +703,13 @@ fn added_migrations(
         .ok_or_else(|| format!("{} is not a local commit", printable(name)))
     };
     let (target, tip) = (rev(target)?, rev(tip)?);
-    let base = git(root, &["merge-base", &target, &tip])
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .ok_or("git merge-base failed")?;
+    let base = git(root, &["merge-base", &target, &tip]).ok_or("git merge-base failed")?;
+    let base = match base.status.code() {
+        Some(0) => String::from_utf8_lossy(&base.stdout).trim().to_owned(),
+        // Exit 1 with both commits resolved: no common ancestor.
+        Some(1) => return Err(NO_SHARED_HISTORY.into()),
+        _ => return Err("git merge-base failed".into()),
+    };
     let pathspecs: Vec<String> = paths.iter().map(|p| format!(":(glob){p}")).collect();
     let mut args = vec![
         "diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", &base, &tip, "--",
@@ -771,6 +881,7 @@ mod tests {
 
     include!("qa_release/fixture_test.rs");
     include!("qa_release/resources_test.rs");
+    include!("qa_release/run_test.rs");
     include!("qa_release/promotion_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes
@@ -1297,6 +1408,14 @@ mod tests {
         assert!(
             matches!(refusal, MigrationRefusal::CheckFailed(_))
                 && refusal.next_step().contains("fetch them"),
+            "{refusal}"
+        );
+        project.git(&["checkout", "-q", "--orphan", "lone"]);
+        project.commit("db/migrations/20261023_lone/migration.sql", "lone");
+        let refusal = check_migrations(root, &config, "main", "lone").unwrap_err();
+        assert!(
+            refusal.to_string().ends_with("share no history")
+                && refusal.next_step().starts_with("The delivery was not cut from the target"),
             "{refusal}"
         );
     }

@@ -80,6 +80,8 @@ const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: docs-only code CI was explicitly overridden by a registered supervisor.\n\n";
 const MIGRATION_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: an unapplied migration was explicitly overridden by a registered supervisor.\n\n";
+const FREEZE_OVERRIDE_POLICY_NOTICE: &str =
+    "Merge policy: a release-gate freeze was explicitly overridden by a registered supervisor.\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
@@ -131,15 +133,24 @@ struct MigrationGate<'a> {
     tip: &'a str,
 }
 
-/// Lane CI admission, then the migration check. Returns whether the CI
-/// override was used and the migration refusal an override accepted, or the
-/// refusal kind and message.
+/// What admission accepted: whether the CI override was used, and the
+/// migration and freeze refusals an override accepted.
+#[derive(Debug, Default, PartialEq)]
+struct Admitted {
+    ci_override: bool,
+    migration_override: Option<String>,
+    freeze_override: Option<String>,
+}
+
+/// Lane CI admission, the migration check, then the release-gate freeze.
+/// Returns what was accepted, or the refusal kind and message.
 fn admit_merge(
     ci_state: &BranchCiState,
     migrations: Option<MigrationGate<'_>>,
+    freeze: Option<FreezeGate<'_>>,
     override_requested: bool,
     reason: Option<&str>,
-) -> Result<(bool, Option<String>), (&'static str, String)> {
+) -> Result<Admitted, (&'static str, String)> {
     let ci_override = admit_branch_ci(ci_state, override_requested, reason)
         .map_err(|message| ("ci_refused", message))?;
     let migration_override = match migrations {
@@ -147,7 +158,40 @@ fn admit_merge(
             .map_err(|message| ("migration_refused", message))?,
         None => None,
     };
-    Ok((ci_override, migration_override))
+    let freeze_override = match freeze {
+        Some(gate) => admit_release_freeze(gate, override_requested, reason)
+            .map_err(|message| ("freeze_refused", message))?,
+        None => None,
+    };
+    Ok(Admitted { ci_override, migration_override, freeze_override })
+}
+
+/// The live release-gate run, if any, and the merge target.
+struct FreezeGate<'a> {
+    freeze: Option<crate::qa_release::run::Freeze>,
+    target: &'a str,
+}
+
+/// cas-e3aa: while a release gate runs, factory merges into
+/// `qa.release.integration_branch` are refused until seal, abort or the TTL.
+/// Only an override reason naming RELEASE FREEZE accepts it, independently of
+/// the CI and migration labels.
+fn admit_release_freeze(
+    gate: FreezeGate<'_>,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    use crate::qa_release::run::FREEZE_LABEL;
+    let Some(freeze) = gate.freeze else {
+        return Ok(None);
+    };
+    let refusal = freeze.refusal(gate.target);
+    if override_requested && reason.is_some_and(|r| r.contains(FREEZE_LABEL)) {
+        return Ok(Some(refusal));
+    }
+    Err(format!(
+        "{refusal} A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a reason that names {FREEZE_LABEL}. No merge was attempted."
+    ))
 }
 
 /// cas-87e0: a merge into `qa.release.integration_branch` that adds a
@@ -3879,9 +3923,24 @@ impl CasCore {
             target: &worktree.parent_branch,
             tip: ci_source,
         });
-        let admission =
-            admit_merge(&branch_ci_state, migration_gate, supervisor_override, reason);
-        let (ci_override, migration_override) = match admission {
+        let release_config = config.qa.as_ref().and_then(|qa| qa.release.as_ref());
+        let freeze_gate = (!reconciled_delivery).then(|| FreezeGate {
+            freeze: crate::qa_release::run::active_freeze(
+                &cas_root,
+                release_config,
+                &worktree.parent_branch,
+                chrono::Utc::now(),
+            ),
+            target: &worktree.parent_branch,
+        });
+        let admission = admit_merge(
+            &branch_ci_state,
+            migration_gate,
+            freeze_gate,
+            supervisor_override,
+            reason,
+        );
+        let Admitted { ci_override, migration_override, freeze_override } = match admission {
             Ok(accepted) => accepted,
             Err((refusal_kind, message)) => {
                 // cas-d1eb: CI refuses before Git runs. Withdraw the durable
@@ -3963,6 +4022,22 @@ impl CasCore {
                     reason.unwrap_or_default(),
                 ))?;
                 MIGRATION_OVERRIDE_POLICY_NOTICE
+            }
+            None => "",
+        };
+        let freeze_policy_notice = match &freeze_override {
+            Some(refusal) => {
+                let supervisor = override_authority
+                    .as_ref()
+                    .expect("freeze override has authority");
+                log_override_decision(migration_override_note(
+                    &supervisor.id,
+                    &worktree.branch,
+                    &worktree.parent_branch,
+                    refusal,
+                    reason.unwrap_or_default(),
+                ))?;
+                FREEZE_OVERRIDE_POLICY_NOTICE
             }
             None => "",
         };
@@ -4662,7 +4737,7 @@ impl CasCore {
             close_result.content.insert(
                 0,
                 Content::text(format!(
-                    "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}"
+                    "{ci_prefix}{trunk_notice}{migration_policy_notice}{freeze_policy_notice}{ci_policy_notice}"
                 )),
             );
             if !pushed_source_note.is_empty() {
@@ -4679,7 +4754,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}{migration_policy_notice}{freeze_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -4694,7 +4769,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}{trunk_notice}{migration_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
+            "{ci_prefix}{trunk_notice}{migration_policy_notice}{freeze_policy_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
@@ -4819,7 +4894,7 @@ impl CasCore {
 mod tests {
     use super::{
         BranchCiState, CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput,
-        admit_branch_ci, admit_merge, migration_override_note, MigrationGate,
+        admit_branch_ci, admit_merge, migration_override_note, Admitted, FreezeGate, MigrationGate,
         require_code_validation,
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
@@ -5555,7 +5630,7 @@ mod tests {
         let red = BranchCiState::Red { sha: "abc123".into(), url: None };
         let admit = |ci: &BranchCiState, target, override_requested, reason| {
             let gate = MigrationGate { root, release: Some(&release), target, tip: "factory/fox" };
-            admit_merge(ci, Some(gate), override_requested, reason)
+            admit_merge(ci, Some(gate), None, override_requested, reason)
         };
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"pending"}"#);
 
@@ -5567,23 +5642,23 @@ mod tests {
                 && refusal.ends_with("No merge was attempted."),
             "{refusal}"
         );
-        assert_eq!(admit(&green, "main", false, None), Ok((false, None)));
-        assert!(admit(&green, "staging", true, Some(" ")).is_err());
+        assert_eq!(admit(&green, "main", false, None), Ok(Admitted::default()));
+        assert_eq!(admit(&green, "staging", true, Some(" ")).unwrap_err().0, "ci_refused");
         let (kind, _) = admit(&red, "staging", true, Some("CI flake reviewed")).unwrap_err();
         assert_eq!(kind, "migration_refused", "a red-CI override must not accept the migration");
-        let (ci_override, accepted) = admit(
+        let accepted = admit(
             &red,
             "staging",
             true,
             Some("CI flake reviewed; MIGRATION PENDING applied by hand"),
         )
         .unwrap();
-        assert!(ci_override);
+        assert!(accepted.ci_override);
         let note = migration_override_note(
             "supervisor-1",
             "factory/fox",
             "staging",
-            &accepted.unwrap(),
+            &accepted.migration_override.unwrap(),
             " applied by hand ",
         );
         assert!(
@@ -5603,7 +5678,33 @@ mod tests {
         env.remove("FAKE_ERROR_KIND");
 
         env.set("FAKE_MIGRATIONS", r#"{"20261021_add":"applied"}"#);
-        assert_eq!(admit(&green, "staging", false, None), Ok((false, None)));
+        assert_eq!(admit(&green, "staging", false, None), Ok(Admitted::default()));
+    }
+
+    /// cas-e3aa: a live release gate refuses merges into the integration
+    /// branch; only a reason naming RELEASE FREEZE accepts the refusal, so a
+    /// CI or migration override cannot carry a merge through the freeze.
+    #[test]
+    fn release_freeze_refuses_integration_merge() {
+        use crate::qa_release::run::Freeze;
+        let green = BranchCiState::Green { sha: "abc123".into(), url: None, test_checks: vec![] };
+        let freeze = Freeze { sha: "a".repeat(40), until: chrono::Utc::now() + chrono::Duration::hours(1) };
+        let admit = |frozen: bool, override_requested, reason| {
+            let gate = FreezeGate { freeze: frozen.then(|| freeze.clone()), target: "staging" };
+            admit_merge(&green, None, Some(gate), override_requested, reason)
+        };
+        let (kind, refusal) = admit(true, false, None).unwrap_err();
+        assert!(
+            kind == "freeze_refused"
+                && refusal.starts_with("RELEASE FREEZE: the release gate for aaaaaaaaaaaa holds staging until")
+                && refusal.ends_with("names RELEASE FREEZE. No merge was attempted."),
+            "{refusal}"
+        );
+        let (kind, _) = admit(true, true, Some("MIGRATION PENDING applied by hand")).unwrap_err();
+        assert_eq!(kind, "freeze_refused", "another gate's label must not accept the freeze");
+        let accepted = admit(true, true, Some("RELEASE FREEZE: hotfix approved")).unwrap();
+        assert!(accepted.freeze_override.is_some_and(|r| r.starts_with("RELEASE FREEZE:")));
+        assert_eq!(admit(false, false, None), Ok(Admitted::default()));
     }
 
     #[test]

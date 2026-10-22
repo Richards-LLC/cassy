@@ -80,10 +80,11 @@
 - `cas-cli/src/qa_command.rs` - shared sandbox for project QA executables: no shell, env allow-list, timeout, 1 MiB stdout.
 - `cas-cli/src/qa_readback.rs` - shared read-back result, journey `readback` declaration, subject/invariant allow-list and outcome classification.
 - `cas-cli/src/qa_release.rs` - release gate seam: `[qa.release]` config, adapter protocol v1 and served-component equivalence preflight (fake adapter in `cas-cli/tests/fixtures/qa-release/`).
-- `cas-cli/src/qa_release/` - fixture recipe suite lifecycle, abort cleanup and expired-handle sweep (journal in `crates/cas-store/src/qa_fixture_store.rs`); `resources.rs` meters rate/quota budgets, preflight balance/grant and 429/402 classification (ledger in `crates/cas-store/src/qa_resource_store.rs`); `promotion.rs` judges a head for the `cassy/release-gate` status (CLEAN or tree-equal pack, prod flag diff, SHA-scoped supervisor override) and publishes it and the `cassy/release-freeze` hold through `qa_pass/github_gate.rs`.
+- `cas-cli/src/qa_release/` - fixture recipe suite lifecycle, abort cleanup and expired-handle sweep (journal in `crates/cas-store/src/qa_fixture_store.rs`); `resources.rs` meters rate/quota budgets, preflight balance/grant and 429/402 classification (ledger in `crates/cas-store/src/qa_resource_store.rs`); `promotion.rs` judges a head for the `cassy/release-gate` status (CLEAN or tree-equal pack, prod flag diff, SHA-scoped supervisor override) and publishes it and the `cassy/release-freeze` hold through `qa_pass/github_gate.rs`. `run.rs` is the `cas qa release-gate` run state machine (preflight, suites with wall clocks, manual `record`, OWED reseal, the `RELEASE FREEZE` merge refusal and the `cas serve` driver lease).
 - `cas-cli/src/cli/qa.rs` - `cas qa journeys --seed|--check|--status` and QA subcommand dispatch.
 - `cas-cli/src/cli/qa_impact.rs` - `cas qa impact` adapters for diff, files, stdin, and task-owned changes.
 - `cas-cli/src/cli/qa_post_release.rs` - `cas qa post-release start|status` and persisted jobs for the MCP daemon runner.
+- `cas-cli/src/cli/qa_release_gate.rs` - `cas qa release-gate --sha X|status|record|abort|verify`.
 - `cas-cli/src/cli/doctor/journeys.rs` - doctor journey-registry row using the shared coverage/debt report.
 - `cas-cli/src/config/upkeep.rs` - registry/CODEMAP/overview stages and one-release observe-to-enforce adoption.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_batch.rs` - independent QA eligibility, evidence gates, and batch receipt validation.

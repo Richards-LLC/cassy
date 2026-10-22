@@ -34,6 +34,7 @@ mod project_overview_cmd;
 mod qa;
 mod qa_impact;
 pub(crate) mod qa_post_release;
+mod qa_release_gate;
 mod provider_default;
 mod release_report;
 mod sweep;

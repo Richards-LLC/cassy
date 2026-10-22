@@ -253,4 +253,38 @@ mod tests {
             crate::config::HubTransportMode::Loopback
         );
     }
+
+    #[test]
+    fn line_editor_d_on_absent_default_preserves_config_file() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = "# keep this comment\n[hub]\ntailscale_serve = false\n";
+        std::fs::write(root.join("config.toml"), original).unwrap();
+
+        let registry = registry();
+        let mut answers = String::new();
+        'sections: for section in registry.sections() {
+            if !section.starts_with("hub") {
+                continue;
+            }
+            for meta in registry.configs_in_section(section) {
+                if meta.key == "hub.transport_mode" {
+                    answers.push_str("d\nq\n");
+                    break 'sections;
+                }
+                answers.push('\n');
+            }
+        }
+        let args = ConfigEditArgs {
+            section: Some("hub".into()),
+            modified: false,
+            all: true,
+        };
+        let cli = Cli::parse_from(["cas", "--json"]);
+        execute_edit_line_based_with_input(&args, &cli, &root, &mut std::io::Cursor::new(answers))
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
+    }
 }

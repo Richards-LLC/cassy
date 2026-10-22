@@ -218,51 +218,54 @@ pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Optio
     })
 }
 
+fn stale_notice(snapshot: &Snapshot) -> Option<String> {
+    let mut sessions: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for server in snapshot.servers.iter().filter(|server| server.older) {
+        sessions
+            .entry(server.session.as_deref().unwrap_or("unscoped"))
+            .or_default()
+            .push(format!(
+                "{} (pid {}, {})",
+                server.name,
+                server.pid,
+                server.version.as_deref().unwrap_or("unknown")
+            ));
+    }
+    if sessions.is_empty() {
+        return None;
+    }
+    let lines = sessions
+        .into_iter()
+        .map(|(session, servers)| format!("- {session}: {}", servers.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "Cassy {} is installed, but these factory sessions have older MCP servers:\n{lines}\nSave worker state, then recycle affected workers; restart each affected supervisor session to load the installed binary. No process was recycled automatically.",
+        snapshot.installed,
+    ))
+}
+
 /// Called by the newly installed post-swap child. Idempotency is per release
-/// and factory session; a retry cannot spam the supervisor.
+/// and project: a retry cannot spam the supervisor.
 pub(crate) fn notify_after_install(cas_root: &Path, installed: &str) -> Result<usize, String> {
     let snapshot = snapshot_with_installed(cas_root, installed, Utc::now())?;
+    let Some(detail) = stale_notice(&snapshot) else {
+        return Ok(0);
+    };
     let agent_store = open_agent_store(cas_root).map_err(|e| format!("agent roster: {e}"))?;
     let agents = agent_store
         .list(None)
         .map_err(|e| format!("agent roster: {e}"))?;
-    let sessions: BTreeSet<_> = snapshot
-        .servers
-        .iter()
-        .filter(|row| row.older)
-        .filter_map(|row| row.session.as_deref())
-        .collect();
-    let mut sent = 0;
-    for session in sessions {
-        let names = snapshot
-            .servers
-            .iter()
-            .filter(|row| row.older && row.session.as_deref() == Some(session))
-            .map(|row| {
-                format!(
-                    "{} (pid {}, {})",
-                    row.name,
-                    row.pid,
-                    row.version.as_deref().unwrap_or("unknown")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let recipient = crate::supervisor_notices::resolve(&agents, None, Some(session));
-        let detail = format!(
-            "Cassy {installed} is installed, but these factory MCP servers in {session} still run older versions: {names}. Save worker state, then recycle affected workers; restart the supervisor session to load the installed binary. No process was recycled automatically."
-        );
-        crate::supervisor_notices::enqueue(
-            cas_root,
-            &recipient,
-            "factory_binary_skew",
-            &detail,
-            &format!("{installed}:{session}"),
-        )
-        .map_err(|e| format!("supervisor notice: {e}"))?;
-        sent += 1;
-    }
-    Ok(sent)
+    let recipient = crate::supervisor_notices::resolve(&agents, None, None);
+    crate::supervisor_notices::enqueue(
+        cas_root,
+        &recipient,
+        "factory_binary_skew",
+        &detail,
+        installed,
+    )
+    .map_err(|e| format!("supervisor notice: {e}"))?;
+    Ok(1)
 }
 
 #[cfg(test)]
@@ -337,5 +340,43 @@ mod tests {
         assert!(payload.contains("old-worker"), "{payload}");
         assert!(payload.contains("factory-release"), "{payload}");
         assert!(payload.contains("recycle affected workers"), "{payload}");
+    }
+
+    #[test]
+    fn post_install_notice_lists_all_stale_sessions_once() {
+        let snapshot = Snapshot {
+            installed: "9.99.2".into(),
+            servers: vec![
+                ServerVersion {
+                    name: "worker-a".into(),
+                    role: AgentRole::Worker,
+                    session: Some("session-a".into()),
+                    pid: 11,
+                    version: Some("9.99.1".into()),
+                    older: true,
+                },
+                ServerVersion {
+                    name: "supervisor-b".into(),
+                    role: AgentRole::Supervisor,
+                    session: Some("session-b".into()),
+                    pid: 22,
+                    version: Some("9.99.1".into()),
+                    older: true,
+                },
+                ServerVersion {
+                    name: "worker-current".into(),
+                    role: AgentRole::Worker,
+                    session: Some("session-b".into()),
+                    pid: 23,
+                    version: Some("9.99.2".into()),
+                    older: false,
+                },
+            ],
+        };
+        let notice = stale_notice(&snapshot).unwrap();
+        assert!(notice.contains("session-a: worker-a"), "{notice}");
+        assert!(notice.contains("session-b: supervisor-b"), "{notice}");
+        assert!(!notice.contains("worker-current"), "{notice}");
+        assert!(notice.contains("recycle affected workers"), "{notice}");
     }
 }

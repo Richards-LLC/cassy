@@ -17,6 +17,10 @@
 //!   a blocker whose first output line is the reason. Cassy assumes no
 //!   billing API: the hook owns that.
 //!
+//! - GH #1346: the journey registry's `safety` block. A protected credential
+//!   present in the reviewer's environment, or a `qa.deployed_origins` entry
+//!   on a forbidden host, is a blocker: QA must not be able to touch either.
+//!
 //! Starting the QA work item runs the preflight. A blocker refuses the start,
 //! so the round is not claimed and its deadline is not spent. The report
 //! never carries a secret: token values are not read into it, env files are
@@ -103,10 +107,16 @@ pub fn run_with_env(
     ctx: PreflightContext<'_>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Option<PreflightReport> {
-    if !is_configured(qa) {
+    let safety = crate::qa_registry::load(&repo_root.join(&qa.registry.path))
+        .ok()
+        .and_then(|registry| registry.safety);
+    if !is_configured(qa) && safety.is_none() {
         return None;
     }
     let mut report = PreflightReport::default();
+    if let Some(safety) = &safety {
+        report.checks.extend(safety_checks(safety, qa, env));
+    }
     if qa.preflight_gh_token {
         report.checks.push(gh_read_token_check(repo_root, env));
     }
@@ -133,6 +143,46 @@ pub fn run_with_env(
         ));
     }
     Some(report)
+}
+
+/// GH #1346: refuse a round that could reach a protected credential or host.
+/// Reports names and origins only, never a credential value.
+fn safety_checks(
+    safety: &crate::qa_registry::Safety,
+    qa: &QaConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<PreflightCheck> {
+    let mut checks: Vec<_> = safety
+        .protected_credentials
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let exposed = non_empty(env, name);
+            PreflightCheck {
+                name: format!("credential guard {name}"),
+                ready: !exposed,
+                detail: if exposed {
+                    format!("{name} is set in this QA environment; journeys.yaml safety.protected_credentials forbids QA from touching it. Unset it before the round")
+                } else {
+                    "not reachable from this QA environment".to_string()
+                },
+            }
+        })
+        .collect();
+    for origin in &qa.deployed_origins {
+        let host = url::Url::parse(origin)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned));
+        if let Some(forbidden) = host.as_deref().and_then(|host| safety.forbids_host(host)) {
+            checks.push(PreflightCheck {
+                name: format!("host guard {forbidden}"),
+                ready: false,
+                detail: format!("qa.deployed_origins sends QA to {origin}; journeys.yaml safety.forbidden_hosts forbids it. Remove it: `cas config set qa.deployed_origins <allowed origins>`"),
+            });
+        }
+    }
+    checks
 }
 
 fn non_empty(env: &dyn Fn(&str) -> Option<String>, name: &str) -> bool {
@@ -373,6 +423,35 @@ mod tests {
             run_with_env(&QaConfig::default(), dir.path(), ctx(), &lookup(&vars)),
             None
         );
+    }
+
+    #[test]
+    fn safety_block_refuses_protected_credential_and_forbidden_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join(crate::qa_registry::DEFAULT_PATH);
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(
+            &registry,
+            "safety: {mode: fixture-only, forbidden_hosts: ['*.intuit.com'], protected_credentials: [QBO_REFRESH_TOKEN]}\n",
+        )
+        .unwrap();
+        let config =
+            qa(|qa| qa.deployed_origins = vec!["https://quickbooks.api.intuit.com".into()]);
+        let mut vars = HashMap::new();
+        vars.insert("QBO_REFRESH_TOKEN", "secret-refresh-value".to_string());
+
+        let report = run_with_env(&config, dir.path(), ctx(), &lookup(&vars)).unwrap();
+        let rendered = report.render();
+        assert!(!report.is_ready());
+        assert!(
+            rendered.contains("MISSING credential guard QBO_REFRESH_TOKEN"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("MISSING host guard *.intuit.com"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("secret-refresh-value"), "{rendered}");
     }
 
     #[test]

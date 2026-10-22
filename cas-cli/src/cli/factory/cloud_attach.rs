@@ -37,7 +37,7 @@ pub fn execute_cloud_attach(factory_id: &str) -> Result<()> {
     {
         let theme = ActiveTheme::default();
         let mut stderr = io::stderr();
-        let mut fmt = Formatter::stdout(&mut stderr, theme);
+        let mut fmt = Formatter::stderr(&mut stderr, theme);
         StatusLine::info(format!(
             "Connecting to factory {factory_id} via cloud relay..."
         ))
@@ -125,7 +125,7 @@ async fn relay_loop(endpoint: &str, token: &str, factory_id: &str) -> Result<()>
     {
         let theme = ActiveTheme::default();
         let mut stderr = io::stderr();
-        let mut fmt = Formatter::stdout(&mut stderr, theme);
+        let mut fmt = Formatter::stderr(&mut stderr, theme);
         StatusLine::success(format!(
             "Connected to factory {} (client {}). Press Ctrl+D to detach.",
             factory_id,
@@ -191,7 +191,7 @@ async fn relay_loop(endpoint: &str, token: &str, factory_id: &str) -> Result<()>
     {
         let theme = ActiveTheme::default();
         let mut stderr = io::stderr();
-        let mut fmt = Formatter::stdout(&mut stderr, theme);
+        let mut fmt = Formatter::stderr(&mut stderr, theme);
         if let Err(e) = result {
             StatusLine::error(format!("Relay disconnected: {e}")).render(&mut fmt)?;
         } else {

@@ -577,7 +577,7 @@ impl Drop for UpdateTransaction {
         if self.state == TransactionState::BackedUp {
             let mut err = io::stderr();
             let theme = ActiveTheme::default();
-            let mut fmt = Formatter::stdout(&mut err, theme);
+            let mut fmt = Formatter::stderr(&mut err, theme);
             let _ =
                 fmt.warning("Transaction dropped without commit/rollback, attempting rollback...");
             if let Err(e) = self.rollback() {

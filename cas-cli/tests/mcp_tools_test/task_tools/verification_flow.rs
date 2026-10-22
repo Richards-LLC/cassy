@@ -12027,7 +12027,7 @@ async fn cas_e205_supervisor_cannot_discard_source_as_evidence() {
 }
 
 #[tokio::test]
-async fn cas_e205_reverted_source_is_not_evidence_only() {
+async fn cas_0774_reverted_source_is_evidence_only() {
     cas_e205_evidence_close(AgentRole::Supervisor, "reverted").await;
 }
 
@@ -12055,13 +12055,19 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
     proof_boundary_git(root, &["init", "-q", "-b", "main"]);
     std::fs::write(root.join(".gitignore"), ".cas/\ndurable-artifacts/\n").unwrap();
     proof_boundary_git(root, &["add", ".gitignore"]);
+    if mutation == "renamed" {
+        // A source-to-docs rename still deletes source in the net delivery.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/product.rs"), "pub fn changed() {}\n").unwrap();
+        proof_boundary_git(root, &["add", "src"]);
+    }
     proof_boundary_git(root, &["commit", "-q", "-m", "seed"]);
     proof_boundary_git(root, &["checkout", "-q", "-b", "factory/report-worker"]);
     std::fs::create_dir_all(root.join("docs/qa/reports")).unwrap();
     std::fs::write(root.join("docs/qa/reports/audit.md"), "QA completed successfully\n").unwrap();
     proof_boundary_git(root, &["add", "docs"]);
     proof_boundary_git(root, &["commit", "-q", "-m", "docs: deployed QA evidence (cas-e205)"]);
-    if matches!(mutation, "source" | "reverted" | "renamed") {
+    if matches!(mutation, "source" | "reverted") {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/product.rs"), "pub fn changed() {}\n").unwrap();
         proof_boundary_git(root, &["add", "src"]);
@@ -12069,10 +12075,11 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         if mutation == "reverted" {
             proof_boundary_git(root, &["rm", "src/product.rs"]);
             proof_boundary_git(root, &["commit", "-q", "-m", "revert source (cas-e205)"]);
-        } else if mutation == "renamed" {
-            proof_boundary_git(root, &["mv", "src/product.rs", "docs/qa/reports/disguised.md"]);
-            proof_boundary_git(root, &["commit", "-q", "-m", "rename source (cas-e205)"]);
         }
+    }
+    if mutation == "renamed" {
+        proof_boundary_git(root, &["mv", "src/product.rs", "docs/qa/reports/disguised.md"]);
+        proof_boundary_git(root, &["commit", "-q", "-m", "rename source (cas-e205)"]);
     }
     #[cfg(unix)]
     if mutation == "symlink" {
@@ -12096,6 +12103,9 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         let parked = extract_text(service.task(Parameters(ordinary)).await.unwrap());
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
         assert!(parked.contains("evidence_only=true"), "{parked}");
+        if mutation == "report" {
+            assert!(parked.contains("net base..tip diff"), "{parked}");
+        }
         assert_eq!(store.get("cas-e205").unwrap().status, TaskStatus::AwaitingMerge);
         let missing: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": "cas-e205", "evidence_only": true
@@ -12122,7 +12132,7 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
         assert!(response.contains("live registered supervisor"), "{response}");
         assert_eq!(persisted.status, TaskStatus::InProgress);
-    } else if mutation != "report" {
+    } else if !matches!(mutation, "report" | "reverted") {
         assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
         assert!(response.contains("non-evidence path") || response.contains("symlink"), "{response}");
         assert_eq!(persisted.status, TaskStatus::AwaitingMerge);

@@ -668,7 +668,7 @@ fn replay_retired_config_notices(notices: Vec<crate::config::RetiredConfigNotice
         config: findings::ConfigCleanup::default(),
     };
     let mut stderr = io::stderr();
-    let mut fmt = Formatter::stdout(&mut stderr, ActiveTheme::default());
+    let mut fmt = Formatter::stderr(&mut stderr, ActiveTheme::default());
     if let Ok(shortened) = findings::print(&mut fmt, &sweep) {
         if verbose {
             for notice in notices {

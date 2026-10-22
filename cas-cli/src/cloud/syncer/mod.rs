@@ -821,7 +821,7 @@ impl CloudSyncer {
 enum UpsertResult {
     Created,
     Updated,
-    Skipped,
+    Skipped(&'static str),
 }
 
 /// Response from pull endpoint

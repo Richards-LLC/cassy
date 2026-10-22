@@ -1991,6 +1991,14 @@
         {
           "text": "trace snapshot <N> --phase after",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "independent-pass.md#3-correctness-paths",
+          "reason": "Visual baseline findings use the same delivery-scope classification as independent QA."
+        },
+        {
+          "text": "journey invariant its diff adds or edits are unmet even when base shares them",
+          "reason": "A shared baseline failure inside a delivery-owned invariant remains unmet (GH #1339)."
         }
       ],
       "absent": [],
@@ -4385,6 +4393,14 @@
         {
           "text": "Epic verification owner gate",
           "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        },
+        {
+          "text": "Reject findings rated high or above",
+          "reason": "GH1341: the installed verifier must treat high/critical impact as a rejection, not a warning; this is a verdict-policy contract consumed by the model."
+        },
+        {
+          "text": "reproduced silent failure of this task's own behaviour",
+          "reason": "GH1341: realistic silent failure is a separate rejection condition regardless of its assigned impact rating."
         }
       ],
       "absent": [
@@ -4723,6 +4739,14 @@
         {
           "text": "../../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "purpose, acceptance criteria or demo statement cover it",
+          "reason": "The QA entry instructions include the demo statement in delivery-owned acceptance scope (GH #1339)."
+        },
+        {
+          "text": "steps around its asserted invariant at least Normal",
+          "reason": "A test masking its own invariant must not be downgraded to a Note (GH #1339)."
         }
       ],
       "absent": [],

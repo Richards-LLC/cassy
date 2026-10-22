@@ -1444,7 +1444,7 @@ fn reconcile_web_close(
         Ok(local) => {
             if local.status == TaskStatus::Closed {
                 // Already closed locally — nothing to do.
-                return Ok(UpsertResult::Skipped);
+                return Ok(UpsertResult::Skipped("local_conflict"));
             }
             // Merge ONLY the close signal onto the local row. A full overwrite
             // with the remote tombstone would clobber locally-authored,
@@ -1790,11 +1790,11 @@ impl CloudSyncer {
             Ok(local) => {
                 if rejects_delivery_regression(&local, &task) {
                     self.record_delivery_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 let notes_differ = local.notes != task.notes;
                 let mut merged = task;
@@ -1853,7 +1853,7 @@ impl CloudSyncer {
                     CasError::Other(format!("Could not serialize owner sync conflict: {error}"))
                 })?;
                 self.record_owner_conflict_value(&task.id, &discarded)?;
-                return Ok(UpsertResult::Skipped);
+                return Ok(UpsertResult::Skipped("local_conflict"));
             }
         }
 
@@ -1892,7 +1892,7 @@ impl CloudSyncer {
             remote,
             "local_mutation_or_delivery_or_live_execution",
         )?;
-        Ok(UpsertResult::Skipped)
+        Ok(UpsertResult::Skipped("local_mutation_or_delivery_or_live_execution"))
     }
 
     fn record_task_lifecycle_conflict(
@@ -1923,6 +1923,47 @@ impl CloudSyncer {
         } else {
             self.record_task_lifecycle_conflict(local, remote, "delivery_lifecycle_event")
         }
+    }
+
+    /// A consumed peer close remains attention-worthy after its pull cursor
+    /// advances. Both pull scopes report the durable guard until this local
+    /// delivery's lifecycle changes, without fetching or journaling it again.
+    fn report_guarded_peer_closes(
+        &self,
+        task_store: &dyn TaskStore,
+        result: &mut SyncResult,
+    ) -> Result<(), CasError> {
+        #[derive(Deserialize)]
+        struct GuardedTask {
+            local: Task,
+            rejected_remote: Task,
+            reason: String,
+        }
+
+        for (id, row) in self.queue.latest_task_lifecycle_conflicts()? {
+            let guard: GuardedTask = match serde_json::from_str(&row) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    result.errors.push(format!("Task {id}: lifecycle guard journal error: {error}"));
+                    continue;
+                }
+            };
+            if guard.local.status != TaskStatus::AwaitingMerge || !guard.rejected_remote.is_terminal() {
+                continue;
+            }
+            let current = match task_store.get(&id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if current.lifecycle_matches(&guard.local) {
+                result.errors.push(format!(
+                    "Task {}: remote {} skipped; local awaiting_merge\n      Guard: {}\n      Inspect: cas cloud conflicts --json",
+                    id, guard.rejected_remote.status, guard.reason,
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn record_terminal_regression_conflict(
@@ -2267,7 +2308,7 @@ impl CloudSyncer {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2388,7 +2429,7 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2453,7 +2494,7 @@ impl CloudSyncer {
                                 .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2499,7 +2540,7 @@ impl CloudSyncer {
                         );
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2532,7 +2573,7 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_specs += 1;
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2665,6 +2706,7 @@ impl CloudSyncer {
 
         self.reassert_quarantine();
 
+        self.report_guarded_peer_closes(task_store, &mut result)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -2727,11 +2769,11 @@ impl CloudSyncer {
             Ok(local) => {
                 if rejects_delivery_regression(&local, &task) {
                     self.record_delivery_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 if self.remote_supersedes_local(
                     EntityType::Task,
@@ -2757,7 +2799,7 @@ impl CloudSyncer {
                         },
                     )
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
@@ -2786,7 +2828,7 @@ impl CloudSyncer {
                     store.update(&rule)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::RuleNotFound(_)) => {
@@ -2816,7 +2858,7 @@ impl CloudSyncer {
                     store.update(&skill)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             // SqliteSkillStore::get reports a missing row as the generic
@@ -2840,7 +2882,7 @@ impl CloudSyncer {
                     store.update(&spec)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::NotFound(_)) => {
@@ -2910,7 +2952,7 @@ impl CloudSyncer {
         fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
         if self.preserve_fold_conflict(&local, &remote, remote_updated_at, fold_conflicts)? {
-            return Ok(UpsertResult::Skipped);
+            return Ok(UpsertResult::Skipped("local_conflict"));
         }
         // Re-check after the get→add race too: a recovery key must never
         // overwrite a concurrent insert belonging to another creation.
@@ -2936,7 +2978,7 @@ impl CloudSyncer {
                 store.update(&remote)?;
                 Ok(UpsertResult::Updated)
             }
-            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
         }
     }
 
@@ -2953,11 +2995,11 @@ impl CloudSyncer {
             Ok(local) => {
                 if rejects_delivery_regression(&local, &task) {
                     self.record_delivery_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 let action = self.resolve_conflict(
                     "task",
@@ -2987,7 +3029,7 @@ impl CloudSyncer {
                             },
                         )
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
@@ -3023,7 +3065,7 @@ impl CloudSyncer {
                         .unwrap_or(false)
                 {
                     self.keep_local_rule_over_unattributed_row(&rule)?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("local_conflict"));
                 }
                 let local_time = local.last_accessed.unwrap_or(local.created);
                 let remote_time = rule.last_accessed.unwrap_or(rule.created);
@@ -3043,7 +3085,7 @@ impl CloudSyncer {
                         store.update(&rule)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             Err(cas_store::StoreError::RuleNotFound(_)) => {
@@ -3113,7 +3155,7 @@ impl CloudSyncer {
                         store.update(&skill)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             // Keep team and personal pulls aligned: a fresh local store may
@@ -3457,7 +3499,7 @@ impl CloudSyncer {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3578,7 +3620,7 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3644,7 +3686,7 @@ impl CloudSyncer {
                                 .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3690,7 +3732,7 @@ impl CloudSyncer {
                         );
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3715,6 +3757,7 @@ impl CloudSyncer {
         for conflict in self.take_conflict_log() {
             result.record_conflict_detail(conflict);
         }
+        self.report_guarded_peer_closes(task_store, &mut result)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -4364,7 +4407,7 @@ mod web_close_tests {
             "personal_pull",
         )
         .unwrap();
-        assert!(matches!(outcome, UpsertResult::Skipped));
+        assert!(matches!(outcome, UpsertResult::Skipped(_)));
         // The no-op must not clobber the pre-existing local close_reason.
         let got = store.get("t-done").unwrap();
         assert_eq!(got.close_reason.as_deref(), Some("already closed locally"));
@@ -4472,7 +4515,7 @@ mod web_close_tests {
         stale_remote.updated_at = chrono::Utc::now();
         assert!(matches!(
             syncer.upsert_task(&*store, stale_remote, "sync-gh451", "personal_pull"),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
 
         let retained = store.get("cas-gh451").unwrap();
@@ -4513,7 +4556,7 @@ mod web_close_tests {
                 "sync-team",
                 "team_pull",
             ),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
         assert_eq!(
             store.get("cas-team-terminal").unwrap().status,
@@ -4588,7 +4631,7 @@ mod web_close_tests {
 
         assert!(matches!(
             syncer.upsert_task(&*store, remote, "sync-unattributed", "personal_pull"),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
         assert_eq!(
             store.get("cas-unattributed-reopen").unwrap().status,
@@ -4630,7 +4673,7 @@ mod web_close_tests {
                 ),
             }
             .unwrap();
-            assert!(matches!(outcome, UpsertResult::Skipped));
+            assert!(matches!(outcome, UpsertResult::Skipped(_)));
             let retained = store.get(&local.id).unwrap();
             assert!(retained.lifecycle_matches(&local));
             assert_eq!(retained.updated_at, local.updated_at);

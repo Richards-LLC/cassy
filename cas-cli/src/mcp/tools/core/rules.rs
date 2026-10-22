@@ -1080,7 +1080,15 @@ impl CasCore {
             task_id,
             verdict_id,
         )
-        .map_err(|error| invalid(format!("Failed to record the observation: {error}")))?;
+        .map_err(|error| {
+            let mut mapped = invalid(format!("Failed to record the observation: {error}"));
+            if matches!(&error, cas_store::StoreError::Database(source)
+                if cas_store::shared_db::is_busy_error(source))
+            {
+                mapped.code = ErrorCode::INTERNAL_ERROR;
+            }
+            mapped
+        })?;
         let tasks = candidate.distinct_tasks();
         let mut output = format!(
             "Observed rule candidate {} ({tasks}/{CANDIDATE_DECISION_TASKS} tasks). It is not a rule and is never surfaced to agents.",
@@ -1485,5 +1493,24 @@ mod tests {
             .collect();
         assert_eq!(chores.len(), 1);
         assert!(!chores[0].description.contains(lesson));
+
+        // A real pooled-store wait timeout is retryable, not a bad observation.
+        let connection = cas_store::shared_db::shared_connection(&core.cas_root.join("cas.db"))
+            .unwrap();
+        let held = connection.lock().unwrap();
+        let budget = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
+        let error = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "cas-0ab2:ver-busy".into())
+            .await
+            .unwrap_err();
+        drop(budget);
+        drop(held);
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR, "{error}");
+        assert!(error.message.contains("retry"), "{error}");
+        let invalid = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "missing-verdict".into())
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
     }
 }

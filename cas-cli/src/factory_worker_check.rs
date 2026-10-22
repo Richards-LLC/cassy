@@ -1886,8 +1886,20 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     } else {
         let mut command = Command::new(cargo);
         command.arg("check");
+        // cas-edeb: a nested check must not reuse an outer test's lease runner.
+        if let Some(variable) = crate::factory_target_cache::owner::host_runner_env() {
+            command.env_remove(variable);
+        }
         command
     };
+    #[cfg(unix)]
+    if test.is_some()
+        && target_lease.is_none()
+        && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+    {
+        // Managed review checkouts have no lease-aware runner to replace this value.
+        command.env_remove(variable);
+    }
     #[cfg(unix)]
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
@@ -2021,7 +2033,7 @@ mod tests {
             let root = PathBuf::from(root);
             let mut command = Command::new("python3");
             command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
-                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/worker-proof-guards.py"))
+                .arg(root.join("worker-proof-guards.py"))
                 .arg(root.join("verified.sh"))
                 .arg(root.join("fake-cargo.py"))
                 .arg(root.join("count"))
@@ -2030,6 +2042,10 @@ mod tests {
                 .env("PID_FILE", root.join("pids"))
                 .env("CARGO", root.join("fake-cargo.py"))
                 .env("PYTHONPATH", &root)
+                // CI runs the suite under run-verified-tests.sh with a
+                // relative VERIFIED_TEST_LOG; the nested runner must not
+                // inherit it, or it cannot open the log and never starts Cargo.
+                .env_remove("VERIFIED_TEST_LOG")
                 .stdout(Stdio::null()).stderr(Stdio::null());
             command.process_group(0);
             let signals = WorkerWaitSignals::install().unwrap();
@@ -2042,6 +2058,11 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let fake = root.path().join("fake-cargo.py");
+        std::fs::write(
+            root.path().join("worker-proof-guards.py"),
+            include_str!("../../scripts/worker-proof-guards.py"),
+        )
+        .unwrap();
         std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
         std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
 real_killpg = os.killpg
@@ -2870,9 +2891,9 @@ fi"#);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
-        // A capped outer test already has a release runner. Observe only what
-        // this fixture's check/test invocation installs, not inherited state.
-        env.remove(&variable);
+        // cas-edeb: nested checks can inherit a capped outer test's runner.
+        // Check must clear it; test mode must install its own release runner.
+        env.set(&variable, "/inherited/outer-test-runner");
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,
@@ -2926,6 +2947,51 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             free.is_ok_and(|lease| lease.is_some()),
             "a leaked test child must not hold the worktree's target lease"
         );
+    }
+
+    /// cas-edeb: managed review checkouts have no target lease, so nested
+    /// tests must not inherit the outer host's test-binary runner.
+    #[cfg(unix)]
+    #[test]
+    fn managed_review_test_does_not_inherit_host_runner_cas_edeb() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        env.set(&variable, "/inherited/outer-test-runner");
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = fixture_head(&repo);
+        let root = repo.join(".cas");
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let checkout =
+            crate::factory_review_scratch::create(&root, &repo, "cas-proof", None, &head).unwrap();
+        assert!(
+            crate::factory_target_cache::owner::acquire(&root, &checkout.path)
+                .unwrap()
+                .is_none(),
+            "managed review checkouts do not own worker target leases"
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            &format!(
+                r#"[ "$1" = nextest ] || exit 2
+[ -z "${{{variable}:-}}" ] || {{ echo 'test command inherited host runner' >&2; exit 3; }}
+python3 -c 'import os, sys; sys.exit(0 if not os.environ.get("{variable}") else 4)'
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
+            ),
+        );
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
+            .map(str::to_string);
+        execute_at_with_scope(&root, &args, &checkout.path, &fake, None, None).unwrap();
     }
 
     /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at
@@ -3358,11 +3424,12 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         )
         .unwrap();
         assert!(!repo.join(".context/zig/zig").exists());
-        // Preserve the tools needed by Git and the zero-test guard, but omit Zig.
+        // Preserve the tools needed by Git and the zero-test guard, including
+        // Python for nextest discovery; keep Zig absent from this PATH.
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let host_path = std::env::var_os("PATH").unwrap();
-        for tool in ["git", "bash", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
+        for tool in ["git", "bash", "python3", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
             let path = std::env::split_paths(&host_path)
                 .map(|dir| dir.join(tool))
                 .find(|path| executable(path))

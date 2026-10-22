@@ -1,0 +1,4 @@
+[WARN] local-only proof.cjs - 34 B - art-108414f1
+     recorded locally; not logged in to Cassy Cloud
+     sha256 9f72b7fbdcae1216afb9604428a18351041e293faa2a71d74b08007e92b43dd7
+  -> cas artifact show art-108414f1

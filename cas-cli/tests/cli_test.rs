@@ -390,6 +390,12 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
     write("pages/base.ts", "export {};\n");
     let baseline = commit();
     write("pages/new.ts", "export {};\n");
+    // Integration has seeded debt and a broken reference; the checkout is curated.
+    write(
+        "docs/qa/journeys.yaml",
+        &registry.replace("    status: live", "    status: live\n    seeded: true")
+            .replace("invariants: [FLOW]", "invariants: [MISSING]"),
+    );
     let integrated = commit();
     git(&["update-ref", "refs/remotes/origin/main", &integrated]);
     git(&["reset", "--hard", &baseline]);
@@ -407,7 +413,20 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
     let report = status();
     let measured = format!("origin/main@{integrated}");
     assert_eq!(report["upkeep"]["measured_ref"], measured, "{report}");
-    for artifact in ["codemap", "product_overview", "registry"] {
+    assert_eq!(report["source"], "working_tree", "{report}");
+    assert_eq!(report["differs_from_measured_ref"], true, "{report}");
+    assert_eq!(report["seeded"], 0, "{report}");
+    assert_eq!(report["debt_count"], 0, "{report}");
+    assert_eq!(report["problems"], serde_json::json!([]), "{report}");
+    assert_eq!(report["upkeep"]["registry"]["drift_count"], 2, "{report}");
+    assert_eq!(report["upkeep"]["registry"]["debt_count"], 1, "{report}");
+    let checked = cas_cmd(root).current_dir(root)
+        .args(["qa", "journeys", "--check", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+    assert_eq!(report["problems"], checked["problems"]);
+    assert_eq!(report["debt_count"], checked["debt_summary"]["total"]);
+    for artifact in ["codemap", "product_overview"] {
         assert_eq!(
             report["upkeep"][artifact]["drift_count"], 1,
             "{artifact}: {report}"
@@ -429,6 +448,13 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             .stdout
             .clone();
         let human = String::from_utf8(human).unwrap();
+        assert!(human.starts_with("PASS: 0 problem(s), 0 debt item(s) (working tree)\n"), "{human}");
+        assert!(human.contains("Working tree:\n  Journeys: 1  Added: 0\n  Seeded: 0  Unowned surfaces: 0"), "{human}");
+        assert!(human.contains("Working tree differs from measured ref."), "{human}");
+        let (_, integration) = human.split_once("Integration upkeep:\n").unwrap();
+        assert!(integration.contains("journey registry: 2 validation/ownership issue(s)"), "{human}");
+        assert!(integration.contains("1 validation problem(s), 1 unowned surface file(s)"), "{human}");
+        assert!(integration.contains("Curation debt: 1"), "{human}");
         let line = human.lines().find(|line| line.starts_with("Measured ref: ")).unwrap();
         assert!(line.chars().count() <= 80, "{human}");
         if branch == "main" {
@@ -466,7 +492,7 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
                 .stdout
                 .clone();
             let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
-            assert_eq!(saved["warnings"][0]["drift_count"], 1, "{saved}");
+            assert_eq!(saved["warnings"][0]["drift_count"], if *key == "qa.registry.enforce" { 2 } else { 1 }, "{saved}");
             assert_eq!(saved["warnings"][0]["measured_ref"], measured, "{saved}");
         }
         let output = cas_cmd(root)
@@ -1269,10 +1295,17 @@ fn test_not_initialized_error() {
 
     // cas-d6ab: styling follows the destination stream, independently of stdout.
     #[cfg(unix)]
-    for (stdout_tty, stderr_tty, no_color) in [
-        (true, false, false),
-        (false, true, false),
-        (true, true, true),
+    let config_project = TempDir::new().unwrap();
+    #[cfg(unix)]
+    cas::store::init_cas_dir(config_project.path()).unwrap();
+    #[cfg(unix)]
+    for (stdout_tty, stderr_tty, no_color, config_error) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (true, true, true, false),
+        // cas-62e0: the command's own stderr formatter must follow the pipe,
+        // just like the top-level error formatter covered by the other rows.
+        (true, false, false, true),
     ] {
         use std::fs::File;
         use std::io::{IsTerminal, Read};
@@ -1296,7 +1329,8 @@ fn test_not_initialized_error() {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("LC_ALL", "C")
             .env("CAS_SKIP_FACTORY_TOOLING", "1")
-            .current_dir(temp.path()).arg("status")
+            .current_dir(if config_error { config_project.path() } else { temp.path() })
+            .args(if config_error { vec!["config", "export", "--format", "unsupported"] } else { vec!["status"] })
             .stdin(Stdio::null())
             .stdout(if stdout_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() })
             .stderr(if stderr_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() });
@@ -1322,7 +1356,8 @@ fn test_not_initialized_error() {
         drop(slave);
         let error = if stderr_tty { &tty_output } else { &output.stderr };
         assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(String::from_utf8_lossy(error).contains("no Cassy store here"),
+        let diagnostic = if config_error { "Unknown format" } else { "no Cassy store here" };
+        assert!(String::from_utf8_lossy(error).contains(diagnostic),
             "missing diagnostic: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, stderr={error:?}");
         assert_eq!(error.contains(&0x1b), stderr_tty && !no_color,
             "stderr styling must follow its own TTY and NO_COLOR: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, no_color={no_color}, stderr={error:?}");

@@ -95,12 +95,12 @@ must state the measured time and whether it exceeded the recorded budget.
    `docs/release-reports/`. Verify source fidelity and PDF pagination before
    either top-level message is sent. These local artifacts precede the later
    upload/link receipt, which needs existing parent messages.
-2. Submit the four reviewed bodies through Violet in order: User top-level,
+2. Post the four messages through Violet in order: the reviewed User top-level,
    User logical reply, Dev top-level, Dev logical reply. A logical reply is one
    body submitted once; Violet may split it into multiple Slack messages under
    the same parent. Save every returned part ID in order, the singular message
    ID and returned permalink, including both parent IDs for report delivery.
-3. After all parts of those four bodies, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
+3. After the four messages (including all returned parts), set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
    `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
    `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
    to the existing User thread through Violet `violet_post` with `kind: file`

@@ -122,7 +122,10 @@ fn qa_impact_orders_status_share_id_and_ignores_paths() {
         ),
         ("src/flow.ts", "src/**", "owner_groups.core")
     );
-    assert!(first.evidence_required.contains("INV"));
+    assert_eq!(
+        first.evidence_required,
+        "walk /flow on staging with a fresh persona; read back INV from the system of record; fixtures: none declared"
+    );
     assert_eq!(
         report.journeys[4].evidence_required,
         "prove it stays unreachable"
@@ -131,6 +134,73 @@ fn qa_impact_orders_status_share_id_and_ignores_paths() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["version"], 1);
     assert_eq!(json["journeys"][0]["invariants"][0]["check"], "Read state");
+}
+
+#[test]
+fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/deals.ts", "deals");
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-22'\nsafety: {mode: fixture-only, forbidden_hosts: [quickbooks.api.intuit.com], protected_credentials: [QBO_REFRESH_TOKEN]}\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n    traffic: {share_pct: null, basis: New accounts}\n",
+    );
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified("src/deals.ts")],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert!(report.registry.valid, "{:?}", report.warnings);
+    let note = crate::mcp::tools::core::task::lifecycle::qa_impact::render(
+        &serde_json::to_value(&report).unwrap(),
+    );
+    assert!(
+        note.contains("walk /deals against stubs; prove zero non-loopback requests"),
+        "{note}"
+    );
+    assert!(
+        note.contains("quickbooks.api.intuit.com") && note.contains("QBO_REFRESH_TOKEN"),
+        "{note}"
+    );
+    assert!(
+        !note.contains("staging") && !note.contains("system of record"),
+        "{note}"
+    );
+}
+
+#[test]
+fn qa_impact_marks_a_planned_spec_as_planned_not_reviewable() {
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/deals.ts", "deals");
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n    spec: tests/deals.spec.ts\n    spec_status: planned\n",
+    );
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified("src/deals.ts")],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    let journey = &report.journeys[0];
+    assert_eq!(journey.spec, None);
+    assert!(
+        journey.evidence_required.ends_with(
+            "; spec tests/deals.spec.ts is planned, not written: no automated coverage yet"
+        ),
+        "{}",
+        journey.evidence_required
+    );
 }
 
 #[test]
@@ -425,4 +495,80 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         selected_source_merges > 0,
         "parity needs a production source merge that selects journeys"
     );
+}
+
+/// GH #1340: qa impact, `cas codemap status` and `cas qa journeys --status`
+/// share one CODEMAP freshness source. A regen commit that also adds files,
+/// plus untracked checkout debris, is fresh in all three; a later structural
+/// commit makes all three stale.
+#[test]
+fn codemap_freshness_agrees_across_qa_impact_status_and_journeys_gh_1340() {
+    use crate::hooks::handlers::handlers_events::{
+        codemap::{CodemapStaleness, evaluate_codemap_at},
+        docs_freshness::{Measurement, UpkeepReport},
+    };
+    let temp = repo();
+    let repo = temp.path();
+    let origin = tempfile::tempdir().unwrap();
+    git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(
+        repo,
+        &["remote", "add", "origin", &origin.path().to_string_lossy()],
+    );
+    write(repo, ".claude/CODEMAP.md", "- `src/` - Source\n");
+    commit(repo);
+    write(
+        repo,
+        ".claude/CODEMAP.md",
+        "- `src/` - Source\n- `docs/` - Docs\n",
+    );
+    write(repo, "docs/PRODUCT_OVERVIEW.md", "overview");
+    write(repo, "docs/qa/notes.md", "notes");
+    commit(repo);
+    let publish = || {
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["fetch", "-q", "origin"]);
+        git(repo, &["remote", "set-head", "origin", "main"]);
+    };
+    publish();
+    write(repo, ".playwright-mcp/page.yml", "untracked debris");
+    let store = repo.join(".cas");
+    let counts = || {
+        let impact = analyze(
+            repo,
+            &QaConfig::default(),
+            &[Change::modified("src/a.ts")],
+            None,
+            None,
+        )
+        .unwrap()
+        .warnings
+        .iter()
+        .find_map(|w| {
+            w.strip_prefix("CODEMAP is stale (")
+                .map(|rest| rest.split(' ').next().unwrap().to_owned())
+        });
+        let status = match evaluate_codemap_at(&Measurement::at(repo, &store))
+            .unwrap()
+            .staleness
+        {
+            None => Some(0),
+            Some(CodemapStaleness::Stale { total_changes, .. }) => Some(total_changes),
+            other => panic!("unexpected status {other:?}"),
+        };
+        let journeys = UpkeepReport::at(
+            &Measurement::integration_at(repo, &store),
+            &QaConfig::default(),
+        )
+        .codemap
+        .drift_count;
+        (impact, status, journeys)
+    };
+    assert_eq!(counts(), (None, Some(0), Some(0)));
+    // `commit` stages everything; drop the debris so only src/new.ts lands.
+    std::fs::remove_dir_all(repo.join(".playwright-mcp")).unwrap();
+    write(repo, "src/new.ts", "new");
+    commit(repo);
+    publish();
+    assert_eq!(counts(), (Some("1".to_owned()), Some(1), Some(1)));
 }

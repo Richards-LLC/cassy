@@ -215,7 +215,7 @@ pub(crate) struct UpkeepReport {
 
 impl UpkeepReport {
     pub fn at(measurement: &Measurement, qa: &crate::config::QaConfig) -> Self {
-        use super::{codemap::CodemapStaleness, project_overview::ProjectOverviewStaleness};
+        use super::project_overview::ProjectOverviewStaleness;
         let sha = git(
             &measurement.root,
             &[
@@ -258,14 +258,7 @@ impl UpkeepReport {
         };
         let measurement = &snapshot;
         if let Some(evaluation) = super::codemap::evaluate_codemap_at(measurement) {
-            report.codemap.observe(match evaluation.staleness {
-                None => Some(0),
-                Some(CodemapStaleness::Missing) => None,
-                Some(
-                    CodemapStaleness::Stale { total_changes, .. }
-                    | CodemapStaleness::SignificantlyStale { total_changes, .. },
-                ) => Some(total_changes),
-            });
+            report.codemap.observe(evaluation.structural_change_count());
         }
         let watch_warning = measurement
             .read(super::project_overview::DOC_PATH)

@@ -157,6 +157,67 @@ pub(crate) fn started_delivery(
     Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
 }
 
+/// A legacy start may name the previous task's lane, before the worker
+/// switched to its own. An already-integrated, attributable receipt can
+/// retire that stale boundary for close; it cannot rebind a live delivery or
+/// waive any of the ordinary receipt/content/review gates.
+pub(super) fn recover_stale_start_for_integrated_receipt(
+    repo: &Path,
+    task: &mut Task,
+    receipt: &str,
+    lease_history: &[cas_store::LeaseHistoryEntry],
+) -> bool {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+        return false;
+    };
+    let Some(target) = task.deliverables.work_target.as_ref() else {
+        return false;
+    };
+    if target != &start.work_target
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(repo, &target.repo_selector)
+        || !is_safe_git_refname(&start.branch)
+        || !matches!(start.base_sha.len(), 40 | 64)
+        || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || start.branch == crate::factory_isolation::worker_task_branch(&start.assignee, &task.id)
+        || started_delivery(repo, task).is_ok()
+    {
+        return false;
+    }
+    let Ok(receipt) = resolve_task_commit_receipt_sha(repo, receipt) else {
+        return false;
+    };
+    let identity = task_commit_identity(task, None);
+    if commit_claims_another_task(repo, &receipt, &identity) {
+        return false;
+    }
+    let own_tip = worker_task_branch_ref(repo, &start.assignee, &task.id)
+        .and_then(|branch| resolve_branch_sha(repo, &branch));
+    if own_tip.as_deref() != Some(receipt.as_str())
+        && !commit_is_task_attributable(repo, &receipt, &identity)
+    {
+        return false;
+    }
+    fetch_parent_branch_best_effort(repo, &target.target_branch);
+    let window = resolve_task_commit_receipt_window(task.created_at, lease_history, identity);
+    // No supervisor override here: recovery itself needs actual integrated
+    // content within this task's attributable work window.
+    if validate_task_commit_receipt(repo, &receipt, &target.target_branch, &window).is_err() {
+        return false;
+    }
+    let audit = format!(
+        "[{}] DECISION: integrated commit_receipt {receipt} resolved task {} after a lane switch. \
+         Retired stale start boundary {} at {}; no branch ref was moved. All normal close gates remain required.",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"), task.id, start.branch, start.base_sha,
+    );
+    task.deliverables.factory_branch_start = None;
+    if !task.notes.is_empty() {
+        task.notes.push_str("\n\n");
+    }
+    task.notes.push_str(&audit);
+    true
+}
+
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')

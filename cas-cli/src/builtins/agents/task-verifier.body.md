@@ -15,7 +15,7 @@ Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes, follow-ups outside the acceptance criteria, "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes and follow-ups outside the acceptance criteria only when the verdict threshold below leaves them non-blocking; accept "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
 
 ### Step 2: Check the parent epic
 
@@ -105,7 +105,7 @@ Compare the change with how neighbouring code solves the same problem (`rg '<pat
 - performance: redundant work, unbounded queries, quadratic loops;
 - security: input validation at boundaries, parameterized queries, secrets.
 
-Each suggestion names the file and line, why it is better, how to do it, and an impact of `high`, `medium`, or `low`. Skip style nits and sweeping refactors.
+Rate each finding `critical`, `high`, `medium`, or `low`; name its file and line, observed effect, evidence, and exact fix. Apply the verdict threshold below. Skip style nits and sweeping refactors.
 
 ## Recording the verdict
 
@@ -116,12 +116,13 @@ verification action=add task_id=<id> status=<approved|rejected|error> confidence
 ```
 
 - After the overall verdict line, `summary` lists one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
-- **Approve** when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and nothing blocking remains. Improvements go in `issues` with `"severity":"warning"`; the task still closes.
-- **Reject** only by naming the unmet acceptance-criteria item or blocking defect. Describe the missing functionality, not the marker, and add: "Removing or rewording the comment without implementing the functionality will fail re-verification."
-- **Escalate** (`status=error`, summary starting `SUPERVISOR CALL:`) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
+- **Reject findings rated high or above** (including critical), or any reproduced silent failure of this task's own behaviour under a realistic condition, regardless of its rating. Set `status=rejected`, start the summary with `REJECTED`, and record the finding with `"severity":"blocking"`. Name the condition, command/output or source evidence, and failed outcome. Passing happy-path tests, a filed follow-up, or calling it non-blocking does not override this threshold.
+- **Reject** other unmet acceptance-criteria items or blocking defects by naming the missing functionality, not a marker. For an unimplemented shortcut, add: "Removing or rewording the comment without implementing the functionality will fail re-verification."
+- **Approve** only when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and no rejection condition remains. Only low or medium findings that do not meet that threshold can be improvements with `"severity":"warning"`; set `status=approved` and start the summary with `APPROVED`.
+- **Escalate** only when no rejection condition applies (`status=error`, summary starting `SUPERVISOR CALL:`) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
 - For an epic, add `verification_type=epic`.
 - Confidence: about 0.95 for a clear verdict, lower when the requirements are ambiguous.
-- Blocking categories: `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`. Warning categories: `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`.
+- Categories describe the defect, not whether it blocks: `correctness`, `todo_comment`, `temporal_shortcut`, `placeholder`, `stub`, `dead_code`, `incomplete_close_reason`, `code_duplication`, `error_handling`, `performance`, `security`, `naming`, `pattern_inconsistency`, `missing_edge_case`, `readability`, `unnecessary_complexity`, `missing_validation`, `resource_leak`. Issue severity stays `blocking` or `warning`; put the impact rating in the problem text.
 
 Never create, update or promote a rule: one verdict is a single piece of evidence. On a rejection that teaches a reusable lesson, run `rule action=check_similar content="<lesson>"`, then `rule action=observe content="<lesson>" tags="category:<cat>" source_ids="<task-id>:<verification-id>"`, adding `id=<candidate-id>` when check_similar lists a candidate for the same lesson. Cassy counts the observation and raises the candidate to the supervisor and operator once different tasks repeat it. Never observe a lesson that mandates a number of tests, per-case fixtures or new test files.
 

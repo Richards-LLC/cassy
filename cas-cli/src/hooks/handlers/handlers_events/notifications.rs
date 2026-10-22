@@ -204,16 +204,39 @@ pub fn handle_notification(
             .spawn();
     }
 
+    // This records the hook event, not external delivery.
+    eprintln!("cas: Notification event: {message}");
+
     // Optional webhook support
     if let Some(ref webhook_url) = notification_config.webhook_url {
-        // Diagnose old/hand-edited values before a fire-and-forget thread can
-        // be lost at process exit. Do not put the destination or body in logs.
+        // Diagnose old/hand-edited values before sending. Do not put the
+        // destination or body in logs.
         match crate::config::validate_notification_webhook_url(webhook_url) {
             Ok(Some(url)) => {
                 let msg = message.clone();
-                std::thread::spawn(move || {
-                    let _ = send_webhook_notification(url.as_str(), &msg);
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                let sender = std::thread::spawn(move || {
+                    let _ = done_tx.send(send_webhook_notification(url.as_str(), &msg));
                 });
+                // Curl has a ten-second transfer limit. Keep this short-lived
+                // CLI alive through normal delivery, but never wait forever
+                // for a stuck sender or process launch.
+                match done_rx.recv_timeout(std::time::Duration::from_secs(11)) {
+                    Ok(result) => {
+                        if sender.join().is_err() || result.is_err() {
+                            eprintln!("cas: Warning: notification webhook failed.");
+                        } else {
+                            eprintln!("cas: Notification webhook delivered");
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => eprintln!(
+                        "cas: Warning: notification webhook timed out; delivery unconfirmed."
+                    ),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = sender.join();
+                        eprintln!("cas: Warning: notification webhook sender failed.");
+                    }
+                }
             }
             Ok(None) => {}
             Err(_) => eprintln!(
@@ -222,13 +245,10 @@ pub fn handle_notification(
         }
     }
 
-    // Log the notification event
-    eprintln!("cas: Notification sent: {message}");
-
     Ok(HookOutput::empty())
 }
 
-/// Send a webhook notification (blocking, for use in spawned thread)
+/// Send a webhook notification (blocking, for use in the bounded sender thread)
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
     // Config files can predate URL validation or be edited outside the CLI;
     // enforce the destination policy at the last point before sending data.
@@ -264,7 +284,11 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
         .output();
 
     match output {
-        Ok(_) => Ok(()),
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(MemError::Other(format!(
+            "Webhook failed: curl exited {}",
+            output.status
+        ))),
         Err(e) => Err(MemError::Other(format!("Webhook failed: {e}"))),
     }
 }

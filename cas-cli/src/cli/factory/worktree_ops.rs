@@ -219,7 +219,7 @@ pub(super) fn execute_check_staleness(branch: Option<&str>, fetch: bool) -> Resu
             if !status.success() {
                 let mut stderr = io::stderr();
                 let theme = ActiveTheme::default();
-                let mut fmt = Formatter::stdout(&mut stderr, theme);
+                let mut fmt = Formatter::stderr(&mut stderr, theme);
                 StatusLine::warning(format!("Could not fetch from {remote} (offline?)"))
                     .render(&mut fmt)?;
             }
@@ -237,7 +237,7 @@ pub(super) fn execute_check_staleness(branch: Option<&str>, fetch: bool) -> Resu
     if behind_count > 0 {
         let mut stderr = io::stderr();
         let theme = ActiveTheme::default();
-        let mut fmt = Formatter::stdout(&mut stderr, theme);
+        let mut fmt = Formatter::stderr(&mut stderr, theme);
         fmt.newline()?;
         StatusLine::warning("STALE WORKTREE").render(&mut fmt)?;
         fmt.separator()?;

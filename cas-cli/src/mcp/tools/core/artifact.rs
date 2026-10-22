@@ -186,8 +186,9 @@ fn upload_client(cas_root: &std::path::Path) -> Option<ArtifactUploadClient> {
 
 fn render_publish(outcome: &PublishOutcome) -> String {
     let artifact = &outcome.artifact;
+    let verdict = if outcome.disposition.is_committed() { "Published" } else { "Local-only artifact" };
     let mut out = format!(
-        "Published {}\n\nartifact_id: {}\nname: {}\nmime: {}\nsize_bytes: {}\nsha256: {}\nstatus: {}\nstorage: {}\n",
+        "{verdict} {}\n\nartifact_id: {}\nname: {}\nmime: {}\nsize_bytes: {}\nsha256: {}\nstatus: {}\nstorage: {}\n",
         artifact.id,
         artifact.id,
         artifact.name,
@@ -261,7 +262,7 @@ mod tests {
             source: PathBuf::from("/tmp/brief.pdf"),
         };
         let rendered = render_publish(&outcome);
-        assert!(rendered.starts_with("Published art-7f3a9c21"), "{rendered}");
+        assert!(rendered.starts_with("Local-only artifact art-7f3a9c21"), "{rendered}");
         assert!(rendered.contains("artifact_id: art-7f3a9c21"), "{rendered}");
         assert!(rendered.contains("sha256: bbbb"), "{rendered}");
         assert!(

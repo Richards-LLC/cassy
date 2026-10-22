@@ -17,8 +17,22 @@ pub struct Status {
     pub seeded: usize,
     pub debt_count: usize,
     pub unowned_surfaces: Vec<String>,
+    /// GH #1344: `<journey>: <path>` for each planned spec not yet tracked.
+    pub planned_specs: Vec<String>,
     pub problems: Vec<Problem>,
     pub added: usize,
+}
+
+impl Status {
+    /// The `--status` line naming specs still owed, if any.
+    pub fn planned_specs_line(&self) -> Option<String> {
+        (!self.planned_specs.is_empty()).then(|| {
+            format!(
+                "  Planned specs (not written): {}",
+                self.planned_specs.join(", ")
+            )
+        })
+    }
 }
 
 fn tracked(root: &Path) -> Result<Vec<String>> {
@@ -63,6 +77,7 @@ pub(crate) fn status_with_registry(
         seeded: 0,
         debt_count: 0,
         unowned_surfaces: vec![],
+        planned_specs: vec![],
         problems: vec![],
         added: 0,
     };
@@ -84,6 +99,14 @@ pub(crate) fn status_with_registry(
     status.seeded = registry.journeys.iter().filter(|j| j.seeded).count();
     status.debt_count = report.debt.len();
     status.problems = report.problems;
+    status.planned_specs = registry
+        .journeys
+        .iter()
+        .filter(|j| j.spec_status.as_deref() == Some("planned"))
+        .filter_map(|j| j.spec.as_ref().map(|spec| (j, spec)))
+        .filter(|(_, spec)| !files.contains(spec))
+        .map(|(j, spec)| format!("{}: {spec}", j.id))
+        .collect();
     status.unowned_surfaces = files
         .iter()
         .filter(|file| {
@@ -541,6 +564,23 @@ pub fn seed(root: &Path, qa: &QaConfig, merge: bool) -> Result<Status> {
 mod tests {
     use crate::{qa_registry, test_support::TestEnvGuard};
     use std::{fs, path::Path, process::Command};
+
+    #[test]
+    fn status_lists_planned_specs_not_yet_written() {
+        let registry = qa_registry::parse(
+            "journeys:\n  - {id: deals, status: dark, spec: tests/deals.spec.ts, spec_status: planned}\n  - {id: home, status: dark, spec: tests/home.spec.ts, spec_status: planned}\n",
+        )
+        .unwrap();
+        let status = super::status_with_registry(
+            &Default::default(),
+            Some(Ok(registry)),
+            &["tests/home.spec.ts".into()],
+        );
+        assert_eq!(
+            status.planned_specs_line().as_deref(),
+            Some("  Planned specs (not written): deals: tests/deals.spec.ts")
+        );
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let out = Command::new("git")

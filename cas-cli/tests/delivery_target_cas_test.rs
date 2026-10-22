@@ -624,7 +624,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let original_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
             assert_eq!(original.deliverables.factory_branch_start.as_ref().unwrap().branch, delivery_branch);
             run_git(&["push", "origin", &delivery_branch], &worker_path);
-            delivery_branch = format!("factory/{worker}-{}-resume", task.id);
+            delivery_branch = format!("factory/{worker}-{}-reviewed", task.id);
             run_git(&["switch", "-c", &delivery_branch, "main"], &worker_path);
             std::fs::write(worker_path.join(delivered_path), "fresh branch delivery\n").unwrap();
             run_git(&["add", delivered_path], &worker_path);

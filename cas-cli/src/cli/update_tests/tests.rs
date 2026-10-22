@@ -2518,6 +2518,28 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
 }
 
 #[test]
+fn cloud_findings_keep_c_locale_cause_and_remedy_cas_2c9c() {
+    for (summary, cause, remedy) in [
+        (
+            "[WARN] Push incomplete - 1 rejected by cloud (invalid_json_nul x1) - invalid_json_nul: Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul` - queued rows remain - run cas cloud queue --retry\n",
+            "push incomplete: 1 rejected by cloud (invalid_json_nul x1)",
+            "Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul`",
+        ),
+        (
+            "[WARN] Pull incomplete - 1 errors - run cas cloud pull\n",
+            "pull incomplete: 1 errors",
+            "cas cloud pull",
+        ),
+    ] {
+        assert_eq!(
+            findings::cause_and_remedy("cloud sync: counts only", summary),
+            (cause.to_owned(), Some(remedy.to_owned())),
+            "lost cloud finding from {summary:?}"
+        );
+    }
+}
+
+#[test]
 fn store_lock_failure_names_holders_and_the_remedy_cas_91a3() {
     let cas_root = Path::new("/projects/soundwave-config/.cas");
     let phase = ProjectPhase::Failed("migration: database error: database is locked".to_string());
@@ -3693,11 +3715,14 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
             && !output.contains("retired config settings remain ignored"),
         "receipted config failures must not replay duplicate or projection findings: {output}"
     );
+    // Longer phase remedies can wrap this cause between words at 80 columns.
+    let prose = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        rendered.matches("config is read-only").count(),
+        prose.matches("config is read-only").count(),
         1,
         "{rendered}"
     );
+    assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
     assert!(
         rendered.contains("cas update --user"),
         "existing phase remedy lost: {rendered}"

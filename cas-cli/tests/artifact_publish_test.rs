@@ -312,13 +312,21 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "artifact_id": "cloud-42",
                 "upload_url": upload_url,
+                "required_headers": { "content-type": "application/octet-stream" },
             })))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
             .and(path_matcher("/object/put"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(|request: &wiremock::Request| {
+                let types = request.headers.get_all("content-type").iter().collect::<Vec<_>>();
+                if types.len() == 1 && types[0] == "application/octet-stream" {
+                    ResponseTemplate::new(200)
+                } else {
+                    ResponseTemplate::new(403).set_body_string("signed Content-Type mismatch")
+                }
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -335,7 +343,7 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
 
     let project = Project::new();
     project.log_in(&server.uri());
-    let file = project.task_dir().join("report.pdf");
+    let file = project.task_dir().join("report.cjs");
     let bytes = write_sample(&file);
 
     let output = project
@@ -354,6 +362,7 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
     assert_eq!(record["status"], "committed");
     assert_eq!(record["storage"], "committed");
     assert_eq!(record["cloud_url"], "https://cloud.example/a/cloud-42");
+    assert_eq!(record["mime"], "application/octet-stream");
 
     runtime.block_on(async {
         server.verify().await;
@@ -365,6 +374,9 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
             .filter(|request| request.url.path() == "/object/put")
             .collect();
         assert_eq!(uploads.len(), 1);
+        let types = uploads[0].headers.get_all("content-type").iter().collect::<Vec<_>>();
+        assert_eq!(types.len(), 1, "the signed type must replace inference, not append");
+        assert_eq!(types[0], "application/octet-stream");
         assert!(
             uploads[0].headers.get("authorization").is_none(),
             "the Cassy bearer must never reach the object store"
@@ -420,6 +432,60 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
         upload_url.contains(UPLOAD_SIGNATURE),
         "sanity: the mock really did hand back a signed URL"
     );
+}
+
+#[test]
+fn a_failed_put_is_local_only_on_cli_and_mcp() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_matcher("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-failed",
+                "upload_url": format!("{}/object/put?signature={UPLOAD_SIGNATURE}", server.uri()),
+                "required_headers": { "Content-Type": "application/octet-stream" },
+            })))
+            .expect(3).mount(&server).await;
+        Mock::given(method("PUT")).and(path_matcher("/object/put"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("signed Content-Type mismatch"))
+            .expect(3).mount(&server).await;
+        Mock::given(method("POST")).and(path_matcher("/api/artifacts/cloud-failed/complete"))
+            .respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+        server
+    });
+    let project = Project::new();
+    project.log_in(&server.uri());
+    let file = project.task_dir().join("proof.cjs");
+    write_sample(&file);
+    let human = project.cmd().args(["artifact", "publish", "--task", TASK]).arg(&file).output().unwrap();
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(stdout.lines().next().unwrap().contains("local-only"), "{stdout}");
+    assert!(!stdout.contains("[OK] published"), "a failed remote delivery is not success: {stdout}");
+    assert!(stdout.contains("403"), "retain the remote status: {stdout}");
+
+    let core = cas::mcp::CasCore::with_daemon(project.cas_dir(), None, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "publish", "task_id": TASK, "path": file,
+    })).unwrap();
+    let response = runtime.block_on(core.artifact_publish(rmcp::handler::server::wrapper::Parameters(request))).unwrap();
+    let mcp = response.content.iter().filter_map(|content| match &content.raw {
+        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+    assert!(mcp.lines().next().unwrap().contains("Local-only"), "{mcp}");
+    assert!(!mcp.starts_with("Published "), "{mcp}");
+    assert!(mcp.contains("status: local") && mcp.contains("403"), "{mcp}");
+
+    let machine = project.cmd().args(["--json", "artifact", "publish", "--task", TASK]).arg(&file).output().unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(record["status"], "local");
+    assert_eq!(record["storage"], "upload_failed");
+    assert!(record["cloud_url"].is_null());
+    assert!(record["storage_detail"].as_str().unwrap().contains("403"));
+    assert!(!format!("{stdout}{mcp}{}", String::from_utf8_lossy(&machine.stdout)).contains(UPLOAD_SIGNATURE));
+    runtime.block_on(server.verify());
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated from the merged v57 workspace: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.73 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -47,6 +47,8 @@
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs` - executable entry and module composition.
 - `cas-cli/src/cli/mod.rs` - clap command definitions and dispatch.
+- `cas-cli/src/cli/init.rs` - initialization, recovery advice and MCP provisioning.
+- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/account_picker.rs` - account selection, profile setup and login commands.
 - `cas-cli/src/test_env_guard.rs`, `cas-cli/src/test_paths.rs` - isolated test environments and project paths.
 - `cas-cli/src/cli/doctor.rs`, `cas-cli/src/cli/doctor/` - health producers, grouped rendering and communication checks.
 - `cas-cli/src/cli/update.rs`, `cas-cli/src/cli/update/` - update phases, binding checks, discovery and receipts.
@@ -61,11 +63,14 @@
 - `cas-cli/src/worktree/`, `cas-cli/src/worktree/git/` - worktree lifecycle and guarded Git operations.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/` - store decorators and numbered SQLite migrations.
 - `cas-cli/src/coordination/`, `cas-cli/src/notifications/` - binding intake, ownership repair and notification queues.
+- `cas-cli/src/coordination/binding_intake.rs`, `cas-cli/src/coordination/binding_repair.rs` - durable intake gates, refusal origins and retry settlement.
+- `cas-cli/src/migration/migrations/m286_epic_split_releases.rs` - durable child-release ledger schema.
 - `cas-cli/src/task_ownership.rs`, `cas-cli/src/task_assignment.rs` - project proof and task assignment identity.
 - `cas-cli/src/artifacts/`, `cas-cli/src/task_simulators.rs` - portable proofs, retention and owned simulator cleanup.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/` - knowledge distillation and background maintenance/indexing.
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - observation extraction, memory decay and harness sync.
 - `cas-cli/src/builtins/` - canonical agents, skills, jobs, harness mirrors and sync manifest.
+- `cas-cli/src/builtins/skills/finish/`, `cas-cli/src/builtins/reference-history.json` - shared finish command and per-reference provenance.
 
 ## Factory runtime and terminals
 
@@ -73,10 +78,13 @@
 - `cas-cli/src/ui/factory/app/provisioning.rs`, `cas-cli/src/ui/factory/app/render_and_ops/` - provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup delivery, events, probes, relays and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs` - lifecycle-owned Slack intake and pause control.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - managed delivery decoding, recovery ordering and idempotent wake intake.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs` - managed wake presentation, source age and addressing.
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry/` - dispatch, reminders, stalls and owned servers.
 - `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable succession and authenticated worker-branch recovery.
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment receipts and wake batching.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
+- `cas-cli/src/factory_binary_skew.rs`, `cas-cli/src/history/epochs.rs` - live binary/version identity and runtime epoch history.
 - `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_build_guard.rs` - scratch paths and build-pressure admission.
 - `cas-cli/src/factory_review_scratch.rs` - task/dispatch-owned review proof checkouts, reuse and GC.
 - `cas-cli/src/factory_worker_check.rs` - capped checks/tests, receipt rebinding and supervisor-recorded evidence.
@@ -97,6 +105,7 @@
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded repository discovery for lifecycle operations.
 - `cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs` - guarded parked-branch transfers.
 - `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - factory/reminder/server dispatch and request schemas.
+- `cas-cli/src/mcp/tools/service/mod.rs` - dispatcher composition and future-size regression guards.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage, retrieval and clients
@@ -121,9 +130,11 @@
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
 - **Contributor policy:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`.
 - **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs`; **release records:** `docs/release-notes/`, `docs/release-reports/`.
-- **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs, locale/width captures and `captures/`.
+- **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs, locale/width captures and `docs/design/cli/captures/`.
 - **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `cas-cli/src/cli/release_report.rs`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.
+- **Process-proof safety:** `scripts/run-verified-tests.sh`, `scripts/test-factory-client-terminal.py` - bounded discovery/process groups and PTY exit fixtures.
+- **Doc validation:** `scripts/check-changed-markdown.py`, `scripts/check-design-paths.py`, `scripts/release-train-announce.py` - Markdown, portable paths and four-body draft checks.
 - **Runbooks/config:** `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`, `.mcp.json`, `.env.worktree.template`, `.claude/settings.json`, `.codex/hooks.json`.
 
 ## Entrypoints

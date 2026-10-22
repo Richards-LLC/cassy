@@ -196,13 +196,13 @@ impl ConfigTuiApp {
 
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let footer_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let footer_width = footer_block.inner(area).width;
         let footer = ratatui::widgets::Paragraph::new(self.footer_text())
-            .block(
-                ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL),
-            )
+            .block(footer_block)
             .wrap(ratatui::widgets::Wrap { trim: true });
         let footer_height = footer
-            .line_count(area.width)
+            .line_count(footer_width)
             .max(3)
             .try_into()
             .unwrap_or(u16::MAX);

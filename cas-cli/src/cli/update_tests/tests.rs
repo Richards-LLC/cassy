@@ -480,17 +480,58 @@ fn cas_8235_doctor_keeps_working_custom_symlink_and_runs_hub_probe() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
-    let env = crate::test_support::TestEnvGuard::temp_home();
-    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
-    sync_user_builtins_with_violet(&update_test_cli(true), || anyhow::bail!("hub offline"))
-        .unwrap();
-    assert!(
-        env.home()
-            .join(".claude/skills/cas-worker/SKILL.md")
-            .is_file()
-    );
+    use std::os::unix::fs::symlink;
+    struct NoNetwork;
+    impl crate::cli::integrate::violet::HubProbe for NoNetwork {
+        fn list_tools(&self, _: &cmcp_core::config::ServerConfig) -> crate::cli::integrate::violet::ProbeOutcome {
+            panic!("no Violet configuration should require a network probe");
+        }
+    }
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("COLUMNS", "80");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let account = home.join(".claude-operator@example.com");
+    std::fs::create_dir_all(&account).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &account);
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("outside-profile-with-a-very-long-name".repeat(3)).join("skills");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("operator.txt"), "preserve outside profile").unwrap();
+    symlink(&target, account.join("skills")).unwrap();
+    let cli = update_test_cli(true);
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(home.join(".claude/skills/cas-worker/SKILL.md").is_file());
+    let warnings: Vec<_> = output.lines().filter(|line| !line.starts_with('{')).collect();
+    assert!(warnings.iter().all(|line| line.chars().count() <= 78), "{output}");
+    assert!(output.contains("outside HOME"), "{output}");
+    assert!(output.contains("~/.claude-operator@example.com/skills"), "{output}");
+    assert!(!output.contains(home.to_str().unwrap()), "{output}");
+    let joined: String = warnings.iter().flat_map(|line| line.split_whitespace()).collect();
+    assert!(joined.contains(target.to_str().unwrap()), "{output}");
+    assert!(warnings.iter().any(|line| line.trim() == "Retry: cas update --user"), "{output}");
+    assert!(account.join("skills").is_symlink());
+    // pin: migration must never alter the rejected external target's bytes.
+    assert_eq!(std::fs::read_to_string(target.join("operator.txt")).unwrap(), "preserve outside profile");
+
+    // The ordinary shared base is inside HOME and is already a trusted target.
+    let shared = home.join(".cas/claude-base/skills");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::remove_file(account.join("skills")).unwrap();
+    symlink(&shared, account.join("skills")).unwrap();
+    let (result, accepted) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(!accepted.contains("Violet migration skipped") && !accepted.contains("Violet update advisory"), "{accepted}");
+    assert!(account.join("skills").is_symlink());
+    assert!(shared.join("finish/SKILL.md").is_file());
 }
 
 /// Install/update must not depend on a personal HOME seed, and both legacy

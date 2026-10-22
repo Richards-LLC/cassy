@@ -43,6 +43,16 @@ pub const EPIC_SPLIT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_epic_splits_state ON epic_splits(state, epic_id)",
 ];
 
+/// Additive release ledger, shared by lazy repair and migration m286.
+pub const EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS epic_split_releases (
+        split_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        released_at TEXT NOT NULL,
+        PRIMARY KEY(split_id, task_id)
+    )",
+];
+
 /// Upgrade the original CHECK constraint without losing existing split rows.
 pub const EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE epic_splits_decisions (
@@ -192,7 +202,7 @@ fn open_conn(cas_dir: &Path) -> Result<std::sync::Arc<std::sync::Mutex<Connectio
     let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
     {
         let guard = crate::shared_db::lock_connection(&conn)?;
-        for statement in EPIC_SPLIT_SCHEMA_STATEMENTS {
+        for statement in EPIC_SPLIT_SCHEMA_STATEMENTS.iter().chain(EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS) {
             guard.execute(statement, [])?;
         }
         let ddl: String = guard.query_row(
@@ -322,6 +332,36 @@ pub fn list_epic_splits(cas_dir: &Path) -> Result<Vec<EpicSplit>> {
         "SELECT {COLUMNS} FROM epic_splits ORDER BY created_at DESC, id"
     ))?;
     let rows = statement.query_map([], parse_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Record that one child no longer belongs to this split's share. This is
+/// separate from the historical share arrays so cleanup can be retried and
+/// the original proposal remains inspectable.
+pub fn mark_epic_split_child_released(
+    cas_dir: &Path,
+    split_id: &str,
+    task_id: &str,
+    at: DateTime<Utc>,
+) -> Result<bool> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO epic_split_releases (split_id, task_id, released_at)
+         VALUES (?1, ?2, ?3)",
+        params![split_id, task_id, at.to_rfc3339()],
+    )?;
+    Ok(inserted == 1)
+}
+
+/// Every per-child release marker, keyed by its split id and task id.
+pub fn list_epic_split_child_releases(cas_dir: &Path) -> Result<Vec<(String, String)>> {
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let mut statement = conn.prepare(
+        "SELECT split_id, task_id FROM epic_split_releases ORDER BY split_id, task_id",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -491,6 +531,20 @@ mod tests {
         assert_eq!(read.state, SplitState::Pending);
         assert_eq!(list_epic_splits(dir.path()).unwrap().len(), 1);
         assert!(get_epic_split(dir.path(), "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn split_child_release_markers_are_scoped_and_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let now = Utc::now();
+
+        assert!(mark_epic_split_child_released(dir.path(), "split-1", "cas-1", now).unwrap());
+        assert!(!mark_epic_split_child_released(dir.path(), "split-1", "cas-1", now).unwrap());
+        assert!(mark_epic_split_child_released(dir.path(), "split-2", "cas-1", now).unwrap());
+        assert_eq!(list_epic_split_child_releases(dir.path()).unwrap(), vec![
+            ("split-1".into(), "cas-1".into()),
+            ("split-2".into(), "cas-1".into()),
+        ]);
     }
 
     #[test]

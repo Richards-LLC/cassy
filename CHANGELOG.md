@@ -7,6 +7,86 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.73.0] - 2026-10-22
+
+### Added
+
+- **Shared /finish command** — Ship the finish command as a Cassy builtin across Claude, Codex and Grok, while preserving personal commands and reporting account refresh failures.
+
+### Changed
+
+- **Running-version visibility** — Show stale or unknown MCP/session versions after an update, correlate registered server processes with live epochs, read the newest daemon epochs, and send one release notice across stale sessions.
+
+- **Recovery ordering** — Sort each returned managed-Violet recovery batch numerically by Slack timestamp and delivery ID, with missing or invalid timestamps placed last. Cross-page ordering remains a separate Cloud change.
+
+- **Binding journal compatibility** — Record an optional origin for refusal-backed intake pauses. On upgrade, a 3.72 quiet hold is unmarked and can end early once per host; a downgrade to 3.72 rejects journals containing the new field and fails closed. Rerunning `cas update` after a downgrade may be needed.
+
+- **Folded-message compatibility** — Escape user-controlled fold labels and delimiters instead of accepting message text as a boundary. Mixed 3.72/3.73 sessions write different fold formats; keep communicating sessions on the same version after upgrading.
+
+- **Release publication records** — Treat a split Slack reply as one logical body with ordered part IDs, retain distinct PDF file and upload-message identities, and attach split announcement replies and reports under the first root part.
+
+### Fixed
+
+- **Terminal ownership and shutdown** — Restore terminal modes after signal, disconnect, error and unwind; keep remote-client termination bounded and preserve signal exit status. Isolate daemon process sessions, clean owned children on real exits, and resize a reattached TUI to its active input owner.
+
+- **Initialization recovery** — Explain failed initialization retries with `--force`, preserve an existing project configuration, save the full JSON initialization configuration before provisioning, and refuse malformed or non-object MCP settings without overwriting them. JSON initialization provisions Claude MCP before reporting success.
+
+- **Readable setup and updates** — Use terminal foreground colors and safe status marks in initialization and shared pickers, honor `NO_COLOR` and locale precedence, wrap setup tooling results and recovery details at 80 columns, and avoid repeated embedded init error causes.
+
+- **Update warnings** — Wrap preserved-reference, personal-finish and Violet-migration warnings without splitting path tokens; show abbreviated home paths and retain complete paths in JSON or verbose output. Separate full-width progress labels from their status.
+
+- **Configuration editors** — Read and reset host-scoped settings in host configuration, batch saves under the configuration lock, and persist only visible edits. Keep operator-only refusal remedies and help usable in narrow or short terminals.
+
+- **Managed-file repairs** — Keep repairs staged when commit-guard configuration is unreadable, support detached HEADs, and report unpublished reconciliation commits before they become a hidden spawn base. Compare against the published parent after rebases and name deleted upstreams accurately.
+
+- **Safe launch remedies** — Quote trust-directory commands safely, reject invisible Unicode or control characters in branch names, retain the original Git failure, and report a refused branch as a refusal rather than an internal error.
+
+- **Root-bound command access** — Keep write and artifact fallbacks within the accepted turn directory, including rootless work and shell-resolved working directories; a supplied workdir cannot widen an unbound turn root.
+
+- **Notification delivery** — Normalize and validate webhook URLs, retain inline configuration errors, ignore user curl defaults with `-q`, bound curl runtime, and warn instead of sending to an unsafe stored destination.
+
+- **Direct Violet mentions** — Read the optional event kind from the delivery object and propagate explicit urgency atomically through idempotent enqueue. Only recognized app mentions interrupt; missing fields and ordinary messages remain non-interrupting, and replay cannot escalate a queued message.
+
+- **Message addressing** — Document the mention addressing alias as addressed to Violet; retain the already-shipped source-age calculation rather than attributing that older fix to this release.
+
+- **Cloud claim fencing** — Use conditional snapshot releases in the remaining synchronous, rollback and background paths. Preserve a same-agent restart or re-claim, confirm renewals, and distinguish self-held transfers from peer ownership.
+
+- **Reassignment leases** — Stop renewing claims for a former assignee, a stopped task or a missing task row, so reassignment is not held by an obsolete renewable lease.
+
+- **Split ownership** — Release obsolete split-owned task claims after retargeting, retain pending shares until release is known, honor explicit child releases in raw fallback rows, and preserve a hold when projection or release reads fail. Include the durable split-release migration.
+
+- **Follow-up release routing** — Inherit an active release binding for live follow-up work without rerouting unrelated tasks.
+
+- **Assignment freshness** — Allow an audited stale-assignment override and make its warning describe the actual start check.
+
+- **Merge observations** — Recover failed merge observations and clear completed or intentionally skipped wake intents. Bound persistence retry waits under the merge lock; record later merge failures and ineligible close outcomes without blank summaries.
+
+- **Advisory-CI merges** — Continue ordinary close and verification dispatch after a published merge with no check runs, with a persisted CI-unconfirmed note. An explicit failed-CI override keeps its separate behavior and the close proof gate still applies.
+
+- **Rebased parked deliveries** — Persist the new anchor and validate ownership before advertising a rebased merge request, so the merged delivery matches the recorded source tip.
+
+- **Delivery evidence** — Accept task content beneath an empty checkpoint and prove merged builtin-reference history by key instead of whole-file equality. Measure QA ranges from recorded delivery boundaries, resolve managed merges in the target repository, and recognize declared sibling test modules.
+
+- **Coverage and reference diagnostics** — Record pair-coverage waivers only when coverage is actually missing, preserve measured commit suffixes when shortening upkeep references, and reset corrupt or unsupported journey-debt history with a clear diagnostic.
+
+- **Candidate safety** — Prevent implicit scratch-worktree candidates from migrating or syncing a live store, verify the copied candidate binary, consume its published receipt rather than arbitrary stdout, and provide a short task-based candidate locator.
+
+- **Review-cache lifetime** — Reuse matching review targets and reclaim resolved targets through lifecycle and bounded GC instead of keeping a fresh multi-gigabyte target per dispatch. Preserve modified checkouts and recheck source changes before reclaim.
+
+- **Review-cache accounting** — Atomically publish ownership, stage targets before background deletion, recover interrupted trash and stale private owner markers, count only eligible bytes as reclaimable, expose deferred work in JSON, and log staging errors while measuring each trash row once.
+
+- **Bounded Rust proofs** — Protect macOS test discovery from a blocked output pipe, forward wrapper and runtime termination through the owned process group, wait for slow cleanup before bounded escalation, and support Python platforms without `waitid` without targeting a reaped group.
+
+- **Capacity diagnostics** — Name the active capped check, PID, command and start time in a busy-check refusal. Keep capacity bookkeeping failures from aborting admitted work, consume an automatic notice when a named blocker is raised, and skip missing lease rows.
+
+- **Hub diagnostics** — Honor the configured launchd label in status and present required-mode retry alternatives on separate bounded lines.
+
+- **Release reports** — Use repository-hosted source and print links instead of local file URLs, resolve post-release reports on the published main branch, and retain source and upload integrity evidence without inventing absent receipts.
+
+- **Tooling help** — Keep GC help aligned with reachable CLI flags and terminal-ellipsis exceptions limited to complete known progress text, so real truncation remains detectable. Enforce portable design-document paths.
+
+- **Regression portability** — Use the shared environment guard across integration suites, restore damaged split-test schemas on unwind, make macOS liveness and unused-port fixtures deterministic, and guard every MCP dispatcher future against the 32 KiB limit.
+
 ## [3.72.0] - 2026-10-22
 
 ### Fixed — task claims stay exclusive across upgrades

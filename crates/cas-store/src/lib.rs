@@ -134,9 +134,11 @@ pub use delegation_receipt_store::{
     SqliteDelegationReceiptStore,
 };
 pub use epic_split_store::{
-    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
+    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS,
+    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
     SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
-    insert_epic_split, list_epic_splits, open_epic_splits, pending_epic_split_work,
+    insert_epic_split, list_epic_splits, list_epic_split_child_releases,
+    mark_epic_split_child_released, open_epic_splits, pending_epic_split_work,
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
@@ -164,7 +166,8 @@ pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
     get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
-    record_observed_delivery_merge,
+    clear_pending_observed_delivery_merge, has_pending_observed_delivery_merge,
+    record_observed_delivery_merge, record_pending_observed_delivery_merge,
     transition_worker_delivery, transition_worker_delivery_verification_with_conn,
     worker_delivery_transaction_id,
 };
@@ -233,7 +236,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_targets, correct_parked_delivery_execution_note,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    get_latest_verification_dispatch,
+    get_latest_verification_dispatch, has_active_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,
     get_verification_dispatch_with_conn, get_verification_for_dispatch,
     inspect_bound_server_verifier_handoff, inspect_verifier_capability,

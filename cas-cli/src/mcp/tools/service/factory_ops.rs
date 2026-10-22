@@ -3885,7 +3885,8 @@ impl CasService {
         })?;
 
         // Snapshot execution before housekeeping can remove a dead worker.
-        // The fast poll does no Git, network, history scan or stale mutation.
+        // The fast poll does no Git, network or stale mutation. Binary-skew
+        // detection below reads bounded epoch history and caches its CLI probe.
         let factory_session = current_factory_session();
         let liveness_rows = worker_liveness_rows(
             &self.inner.cas_root,
@@ -3894,6 +3895,9 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
+            .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
+            .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         let (scoped_worker_count, outside_scope_worker_count) =
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
@@ -3904,6 +3908,7 @@ impl CasService {
                 scoped_worker_count,
                 outside_scope_worker_count,
             );
+            summary.push_str(&format!("\n{binary_versions}"));
             let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
                 factory_session.as_deref(), chrono::Utc::now());
             if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
@@ -4328,6 +4333,7 @@ impl CasService {
                     "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
                 ));
             }
+            msg.push_str(&format!("\n{binary_versions}\n"));
             return Ok(Self::success(msg));
         }
 
@@ -5322,6 +5328,7 @@ impl CasService {
             ));
         }
 
+        output.push_str(&format!("\n{binary_versions}\n"));
         output.push_str(&crate::supervisor_continuity::status_section(&self.inner.cas_root));
         Ok(Self::success(output))
     }
@@ -17316,10 +17323,56 @@ effort = "high"
         assert_eq!(got, TranscriptResolution::Resolved(expected));
     }
 
-    /// Characterization for cas-fa69: worker_status resolves its live
-    /// activity/context/in-flight path through `transcript_path_fast`.
-    /// A real Codex rollout exists and is discoverable by the established
-    /// cwd-aware resolver, so that production path must return it too.
+    #[tokio::test]
+    async fn cas_3963_worker_status_flags_old_mcp_against_installed_binary() {
+        use cas_store::{AgentStore, HistoryStore, SqliteHistoryStore};
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cas = bin.join("cas");
+        std::fs::write(&cas, "#!/bin/sh\necho 'cas 9.99.2'\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", &path), ("CAS_FACTORY_SESSION", "release-session"),
+        ]);
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let daemon = Child(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
+        epoch.pid = Some(daemon.0.id().into());
+        epoch.version = Some("9.99.1".into());
+        SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
+        );
+        worker.factory_session = Some("release-session".into());
+        worker.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        assert_ne!(worker.pid, Some(daemon.0.id()));
+        let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
+        assert!(banner.contains("release-worker") && banner.contains("9.99.1 [STALE"), "{banner}");
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        assert!(output.contains("Factory MCP versions (installed 9.99.2)"), "{output}");
+        assert!(output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"), "{output}");
+    }
+
     #[tokio::test]
     async fn worker_liveness_summary_five_workers_under_one_second() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
@@ -17404,10 +17457,10 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 7, "{output}");
+        assert_eq!(lines.len(), 8, "{output}");
         assert!(
-            lines[6].starts_with("Peer mailbox: not receiving:")
-                && lines[6].contains("has not reported a mailbox poll"),
+            lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
+                && line.contains("has not reported a mailbox poll")),
             "summary must retain a visible mailbox health footer: {output}"
         );
         assert!(
@@ -17442,6 +17495,10 @@ effort = "high"
         }
     }
 
+    /// Characterization for cas-fa69: worker_status resolves its live
+    /// activity/context/in-flight path through `transcript_path_fast`.
+    /// A real Codex rollout exists and is discoverable by the established
+    /// cwd-aware resolver, so that production path must return it too.
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
         let _lock = crate::hooks::test_env_lock();

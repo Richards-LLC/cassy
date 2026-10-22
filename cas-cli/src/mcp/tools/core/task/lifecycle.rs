@@ -938,7 +938,11 @@ fn recent_other_epic_planner(
         .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
         .filter_map(|dependency| {
             let planner = dependency.created_by?;
-            (planner != creator && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
+            // Legacy transport tags contain no actor identity and cannot prove
+            // that a different supervisor planned these children.
+            (planner != "mcp"
+                && planner != creator
+                && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
         .max_by_key(|(_, created_at)| *created_at);
@@ -1060,6 +1064,62 @@ impl CasCore {
 }
 
 impl CasCore {
+    /// One binding is inherited as a unit. A held/expired task is not active
+    /// filing context, and multiple live tasks must agree before we default.
+    fn active_task_create_binding(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        agent_id: &str,
+    ) -> Result<Option<(String, Option<String>, Option<cas_types::WorkTarget>)>, McpError> {
+        let agents = self.open_agent_store()?;
+        let inspect_error = |error: cas_store::StoreError| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to inspect active task binding: {error}")),
+            data: None,
+        };
+        let mut leases = agents.list_agent_leases(agent_id).map_err(inspect_error)?;
+        leases.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        let mut binding: Option<(String, Option<String>, Option<cas_types::WorkTarget>)> = None;
+        for lease in leases.into_iter().filter(|lease| lease.is_valid()) {
+            let task = match task_store.get(&lease.task_id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(inspect_error(error)),
+            };
+            if task.status != TaskStatus::InProgress {
+                continue;
+            }
+            let (epic, target) = if task.task_type == TaskType::Epic {
+                // A Standard caller also leases the epic when starting a child.
+                // Compare that lease using the same live lane a child inherits,
+                // rather than the epic's own PR/base target.
+                let target = super::repo_context::inherited_work_target_from_epic(&task);
+                (Some(task.id.clone()), target)
+            } else {
+                let epic = task_store
+                    .get_parent_epic(&task.id)
+                    .map_err(inspect_error)?
+                    .map(|t| t.id);
+                (epic, task.deliverables.work_target)
+            };
+            if let Some((_, previous_epic, previous_target)) = &binding {
+                if previous_epic != &epic || previous_target != &target {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Active tasks have different epic or target bindings. Retry {tool_prefix}task action=create with an explicit epic, target_repo or target_branch; epic=\"\" creates a standalone task.",
+                            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+                        )),
+                        data: None,
+                    });
+                }
+            } else {
+                binding = Some((task.id, epic, target));
+            }
+        }
+        Ok(binding)
+    }
+
     pub async fn cas_task_create(
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
@@ -1171,13 +1231,31 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+        let created_by = self.get_agent_id().ok();
+        let active_binding = if task_type != TaskType::Epic
+            && req.epic.is_none()
+            && target_repo.is_none()
+            && target_branch.is_none()
+        {
+            created_by
+                .as_deref()
+                .map(|agent| self.active_task_create_binding(task_store.as_ref(), agent))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let epic_id = req
             .epic
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(ToString::to_string);
-        let created_by = self.get_agent_id().ok();
+            .map(ToString::to_string)
+            .or_else(|| {
+                active_binding
+                    .as_ref()
+                    .and_then(|(_, epic, _)| epic.clone())
+            });
 
         // Set when the new task overlaps a sibling under its own epic; shown
         // in the create receipt, never a reason to refuse the write.
@@ -1362,9 +1440,11 @@ impl CasCore {
                     None
                 }
             });
-        let (work_target, default_target_warning) = if let Some(target) =
-            inherited_from_epic.or(declared_work_target)
-        {
+        let (work_target, default_target_warning) = if let Some((_, _, target)) = &active_binding {
+            // Preserve the active task's exact binding, even when its target
+            // differs from the parent epic's current lane (or is absent).
+            (target.clone(), None)
+        } else if let Some(target) = inherited_from_epic.or(declared_work_target) {
             (Some(target), None)
         } else if task_type == TaskType::Epic {
             // The branch created below is the epic's canonical WorkTarget.
@@ -1503,11 +1583,19 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
+        let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
             .map(|assignee| {
                 self.validate_task_assignee(
-                    task_store.as_ref(), &task, &assignee, task.status, &mut assignee_warnings,
+                    task_store.as_ref(),
+                    &task,
+                    &assignee,
+                    task.status,
+                    false,
+                    None,
+                    &mut assignee_override_audit,
+                    &mut assignee_warnings,
                 )
             })
             .transpose()
@@ -1848,11 +1936,30 @@ impl CasCore {
             None
         };
 
+        let inherited_receipt = active_binding
+            .as_ref()
+            .map(|(source, epic, target)| {
+                let mut receipt = format!(
+                    "\nInherited epic: {} (active task {source})",
+                    epic.as_deref().unwrap_or("(standalone)")
+                );
+                if let Some(target) = target {
+                    receipt.push_str(&format!(
+                        "\n  Repository: {}\n  Branch: {}",
+                        target.repo_selector, target.target_branch
+                    ));
+                } else {
+                    receipt.push_str("\n  Work target: (unbound)");
+                }
+                receipt
+            })
+            .unwrap_or_default();
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}{}",
             id,
             task.title,
             task.priority.0,
+            inherited_receipt,
             assignee_receipt,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
@@ -2538,6 +2645,7 @@ impl CasCore {
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
+        let mut claim_snapshot = None;
         // cas-0078: another agent of this database holds the cloud claim. It
         // moves here only if this start wins the local lease below.
         let mut cloud_local_holder: Option<String> = None;
@@ -2549,7 +2657,7 @@ impl CasCore {
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};
             let kind = task_claim_kind;
-            let (answer, fence) = {
+            let (answer, fence, snapshot) = {
                 let (claims, id, agent, name, local) = (
                     claims.clone(),
                     req.id.clone(),
@@ -2565,9 +2673,10 @@ impl CasCore {
                         })
                     })
                     .await
-                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
+                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
             };
             peer_claim_fence = fence;
+            claim_snapshot = snapshot;
             match answer {
                 Acquire::Claimed => cloud_claimed = true,
                 Acquire::LocalHolder(holder) => cloud_local_holder = Some(holder),
@@ -2623,8 +2732,18 @@ impl CasCore {
         if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
             // A refusal or failed local write leaves no newly acquired claim
             // behind. Never release a claim retained by another local agent.
-            let (id, agent) = (req.id.clone(), agent_id.clone());
-            let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+            // cas-da31: the release holds the claim fence until it really
+            // ends, even past this call's budget, so a same-agent restart
+            // cannot claim first and then lose that claim to this release.
+            // cas-da31: release only the lock this start claimed, so a late
+            // copy of this release cannot drop a restart's newer claim.
+            let (id, agent, fence) = (req.id.clone(), agent_id.clone(), peer_claim_fence.take());
+            let _ = peer_budget
+                .run(move || {
+                    let _fence = fence;
+                    claims.release_own_at(&id, &agent, claim_snapshot)
+                })
+                .await;
         }
 
         let mut start_lease_epoch = None;
@@ -2653,9 +2772,13 @@ impl CasCore {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "Task is locked by {} until {}",
+                            "Task is locked by {} until {}. A registered live supervisor can release it: {tool_prefix}task action=release id={}",
                             holder_display,
-                            expires_at.format("%H:%M")
+                            expires_at.format("%H:%M"),
+                            task.id,
+                            tool_prefix = self.supervisor_guidance_prefix().unwrap_or_else(
+                                crate::mcp::tools::core::guidance::caller_prefix,
+                            ),
                         ),
                     ));
                 }
@@ -4018,6 +4141,387 @@ mod related_recall_response_tests {
         );
     }
 
+    #[tokio::test]
+    async fn cas_ddbb_create_inherits_only_an_eligible_active_binding() {
+        use cas_types::{Agent, AgentRole, ClaimResult, Dependency, DependencyType, WorkTarget};
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
+        const LANE: &str = "epic/burn-down-v57-ships-as-3-72-non-regression-follow-cas-09fb";
+        for case in [
+            "default",
+            "no-lease",
+            "expired",
+            "blocked",
+            "other-agent",
+            "explicit-epic",
+            "explicit-target",
+            "empty-epic",
+            "standalone-active",
+        ] {
+            let (_temp, repo) = epic_lane_repo();
+            let root = epic_lane_cas_root(&repo);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            let agents = core.open_agent_store().unwrap();
+            agents
+                .register(&Agent::new_with_role(
+                    "filing-worker".into(),
+                    "qa-worker".into(),
+                    AgentRole::Worker,
+                ))
+                .unwrap();
+            agents
+                .register(&Agent::new("peer-worker".into(), "peer-worker".into()))
+                .unwrap();
+            core.set_agent_id_for_testing("filing-worker".into());
+            let target = super::super::repo_context::declare_work_target(
+                &root,
+                Some(repo.to_str().unwrap()),
+                Some(LANE),
+            )
+            .unwrap()
+            .unwrap();
+            let mut epic = Task::new("cas-09fb".into(), "Existing release train".into());
+            epic.task_type = TaskType::Epic;
+            epic.branch = Some("epic/parent-live-lane".into());
+            epic.deliverables.work_target = Some(WorkTarget {
+                target_branch: "main".into(),
+                ..target.clone()
+            });
+            store.add(&epic).unwrap();
+            let mut alternate = epic.clone();
+            alternate.id = "cas-4ca3".into();
+            alternate.branch = Some("epic/alternate-release".into());
+            store.add(&alternate).unwrap();
+            let mut active = Task::new(
+                "cas-active-qa".into(),
+                "Validate rendering control paths".into(),
+            );
+            active.status = if case == "blocked" {
+                TaskStatus::Blocked
+            } else {
+                TaskStatus::InProgress
+            };
+            active.deliverables.work_target = Some(target.clone());
+            store.add(&active).unwrap();
+            if case != "standalone-active" {
+                let mut dep = Dependency::new(
+                    active.id.clone(),
+                    epic.id.clone(),
+                    DependencyType::ParentChild,
+                );
+                dep.created_by = Some("filing-worker".into());
+                store.add_dependency(&dep).unwrap();
+            }
+            if case != "no-lease" {
+                let holder = if case == "other-agent" {
+                    "peer-worker"
+                } else {
+                    "filing-worker"
+                };
+                assert!(matches!(
+                    agents
+                        .try_claim(
+                            &active.id,
+                            holder,
+                            if case == "expired" { -3600 } else { 600 },
+                            None
+                        )
+                        .unwrap(),
+                    ClaimResult::Success(_)
+                ));
+            }
+            // A held older task's still-live lease must not compete with current work.
+            let mut held = Task::new(
+                "cas-priority-held".into(),
+                "Parked maintenance checkpoint".into(),
+            );
+            held.status = TaskStatus::Blocked;
+            held.deliverables.work_target = Some(WorkTarget {
+                target_branch: "epic/held-release".into(),
+                ..target.clone()
+            });
+            store.add(&held).unwrap();
+            agents
+                .try_claim(&held.id, "filing-worker", 600, None)
+                .unwrap();
+
+            let mut request = plain_task_request("Followup discovered during QA");
+            request.epic = match case {
+                "explicit-epic" => Some(alternate.id.clone()),
+                "empty-epic" => Some(String::new()),
+                _ => None,
+            };
+            let explicit_target = case == "explicit-target";
+            let response = text(
+                core.cas_task_create_with_target(
+                    request,
+                    explicit_target.then(|| repo.to_str().unwrap()),
+                    explicit_target.then_some("release/operator"),
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+            let child = store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.title == "Followup discovered during QA")
+                .unwrap();
+            let parent = store.get_parent_epic(&child.id).unwrap().map(|t| t.id);
+            let inherits = matches!(case, "default" | "standalone-active");
+            let expected_epic = match case {
+                "default" => Some(epic.id.clone()),
+                "explicit-epic" => Some(alternate.id.clone()),
+                _ => None,
+            };
+            assert_eq!(parent, expected_epic, "{case}: {response}");
+            let expected_branch = match case {
+                "default" | "standalone-active" => LANE,
+                "explicit-epic" => "epic/alternate-release",
+                "explicit-target" => "release/operator",
+                _ => "main",
+            };
+            assert_eq!(
+                child
+                    .deliverables
+                    .work_target
+                    .as_ref()
+                    .unwrap()
+                    .target_branch,
+                expected_branch,
+                "{case}: {response}"
+            );
+            if inherits {
+                assert_eq!(
+                    child.deliverables.work_target.as_ref(),
+                    Some(&target),
+                    "exact active target, including its repository binding"
+                );
+                assert!(
+                    response.contains("Inherited")
+                        && response.contains(&active.id)
+                        && response.contains(LANE),
+                    "{response}"
+                );
+                assert!(!response.contains("WORK TARGET DEFAULTED"), "{response}");
+                if case == "default" {
+                    assert_eq!(
+                        response.replace(&child.id, "cas-new").trim(),
+                        include_str!(concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/../docs/design/cli/task-create-inheritance.capture.txt"
+                        ))
+                        .trim(),
+                        "real create receipt matches the terminal capture"
+                    );
+                }
+            } else {
+                assert!(
+                    !response.contains("Inherited"),
+                    "explicit or ineligible context must not claim inherited binding: {case}: {response}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_ddbb_standard_start_keeps_followups_on_its_epic_lane() {
+        use cas_types::{Agent, Dependency, DependencyType, WorkTarget};
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
+        let mut failures = Vec::new();
+        for case in ["child-and-parent", "epic-only", "new-epic"] {
+            let (_temp, repo) = epic_lane_repo();
+            let root = epic_lane_cas_root(&repo);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            let agents = core.open_agent_store().unwrap();
+            agents
+                .register(&Agent::new("filing-agent".into(), "qa-agent".into()))
+                .unwrap();
+            core.set_agent_id_for_testing("filing-agent".into());
+            let target = super::super::repo_context::declare_work_target(
+                &root,
+                Some(repo.to_str().unwrap()),
+                Some("epic/current-release"),
+            )
+            .unwrap()
+            .unwrap();
+            let mut epic = Task::new("cas-current".into(), "Existing release train".into());
+            epic.task_type = TaskType::Epic;
+            epic.branch = Some("epic/current-release".into());
+            epic.deliverables.work_target = Some(WorkTarget {
+                target_branch: "main".into(),
+                ..target.clone()
+            });
+            store.add(&epic).unwrap();
+            let start_id = if case == "child-and-parent" {
+                let mut child = Task::new("cas-active-qa".into(), "Validate rendering".into());
+                child.deliverables.work_target = Some(target.clone());
+                store.add(&child).unwrap();
+                store
+                    .add_dependency(&Dependency::new(
+                        child.id.clone(),
+                        epic.id.clone(),
+                        DependencyType::ParentChild,
+                    ))
+                    .unwrap();
+                child.id
+            } else {
+                epic.id.clone()
+            };
+            core.cas_task_start(Parameters(IdRequest {
+                id: start_id.clone(),
+            }))
+            .await
+            .expect("real Standard start claims its epic too");
+            let leases = agents.list_agent_leases("filing-agent").unwrap();
+            assert!(
+                leases
+                    .iter()
+                    .any(|lease| lease.task_id == epic.id && lease.is_valid())
+            );
+            assert_eq!(leases.len(), if case == "child-and-parent" { 2 } else { 1 });
+            let mut request = plain_task_request("Independent diagnostics followup");
+            if case == "new-epic" {
+                request.task_type = "epic".into();
+            }
+            let result = core.cas_task_create(Parameters(request)).await;
+            let response = match result {
+                Ok(response) => text(response),
+                Err(error) => {
+                    failures.push(format!("{case}: create refused: {error}"));
+                    continue;
+                }
+            };
+            let created = store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.title == "Independent diagnostics followup")
+                .unwrap();
+            let parent = store
+                .get_parent_epic(&created.id)
+                .unwrap()
+                .map(|task| task.id);
+            if case == "new-epic" {
+                let lane = created
+                    .branch
+                    .as_deref()
+                    .expect("new epic gets its own lane");
+                if parent.is_some()
+                    || lane == "epic/current-release"
+                    || created
+                        .deliverables
+                        .work_target
+                        .as_ref()
+                        .map(|target| target.target_branch.as_str())
+                        != Some(lane)
+                    || response.contains("Inherited")
+                {
+                    failures.push(format!("{case}: new epic inherited old binding: {response}; parent={parent:?}; target={:?}", created.deliverables.work_target));
+                }
+            } else if parent.as_deref() != Some("cas-current")
+                || created.deliverables.work_target.as_ref() != Some(&target)
+                || !response.contains("Inherited")
+                || !response.contains(&start_id)
+            {
+                failures.push(format!(
+                    "{case}: wrong binding: {response}; parent={parent:?}; target={:?}",
+                    created.deliverables.work_target
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn cas_ddbb_disagreeing_active_bindings_require_an_explicit_binding() {
+        use cas_types::{Agent, Dependency, DependencyType};
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
+        for disagreement in ["none", "epic", "target"] {
+            let (_temp, repo) = epic_lane_repo();
+            let root = epic_lane_cas_root(&repo);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            let agents = core.open_agent_store().unwrap();
+            agents
+                .register(&Agent::new("filing-worker".into(), "qa-worker".into()))
+                .unwrap();
+            core.set_agent_id_for_testing("filing-worker".into());
+            let target = super::super::repo_context::declare_work_target(
+                &root,
+                Some(repo.to_str().unwrap()),
+                Some("epic/release"),
+            )
+            .unwrap()
+            .unwrap();
+            for id in ["cas-parent-a", "cas-parent-b"] {
+                let mut epic = Task::new(id.into(), id.into());
+                epic.task_type = TaskType::Epic;
+                epic.deliverables.work_target = Some(target.clone());
+                store.add(&epic).unwrap();
+            }
+            for (index, id) in ["cas-active-a", "cas-active-b"].into_iter().enumerate() {
+                let mut task = Task::new(id.into(), id.into());
+                task.status = TaskStatus::InProgress;
+                let mut bound = target.clone();
+                if index == 1 && disagreement == "target" {
+                    bound.target_branch = "release/other".into();
+                }
+                task.deliverables.work_target = Some(bound);
+                store.add(&task).unwrap();
+                let parent = if index == 1 && disagreement == "epic" {
+                    "cas-parent-b"
+                } else {
+                    "cas-parent-a"
+                };
+                let mut dep = Dependency::new(id.into(), parent.into(), DependencyType::ParentChild);
+                dep.created_by = Some("filing-worker".into());
+                store.add_dependency(&dep).unwrap();
+                agents.try_claim(id, "filing-worker", 600, None).unwrap();
+            }
+            let before = store.list(None).unwrap().len();
+            let result = core
+                .cas_task_create(Parameters(plain_task_request("Diagnose successor binding")))
+                .await;
+            if disagreement == "none" {
+                let response = text(result.unwrap());
+                let child = store
+                    .list(None)
+                    .unwrap()
+                    .into_iter()
+                    .find(|t| t.title == "Diagnose successor binding")
+                    .unwrap();
+                assert_eq!(
+                    store.get_parent_epic(&child.id).unwrap().unwrap().id,
+                    "cas-parent-a",
+                    "{response}"
+                );
+            } else {
+                let error =
+                    result.expect_err("must not guess a release train for conflicting active work");
+                assert!(
+                    error.message.contains("explicit") && error.message.contains("target"),
+                    "{error}"
+                );
+                assert_eq!(
+                    store.list(None).unwrap().len(),
+                    before,
+                    "refusal persists no child"
+                );
+                let mut explicit = plain_task_request("Deliberate standalone diagnostics");
+                explicit.epic = Some(String::new());
+                core.cas_task_create(Parameters(explicit))
+                    .await
+                    .expect("explicit standalone choice bypasses ambiguity");
+            }
+        }
+    }
+
     /// GH #625: `target_branch=main` is often the resolver's default, not a
     /// deliberate request to bypass the focused epic. Persisting the live
     /// epic lane at create time keeps spawn, merge, and close on one target and
@@ -4753,6 +5257,29 @@ mod related_recall_response_tests {
             )))
             .await
             .expect("first supervisor plans child");
+
+        // Rebinding this caller's own tasks is not another supervisor's plan.
+        for method in ["update", "dep_add"] {
+            let store = first.open_task_store().unwrap();
+            let id = format!("cas-own-{method}");
+            store.add(&Task::new(id.clone(), format!("Existing repair {method}"))).unwrap();
+            if method == "update" {
+                let update = serde_json::from_value(serde_json::json!({"id": id, "epic": epic_id})).unwrap();
+                first.cas_task_update(Parameters(update)).await.unwrap();
+            } else {
+                first.cas_task_dep_add(Parameters(DependencyRequest { from_id: id, to_id: epic_id.clone(), dep_type: "parent-child".into() })).await.unwrap();
+            }
+            first.cas_task_create(Parameters(child_request(format!("Own subsequent plan {method}").as_str(), epic_id.clone())))
+                .await.expect("the caller's own binding update must not trigger a planning race");
+        }
+
+        let store = first.open_task_store().unwrap();
+        store.add(&Task::new("cas-anonymous-old".into(), "Historical parent link".into())).unwrap();
+        let mut legacy = Dependency::new("cas-anonymous-old".into(), epic_id.clone(), DependencyType::ParentChild);
+        legacy.created_by = Some("mcp".into());
+        store.add_dependency(&legacy).unwrap();
+        first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
+            .await.expect("anonymous historical metadata is not evidence of another planner");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");

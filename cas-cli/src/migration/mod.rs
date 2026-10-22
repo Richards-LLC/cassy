@@ -420,7 +420,9 @@ fn record_detected_migration(conn: &Connection, migration: &Migration) -> Result
 
 /// Check migration status for a Cassy directory
 pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
-    check_migrations_with_mode(cas_dir, false)
+    let read_only =
+        crate::store::detect::guard_implicit_worktree_write(cas_dir, "apply migrations").is_err();
+    check_migrations_with_mode(cas_dir, read_only)
 }
 
 /// Doctor's status view never bootstraps schemas or records detected rows.
@@ -916,6 +918,26 @@ fn backfill_legacy_origin_project(conn: &Connection, cas_dir: &Path) -> Result<(
 ///
 /// If `dry_run` is true, returns what would be done without applying.
 pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> {
+    if let Err(error) =
+        crate::store::detect::guard_implicit_worktree_write(cas_dir, "apply migrations")
+    {
+        let status = check_migrations_read_only(cas_dir)?;
+        if dry_run {
+            return Ok(MigrationResult {
+                applied_count: status.pending.len(),
+                applied_names: status
+                    .pending
+                    .iter()
+                    .map(|migration| migration.name.to_string())
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        if status.has_pending() {
+            return Err(error);
+        }
+        return Ok(MigrationResult::default());
+    }
     let db_path = cas_dir.join("cas.db");
 
     let conn = Connection::open(&db_path)?;

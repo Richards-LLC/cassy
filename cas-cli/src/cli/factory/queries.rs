@@ -354,9 +354,13 @@ pub(super) fn execute_worker_status(
         chrono::Utc::now(),
     )
     .map_err(anyhow::Error::msg)?;
+    let binary_versions = crate::factory_binary_skew::snapshot(&root).ok();
     if cli.json {
         let rows: Vec<_> = rows.iter().map(|(name, observation)| serde_json::json!({
             "name": name, "liveness": observation.state.as_str(), "evidence": observation.evidence,
+            "installed_version": binary_versions.as_ref().map(|snapshot| snapshot.installed.as_str()),
+            "mcp_version": binary_versions.as_ref().and_then(|snapshot| snapshot.servers.iter().find(|server| &server.name == name)).and_then(|server| server.version.as_deref()),
+            "mcp_older_than_installed": binary_versions.as_ref().and_then(|snapshot| snapshot.servers.iter().find(|server| &server.name == name)).map(|server| server.older),
         })).collect();
         println!("{}", serde_json::to_string(&rows)?);
     } else if summary {
@@ -364,6 +368,7 @@ pub(super) fn execute_worker_status(
             "{}",
             crate::mcp::tools::service::factory_ops::render_worker_liveness_summary(&rows)
         );
+        if let Some(snapshot) = &binary_versions { println!("{}", crate::factory_binary_skew::render(snapshot, session.or(env_session.as_deref()))); }
     } else {
         for (name, observation) in rows {
             println!("{}", observation.summary(&name));
@@ -378,6 +383,7 @@ pub(super) fn execute_worker_status(
             }
             println!("{line}");
         }
+        if let Some(snapshot) = &binary_versions { println!("{}", crate::factory_binary_skew::render(snapshot, session.or(env_session.as_deref()))); }
     }
     Ok(())
 }

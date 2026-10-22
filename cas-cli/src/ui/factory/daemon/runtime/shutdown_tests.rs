@@ -12,6 +12,332 @@ use cas_store::{SpawnLifecycleState, SpawnQueueStore};
 const SESSION: &str = "provision-test";
 const REPLACEMENT_STARTUP: &str = "REPLACEMENT CODEX: startup reached";
 
+/// Exercise the real daemon loop out of process: no LLM or operator launch
+/// gate, and no signals installed in the test runner itself.
+#[cfg(unix)]
+#[test]
+fn factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Stdio};
+
+    const NAME: &str = "ui::factory::daemon::runtime::shutdown_tests::factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1";
+    if let Some(root) = std::env::var_os("CAS_8FAC1_CHILD") {
+        let root = std::path::PathBuf::from(root);
+        let cas_dir = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let mut daemon = daemon(&cas_dir);
+        daemon.listener.set_nonblocking(true).unwrap();
+        daemon.gui_listener.set_nonblocking(true).unwrap();
+        let pty = cas_mux::Pty::spawn("owned-worker", cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "trap '' HUP TERM; sleep 300 & echo $! > \"$1\"; wait".into(),
+                "fixture".into(), root.join("descendant").to_string_lossy().into_owned()],
+            cwd: Some(root.clone()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let pgid = pty.process_group_id().unwrap();
+        daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            "owned-worker", cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+        ).unwrap());
+        std::fs::write(root.join("group"), pgid.to_string()).unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(daemon.run()).unwrap();
+        return;
+    }
+
+    struct Owned {
+        child: Child,
+        root: std::path::PathBuf,
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // Only the PTY group recorded by this fixture, never a name scan.
+            if let Ok(group) = std::fs::read_to_string(self.root.join("group"))
+                && let Ok(group) = group.parse::<i32>()
+            {
+                unsafe { libc::killpg(group, libc::SIGKILL); }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    fn running(pid: u32) -> bool {
+        std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()])
+            .output().ok().is_some_and(|output| {
+                let state = String::from_utf8_lossy(&output.stdout);
+                !state.trim().is_empty() && !state.trim().starts_with('Z')
+            })
+    }
+
+    struct Shared(Child);
+    impl Drop for Shared {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let mut shared = Shared(std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap());
+    let mut failures = Vec::new();
+    for route in ["quit", "term", "int", "hup", "client-death", "detach"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("project")).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+            .env_clear().env("HOME", root).env("PATH", "/usr/bin:/bin")
+            .env("XDG_CONFIG_HOME", root.join(".config")).env("CAS_8FAC1_CHILD", root);
+        let child = super::super::process::spawn_daemon_process(command,
+            std::fs::File::create(root.join("daemon.log")).unwrap()).unwrap();
+        let mut owned = Owned { child, root: root.into() };
+        let socket = root.join("project/.cas/test.sock");
+        assert!(wait_until(Duration::from_secs(20), || socket.exists() && root.join("descendant").exists()),
+            "{route}: daemon startup: {}", std::fs::read_to_string(root.join("daemon.log")).unwrap());
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        client.read_exact(&mut [0u8; 1]).unwrap(); // run() has accepted us and installed its lifecycle handlers.
+        let group: u32 = std::fs::read_to_string(root.join("group")).unwrap().parse().unwrap();
+        let descendant: u32 = std::fs::read_to_string(root.join("descendant")).unwrap().trim().parse().unwrap();
+        let daemon_pid = owned.child.id();
+        let listing = std::process::Command::new("/bin/ps")
+            .args(["-o", "pid,ppid,pgid,stat,command", "-p", &format!("{daemon_pid},{group},{descendant},{}", shared.0.id())])
+            .stdout(Stdio::piped()).output().unwrap();
+        eprintln!("{route} BEFORE\n{}", String::from_utf8_lossy(&listing.stdout));
+        if unsafe { libc::getpgid(daemon_pid as i32) } != daemon_pid as i32 {
+            failures.push(format!("{route}: daemon still shares its launcher's process group"));
+        }
+        match route {
+            "quit" => client.write_all(&[0x11]).unwrap(),
+            "client-death" => {},
+            "detach" => {
+                let mut detach = CONTROL_PREFIX.to_vec();
+                detach.extend_from_slice(b"detach"); detach.push(CONTROL_SUFFIX);
+                client.write_all(&detach).unwrap();
+            },
+            signal => unsafe { libc::kill(daemon_pid as i32, match signal {
+                "term" => libc::SIGTERM, "int" => libc::SIGINT, _ => libc::SIGHUP,
+            }); },
+        }
+        drop(client);
+        let mut reattached = None;
+        if route == "detach" {
+            std::thread::sleep(Duration::from_millis(700));
+            if owned.child.try_wait().unwrap().is_some() || !running(group) || !running(descendant) {
+                failures.push("intentional detach must retain the daemon and its children".into());
+            } else {
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                stream.read_exact(&mut [0u8; 1]).unwrap();
+                stream.write_all(&[0x11]).unwrap();
+                reattached = Some(stream);
+            }
+        }
+        let exited = wait_until(Duration::from_secs(12), || owned.child.try_wait().unwrap().is_some());
+        drop(reattached);
+        let gone = wait_until(Duration::from_secs(2), || !running(group) && !running(descendant));
+        if !exited || !gone {
+            failures.push(format!("{route}: exited={exited}, children_gone={gone}"));
+        }
+        let after = std::process::Command::new("/bin/ps")
+            .args(["-o", "pid,ppid,pgid,stat,command", "-p", &format!("{daemon_pid},{group},{descendant},{}", shared.0.id())])
+            .output().unwrap();
+        eprintln!("{route} AFTER\n{}", String::from_utf8_lossy(&after.stdout));
+        assert!(shared.0.try_wait().unwrap().is_none(), "a shared service must be unaffected");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A watchdog can leave its 80x24 launch client connected while the operator
+/// attaches from a larger terminal. The new owner must drive both the TUI and
+/// the kernel PTY sizes; a later resize must also win over that old client.
+#[cfg(unix)]
+#[test]
+fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
+    use crate::ui::factory::protocol::{DaemonMessage, FRAME_HEADER_SIZE, decode_length};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::process::Child;
+
+    const NAME: &str = "ui::factory::daemon::runtime::shutdown_tests::detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631";
+    if let Some(root) = std::env::var_os("CAS_9631_CHILD") {
+        let root = std::path::PathBuf::from(root);
+        let cas_dir = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let mut daemon = daemon(&cas_dir);
+        daemon.listener.set_nonblocking(true).unwrap();
+        daemon.gui_listener.set_nonblocking(true).unwrap();
+        let mut groups = Vec::new();
+        for (name, kind) in [
+            ("test-supervisor", cas_mux::PaneKind::Supervisor),
+            ("owned-worker", cas_mux::PaneKind::Worker),
+        ] {
+            let size_file = root.join(format!("{name}.size"));
+            let pty = cas_mux::Pty::spawn(
+                name,
+                cas_mux::PtyConfig {
+                    command: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        "while :; do stty size > \"$1\"; sleep 0.1; done".into(),
+                        "fixture".into(),
+                        size_file.to_string_lossy().into_owned(),
+                    ],
+                    cwd: Some(root.clone()),
+                    env: vec![],
+                    env_remove: vec![],
+                    rows: 24,
+                    cols: 80,
+                },
+            )
+            .unwrap();
+            groups.push(pty.process_group_id().unwrap());
+            let pane =
+                cas_mux::Pane::with_pty(name, kind.clone(), pty, 24, 80, cas_mux::SupervisorCli::Claude)
+                    .unwrap();
+            if kind == cas_mux::PaneKind::Worker {
+                daemon.app.adopt_worker_pane_for_test(pane);
+            } else {
+                daemon.app.mux.add_pane(pane);
+            }
+        }
+        std::fs::write(
+            root.join("groups"),
+            groups
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(daemon.run())
+            .unwrap();
+        return;
+    }
+
+    struct Owned {
+        child: Child,
+        root: std::path::PathBuf,
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            if let Ok(groups) = std::fs::read_to_string(self.root.join("groups")) {
+                for group in groups.lines().filter_map(|line| line.parse::<i32>().ok()) {
+                    unsafe {
+                        libc::killpg(group, libc::SIGKILL);
+                    }
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    fn connect_tui(path: &std::path::Path) -> UnixStream {
+        let mut stream = UnixStream::connect(path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.read_exact(&mut [0u8; 1]).unwrap();
+        stream
+    }
+    fn resize(stream: &mut UnixStream, cols: u16, rows: u16) {
+        let mut frame = CONTROL_PREFIX.to_vec();
+        frame.extend_from_slice(format!("resize;{cols};{rows}").as_bytes());
+        frame.push(CONTROL_SUFFIX);
+        stream.write_all(&frame).unwrap();
+    }
+    fn gui_size(path: &std::path::Path) -> (u16, u16) {
+        let mut stream = UnixStream::connect(path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut header = [0u8; FRAME_HEADER_SIZE];
+        stream.read_exact(&mut header).unwrap();
+        let len = decode_length(&header);
+        assert!(len < 1_000_000, "bounded GUI welcome");
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).unwrap();
+        match serde_json::from_slice::<DaemonMessage>(&body).unwrap() {
+            DaemonMessage::Welcome { state, .. } => (state.cols, state.rows),
+            other => panic!("expected GUI Welcome, got {other:?}"),
+        }
+    }
+    fn pty_size(path: &std::path::Path) -> Option<(u16, u16)> {
+        let value = std::fs::read_to_string(path).ok()?;
+        let mut parts = value.split_whitespace();
+        let rows = parts.next()?.parse().ok()?;
+        let cols = parts.next()?.parse().ok()?;
+        Some((cols, rows))
+    }
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("project")).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env_clear()
+        .env("HOME", root)
+        .env("PATH", "/usr/bin:/bin")
+        .env("XDG_CONFIG_HOME", root.join(".config"))
+        .env("CAS_9631_CHILD", root);
+    let child = super::super::process::spawn_daemon_process(
+        command,
+        std::fs::File::create(root.join("daemon.log")).unwrap(),
+    )
+    .unwrap();
+    let mut owned = Owned {
+        child,
+        root: root.into(),
+    };
+    let tui_socket = root.join("project/.cas/test.sock");
+    let gui_socket = root.join("project/.cas/gui.sock");
+    assert!(
+        wait_until(Duration::from_secs(20), || root.join("groups").exists()),
+        "daemon startup: {}",
+        std::fs::read_to_string(root.join("daemon.log")).unwrap()
+    );
+
+    // The watchdog's detached 80x24 client stays connected but stops sending input.
+    let mut launch_client = connect_tui(&tui_socket);
+    resize(&mut launch_client, 80, 24);
+    std::thread::sleep(Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1));
+    let mut operator = connect_tui(&tui_socket);
+    let mut layout = FactoryApp::for_test_at(root.join("project/.cas"));
+    layout.add_worker_name_for_test("owned-worker");
+    for (cols, rows) in [(200, 60), (120, 40)] {
+        resize(&mut operator, cols, rows);
+        layout.handle_resize(cols, rows).unwrap();
+        let expected = ["test-supervisor", "owned-worker"].map(|name| {
+            let (pane_cols, pane_rows) = layout.dashboard_pane_size(name).unwrap();
+            (name, (pane_cols, pane_rows))
+        });
+        let panes_match = wait_until(Duration::from_secs(5), || {
+            expected
+                .iter()
+                .all(|(name, size)| pty_size(&root.join(format!("{name}.size"))) == Some(*size))
+        });
+        let tui = gui_size(&gui_socket);
+        assert_eq!(tui, (cols, rows), "the attaching owner's TUI size must win");
+        assert!(
+            panes_match,
+            "PTY sizes at {cols}x{rows}: expected {expected:?}, got {:?}; daemon: {}",
+            expected.map(|(name, _)| (name, pty_size(&root.join(format!("{name}.size"))))),
+            std::fs::read_to_string(root.join("daemon.log")).unwrap()
+        );
+    }
+    operator.write_all(&[0x11]).unwrap();
+    drop(operator);
+    drop(launch_client);
+    assert!(
+        wait_until(Duration::from_secs(12), || owned
+            .child
+            .try_wait()
+            .unwrap()
+            .is_some()),
+        "daemon did not stop after quit"
+    );
+}
+
 /// macOS has no /proc discovery. Keep that OS boundary deterministic on CI
 /// while retaining real PID checks, registry reads, PTYs and queue consumers.
 struct EmptyProcessTable;
@@ -49,13 +375,33 @@ fn idle_worker_pane(name: &str, harness: cas_mux::SupervisorCli) -> cas_mux::Pan
 
 /// Alive means the process exists and is not a zombie awaiting reaping.
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
-        })
-        .is_some_and(|state| state != "Z" && state != "X")
+    if pid == 0 || pid > i32::MAX as u32 || !crate::mcp::daemon::pid_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
+            })
+            .is_some_and(|state| state != "Z" && state != "X")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS has no /proc. Signal 0 above probes existence; ps keeps the
+        // same zombie exclusion as the Linux check and the daemon fixture.
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                let state = String::from_utf8_lossy(&output.stdout);
+                let state = state.trim();
+                output.status.success() && !state.is_empty() && !state.starts_with(['Z', 'X'])
+            })
+    }
 }
 
 fn register_idle_worker(cas_dir: &std::path::Path, name: &str) {

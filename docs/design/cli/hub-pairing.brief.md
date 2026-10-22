@@ -16,7 +16,7 @@
 | Scannable | 4/4 | Doctor labels the supervised transport failure; relay errors avoid raw transport details. |
 | Readable | 4/4 | Messages distinguish unavailable publication, unclaimed pairing, consumed codes, and expired codes. |
 | Machine output | 3/4 | Existing JSON remains structured; no pairing secrets are added. A full successful relay requires live Cloud credentials and was not exercised in the isolated-home sweep. |
-| Width/locale | 3/4 | `terminal-qa: PASS cas-hub-authorize-help-120 · 5 runs · 0 fail · 0 warn · 0 allowed` (`/home/pippenz/.cas/artifacts/cas-3fb7/terminal-qa-help120/report.json`). The service dry-run still has a long absolute `ExecStart` line at 80 columns and an em dash under `LC_ALL=C`; retained as a documented pre-existing presentation finding. |
+| Width/locale | 3/4 | `terminal-qa: PASS cas-hub-authorize-help-120 · 5 runs · 0 fail · 0 warn · 0 allowed` (`<artifacts>/cas-3fb7/terminal-qa-help120/report.json`). The service dry-run still has a long absolute `ExecStart` line at 80 columns and an em dash under `LC_ALL=C`; retained as a documented pre-existing presentation finding. |
 
 The CLI surface gate is a real-build terminal capture. Full launchd execution and a successful Cloud pairing need a supervised macOS/Cloud environment, so those paths are covered by deterministic unit/integration tests and the bounded isolated-home matrix rather than claimed as locally exercised.
 
@@ -26,9 +26,9 @@ The CLI surface gate is a real-build terminal capture. Full launchd execution an
 error, names where the CLI was sought when the macOS app fallback is missing,
 and offers `cas hub restart --tailscale-serve` without telling an actively
 supervised hub to uninstall its service. Real-build captures and the honest
-demo ledger are under `/Users/pippenz/.cas/artifacts/cas-5722/`.
+demo ledger are under `<artifacts>/cas-5722/`.
 
-terminal-qa: PASS cas-5722-authorize-cause · 11 runs · 0 fail · 0 warn · 0 allowed · `/Users/pippenz/.cas/artifacts/cas-5722/terminal-qa-authorize-cause/report.json`
+terminal-qa: PASS cas-5722-authorize-cause · 11 runs · 0 fail · 0 warn · 0 allowed · `<artifacts>/cas-5722/terminal-qa-authorize-cause/report.json`
 
 | Criterion | Score | Evidence / follow-up |
 | --- | ---: | --- |

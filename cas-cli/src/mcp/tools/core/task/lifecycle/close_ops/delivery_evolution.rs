@@ -1133,6 +1133,100 @@ fn commit_messages(
         .then_some(messages)
 }
 
+/// The declared append-only builtin ledger owns added hashes under each file
+/// key, not JSON lines. A merged union may reorder keys/arrays or change commas
+/// without losing any delivery. Other generated outputs keep their existing
+/// artifact rules; deletions and metadata edits keep the ordinary line proof.
+fn reference_history_additions_presence(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    if path != super::REFERENCE_HISTORY_LEDGER {
+        return Ok(None);
+    }
+    #[derive(serde::Deserialize)]
+    struct History {
+        version: u64,
+        files: BTreeMap<String, BTreeSet<String>>,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, serde_json::Value>,
+    }
+    let blobs = path_blobs(repo, &[parent, delivery, target], path)
+        .ok_or_else(|| format!("could not inspect reference-history blobs for `{path}`"))?;
+    let read = |revision: &str| -> Result<Option<History>, String> {
+        let Some(blob) = blobs.get(revision).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        let contents = text(repo, &["cat-file", "blob", blob])?;
+        let history: History = serde_json::from_str(&contents)
+            .map_err(|error| format!("invalid reference history `{revision}:{path}`: {error}"))?;
+        if history.version != 1 {
+            return Err(format!(
+                "unsupported reference history version at `{revision}:{path}`"
+            ));
+        }
+        Ok(Some(history))
+    };
+    let Some(delivered) = read(delivery)? else {
+        return Ok(None);
+    };
+    let before = read(parent)?;
+    if before.as_ref().is_some_and(|before| {
+        before.metadata != delivered.metadata
+            || before.files.iter().any(|(key, hashes)| {
+                delivered
+                    .files
+                    .get(key)
+                    .is_none_or(|kept| !hashes.is_subset(kept))
+            })
+    }) {
+        return Ok(None);
+    }
+    let added: BTreeMap<_, BTreeSet<_>> = delivered
+        .files
+        .iter()
+        .filter_map(|(key, hashes)| {
+            let old = before.as_ref().and_then(|before| before.files.get(key));
+            let added: BTreeSet<_> = hashes
+                .iter()
+                .filter(|hash| old.is_none_or(|old| !old.contains(*hash)))
+                .collect();
+            (!added.is_empty()).then_some((key, added))
+        })
+        .collect();
+    if added.is_empty() {
+        return Ok(None);
+    }
+    let landed = read(target)?;
+    // Metadata delivered with a newly introduced ledger still needs the
+    // ordinary proof if the target changed it. Inherited metadata isn't ours.
+    if before.is_none()
+        && landed
+            .as_ref()
+            .is_some_and(|landed| landed.metadata != delivered.metadata)
+    {
+        return Ok(None);
+    }
+    let present = landed.as_ref().is_some_and(|landed| {
+        added.iter().all(|(key, hashes)| {
+            landed
+                .files
+                .get(*key)
+                .is_some_and(|kept| hashes.iter().all(|hash| kept.contains(*hash)))
+        })
+    });
+    let paths = vec![path.to_string()];
+    Ok(Some(if present {
+        super::DeliveryContentPresence::Present { paths }
+    } else {
+        super::DeliveryContentPresence::Dropped { paths }
+    }))
+}
+
 fn line_content_presence_uncached(
     repo: &Path,
     parent: &str,
@@ -1151,6 +1245,13 @@ fn line_content_presence_uncached(
         .ok_or("delivery line target does not resolve to a commit")?;
     let delivery = delivery_commit.as_str();
     let target = target_commit.as_str();
+    // Novel merge-resolution ownership excludes imported parents; leave that
+    // attribution to the existing proof instead of claiming their hashes here.
+    if !novel_only
+        && let Some(presence) = reference_history_additions_presence(repo, parent, delivery, target, path)?
+    {
+        return Ok(Some(presence));
+    }
     let initial = match hunks(repo, parent, delivery, path) {
         Ok(hunks) => hunks,
         Err(reason) if reason.starts_with("binary delivery") => return Ok(None),

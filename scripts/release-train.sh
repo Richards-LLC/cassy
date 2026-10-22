@@ -907,7 +907,7 @@ print_release_report_status() {
     local receipt="$run_dir/release-report.receipt"
     local tag pdf_path html_path pdf_sha pdf_size html_sha page_count file_permalink
     local remote_pdf_sha remote_pdf_size remote_pdf_pages
-    local pdf_file_id html_file_id user_thread dev_thread
+    local pdf_file_id pdf_message_id pdf_message_permalink html_file_id user_thread dev_thread
     local actual_sha actual_size actual_html_sha actual_pages resolved_pdf resolved_html resolved_worktree
 
     if [[ ! -s "$receipt" ]]; then
@@ -935,6 +935,8 @@ print_release_report_status() {
     [[ -n "$file_permalink" ]] || file_permalink="$(receipt_field "$receipt" FILE_PERMALINK)"
     pdf_file_id="$(receipt_field "$receipt" PDF_FILE_ID)"
     [[ -n "$pdf_file_id" ]] || pdf_file_id="$(receipt_field "$receipt" FILE_ID)"
+    pdf_message_id="$(receipt_field "$receipt" PDF_MESSAGE_ID)"
+    pdf_message_permalink="$(receipt_field "$receipt" PDF_MESSAGE_PERMALINK)"
     html_file_id="$(receipt_field "$receipt" HTML_FILE_ID)"
     user_thread="$(receipt_field "$receipt" USER_THREAD_TS)"
     [[ -n "$user_thread" ]] || user_thread="$(receipt_field "$receipt" USER_THREAD_ID)"
@@ -949,11 +951,13 @@ print_release_report_status() {
         || ! "$html_sha" =~ ^[0-9a-f]{64}$ \
         || ! "$page_count" =~ ^[1-9][0-9]*$ \
         || ! "$file_permalink" =~ ^https://[^[:space:]]+$ \
-        || -z "$pdf_file_id" || -z "$html_file_id" \
+        || -z "$pdf_file_id" || -z "$html_file_id" || -z "$pdf_message_id" \
+        || ! "$pdf_message_id" =~ ^[^[:space:]]+$ \
+        || ! "$pdf_message_permalink" =~ ^https://[^[:space:]]+$ \
         || ! "$pdf_file_id" =~ ^[^[:space:]]+$ || ! "$html_file_id" =~ ^[^[:space:]]+$ \
         || -z "$user_thread" || -z "$dev_thread" \
         || ! "$user_thread" =~ ^[^[:space:]]+$ || ! "$dev_thread" =~ ^[^[:space:]]+$ ]]; then
-        printf 'release report: pending (receipt is incomplete; require TAG, PDF_PATH, HTML_PATH, PDF_SHA256, PDF_SIZE_BYTES, PDF_REMOTE_SHA256, PDF_REMOTE_SIZE_BYTES, PDF_REMOTE_PAGE_COUNT, HTML_SHA256, PAGE_COUNT, PDF_FILE_PERMALINK, PDF_FILE_ID, HTML_FILE_ID, USER_THREAD_TS, and DEV_THREAD_TS)\n'
+        printf 'release report: pending (receipt is incomplete; require TAG, PDF_PATH, HTML_PATH, PDF_SHA256, PDF_SIZE_BYTES, PDF_REMOTE_SHA256, PDF_REMOTE_SIZE_BYTES, PDF_REMOTE_PAGE_COUNT, HTML_SHA256, PAGE_COUNT, PDF_FILE_PERMALINK, PDF_FILE_ID, PDF_MESSAGE_ID, PDF_MESSAGE_PERMALINK, HTML_FILE_ID, USER_THREAD_TS, and DEV_THREAD_TS)\n'
         return 1
     fi
 
@@ -1093,6 +1097,30 @@ print_publication_status() {
     print_release_report_status || true
 }
 
+release_train_report_thread_id() {
+    python3 - "$1" "$2" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+fields = dict(line.split("=", 1) for line in Path(sys.argv[1]).read_text().splitlines() if "=" in line)
+prefix = sys.argv[2]
+raw = fields.get(prefix + "_PART_IDS")
+if raw is None:
+    # Legacy receipts predate ordered part IDs and contain one message ID.
+    print(fields.get(prefix + "_ID", ""))
+else:
+    try:
+        parts = json.loads(raw)
+        if not isinstance(parts, list) or not parts or any(not isinstance(part, str) or not part.strip() for part in parts):
+            raise ValueError()
+    except (ValueError, TypeError):
+        sys.exit("release report: invalid " + prefix + "_PART_IDS; preserve the receipt and reconcile before posting")
+    # Violet's split root thread is the first part; the singular ID is last.
+    print(parts[0])
+PY
+}
+
 run_report() {
     if release_train_announcement_embargo_active; then
         printf 'BLOCKER report: explicit announcement embargo; runtime publication and install proof remain required\n' >&2
@@ -1114,8 +1142,8 @@ run_report() {
     local announce_receipt="$run_dir/announce.receipt"
 
     if [[ -s "$announce_receipt" ]]; then
-        [[ -n "$report_user_thread" ]] || report_user_thread="$(sed -n 's/^USER_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
-        [[ -n "$report_dev_thread" ]] || report_dev_thread="$(sed -n 's/^DEV_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
+        [[ -n "$report_user_thread" ]] || report_user_thread="$(release_train_report_thread_id "$announce_receipt" USER_TOP_LEVEL)"
+        [[ -n "$report_dev_thread" ]] || report_dev_thread="$(release_train_report_thread_id "$announce_receipt" DEV_TOP_LEVEL)"
     fi
 
     if [[ ! -f "${report_prefix}.md" || ! -f "${report_prefix}.html" || ! -f "${report_prefix}.pdf" ]]; then

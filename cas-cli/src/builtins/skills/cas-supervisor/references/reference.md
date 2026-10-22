@@ -28,8 +28,9 @@ For a Cassy source CLI QA walk requiring an exact-tip binary, run
 `cas qa candidate build --task <task-id> --rev <sha>` as supervisor. The command
 uses release/assembly Zig and scratch resolution and the warm native Cargo
 target; it writes `cas`, `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` under
-the task's canonical artifact `candidate/` directory. Give the path, version
-and binary SHA-256 to the QA reviewer. The command builds evidence only and
+the task's canonical artifact `candidate/` directory. Give the version and
+binary SHA-256 to the QA reviewer, who resolves the binary with
+`cas qa candidate path --task <task-id>` instead of a typed hashed path. The command builds evidence only and
 does not run or replace the epic's release checks.
 
 For a proof produced on another machine, use the worker's

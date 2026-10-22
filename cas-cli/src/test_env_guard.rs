@@ -289,6 +289,19 @@ impl TestEnvGuard {
         std::env::set_current_dir(path).expect("set test current directory");
     }
 
+    /// cas-3fc8 (rule-026): enter `path` until the returned guard drops.
+    /// Shadow `env` with it (`let mut env = env.enter_dir(..)`), after the
+    /// fixture it enters: it then drops first, even when the test panics, so
+    /// the process leaves that directory before it is deleted and no other
+    /// test in the process sees a deleted current directory. Both moves go
+    /// through [`Self::set_current_dir`].
+    #[allow(dead_code)]
+    pub(crate) fn enter_dir(&mut self, path: impl AsRef<Path>) -> CurrentDirGuard<'_> {
+        let saved = std::env::current_dir().expect("current test directory");
+        self.set_current_dir(path);
+        CurrentDirGuard { env: self, saved }
+    }
+
     fn capture(&mut self, key: &OsStr) {
         if !self.saved.iter().any(|(saved, _)| saved == key) {
             self.saved.push((key.to_os_string(), std::env::var_os(key)));
@@ -314,6 +327,41 @@ impl TestEnvGuard {
     }
 }
 
+/// Restores the current directory saved by [`TestEnvGuard::enter_dir`],
+/// and stands in for the guard it borrows meanwhile.
+#[allow(dead_code)]
+pub(crate) struct CurrentDirGuard<'a> {
+    env: &'a mut TestEnvGuard,
+    saved: std::path::PathBuf,
+}
+
+impl std::ops::Deref for CurrentDirGuard<'_> {
+    type Target = TestEnvGuard;
+    fn deref(&self) -> &TestEnvGuard {
+        self.env
+    }
+}
+
+impl std::ops::DerefMut for CurrentDirGuard<'_> {
+    fn deref_mut(&mut self) -> &mut TestEnvGuard {
+        self.env
+    }
+}
+
+impl Drop for CurrentDirGuard<'_> {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        // cas-3fc8: a failing test may already have deleted the saved
+        // directory. A panic here, during that test's unwind, would abort the
+        // whole test binary; TestEnvGuard::drop still restores the original.
+        if saved.is_dir() {
+            self.env.set_current_dir(saved);
+        } else {
+            eprintln!("test cwd: {} is gone; staying put", saved.display());
+        }
+    }
+}
+
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {
         // Restore in reverse mutation order while `_lock` is still held.
@@ -334,6 +382,22 @@ impl Drop for TestEnvGuard {
 #[cfg(test)]
 mod ambient_scrub_tests {
     use super::*;
+    /// cas-3fc8: leaving an entered directory whose saved parent is already
+    /// gone (a failing test deleted it) must not panic; a panic during the
+    /// unwind of that failing test aborts the whole test binary.
+    #[test]
+    fn leaving_a_directory_whose_saved_parent_is_gone_does_not_panic_cas_3fc8() {
+        let mut env = TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let inner = tempfile::tempdir().unwrap();
+        let mut env = env.enter_dir(outer.path());
+        let entered = env.enter_dir(inner.path());
+        std::fs::remove_dir(outer.path()).unwrap();
+        let left = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(entered)));
+        assert!(left.is_ok(), "restoring a deleted saved directory must not panic");
+        drop(env);
+    }
+
     #[test]
     fn repository_local_git_environment_is_scrubbed_cas_ea62() {
         // Keep the in-process guard in sync with the shell suite boundary's

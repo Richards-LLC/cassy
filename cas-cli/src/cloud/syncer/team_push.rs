@@ -145,6 +145,10 @@ impl CloudSyncer {
     }
 
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let mut result = SyncResult::default();
         let start = Instant::now();
 

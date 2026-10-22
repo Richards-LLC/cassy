@@ -654,9 +654,34 @@ pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> O
         .or_else(|| github_merge_refusal(cas_root, cwd, command))
 }
 
-/// Check the branch selected by `worktree_merge`, including calls without a
-/// task_id. The raw-git hook uses the same lookup so both merge paths agree.
+/// Check a raw Git merge in the repository where that command will run.
 pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option<String> {
+    branch_merge_refusal_in_repo(cas_root, branch, |_| Ok(cwd.to_path_buf()))
+}
+
+/// A worker-only managed merge has not inferred its parked task yet. Match
+/// recorded rounds first, then resolve each task's declared repository before
+/// reading its branch. This keeps pending QA ahead of parked-task ambiguity.
+pub(crate) fn worktree_branch_merge_refusal(
+    cas_root: &Path,
+    fallback_repo: &Path,
+    branch: &str,
+) -> Option<String> {
+    branch_merge_refusal_in_repo(cas_root, branch, |task| {
+        match task.deliverables.work_target.as_ref() {
+            Some(target) => crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                cas_root, target,
+            ).map(|context| context.repo_root),
+            None => Ok(fallback_repo.to_path_buf()),
+        }
+    })
+}
+
+fn branch_merge_refusal_in_repo(
+    cas_root: &Path,
+    branch: &str,
+    repo_for_task: impl Fn(&Task) -> Result<std::path::PathBuf, String>,
+) -> Option<String> {
     let config = crate::config::Config::load(cas_root).ok()?;
     let qa = config.qa();
     if !qa.independent_pass {
@@ -676,9 +701,15 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
         if !branch_binds_task(task, &qa, &passes, branch, &implementer) {
             continue;
         }
+        let repo = match repo_for_task(task) {
+            Ok(repo) => repo,
+            Err(error) => return Some(format!(
+                "🚫 INDEPENDENT QA REQUIRED before {} merges: {error}", task.id,
+            )),
+        };
         let head = Command::new("git")
             .args(["rev-parse", "--verify", branch])
-            .current_dir(cwd)
+            .current_dir(&repo)
             .output()
             .ok()
             .filter(|out| out.status.success())
@@ -690,7 +721,7 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
             // into the checked-out branch, so that is the target.
             Some(head) => merge_gate(task, &qa, &passes, &head)
                 .err()
-                .filter(|_| carry_verdict(cas_root, cwd, task, &passes, &head, "HEAD").is_none()),
+                .filter(|_| carry_verdict(cas_root, &repo, task, &passes, &head, "HEAD").is_none()),
             None => Some(format!(
                 "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
                 task.id

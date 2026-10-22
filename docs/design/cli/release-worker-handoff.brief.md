@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS release-worker-handoff · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-74e3/terminal-qa/report.json
+terminal-qa: PASS release-worker-handoff · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-74e3/terminal-qa/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

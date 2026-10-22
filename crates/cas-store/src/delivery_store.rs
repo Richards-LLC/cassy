@@ -3,6 +3,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use cas_types::{
     VerificationDispatch, VerificationProofBoundary, WorkerCompletionReceipt,
@@ -94,7 +95,29 @@ BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS observed_delivery_merges_immutable_delete
 BEFORE DELETE ON observed_delivery_merges
 BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
+
+-- Worktree merges are published before their durable observation is written.
+-- Keep an idempotent intent first so a failed observation can be resumed after
+-- origin already contains the parked source.
+CREATE TABLE IF NOT EXISTS pending_observed_delivery_merges (
+    task_id TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    source_commit_sha TEXT NOT NULL,
+    actor_agent_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, target_branch, source_commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_observed_delivery_merges_task
+    ON pending_observed_delivery_merges(task_id, created_at DESC);
 "#;
+
+// These four synchronous operations run while worktree_merge owns the target
+// lock. Bound schema installation, busy-handler waits and retry backoffs together
+// to 2s per operation (at most 8s of observation contention per merge request),
+// rather than allowing each write its own ~32s retry window. A caller can safely
+// retry the exact intent/observation/clear after the foreign writer finishes.
+const OBSERVED_MERGE_WAIT_BUDGET: Duration = Duration::from_secs(2);
 
 /// Persist an authenticated worktree_merge observation after Git has advanced
 /// the task's declared target. This is a delivery fact, not worker proof.
@@ -123,22 +146,121 @@ pub fn record_observed_delivery_merge(
                 .to_string(),
         ));
     }
-    let conn = open(root)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO observed_delivery_merges
-         (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            task_id,
-            source_branch,
-            target_branch,
-            source_commit_sha,
-            merge_commit_sha,
-            actor_agent_id,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
+    // The merge and push already happened when this observation is written.
+    // Retry the whole one-statement write on SQLITE_BUSY; INSERT OR IGNORE
+    // keeps a retry after an ambiguous completion idempotent.
+    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                merge_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Persist the recovery intent before a nontransactional Git merge starts.
+/// If the later observation write fails after publication, worktree_merge can
+/// distinguish its retry from an ordinary already-contained no-op.
+pub fn record_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+    actor_agent_id: &str,
+) -> Result<()> {
+    if [
+        task_id,
+        source_branch,
+        target_branch,
+        source_commit_sha,
+        actor_agent_id,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(StoreError::Parse(
+            "pending observed merge requires complete task, branch, commit, and actor identity"
+                .to_string(),
+        ));
+    }
+    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Whether this exact parked source has an unfinished observation recovery.
+pub fn has_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<bool> {
+    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    // open() installs the schema on the first call after an upgrade, so even
+    // this read must retry the whole operation on a transient SQLITE_BUSY.
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        Ok(conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pending_observed_delivery_merges
+                 WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+                   AND source_commit_sha = ?4
+             )",
+            params![task_id, source_branch, target_branch, source_commit_sha],
+            |row| row.get(0),
+        )?)
+    })
+}
+
+/// Remove a pending intent after the observation and its close/dispatch path
+/// have been durably resumed. Repeated clears are harmless.
+pub fn clear_pending_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+) -> Result<()> {
+    let _wait = crate::wait_budget::bound_waits_for(OBSERVED_MERGE_WAIT_BUDGET);
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "DELETE FROM pending_observed_delivery_merges
+             WHERE task_id = ?1 AND source_branch = ?2 AND target_branch = ?3
+               AND source_commit_sha = ?4",
+            params![task_id, source_branch, target_branch, source_commit_sha],
+        )?;
+        Ok(())
+    })
 }
 
 fn open(root: &Path) -> Result<Connection> {
@@ -890,6 +1012,7 @@ mod tests {
     use super::*;
     use crate::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
     use cas_types::{Agent, AgentRole, ClaimResult, Task, TaskStatus, VerificationDispatchState};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -1901,5 +2024,139 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn observed_delivery_merge_contention_is_bounded_and_recoverable() {
+        // Exercise all observation operations, including first-use schema
+        // installation by the pending check on an upgraded database.
+        for operation in ["check", "intent", "observe", "clear"] {
+            let root = TempDir::new().unwrap();
+            if operation != "check" {
+                record_pending_observed_delivery_merge(
+                    root.path(),
+                    "cas-bounded",
+                    "factory/worker",
+                    "epic/release",
+                    "source",
+                    "supervisor",
+                )
+                .unwrap();
+            }
+            let holder = Connection::open(root.path().join("cas.db")).unwrap();
+            holder
+                .execute_batch("BEGIN EXCLUSIVE; PRAGMA user_version = 1;")
+                .unwrap();
+            let path = root.path().to_path_buf();
+            let (sent, received) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = match operation {
+                    "check" => has_pending_observed_delivery_merge(
+                        &path,
+                        "cas-bounded",
+                        "factory/worker",
+                        "epic/release",
+                        "source",
+                    )
+                    .map(|_| ()),
+                    "intent" => record_pending_observed_delivery_merge(
+                        &path,
+                        "cas-bounded",
+                        "factory/worker",
+                        "epic/release",
+                        "source",
+                        "supervisor",
+                    ),
+                    "observe" => record_observed_delivery_merge(
+                        &path,
+                        "cas-bounded",
+                        "factory/worker",
+                        "epic/release",
+                        "source",
+                        "target",
+                        "supervisor",
+                    ),
+                    "clear" => clear_pending_observed_delivery_merge(
+                        &path,
+                        "cas-bounded",
+                        "factory/worker",
+                        "epic/release",
+                        "source",
+                    ),
+                    _ => unreachable!(),
+                };
+                sent.send(result).unwrap();
+            });
+            // Always release/join before asserting, even against the old
+            // unbounded implementation. No sleeping lock-holder thread leaks.
+            let result = received.recv_timeout(Duration::from_secs(3));
+            holder.execute_batch("COMMIT").unwrap();
+            worker.join().unwrap();
+            let error = result
+                .expect("observation waits must end within three seconds")
+                .expect_err("the foreign lock must outlast the observation wait budget");
+            assert!(crate::shared_db::is_busy_error(match &error {
+                StoreError::Database(error) => error,
+                other => panic!("{operation}: {other}"),
+            }));
+            record_pending_observed_delivery_merge(
+                root.path(),
+                "cas-bounded",
+                "factory/worker",
+                "epic/release",
+                "source",
+                "supervisor",
+            )
+            .unwrap();
+            assert!(
+                has_pending_observed_delivery_merge(
+                    root.path(),
+                    "cas-bounded",
+                    "factory/worker",
+                    "epic/release",
+                    "source",
+                )
+                .unwrap()
+            );
+            for _ in 0..2 {
+                record_observed_delivery_merge(
+                    root.path(),
+                    "cas-bounded",
+                    "factory/worker",
+                    "epic/release",
+                    "source",
+                    "target",
+                    "supervisor",
+                )
+                .unwrap();
+                clear_pending_observed_delivery_merge(
+                    root.path(),
+                    "cas-bounded",
+                    "factory/worker",
+                    "epic/release",
+                    "source",
+                )
+                .unwrap();
+            }
+            assert!(
+                !has_pending_observed_delivery_merge(
+                    root.path(),
+                    "cas-bounded",
+                    "factory/worker",
+                    "epic/release",
+                    "source",
+                )
+                .unwrap()
+            );
+            let count: i64 = open(root.path())
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = 'cas-bounded'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "recovery must remain idempotent");
+        }
     }
 }

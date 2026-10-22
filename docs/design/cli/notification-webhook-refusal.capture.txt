@@ -1,0 +1,2 @@
+cas: Warning: notification webhook refused; check notifications.webhook_url.
+cas: Notification sent: Claude is waiting for your input

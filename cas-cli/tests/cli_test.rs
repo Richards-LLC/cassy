@@ -46,7 +46,7 @@ fn test_version() {
 }
 
 #[test]
-fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
+fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     assert!(std::process::Command::new("git")
@@ -90,6 +90,84 @@ fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
     assert_eq!(plan["receipt_file"], candidate.join("RECEIPT.json").display().to_string());
     assert_eq!(plan["revision"].as_str().unwrap().len(), 40);
     assert!(!candidate.exists(), "planning must not build or create evidence");
+
+    // cas-d0e6: the receipt names the short form, and a worker resolves the
+    // binary by task id alone instead of typing the hashed artifacts path.
+    let text_plan = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "candidate", "build", "--task", "cas-0227", "--plan"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&text_plan.stdout).contains("cas qa candidate path --task cas-0227"),
+        "{}",
+        String::from_utf8_lossy(&text_plan.stdout)
+    );
+    let path = |role: &str| {
+        cas_cmd(root)
+            .current_dir(root)
+            .env("CAS_AGENT_ROLE", role)
+            .args(["qa", "candidate", "path", "--task", "cas-0227"])
+            .output()
+            .unwrap()
+    };
+    let binary = candidate.join("cas").display().to_string();
+    let missing = path("worker");
+    assert!(!missing.status.success(), "no candidate has been built yet");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains(&binary), "{missing:?}");
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("cas"), "built candidate\n").unwrap();
+    let found = path("worker");
+    assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
+    assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
+
+    // No compiler runs: exercise the real wrapper with a builder boundary
+    // that publishes the same manifest as the Python builder, plus Git chatter.
+    let build = |json: bool| {
+        let mut command = cas_cmd(root);
+        command.current_dir(root)
+            .env("CAS_AGENT_ROLE", "supervisor")
+            .args(["qa", "candidate", "build", "--task", "cas-0227"]);
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+    let missing_builder = build(true);
+    assert!(!missing_builder.status.success());
+    let script = root.join("scripts/qa-candidate-build.py");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, r#"
+import argparse, json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument('--repo')
+parser.add_argument('--rev')
+parser.add_argument('--candidate-dir')
+args = parser.parse_args()
+destination = Path(args.candidate_dir)
+destination.mkdir(parents=True, exist_ok=True)
+receipt = dict(revision=args.rev, version='cas 9.99.7', sha256='fixture-hash')
+(destination / 'RECEIPT.json').write_text(json.dumps(receipt))
+print('HEAD is now at fixture')
+print(json.dumps(dict(receipt, candidate_dir=str(destination))))
+"#).unwrap();
+    let built = build(true);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert_eq!(receipt["revision"], plan["revision"]);
+    assert_eq!(receipt["candidate_dir"], plan["candidate_dir"]);
+    assert_eq!(receipt["receipt_file"], plan["receipt_file"]);
+    assert!(!String::from_utf8_lossy(&built.stderr).contains("[ERROR]"));
+    let human = build(false);
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(String::from_utf8_lossy(&human.stdout).contains(&format!(
+        "Receipt: {}", candidate.join("RECEIPT.json").display()
+    )), "{human:?}");
+
+    let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
+    assert!(missing_error.contains("QA candidate builder missing"), "{missing_error}");
+    assert!(missing_error.contains("source checkout") && missing_error.contains("rerun"), "{missing_error}");
 }
 
 #[test]
@@ -196,6 +274,26 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     assert_eq!(unchanged["debt_summary"]["delta"], 0);
     assert_eq!(unchanged["debt_summary"]["grew"], false);
 
+    // A corrupt receipt must restart history, not poison every future check.
+    let connection = rusqlite::Connection::open(root.join(".cas/cas.db")).unwrap();
+    let key: String = connection.query_row(
+        "SELECT key FROM metadata WHERE key LIKE 'qa_journeys_check:%'", [], |row| row.get(0),
+    ).unwrap();
+    connection.execute("UPDATE metadata SET value = '{' WHERE key = ?1", [&key]).unwrap();
+    let recovered = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "journeys", "--check", "--verbose"])
+        .assert().success().get_output().stdout.clone();
+    let recovered = String::from_utf8(recovered).unwrap();
+    assert!(recovered.contains("first recorded check")
+        && recovered.contains("History reset:")
+        && !recovered.contains("Details: cas qa journeys --check --verbose"), "{recovered}");
+    assert!(recovered.lines().all(|line| line.chars().count() <= 80), "{recovered}");
+    let after_recovery = json();
+    assert_eq!(after_recovery["debt_summary"]["history_status"], "recorded");
+    assert_eq!(after_recovery["debt_summary"]["previous_total"], 2);
+    assert_eq!(after_recovery["debt_summary"]["delta"], 0);
+
     let alternate = root.join("docs/qa/alternate.yaml");
     std::fs::write(&alternate, seeded).unwrap();
     cas_cmd(root)
@@ -292,19 +390,33 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             "{artifact}: {report}"
         );
     }
-    let human = cas_cmd(root)
-        .current_dir(root)
-        .args(["qa", "journeys", "--status"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert!(
-        String::from_utf8(human)
-            .unwrap()
-            .contains(&format!("Measured ref: {measured}"))
-    );
+    let long_branch = format!("epic/{}release-suffix", "measured-integration-reference-".repeat(4));
+    for branch in ["main", long_branch.as_str()] {
+        git(&["update-ref", &format!("refs/remotes/origin/{branch}"), &integrated]);
+        let config_path = root.join(".cas/config.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(&config_path, config.replace("epic_base_branch = 'main'", &format!("epic_base_branch = '{branch}'"))).unwrap();
+        let human = cas_cmd(root)
+            .current_dir(root)
+            .env("COLUMNS", "80")
+            .args(["qa", "journeys", "--status"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let human = String::from_utf8(human).unwrap();
+        let line = human.lines().find(|line| line.starts_with("Measured ref: ")).unwrap();
+        assert!(line.chars().count() <= 80, "{human}");
+        if branch == "main" {
+            assert_eq!(line, format!("Measured ref: {measured}"));
+        } else {
+            assert!(line.ends_with(&format!("@{}", &integrated[..7])), "measured SHA lost: {human}");
+            assert!(line.contains("origin/epic/") && line.contains("release-suffix@"), "branch ends lost: {human}");
+            assert!(human.contains("Full ref: cas qa journeys --status --json"), "{human}");
+        }
+        std::fs::write(config_path, config).unwrap();
+    }
     for (index, key) in [
         "upkeep.codemap",
         "upkeep.product_overview",
@@ -319,7 +431,8 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
                 .args(["config", "set", key, "enforce"])
                 .assert()
                 .success()
-                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"));
+                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"))
+                .stdout(predicate::str::contains("Review: cas qa journeys --status\n"));
         } else {
             let output = cas_cmd(root)
                 .current_dir(root)
@@ -454,50 +567,184 @@ print(json.dumps(held))
 
 #[test]
 fn test_init_yes_flag() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let project = TempDir::new().unwrap();
+        // Establish the child's isolated home before making the project
+        // unwritable; failure must come from real project initialization.
+        let mut command = cas_cmd(project.path());
+        command
+            .current_dir(project.path())
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .args(["init", "--yes", "--no-integrations"]);
+        let restore = RestorePermissions(
+            project.path().into(),
+            std::fs::metadata(project.path()).unwrap().permissions(),
+        );
+        std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let output = command.output().unwrap();
+        drop(restore);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            stderr.matches("Permission denied").count(),
+            1,
+            "a CasError that already displays its source must not repeat it: {stderr}"
+        );
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Permission denied")
+        );
+        assert!(!project.path().join(".cas/cas.db").exists());
+    }
     let mut redraws = Vec::new();
     // Both human entry paths share execute_step; exercise completion and an
     // actual filesystem failure through their piped CLI, not a renderer copy.
-    for interactive in [false, true] {
-        for fail_gitignore in [false, true] {
-            let temp = TempDir::new().unwrap();
-            assert!(!temp.path().join(".git").exists());
-            std::fs::create_dir(temp.path().join(".claude")).unwrap();
-            if fail_gitignore {
-                std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+    for (interactive, failure, width, existing_store) in [
+        (false, "none", 80, false),
+        (true, "none", 80, false),
+        (false, "gitignore", 80, false),
+        (true, "gitignore", 80, false),
+        (false, "codex", 80, false),
+        (true, "codex", 120, false),
+        (false, "codex", 120, true),
+        (true, "codex", 80, true),
+    ] {
+        let temp = TempDir::new().unwrap();
+        assert!(!temp.path().join(".git").exists());
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        let fail_gitignore = failure == "gitignore";
+        let long_cause = "deliberately invalid configuration with enough separate words to require natural wrapping while retaining every part of this complete diagnostic and its original parser explanation";
+        if failure == "codex" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            if existing_store {
+                cas_cmd(temp.path())
+                    .current_dir(&temp)
+                    .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
+                    .args(["init", "--json", "--no-integrations"])
+                    .assert()
+                    .success();
             }
-            let mut cmd = cas_cmd(temp.path());
-            cmd.current_dir(&temp)
-                .args(["init", "--no-integrations"])
-                .env("LC_ALL", "C")
-                .env("NO_COLOR", "1");
-            if interactive {
-                cmd.write_stdin("y\n");
+            std::fs::write(temp.path().join(".codex/config.toml"), long_cause).unwrap();
+        }
+        let saved_config =
+            existing_store.then(|| std::fs::read(temp.path().join(".cas/config.toml")).unwrap());
+        if fail_gitignore {
+            std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+        }
+        let mut cmd = cas_cmd(temp.path());
+        cmd.current_dir(&temp)
+            .args(["init", "--no-integrations"])
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .env("COLUMNS", width.to_string())
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"));
+        if existing_store {
+            cmd.arg("--force");
+        }
+        if interactive {
+            cmd.write_stdin("y\n");
+        } else {
+            cmd.arg("--yes");
+        }
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            failure == "none",
+            "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        let config_phase = if existing_store {
+            "Keeping existing configuration"
+        } else {
+            "Saving configuration"
+        };
+        assert!(text.contains(config_phase), "{text}");
+        assert!(text.contains("Updating .gitignore"), "{text}");
+        if text
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
+            || text.matches(config_phase).count() != 1
+            || text.matches("Updating .gitignore").count() != 1
+        {
+            redraws.push(format!(
+                "interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"
+            ));
+        }
+        assert!(temp.path().join(".cas/cas.db").exists());
+        assert!(temp.path().join(".cas/config.toml").exists());
+        if failure == "codex" {
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let diagnostic = "TOML parse error";
+            assert!(
+                !text.contains(diagnostic),
+                "phase stdout must carry context without repeating the cause: {text}"
+            );
+            assert_eq!(stderr.matches(diagnostic).count(), 1, "{stderr}");
+            let normalized = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains(long_cause),
+                "full parser input must survive wrapping: {stderr}"
+            );
+            assert!(
+                stderr.contains("expected"),
+                "retain the actionable parser explanation: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .all(|line| ratatui::text::Line::raw(line).width() <= width),
+                "{width} columns, existing={existing_store}: {stderr}"
+            );
+            let continuation = stderr
+                .lines()
+                .skip(if existing_store { 1 } else { 3 })
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            assert!(
+                !continuation.is_empty() && continuation.iter().all(|line| line.starts_with("  ")),
+                "wrapped diagnostic continuations retain their hanging indent: {stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join(".codex/config.toml")).unwrap(),
+                long_cause
+            );
+            if let Some(config) = saved_config {
+                assert_eq!(
+                    std::fs::read(temp.path().join(".cas/config.toml")).unwrap(),
+                    config
+                );
             } else {
-                cmd.arg("--yes");
-            }
-            let output = cmd.output().unwrap();
-            assert_eq!(output.status.success(), !fail_gitignore,
-                "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
-                String::from_utf8_lossy(&output.stderr));
-            let text = String::from_utf8(output.stdout).unwrap();
-            assert!(text.contains("Saving configuration"), "{text}");
-            assert!(text.contains("Updating .gitignore"), "{text}");
-            if text.bytes().any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
-                || text.matches("Saving configuration").count() != 1
-                || text.matches("Updating .gitignore").count() != 1
-            {
-                redraws.push(format!("interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"));
-            }
-            assert!(temp.path().join(".cas/cas.db").exists());
-            assert!(temp.path().join(".cas/config.toml").exists());
-            if !fail_gitignore {
-                assert!(text.contains("Cassy initialized"), "{text}");
-                assert!(text.contains("cas hub service install"), "{text}");
-                cas_cmd(temp.path()).current_dir(&temp).arg("status").assert().success();
+                assert!(
+                    stderr.contains("cas init --force"),
+                    "retain recovery remedy: {stderr}"
+                );
             }
         }
+        if failure == "none" {
+            assert!(text.contains("Cassy initialized"), "{text}");
+            assert!(text.contains("cas hub service install"), "{text}");
+            cas_cmd(temp.path())
+                .current_dir(&temp)
+                .arg("status")
+                .assert()
+                .success();
+        }
     }
-    assert!(redraws.is_empty(), "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}");
+    assert!(
+        redraws.is_empty(),
+        "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}"
+    );
 }
 
 #[test]
@@ -540,14 +787,158 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    let temp = TempDir::new().unwrap();
+    for state in ["missing", "existing", "directory", "malformed", "malformed-grok", "array-root", "array-servers", "null-root", "null-servers"] {
+        let temp = TempDir::new().unwrap();
+        if state == "malformed-grok" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            std::fs::create_dir(temp.path().join(".grok")).unwrap();
+        } else {
+            std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        }
+        let mcp_path = temp.path().join(".mcp.json");
+        let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
+        let invalid_content: Option<&[u8]> = match state {
+            "malformed" | "malformed-grok" => Some(b"{\"mcpServers\": {\"other\":"),
+            "array-root" => Some(b"[]"),
+            "array-servers" => Some(b"{\"mcpServers\":[\"x\"]}"),
+            "null-root" => Some(b"null"),
+            "null-servers" => Some(b"{\"mcpServers\":null}"),
+            _ => None,
+        };
+        match state {
+            "existing" => std::fs::write(
+                &mcp_path,
+                serde_json::json!({"mcpServers": {"other": other_server}}).to_string(),
+            )
+            .unwrap(),
+            "directory" => std::fs::create_dir(&mcp_path).unwrap(),
+            _ if invalid_content.is_some() => std::fs::write(&mcp_path, invalid_content.unwrap()).unwrap(),
+            _ => {}
+        }
 
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("initialized"));
+        let output = cas_cmd(temp.path())
+            .current_dir(&temp)
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
+            .args(["init", "--no-integrations", "--json"])
+            .output()
+            .unwrap();
+        if state == "directory" || invalid_content.is_some() {
+            assert!(
+                output.status.code() == Some(1),
+                "MCP provisioning failure must exit 1 without panicking ({state}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "failed init must not report initialized"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
+            if state == "directory" {
+                assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
+            } else {
+                assert_eq!(std::fs::read(&mcp_path).unwrap(), invalid_content.unwrap());
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains("JSON"), "malformed config needs an explicit parse error: {error}");
+            }
+            continue;
+        }
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "initialized");
+        assert_eq!(report["agents"]["claude"], true);
+        assert_eq!(report["hooks_configured"], true);
+        let mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&mcp_path).expect("successful Claude init must create .mcp.json"),
+        )
+        .unwrap();
+        // pin: Claude's MCP launch contract must match the durable server entry.
+        assert_eq!(
+            mcp["mcpServers"]["cas"],
+            serde_json::json!({"command": "cas", "args": ["serve"]})
+        );
+        if state == "existing" {
+            assert_eq!(mcp["mcpServers"]["other"], other_server);
+        }
+    }
+}
+
+#[test]
+fn test_init_failure_reports_force_retry() {
+    let mut missing_hints = Vec::new();
+    for harness in ["claude", "codex"] {
+        let clean = TempDir::new().unwrap();
+        std::fs::create_dir(clean.path().join(format!(".{harness}"))).unwrap();
+        cas_cmd(clean.path()).current_dir(&clean)
+            .env("CODEX_HOME", clean.path().join(".test-home/.codex"))
+            .args(["init", "--json", "--no-integrations"])
+            .assert().success();
+        let clean_config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(clean.path().join(".cas/config.toml")).unwrap(),
+        ).unwrap();
+        for (mode, retry_mode) in [
+            ("json", "json"), ("json", "yes"), ("yes", "yes"), ("interactive", "yes"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let config_dir = temp.path().join(format!(".{harness}"));
+            std::fs::create_dir(&config_dir).unwrap();
+            let blocked = if harness == "claude" {
+                temp.path().join(".mcp.json")
+            } else {
+                config_dir.join("config.toml")
+            };
+            std::fs::create_dir(&blocked).unwrap();
+            let user_codex = temp.path().join(".test-home/.codex");
+            let mut command = cas_cmd(temp.path());
+            command.current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--no-integrations"]);
+            match mode {
+                "json" => { command.arg("--json"); }
+                "yes" => { command.arg("--yes"); }
+                _ => { command.write_stdin("y\n"); }
+            }
+            let output = command.output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{harness}/{mode} must fail provisioning");
+            assert!(temp.path().join(".cas/cas.db").is_file());
+            assert!(blocked.is_dir(), "the user's obstruction must remain intact");
+            if !error.lines().any(|line| line == "Fix the reported error, then re-run: cas init --force")
+                || error.lines().any(|line| line.chars().count() > 80)
+            {
+                missing_hints.push(format!("{harness}/{mode}: {error}"));
+            }
+            std::fs::remove_dir(&blocked).unwrap();
+            // Removing the obstruction alone does not finish an existing
+            // store. Prove that the suggested force retry actually repairs it.
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--json", "--no-integrations"])
+                .assert().success().stdout(predicate::str::contains("already_initialized"));
+            assert!(!blocked.exists());
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", if retry_mode == "json" { "--json" } else { "--yes" }, "--no-integrations", "--force"])
+                .assert().success();
+            let recovered_config: toml::Value = toml::from_str(
+                &std::fs::read_to_string(temp.path().join(".cas/config.toml")).unwrap(),
+            ).unwrap();
+            assert_eq!(recovered_config, clean_config,
+                "{harness}/{mode} -> {retry_mode}: force recovery must keep the full clean-init config");
+            if harness == "claude" {
+                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcpServers"]["cas"]["command"], "cas");
+            } else {
+                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcp_servers"]["cs"]["command"].as_str(), Some("cas"));
+            }
+        }
+    }
+    assert!(missing_hints.is_empty(), "failed init must explain force recovery: {missing_hints:#?}");
 }
 
 #[test]
@@ -568,6 +959,18 @@ fn test_init_already_initialized() {
         .assert()
         .success()
         .stdout(predicate::str::contains("already initialized"));
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n";
+    std::fs::write(&config_path, custom_config).unwrap();
+    let output = cas_cmd(temp.path()).current_dir(&temp)
+        .args(["init", "--no-integrations"]).write_stdin("").output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(error.contains("stdin closed before a selection"), "{error}");
+    assert!(!error.contains("Initialization is incomplete") && !error.contains("cas init --force"),
+        "a valid pre-existing store must not receive partial-init recovery advice: {error}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config);
 }
 
 /// Regression test for cas-bf06: a reinit of `cas init` (interactive, no
@@ -649,22 +1052,31 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
 
 #[test]
 fn test_init_force_reinit() {
-    let temp = TempDir::new().unwrap();
+    for mode in ["json", "yes", "interactive"] {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        cas_cmd(temp.path()).current_dir(&temp)
+            .args(["init", "--yes", "--no-integrations"]).assert().success();
+        let config_path = temp.path().join(".cas/config.toml");
+        let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n[hooks]\ntoken_budget = 1234\n";
+        std::fs::write(&config_path, custom_config).unwrap();
+        let mcp_path = temp.path().join(".mcp.json");
+        std::fs::remove_file(&mcp_path).unwrap();
 
-    // First init
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Force reinit should succeed
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes", "--force"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"));
+        let mut command = cas_cmd(temp.path());
+        command.current_dir(&temp).args(["init", "--force", "--no-integrations"]);
+        match mode {
+            "json" => { command.arg("--json"); }
+            "yes" => { command.arg("--yes"); }
+            _ => { command.write_stdin("y\n"); }
+        }
+        command.assert().success().stdout(predicate::str::contains(
+            if mode == "json" { "initialized" } else { "Cassy initialized" }));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config,
+            "{mode} force retry must preserve the operator's config bytes");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["cas"]["command"], "cas", "{mode} must repair provisioning");
+    }
 }
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the

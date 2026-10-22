@@ -28,8 +28,8 @@
 //                                      line fills the width, ends mid-token, and the
 //                                      wider capture shows the token whole (warn
 //                                      when no wider capture can confirm it)
-//   truncation-without-escape   fail   a token ends in … or ... and the output
-//                                      never names the escape flag (--full)
+//   truncation-without-escape   fail   a truncated value has no escape flag;
+//                                      literal gerund progress lines ending in ... pass
 //   numeric-misalignment        fail   numbers in one table column with
 //                                      different right edges
 //   unicode-without-fallback    fail   bytes ≥ 0x80 emitted under LC_ALL=C
@@ -538,12 +538,19 @@ function checkWordSplit(lines, columns, run, referenceText) {
   return out;
 }
 
+function isLiteralProgressEllipsis(text) {
+  // Only known complete progress copy proves the final word is not cut off.
+  // Keep the interior space literal so table column gaps cannot match.
+  return /^ *Reconfiguring Cassy\.\.\. *$/.test(text);
+}
+
 function checkTruncation(lines, run, escapeFlag) {
   const out = [];
   const full = lines.map(lineText).join("\n");
   if (full.includes(escapeFlag)) return out;
   lines.forEach((line, idx) => {
     const text = lineText(line);
+    if (isLiteralProgressEllipsis(text)) return;
     for (const tok of tokens(text)) {
       if (/(…|\.\.\.)$/.test(tok)) {
         out.push(

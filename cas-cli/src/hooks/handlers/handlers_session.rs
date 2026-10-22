@@ -296,6 +296,14 @@ pub fn handle_session_start(
     // this at the protected top of supervisor context so it survives the
     // SessionStart preview/budget compaction path.
     if is_supervisor {
+        if let Some(banner) = crate::factory_binary_skew::supervisor_banner(
+            cas_root,
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        ) {
+            assembler.prepend_degradable_with_priority(
+                "Factory MCP binary skew", banner.clone(), banner, DegradationPriority::Context,
+            );
+        }
         if let Some(banner) =
             active_peer_supervisor_banner(cas_root, std::env::var("CAS_AGENT_NAME").ok().as_deref())
         {

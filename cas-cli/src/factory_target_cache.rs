@@ -124,6 +124,9 @@ pub struct TargetCacheReport {
     pub candidate_bytes: u64,
     pub selected_bytes: u64,
     pub reclaimed_bytes: u64,
+    /// Verifier output atomically queued for deletion, still occupying disk.
+    #[serde(default)]
+    pub pending_reclaim_bytes: u64,
     pub dry_run: bool,
     pub remediation: String,
     pub caches: Vec<TargetCacheRecord>,
@@ -225,15 +228,17 @@ fn inspect_with_probe(
     )
 }
 
-/// Admission reclaims only verified relocated worker targets. Keep full factory
+/// Admission reclaims verified relocated worker and resolved review targets. Keep full factory
 /// GC (previews, in-tree caches, traces and artifacts) an explicit operation.
 pub(crate) fn reclaim_scratch_for_admission(
     cas_root: &Path,
     policy: TargetCachePolicy,
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
+    let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
     let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, probe)?;
     cleanup_selected(cas_root, &mut report, policy, &[])?;
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(review_bytes);
     Ok(report)
 }
 
@@ -399,6 +404,7 @@ fn inspect_scoped_with_probe(
         candidate_bytes,
         selected_bytes,
         reclaimed_bytes: 0,
+        pending_reclaim_bytes: crate::factory_review_scratch::pending_reclaim_bytes(cas_root),
         dry_run,
         remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,

@@ -52,7 +52,8 @@ for API-only reasons; otherwise follow
    format](references/evidence-bundle.md#api-surfaces)). Register long-lived servers through
    `cas-servers`; never substitute fixtures.
    For a Cassy source CLI binary, ask the supervisor to run
-   `cas qa candidate build --task <task-id> --rev <sha>` and cite its candidate receipt.
+   `cas qa candidate build --task <task-id> --rev <sha>`, then get the binary's path with
+   `cas qa candidate path --task <task-id>` (never type the hashed path) and cite its receipt.
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
    HTTP transcripts; label every row `source-inferred`, `fixture`, `real-build`, or `eyewitness`. A
    label weaker than the cell needs is `NOT EXERCISED`, never `PASS`; never write “partial”. When

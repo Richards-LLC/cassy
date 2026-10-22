@@ -1,4 +1,4 @@
-//! cas-eda0: Cassy closes a parked delivery that it merged with green CI.
+//! Cassy closes a parked delivery that it merged and published.
 //!
 //! Before this, a merged delivery waited for its worker to re-close, and a
 //! verdict that approved it waited for a second worker re-close. Both turns
@@ -13,7 +13,7 @@ use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 
 /// What Cassy's own post-merge close did.
 pub(crate) enum CassyMergeClose {
-    /// The task does not carry a green merge Cassy may close for.
+    /// The task does not carry a published merge Cassy may close for.
     NotEligible,
     /// This call closed the task; `notice` reports the worker notification.
     Closed { notice: String },
@@ -25,11 +25,19 @@ pub(crate) enum CassyMergeClose {
 
 impl CassyMergeClose {
     /// One receipt line for the caller's response.
+    /// cas-3fc8: what the post-commit note says this close concluded.
+    pub(crate) fn followup(&self, task_id: &str) -> String {
+        match self {
+            Self::NotEligible => "not eligible for Cassy's close".to_string(),
+            other => other.receipt(task_id),
+        }
+    }
+
     pub(crate) fn receipt(&self, task_id: &str) -> String {
         match self {
             Self::NotEligible => String::new(),
             Self::Closed { notice } => {
-                format!("\nCassy closed task {task_id} after the green merge; {notice}.")
+                format!("\nCassy closed task {task_id} after the published merge; {notice}.")
             }
             Self::AlreadyClosed => format!("\nTask {task_id} was already closed."),
             Self::Held(text) => format!("\nCassy close of {task_id} is waiting on a gate:\n{text}"),
@@ -38,12 +46,14 @@ impl CassyMergeClose {
 }
 
 impl CasCore {
-    /// Record that `worktree_merge` landed this parked delivery at
-    /// `merge_commit` with green CI, then close it as Cassy.
-    pub(crate) async fn close_after_green_merge(
+    /// Record that `worktree_merge` published this parked delivery, then close
+    /// it as Cassy. The legacy green_merge_commit field records the merge tip
+    /// for both confirmed and advisory CI; the task note preserves that distinction.
+    pub(crate) async fn close_after_published_merge(
         &self,
         task_id: &str,
         merge_commit: &str,
+        ci_confirmed: bool,
     ) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
@@ -51,13 +61,25 @@ impl CasCore {
         // One conditional field write, never a read-modify-write of the row:
         // a worker close landing first must stay closed.
         match store.record_green_merge(task_id, merge_commit) {
-            Ok(true) => self.close_green_merged_delivery(task_id).await,
+            Ok(true) => {
+                if !ci_confirmed {
+                    let note = format!(
+                        "CI unconfirmed at merge {merge_commit}; worktree_merge proceeded under advisory CI policy."
+                    );
+                    if let Err(error) = store.append_trusted_note(task_id, &note) {
+                        return CassyMergeClose::Held(format!(
+                            "the advisory CI close note could not be recorded ({error}); retry task close."
+                        ));
+                    }
+                }
+                self.close_green_merged_delivery(task_id).await
+            }
             Ok(false) => match store.get(task_id) {
                 Ok(task) if task.status == TaskStatus::Closed => CassyMergeClose::AlreadyClosed,
                 _ => CassyMergeClose::NotEligible,
             },
             Err(error) => CassyMergeClose::Held(format!(
-                "the green merge could not be recorded ({error}); retry task close."
+                "the published merge could not be recorded ({error}); retry task close."
             )),
         }
     }

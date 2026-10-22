@@ -583,10 +583,54 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("{error:#}"))
 }
 
+/// Keep every init diagnostic readable, including forced retries of an
+/// existing store that do not carry the incomplete-initialization context.
+/// Reserve eight cells for the widest error mark. As with other presence
+/// prose, indivisible tokens stay whole on their own line.
+pub fn human_init_error_message(error: &anyhow::Error) -> String {
+    let mut message = String::new();
+    for cause in error.chain() {
+        let detail = cause.to_string();
+        // CasError variants can already display their source. Keep outer
+        // context, but do not append that embedded source a second time.
+        if message.ends_with(&detail) {
+            continue;
+        }
+        if !message.is_empty() {
+            message.push_str(": ");
+        }
+        message.push_str(&detail);
+    }
+    let (heading, body) = match message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        Some(cause) => (Some(init::INCOMPLETE_INIT_RECOVERY), cause),
+        None => (None, message.as_str()),
+    };
+    // Wrap the body once: re-wrapping its individual lines strips the
+    // hanging indent that wrap_line gives continuation rows.
+    let body = crate::cloud::presence::wrap_line(body);
+    match heading {
+        Some(heading) => format!("{heading}\n{}", body.trim_end()),
+        None => body.trim_end().to_owned(),
+    }
+}
+
 /// Render the diagnostic for a person while leaving [`json_error_message`]
 /// as the stable machine-readable representation.
 pub fn human_error_message(error: &anyhow::Error) -> String {
     let message = format!("{error:#}");
+    if let Some(cause) = message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        return format!(
+            "{}\n{}",
+            init::INCOMPLETE_INIT_RECOVERY,
+            crate::cloud::presence::wrap_line(cause).trim_end()
+        );
+    }
     let Some(detail) = message
         .strip_prefix("refused: ")
         .filter(|_| message.contains("operator-only because"))
@@ -612,6 +656,8 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
         format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
     };
     format!("Operator-only config change refused.\n{detail}")
+        .trim_end()
+        .to_owned()
 }
 
 /// Run the CLI with the given arguments
@@ -1014,6 +1060,17 @@ mod tests {
             super::json_error_message(&error),
             error.to_string(),
             "machine output keeps the original one-line refusal"
+        );
+
+        let no_context = anyhow::anyhow!(
+            "refused: CAS_AGENT_NAME is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal."
+        );
+        let rendered_without_context = super::human_error_message(&no_context);
+        assert!(
+            rendered_without_context
+                .lines()
+                .all(|line| line == line.trim_end()),
+            "human refusal has no trailing whitespace-only line: {rendered_without_context:?}"
         );
     }
 

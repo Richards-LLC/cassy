@@ -25,6 +25,39 @@ repair as staged changes. Their managed-files receipt uses the existing
 was attempted. The compact staged line is scoped for terminal QA, with the
 operator recovery procedure in ARCHITECTURE.md.
 
+## Commit guard uncertainty (cas-bb3c)
+
+A guard config read failure keeps the repair staged and adds one short ASCII
+warning naming the unreadable commit-guard config, the staged outcome and the
+retry action. The existing staged receipt supplies `git diff --cached`.
+`managed_files.commit_warning` carries the same warning in JSON; it is distinct
+from `commit_error`, so this safe refusal exits zero and remains a warning in
+compact sweeps. The guard uses the CAS root passed to sync, including worktrees
+without a local `.cas`. Detached HEAD and an unidentifiable default branch keep
+repairs staged. This adds no automatic push, reset or config rewrite.
+
+Fresh terminal evidence for this addition belongs to the cas-bb3c task's
+commit-bound ledger; earlier captures below cover only their named changes.
+
+## Local-only commits (cas-3b812)
+
+A committed repair keeps the managed-files verdict and adds one ASCII next-step
+line: the commit is local-only; push it to origin and open a PR. It fits 80
+columns without hiding the action. Staged/current/conflict outcomes do not get
+this line. The compact multi-project sweep keeps a committed repair as a warning
+with the same pending-PR action, so successful-phase elision cannot hide it.
+JSON retains the existing `managed_files` outcome and commit fields and carries
+the sweep warning in its existing skills phase shape.
+Doctor checks the default branch against its configured upstream, even from a
+worker checkout, and warns on Cassy-authored reconcile commits still ahead.
+Its existing check JSON carries the same cause and PR remedy. Spawn and lane
+refusals name reconcile commits only when all commits on the implicated side
+are Cassy-authored managed-file repairs; refs remain untouched.
+
+See the cas-3b812 task's commit-bound `LEDGER.md` for fresh terminal evidence
+and critique of this addition. Earlier receipts below cover their named earlier
+changes only.
+
 ## Critique
 
 The conflict receipt is the scoped terminal surface. A preflight conflict now
@@ -72,3 +105,34 @@ capped named update-sync integration test; binary mtime 2026-10-21 14:36:25 UTC.
 | Machine contract | 5 | Native JSON remains one document with outcome staged and null commit; every real fixture preserves HEAD. |
 
 Scored by ready-bear-59 on 2026-10-21; all mechanical checks and score floors pass.
+
+### cas-bb3c commit guard warning
+
+`terminal-qa: PASS cas-bb3c-config-error · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+`terminal-qa: PASS cas-bb3c-detached · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+```text
+Managed files: staged; review with git diff --cached
+WARN: Commit guard config unreadable; repair staged. Fix config, then retry.
+```
+
+Supervisor-run candidate `cas 3.72.0 (230f8dc 2026-10-22)` maps to
+`230f8dc50c4de89e4d6a88b184f7040829d278ae`. The isolated actual-CLI probe
+keeps the caller's factory role and emits the native changed rows; full output,
+Git refs, staged paths and config-obstruction readbacks are retained in cas-bb3c
+artifacts. `terminal-config-error/report.json` and `terminal-detached/report.json`
+cover 80/120 columns, four palettes, pipe, C locale, NO_COLOR and JSON. All 27
+readbacks passed, including normal work-branch, staging and unknown-default JSON
+controls. No live project or factory configuration was rewritten by the probe.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The staged verdict gives `git diff --cached`; line two names the config cause and retry action. |
+| Fit | 5 | One warning follows the existing receipt; detached HEAD needs only the staged row. |
+| Craft | 4 | The warning is 76 ASCII cells at 80 columns, with no wrapping or elision. |
+| Theme safety | 5 | Uncolored native text is identical across the four palettes and monochrome captures. |
+| Machine contract | 5 | JSON is one document with staged outcome, null commit and optional `commit_warning`; all safe refusals exit zero. |
+
+Scoped text and mechanical captures reviewed by fierce-marten-72 on 2026-10-22;
+this does not grade the unchanged full sync inventory or claim a GUI screenshot.

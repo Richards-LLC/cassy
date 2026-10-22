@@ -31,7 +31,7 @@ The task record names the delivery: `deliverables.files_changed`, `deliverables.
 cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
 ```
 
-The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). Publish durable logs and captures to the task artifacts directory. GC removes disposable source/build output after the task is terminal or the dispatch is resolved, after two hours and only with no lease or live user; it also removes the Git worktree registration. This ownership record makes cleanup independent of whether your session exits normally. Diff against the task's own delivery base, never a fixed commit count:
+The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). Publish durable logs and captures to the task artifacts directory. A verdict or task close reclaims disposable `target/` output once the dispatch is resolved (or a terminal task has no active dispatch), with no lease or live user; existing GC/admission retries deferred cleanup. Source and its Git worktree registration retain the two-hour idle grace period before GC removes them. Checkouts with source changes are kept. This ownership record makes cleanup independent of whether your session exits normally. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
@@ -39,6 +39,17 @@ git diff --name-status "$BASE" HEAD
 ```
 
 If the branch is already merged (`$BASE` equals `HEAD`), inspect the recorded commit instead: `git show --name-status <commit_hash>`. Prefer `deliverables.files_changed` when it is present, and confirm it matches the diff.
+
+Before running a candidate `serve` or any stateful command, create a disposable
+project with an empty `.cas` directory and a disposable HOME outside the source
+checkout. Set `CAS_ROOT` to that fixture `.cas`, `HOME` to the disposable home,
+and `XDG_CONFIG_HOME` beneath it for every candidate subprocess, including the
+fixture's `cas init`. Initialize the fixture store before serving it and record
+the resolved store path with the command receipt. A scratch Git worktree still
+discovers the main checkout's live `.cas`; unsetting `CAS_ROOT` does not isolate
+it. Keep these overrides scoped to candidate subprocesses so your authenticated
+reviewer MCP session retains its factory binding.
+
 
 ### Step 4: Read every changed file in full
 

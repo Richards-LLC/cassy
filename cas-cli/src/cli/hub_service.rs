@@ -19,8 +19,7 @@ use crate::hub::{
     DEFAULT_HUB_PORT, HubLockHolder, HubLockOwner, HubProcessRecord, HubRuntimePaths,
 };
 
-const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
-const LAUNCHD_TEST_LABEL_ENV: &str = "CAS_HUB_LAUNCHD_LABEL";
+use crate::hub::observation::{LAUNCHD_LABEL, LAUNCHD_TEST_LABEL_ENV, launchd_label};
 const LAUNCHD_TEST_PORT_ENV: &str = "CAS_HUB_SERVICE_PORT";
 const LAUNCHD_CLI_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
@@ -1551,10 +1550,6 @@ fn validate_launchd_test_label() -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn launchd_label() -> String {
-    std::env::var(LAUNCHD_TEST_LABEL_ENV).unwrap_or_else(|_| LAUNCHD_LABEL.to_owned())
 }
 
 fn service_port() -> u16 {

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -365,11 +366,22 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
                   "DEV_TOP_LEVEL" if index == 2 else "DEV_REPLY")
         receipt_values[f"{prefix}_ID"] = message_id
         receipt_values[f"{prefix}_PERMALINK"] = permalink
+        # A single Violet request can return several Slack messages. Keep the
+        # ordered transport receipt as well as the compatibility message ID.
+        part_ids = envelope["message"].get("part_ids", [message_id])
+        if (not isinstance(part_ids, list) or not part_ids
+                or any(not isinstance(part, str) or not part.strip() for part in part_ids)
+                or len(set(part_ids)) != len(part_ids) or message_id not in part_ids):
+            receipt(receipt_path, receipt_values)
+            fail(f"{BODY_NAMES[index]} post returned invalid part_ids; preserve partial receipt, do not retry writes")
+        receipt_values[f"{prefix}_PART_IDS"] = json.dumps(part_ids, separators=(",", ":"))
         receipt(receipt_path, receipt_values)
+        # Violet contract: a split root's thread_id is its first part;
+        # the compatibility message_id identifies its last part.
         if index == 0:
-            parent = message_id
+            parent = part_ids[0]
         elif index == 2:
-            dev_parent = message_id
+            dev_parent = part_ids[0]
         if index < len(texts) - 1:
             time.sleep(1)
     receipt(receipt_path, receipt_values)

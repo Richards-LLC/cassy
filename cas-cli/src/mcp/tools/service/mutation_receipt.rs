@@ -159,7 +159,13 @@ pub(crate) fn merge_followup(outcome: &str) {
         && receipt.action == "worktree_merge"
         && let Ok(mut followup) = receipt.followup.lock()
     {
-        *followup = Some(outcome.trim().to_string());
+        // cas-3fc8: a close that answered no text still gets a named outcome.
+        let outcome = outcome.trim();
+        *followup = Some(if outcome.is_empty() {
+            "the close returned no text".to_string()
+        } else {
+            outcome.to_string()
+        });
     }
 }
 

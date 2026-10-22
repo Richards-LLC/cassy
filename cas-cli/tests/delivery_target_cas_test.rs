@@ -33,9 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
@@ -507,13 +505,15 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 /// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
 /// closed by Cassy once its verdict approves: no worker re-close, the parked
 /// close reason and the merge SHA are recorded, and the worker hears once.
-/// A rejected verdict or a red-CI override merge never closes it.
+/// A rejected verdict or a red-CI override merge never closes it. A merge
+/// without check runs still starts the close and records its unconfirmed CI.
 #[tokio::test]
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     // (row, CI conclusion, verdict recorded after merge, Cassy closes)
     for (row, conclusion, verdict, closes) in [
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
+        ("advisory-no-checks", "no-checks", Some("approved"), true),
         ("red-override", "failure", None, false),
     ] {
         let mut env = TestEnvGuard::temp_home();
@@ -537,10 +537,24 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             &repo.root,
         );
         let cas_root = init_cas_dir(&repo.root).expect("init CAS");
-        let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
+        let gh = if conclusion == "no-checks" {
+            let path = cas_root.join("no-checks-ci-gh");
+            cas::test_paths::warm_stub(
+                &path,
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
+            );
+            path
+        } else {
+            ci_check_run::ci_concluded(&cas_root, conclusion)
+        };
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-        std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
-            .expect("write config");
+        // cas-3fc8: the insteadOf rewrite also changes `git remote get-url`,
+        // so pin the project identity the fixture means.
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n"),
+        )
+        .expect("write config");
         let worker = slug.clone();
         let worker_id = format!("{slug}-worker-session");
         let supervisor_id = format!("{slug}-supervisor-session");
@@ -635,6 +649,9 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
 
         if let Some(verdict) = verdict {
+            if row == "advisory-no-checks" {
+                assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
+            }
             assert_eq!(
                 after_merge.deliverables.green_merge_commit.as_deref(),
                 Some(merge_sha.as_str()),
@@ -709,7 +726,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
         "close must retain its configured durable artifact as queryable receipt metadata"
     );
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     assert!(
@@ -1081,7 +1098,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     let state = delivery_state(&fixture);
@@ -1128,7 +1145,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     );
     fixture.repo.arm_post_checkout_drift("cas0a21drift", "main");
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     // The hook must actually have fired, or this regression proves nothing.
@@ -1194,9 +1211,9 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
         &first.repo.root,
     );
 
-    env.set_current_dir(&first.repo.root);
+    let mut env = env.enter_dir(&first.repo.root);
     let first_output = run_merge(&first).await;
-    env.set_current_dir(&second.repo.root);
+    let _env = env.enter_dir(&second.repo.root);
     let second_output = run_merge(&second).await;
 
     assert_eq!(

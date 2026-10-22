@@ -310,6 +310,14 @@ impl std::ops::Deref for ObservedLock {
     }
 }
 
+/// cas-da31: a claim's lock as one start or claim saw it, so its rollback
+/// releases that lock only (petra-stella-cloud #164 conditional release).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimSnapshot {
+    pub epoch: u64,
+    pub renewal_count: u32,
+}
+
 /// Cloud claims for one repository.
 #[derive(Clone)]
 pub struct PeerClaims {
@@ -423,28 +431,101 @@ impl PeerClaims {
     /// in flight; cancellation alone cannot invalidate its earlier snapshot.
     /// Called on the blocking pool under the request's peer budget.
     /// The caller retains the returned guard until its local lease is published.
+    ///
+    /// cas-da31: a claim won here is renewed once, and the returned
+    /// [`ClaimSnapshot`] is what a rollback of this start releases against.
+    /// A same-agent re-claim of a live lock comes back unchanged, so the
+    /// renewal is what makes any earlier, still in-flight conditional release
+    /// of that lock miss (409) instead of dropping this start's claim.
+    /// A release can still win the round trip between claim and renewal.
+    /// If renewal fails, re-acquire and renew once within the same budget;
+    /// only a confirmed renewal reports Claimed and supplies the snapshot.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_for_local_lease(
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
-    ) -> (Acquire, Option<TaskClaimFence>) {
+    ) -> (Acquire, Option<TaskClaimFence>, Option<ClaimSnapshot>) {
         let _fence = match lock_task_claim_release(cas_root, task_id) {
             Ok(fence) => fence,
-            Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None),
+            Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None, None),
         };
         // The async caller may already have timed out while this blocking
         // work waited for an in-flight release. Do not cancel newer work.
         if let Err(error) = self.remaining() {
-            return (Acquire::Unavailable(error.to_string()), None);
+            return (Acquire::Unavailable(error.to_string()), None, None);
         }
         if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
-            return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None);
+            return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None, None);
         }
         // Cancellation remains intentional if Cloud becomes unavailable at
         // this point: the caller publishes a local lease, and renewal repairs
         // its Cloud mirror. Keep release fenced until that local publication.
-        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), Some(_fence))
+        let claims = self.clone().with_budget(PeerBudget::default());
+        let mut answer =
+            claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local);
+        let mut snapshot = None;
+        for attempt in 0..2 {
+            if !matches!(answer, Acquire::Claimed) {
+                break;
+            }
+            match claims
+                .coordinator(agent_id)
+                .and_then(|coordinator| coordinator.renew(&claims.key(task_id), duration_secs))
+            {
+                Ok(lease) => {
+                    snapshot = Some(ClaimSnapshot {
+                        epoch: lease.epoch,
+                        renewal_count: lease.renewal_count,
+                    });
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(task = %task_id, %agent_id, %error,
+                            "claim snapshot renewal failed");
+                    answer = if attempt == 0 {
+                        claims.acquire_bounded(
+                            task_id,
+                            kind,
+                            agent_id,
+                            agent_name,
+                            duration_secs,
+                            is_local,
+                        )
+                    } else {
+                        Acquire::Unavailable(format!("claim snapshot renewal failed: {error}"))
+                    };
+                }
+            }
+        }
+        (answer, Some(_fence), snapshot)
+    }
+
+    /// cas-da31: roll back this agent's own claim on `task_id`, as it stood
+    /// in `snapshot`. A claim reacquired or renewed since (a restart by the
+    /// same agent) is left alone; Cloud answers that release 409. Without a
+    /// snapshot this uses a fresh conditional [`Self::release_own`]. A rollback
+    /// racing the daemon's renewal can leave the claim until its TTL expires.
+    /// Returns whether it released.
+    pub fn release_own_at(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        snapshot: Option<ClaimSnapshot>,
+    ) -> Result<bool, CasError> {
+        let Some(snapshot) = snapshot else {
+            tracing::warn!(task = %task_id, %agent_id,
+                "no acquisition snapshot after failed renew; falling back to fresh-read conditional release");
+            return self.release_own(task_id, agent_id);
+        };
+        let key = self.key(task_id);
+        let Some(lock) = self.read_lock(&key, agent_id)? else {
+            return Ok(false);
+        };
+        if lock.foreign_account || lock.agent_id != agent_id {
+            return Ok(false);
+        }
+        self.coordinator(agent_id)?.release_expecting(&key, snapshot.epoch, snapshot.renewal_count)
     }
 
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
@@ -669,18 +750,26 @@ impl PeerClaims {
         let reason = ClaimHolder::new(kind, agent_name, &self.project)
             .on(&self.label)
             .reason();
-        if let Some(expected) = expected {
-            match claims.release_if_unchanged(&key, expected) {
-                Ok(true) => {}
-                Ok(false) => {
-                    // The old snapshot no longer identifies a competitor.
-                    // A fresh read may find a new holder, a stale holder, or no lock.
-                    return claims.peer_answer(&key, &expected.agent_id);
+        let released = match expected {
+            Some(expected) => claims.release_if_unchanged(&key, expected),
+            None => match claims.read_lock(&key, from) {
+                Ok(Some(lock)) if !lock.foreign_account && lock.agent_id == agent_id => {
+                    return Acquire::Claimed;
                 }
-                Err(error) => return Acquire::Unavailable(error.to_string()),
-            }
-        } else if let Err(error) = claims.release_with_reserve(&key, from) {
-            return Acquire::Unavailable(error.to_string());
+                Ok(Some(lock)) if !lock.foreign_account && lock.agent_id == from => {
+                    claims.release_with_reserve(&key, &lock)
+                }
+                Ok(None) => Ok(true),
+                Ok(Some(_)) => Ok(false),
+                Err(error) => Err(error),
+            },
+        };
+        match released {
+            Ok(true) => {}
+            // The old snapshot no longer identifies a competitor. A fresh
+            // read may find a new holder, a stale holder, or no lock.
+            Ok(false) => return claims.peer_answer(&key, from),
+            Err(error) => return Acquire::Unavailable(error.to_string()),
         }
         let moved = claims
             .coordinator(agent_id)
@@ -706,31 +795,31 @@ impl PeerClaims {
 
     /// Spend at most half the remaining allowance releasing, leaving time to
     /// claim. A blocking continuation cannot start a call after the deadline.
-    fn release_with_reserve(&self, key: &str, agent_id: &str) -> Result<(), CasError> {
+    fn release_with_reserve(&self, key: &str, expected: &TaskLease) -> Result<bool, CasError> {
         let left = self.remaining()? / 2;
         if left.is_zero() {
             return Err(CasError::Other("peer check budget exhausted".into()));
         }
-        self.coordinator(agent_id)?.with_timeout(left).release(key)
+        self.coordinator(&expected.agent_id)?.with_timeout(left)
+            .release_expecting(key, expected.epoch, expected.renewal_count)
     }
 
-    /// Client guard only: Cloud's release POST sends agent_id, not an expected
-    /// epoch. A renewal in the round trip after this final read can still be
-    /// lost until Cloud supports release conditional on epoch (accepted M2).
+    /// Recheck the observed holder before recovery, then let Cloud enforce
+    /// the epoch and renewal count across the final HTTP round trip too.
     fn release_if_unchanged(&self, key: &str, expected: &TaskLease) -> Result<bool, CasError> {
         let current = self.read_lock(key, &expected.agent_id)?;
         let unchanged = current.is_some_and(|current| {
             !current.foreign_account
                 && current.agent_id == expected.agent_id
                 && current.epoch == expected.epoch
+                && current.renewal_count == expected.renewal_count
                 && current.renewed_at == expected.renewed_at
                 && current.status == expected.status
         });
         if !unchanged {
             return Ok(false);
         }
-        self.release_with_reserve(key, &expected.agent_id)?;
-        Ok(true)
+        self.release_with_reserve(key, expected)
     }
 
     /// A peer's hold on `key`, live or stale, read from the lock.
@@ -760,8 +849,7 @@ impl PeerClaims {
         if lock.foreign_account || lock.agent_id != agent_id {
             return Ok(false);
         }
-        self.coordinator(agent_id)?.release(&key)?;
-        Ok(true)
+        self.coordinator(agent_id)?.release_expecting(&key, lock.epoch, lock.renewal_count)
     }
 
     /// The holder as Cassy Cloud lists it: whether it is live, and its
@@ -899,8 +987,7 @@ impl PeerClaims {
         if !is_local(&lock.agent_id) {
             return Ok(false);
         }
-        self.coordinator(&lock.agent_id)?.release(&key)?;
-        Ok(true)
+        self.coordinator(&lock.agent_id)?.release_expecting(&key, lock.epoch, lock.renewal_count)
     }
 
     pub(crate) fn release_reset_holder(
@@ -948,8 +1035,8 @@ pub struct RenewReport {
     pub conflicts: Vec<(String, PeerHold)>,
 }
 
-/// Renew the cloud claims of every task and epic `agent_id` holds a local
-/// lease on, and of the epic its focus claims ([`META_FOCUS_CLAIM`]), for the
+/// Renew the cloud claims of running tasks still assigned to `agent_id` with
+/// local leases, and of the epic its focus claims ([`META_FOCUS_CLAIM`]), for the
 /// configured lease duration. Called from the daemon heartbeat, so claims
 /// stay alive while the agent works and run out after it stops.
 ///
@@ -964,7 +1051,7 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {
         return report;
     };
-    let Ok(leases) = agents.list_agent_leases(agent_id) else {
+    let Ok(leases) = agents.list_renewable_task_leases(agent_id) else {
         return report;
     };
     let me = agents.get(agent_id).ok();
@@ -1362,6 +1449,8 @@ fn release_pending_task_claims_with(
         let done = restarted || expired || {
             let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
             match budgeted.release_local(&task_id, &is_local) {
+                // A snapshot-changed 409 is Ok(false): the old release is
+                // settled, never retried against the replacement claim.
                 Ok(_) => true,
                 Err(error) => {
                     tracing::debug!(task = %task_id, %error, "cloud claim release failed; will retry");
@@ -1378,6 +1467,14 @@ fn release_pending_task_claims_with(
             });
         }
     }
+}
+
+/// cas-da31: [`release_task_claim`] on the blocking pool, awaited, so a
+/// handler freeing a task's claim never blocks the async runtime on the
+/// Cloud.
+pub async fn release_task_claim_off_runtime(cas_root: &Path, task_id: &str) {
+    let (root, id) = (cas_root.to_path_buf(), task_id.to_string());
+    let _ = tokio::task::spawn_blocking(move || release_task_claim(&root, &id)).await;
 }
 
 /// What a spawn learns about peers before it queues anything (cas-0078).
@@ -1588,6 +1685,25 @@ mod tests {
                         "status":"success", "result":"claimed", "lock":fresh,
                     }))
                 }).mount(&server).await;
+            // Starts now require a confirmed renewal rather than silently
+            // accepting the fixture's unmatched-route 404 as a claimed lock.
+            let renewed = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/renew$"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let mut current = renewed.lock().unwrap();
+                    let Some(lock) = current.as_mut()
+                        .filter(|lock| lock["agent_id"] == body["agent_id"])
+                    else {
+                        return ResponseTemplate::new(404);
+                    };
+                    lock["renewal_count"] = serde_json::json!(lock["renewal_count"].as_u64().unwrap_or(0) + 1);
+                    lock["renewed_at"] = serde_json::json!(Utc::now());
+                    let seconds = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
+                    lock["expires_at"] = serde_json::json!(Utc::now() + chrono::Duration::seconds(seconds));
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock": lock}))
+                }).mount(&server).await;
             let claims = PeerClaims {
                 config: CloudConfig {
                     endpoint: server.uri(), token: Some("sandbox-token".into()),
@@ -1611,7 +1727,7 @@ mod tests {
                     // local try_claim. Delay local publication to force the gap.
                     assert!(crate::store::open_agent_store(dir.path()).unwrap()
                         .get_lease(task).unwrap().is_none());
-                    let (answer, fence) = claims.acquire_for_local_lease(
+                    let (answer, fence, _) = claims.acquire_for_local_lease(
                         dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                     );
                     assert!(matches!(answer, Acquire::Claimed));
@@ -1653,7 +1769,7 @@ mod tests {
                 let restart = {
                     let (claims, root) = (claims.clone(), dir.path().to_path_buf());
                     std::thread::spawn(move || {
-                        let (answer, fence) = claims.acquire_for_local_lease(
+                        let (answer, fence, _) = claims.acquire_for_local_lease(
                             &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                         );
                         assert!(matches!(answer, Acquire::Claimed));
@@ -1683,7 +1799,7 @@ mod tests {
             // new local lease, published before the start fence is dropped.
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
-                let (answer, fence) = claims.acquire_for_local_lease(
+                let (answer, fence, _) = claims.acquire_for_local_lease(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                 );
                 assert!(matches!(answer, Acquire::Claimed));

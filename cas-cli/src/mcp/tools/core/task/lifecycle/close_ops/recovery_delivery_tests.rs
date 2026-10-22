@@ -921,7 +921,11 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
 
 #[tokio::test]
 async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
-    for (surface, has_demo) in [("src/cli/status.rs", true), ("note.txt", false)] {
+    for (surface, has_demo, complete_pairs) in [
+        ("src/cli/status.rs", true, false),
+        ("note.txt", false, false),
+        ("note.txt", false, true),
+    ] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture_with_surface(&mut env, surface, true);
         let cas_dir = f.dir.path().join(".cas");
@@ -965,11 +969,18 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
         tasks.update(&task).unwrap();
         std::fs::remove_file(terminal).unwrap();
         std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
+        if complete_pairs {
+            std::fs::write(task_dir.join("after.png"), "current").unwrap();
+        }
         std::fs::write(
             task_dir.join("pairs.json"),
             serde_json::json!({
                 "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
-                "pairs": [], "unpaired": [{"id": "G3", "before": {"png": "before.png"}}],
+                "pairs": if complete_pairs { serde_json::json!([{
+                    "id": "G3", "before": {"png": "before.png"}, "after": {"png": "after.png"},
+                }]) } else { serde_json::json!([]) },
+                "unpaired": if complete_pairs { serde_json::json!([]) }
+                    else { serde_json::json!([{"id": "G3", "before": {"png": "before.png"}}]) },
             })
             .to_string(),
         )
@@ -987,8 +998,10 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
         task.notes
             .push_str(&format!("\nqa-bundle: {}", manifest.display()));
         tasks.update(&task).unwrap();
-        let refusal = close_output(&f).await;
-        assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
+        if !complete_pairs {
+            let refusal = close_output(&f).await;
+            assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
+        }
         cas_store::waive_qa_pass(
             &cas_dir,
             TASK,
@@ -1007,10 +1020,12 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
         );
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
         let waiver_label = if has_demo { "ledger" } else { "pair coverage" };
-        assert!(
+        assert_eq!(
             parked
                 .notes
-                .contains(&format!("QA evidence {waiver_label} waived"))
+                .contains(&format!("QA evidence {waiver_label} waived")),
+            !complete_pairs,
+            "complete coverage must not record an unused waiver: {}", parked.notes,
         );
         let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
         assert_eq!(passes.len(), 1);

@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 
 use anyhow::{Result, bail};
-use crossterm::style::Color;
 
 use crate::cli::interactive::{PickerItem, PickerTag, pick};
 use crate::ui::components::{Formatter, Renderable, StatusLine};
@@ -35,11 +34,7 @@ fn terminate_process(pid: u32) -> Result<()> {
 
 /// Build a picker item for a session (shared by kill and attach).
 pub(super) fn session_picker_item(s: &SessionInfo) -> PickerItem {
-    let (status, color) = if s.is_running {
-        ("running", Color::Green)
-    } else {
-        ("stale", Color::DarkGrey)
-    };
+    let status = if s.is_running { "running" } else { "stale" };
     let workers = format!(
         "{} worker{}",
         s.metadata.workers.len(),
@@ -54,16 +49,11 @@ pub(super) fn session_picker_item(s: &SessionInfo) -> PickerItem {
         tags: vec![
             PickerTag {
                 text: status.into(),
-                color,
             },
             PickerTag {
                 text: format!("PID {}", s.metadata.daemon_pid),
-                color: Color::DarkGrey,
             },
-            PickerTag {
-                text: workers,
-                color: Color::DarkGrey,
-            },
+            PickerTag { text: workers },
         ],
     }
 }

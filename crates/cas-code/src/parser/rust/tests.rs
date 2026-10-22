@@ -7,6 +7,34 @@ mod cases {
     use crate::types::SymbolKind;
 
     #[test]
+    fn test_explicit_external_modules() {
+        let mut parser = RustParser::new().unwrap();
+        let source = r###"
+// #[path = "comment_tests.rs"] mod tests;
+const EXAMPLE: &str = r#"#[path = "example_tests.rs"] mod tests;"#;
+#[cfg(test)]
+#[path = "gear_tests.rs"]
+pub(crate) mod tests;
+#[path = r#"raw_tests.rs"#] mod raw;
+#[path = "inline_tests.rs"] mod inline {}
+mod ordinary;
+#[path = "one.rs"] #[path = "two.rs"] mod ambiguous;
+"###;
+        assert_eq!(
+            parser.explicit_external_modules(source).unwrap(),
+            [
+                ("tests".into(), "gear_tests.rs".into()),
+                ("raw".into(), "raw_tests.rs".into()),
+            ]
+        );
+        assert!(
+            parser
+                .explicit_external_modules("#[path = \"gear_tests.rs\"] mod")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_parse_function() {
         let mut parser = RustParser::new().expect("parser init");
         let source = r#"

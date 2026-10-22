@@ -45,32 +45,235 @@ mod fixture;
 mod live;
 mod preview;
 
+/// Wrap the warning's prose without dropping words or adding elision. The
+/// caller has already written the first prefix; continuation lines align to it.
+fn write_reference_warning_prose(
+    fmt: &mut Formatter<'_>,
+    text: &str,
+    prefix_cells: usize,
+) -> io::Result<()> {
+    // UpdateStepTracker::phase replays captured lines with two more cells.
+    let limit = usize::from(fmt.width().min(80)).saturating_sub(2);
+    let mut cells = prefix_cells;
+    for word in text.split_whitespace() {
+        let word_cells = ratatui::text::Line::from(word).width();
+        if cells > prefix_cells && cells + 1 + word_cells > limit {
+            fmt.newline()?;
+            fmt.write_raw(&" ".repeat(prefix_cells))?;
+            cells = prefix_cells;
+        }
+        if cells > prefix_cells {
+            fmt.write_raw(" ")?;
+            cells += 1;
+        }
+        fmt.write_raw(word)?;
+        cells += word_cells;
+    }
+    fmt.newline()
+}
+
 fn report_modified_builtin_references(
     result: &SyncResult,
     location: &str,
+    refresh_command: &str,
     theme: &ActiveTheme,
 ) -> std::io::Result<()> {
+    for warning in &result.warnings {
+        report_builtin_advisory(warning, theme)?;
+    }
     if !result.has_modified_references() {
         return Ok(());
     }
 
     let mut out = io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
+    let prefix_cells =
+        2 + ratatui::text::Line::from(Verdict::Warning.label(fmt.glyphs())).width() + 1;
     fmt.write_raw("  ")?;
-    fmt.warning(&format!(
-        "{} locally modified builtin reference file(s) in {location} were preserved \
-         (content matches no version Cassy has shipped):",
-        result.modified_reference_files.len()
-    ))?;
+    fmt.mark(Verdict::Warning)?;
+    fmt.write_raw(" ")?;
+    write_reference_warning_prose(
+        &mut fmt,
+        &format!(
+            "{} locally modified builtin reference file(s) in {location} were preserved \
+             (content matches no version Cassy has shipped):",
+            result.modified_reference_files.len()
+        ),
+        prefix_cells,
+    )?;
     for file in &result.modified_reference_files {
         fmt.write_raw(&format!("    ! {file}"))?;
         fmt.newline()?;
     }
     fmt.write_raw("    ")?;
-    fmt.write_raw(
-        "Review each file; to accept the Cassy version, delete it and rerun `cas update --sync`.",
+    write_reference_warning_prose(
+        &mut fmt,
+        "Review each file; to accept the Cassy version, delete it and rerun",
+        4,
     )?;
+    // Keep the command together on its own copyable line.
+    fmt.write_raw(&format!("    `{refresh_command}`."))?;
     fmt.newline()
+}
+
+fn builtin_prune_reason(file: &str) -> &'static str {
+    if file == "skills/finish/SKILL.md" {
+        "personal finish takes precedence; removed"
+    } else {
+        "no longer shipped; removed"
+    }
+}
+
+/// Wrap without losing path characters, including tokens wider than a row.
+fn wrap_builtin_receipt(message: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in message.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() { line.push(' '); }
+        for ch in word.chars() {
+            if line.chars().count() == width {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(ch);
+        }
+    }
+    if !line.is_empty() { lines.push(line); }
+    lines
+}
+
+struct UserVioletWarnings {
+    verbose: bool,
+    warnings: Vec<String>,
+}
+
+std::thread_local! {
+    // Migration emits from nested profile/credential handlers. Scope its
+    // presentation and raw receipt to this synchronous user-update call.
+    static USER_VIOLET_WARNINGS: std::cell::RefCell<Option<UserVioletWarnings>> = const { std::cell::RefCell::new(None) };
+}
+
+struct RestoreUserVioletWarnings(Option<UserVioletWarnings>);
+
+impl Drop for RestoreUserVioletWarnings {
+    fn drop(&mut self) {
+        USER_VIOLET_WARNINGS.with(|slot| { slot.replace(self.0.take()); });
+    }
+}
+
+fn capture_user_violet_warnings(cli: &Cli, violet: impl FnOnce() -> anyhow::Result<()>) -> Vec<String> {
+    let previous = USER_VIOLET_WARNINGS.with(|slot| slot.replace(Some(UserVioletWarnings {
+        verbose: cli.verbose,
+        warnings: Vec::new(),
+    })));
+    let _restore = RestoreUserVioletWarnings(previous);
+    if let Err(error) = violet() {
+        report_update_warning(
+            &format!("Violet update advisory: {error}; continuing builtin sync"),
+            "Retry: cas update --user",
+        );
+    }
+    USER_VIOLET_WARNINGS.with(|slot| std::mem::take(&mut slot.borrow_mut().as_mut().unwrap().warnings))
+}
+
+/// Keep path tokens intact. A compact token preserves its first segment and
+/// leaf; the raw message remains in JSON and the verbose rendering.
+fn wrap_violet_warning(message: &str, width: usize, compact: bool) -> (Vec<String>, bool) {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut shortened = false;
+    for word in message.split_whitespace() {
+        let word = if compact && word.chars().count() > width {
+            shortened = true;
+            let mark = if crate::ui::components::locale_is_utf8() { "…" } else { "..." };
+            let keep = width.saturating_sub(mark.chars().count());
+            let first = if let Some(rest) = word.strip_prefix('/') {
+                format!("/{}/", rest.split('/').next().unwrap_or_default())
+            } else if word.starts_with("~/") {
+                "~/".to_string()
+            } else {
+                word.chars().take(keep / 2).collect()
+            };
+            let first: String = first.chars().take(keep / 2).collect();
+            let tail: String = word.chars().rev().take(keep - first.chars().count()).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail = if word.starts_with('/') || word.starts_with("~/") {
+                tail.find('/').map(|at| &tail[at..]).unwrap_or(&tail)
+            } else {
+                &tail
+            };
+            format!("{first}{mark}{tail}")
+        } else {
+            word.to_string()
+        };
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() { line.push(' '); }
+        line.push_str(&word);
+    }
+    if !line.is_empty() { lines.push(line); }
+    (lines, shortened)
+}
+
+pub(super) fn report_update_warning(message: &str, remedy: &str) {
+    let verbose = USER_VIOLET_WARNINGS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.as_mut() {
+            Some(context) => {
+                context.warnings.push(format!("{message}\n{remedy}"));
+                context.verbose
+            }
+            // Other callers retain their complete diagnostics.
+            None => true,
+        }
+    });
+    let message = if !verbose {
+        match dirs::home_dir() {
+            Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
+            None => message.to_string(),
+        }
+    } else {
+        message.to_string()
+    };
+    // `warning: ` occupies nine cells; the outer update phase adds two.
+    let width = usize::from(crate::ui::components::terminal_width()).saturating_sub(11);
+    let (lines, shortened) = wrap_violet_warning(&message, width, !verbose);
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 { eprintln!("warning: {line}"); }
+        else { eprintln!("         {line}"); }
+    }
+    for line in wrap_violet_warning(remedy, width, !verbose).0 {
+        eprintln!("  {line}");
+    }
+    if shortened {
+        for line in wrap_violet_warning("Full paths: cas update --user --verbose", width, false).0 {
+            eprintln!("  {line}");
+        }
+    }
+}
+
+fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()> {
+    let mut out = io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme.clone());
+    let message = match dirs::home_dir() {
+        Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
+        None => message.to_string(),
+    };
+    // The surrounding update phase indents captured output by two more cells.
+    let lines = wrap_builtin_receipt(&message, usize::from(fmt.width()).saturating_sub(11));
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            fmt.write_raw("  ")?;
+            fmt.warning(line)?;
+        } else {
+            fmt.write_raw(&format!("         {line}\n"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Report one harness's builtin sync result, attributed to the harness
@@ -112,7 +315,7 @@ fn report_builtin_sync(
             fmt.success(&format!("{location}: built-ins up to date"))?;
         }
         for file in &result.pruned_files {
-            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
+            fmt.write_raw(&format!("    - {location}/{file} ({})", builtin_prune_reason(file)))?;
             fmt.newline()?;
         }
 
@@ -140,7 +343,7 @@ fn report_builtin_sync(
         }
     }
 
-    report_modified_builtin_references(result, location, theme)
+    report_modified_builtin_references(result, location, "cas update --sync", theme)
 }
 
 /// GitHub repository owner
@@ -1694,6 +1897,16 @@ fn refresh_all_projects_with_user_refresh(
             crate::store::known_repos::register_repo(&project);
         }
 
+        // The post-swap child runs the new binary. Old MCP processes cannot
+        // notify on their own; emit one durable notice after migration.
+        if args.post_swap && !args.dry_run && !migration.failed() {
+            if let Err(error) = crate::factory_binary_skew::notify_after_install(
+                &cas_root, env!("CARGO_PKG_VERSION"),
+            ) {
+                tracing::warn!(project = %project.display(), %error, "factory binary skew notice unavailable");
+            }
+        }
+
         receipts.push(ProjectRefreshReceipt {
             project,
             unregistered,
@@ -2298,9 +2511,15 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
             "{} managed file conflict(s); run `cas update --sync --json`",
             report.conflicts.len()
         )),
+        Ok(report) if report.commit_warning.is_some() => {
+            ProjectPhase::Warning(report.commit_warning.unwrap())
+        }
         Ok(report) if report.outcome == "staged" => {
             ProjectPhase::Warning("managed changes staged; commit pending".into())
         }
+        Ok(report) if report.outcome == "committed" => ProjectPhase::Warning(
+            "managed commit is local-only; push to origin and open a PR".into()
+        ),
         Ok(report) => ProjectPhase::Ok(format!("skills; managed files {}", report.outcome)),
     }
 }
@@ -3250,7 +3469,7 @@ fn sync_claude_files_into(
     };
 
     let managed_files = if let Some(plan) = reconciliation {
-        let report = plan.finish(&builtin_harnesses)?;
+        let report = plan.finish(&builtin_harnesses, &cas_root)?;
         builtin_gitignore.tracked_paths.clear();
         report
     } else {
@@ -3346,9 +3565,15 @@ fn sync_user_builtins_with_violet(
     cli: &Cli,
     violet: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    if let Err(error) = violet() {
-        eprintln!("warning: Violet update advisory: {error}; continuing builtin sync");
-    }
+    sync_user_builtins_with_discovery(cli, violet, crate::accounts::discover)
+}
+
+fn sync_user_builtins_with_discovery(
+    cli: &Cli,
+    violet: impl FnOnce() -> anyhow::Result<()>,
+    mut discover: impl FnMut(crate::accounts::Provider, &Path) -> io::Result<Vec<crate::accounts::AccountDir>>,
+) -> anyhow::Result<()> {
+    let violet_warnings = capture_user_violet_warnings(cli, violet);
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
     })?;
@@ -3403,11 +3628,11 @@ fn sync_user_builtins_with_violet(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.claude", &theme)?;
+            report_modified_builtin_references(&r, "~/.claude", "cas update --user", &theme)?;
         }
         Some(r)
     } else {
@@ -3415,7 +3640,7 @@ fn sync_user_builtins_with_violet(
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme.clone());
             fmt.write_raw("  ")?;
-            fmt.warning("~/.claude does not exist — skipping (Claude Code not installed?)")?;
+            fmt.warning("~/.claude does not exist; skipping (Claude Code not installed?)")?;
         }
         None
     };
@@ -3444,11 +3669,11 @@ fn sync_user_builtins_with_violet(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.codex", &theme)?;
+            report_modified_builtin_references(&r, "~/.codex", "cas update --user", &theme)?;
         }
         Some(r)
     } else {
@@ -3479,11 +3704,11 @@ fn sync_user_builtins_with_violet(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.grok", &theme)?;
+            report_modified_builtin_references(&r, "~/.grok", "cas update --user", &theme)?;
         }
         Some(r)
     } else {
@@ -3491,6 +3716,64 @@ fn sync_user_builtins_with_violet(
         // have it. Silent skip.
         None
     };
+
+    // Named accounts and linked shared bases can outlive the retired default
+    // dirs. Refresh only finish here; their other configuration stays local.
+    let mut finish_accounts = Vec::new();
+    let mut account_discovery_warnings = Vec::new();
+    for (provider, harness) in [
+        (
+            crate::accounts::Provider::Claude,
+            cas_mux::SupervisorCli::Claude,
+        ),
+        (
+            crate::accounts::Provider::Codex,
+            cas_mux::SupervisorCli::Codex,
+        ),
+    ] {
+        let default_dir = home.join(format!(".{}", provider.name()));
+        let discovered = match discover(provider, &home) {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                let warning = format!("{} account discovery failed: {error}; continuing default and shared-base sync. Retry: cas update --user", provider.name());
+                if !cli.json {
+                    report_builtin_advisory(&warning, &theme)?;
+                }
+                account_discovery_warnings.push(warning);
+                Vec::new()
+            }
+        };
+        let mut accounts: Vec<_> = discovered
+            .into_iter()
+            .map(|account| account.path)
+            .filter(|path| *path != default_dir)
+            .collect();
+        let base = provider.base_dir(&home);
+        if base.is_dir() {
+            accounts.push(base);
+        }
+        for account in accounts {
+            let result = crate::builtins::sync_finish_builtins(harness, &account)?;
+            let preserved: Vec<_> = result.modified_reference_files.iter()
+                .chain(&result.skipped_files).map(String::as_str)
+                .chain((!result.warnings.is_empty()).then_some("skills/finish/SKILL.md"))
+                .collect();
+            if !cli.json {
+                let location = format!("~/{}", account.strip_prefix(&home).unwrap_or(&account).display());
+                let receipt = format!("{location}: finish {} updated, {} preserved, {} removed", result.total_updated(), preserved.len(), result.pruned_files.len());
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                let lines = wrap_builtin_receipt(&receipt, usize::from(fmt.width()).saturating_sub(4));
+                for line in lines { fmt.write_raw(&format!("  {line}\n"))?; }
+                drop(fmt);
+                for warning in &result.warnings { report_builtin_advisory(warning, &theme)?; }
+            }
+            finish_accounts.push(serde_json::json!({
+                "path": account, "updated": result.total_updated(), "preserved": preserved,
+                "removed": result.pruned_files, "warnings": result.warnings,
+            }));
+        }
+    }
 
     if cli.json {
         let claude_total = claude_result
@@ -3526,8 +3809,14 @@ fn sync_user_builtins_with_violet(
         let claude_files_pruned = files_pruned(&claude_result);
         let codex_files_pruned = files_pruned(&codex_result);
         let grok_files_pruned = files_pruned(&grok_result);
+        let builtin_warnings: Vec<_> = [&claude_result, &codex_result, &grok_result].into_iter()
+            .filter_map(Option::as_ref).flat_map(|result| &result.warnings).collect();
+        let finish_accounts = serde_json::to_string(&finish_accounts)?;
+        let account_discovery_warnings = serde_json::to_string(&account_discovery_warnings)?;
+        let builtin_warnings = serde_json::to_string(&builtin_warnings)?;
+        let violet_warnings_json = serde_json::to_string(&violet_warnings)?;
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned},"finish_accounts":{finish_accounts},"account_discovery_warnings":{account_discovery_warnings},"builtin_warnings":{builtin_warnings},"warnings":{violet_warnings_json}}}"#
         );
     }
 
@@ -5234,6 +5523,12 @@ fn report_managed_files(
             )
         };
         println!("{message}");
+        if let Some(warning) = &report.commit_warning {
+            println!("WARN: {warning}");
+        }
+        if report.outcome == "committed" {
+            println!("Next: commit is local-only; push to origin and open a PR.");
+        }
     }
     Ok(())
 }

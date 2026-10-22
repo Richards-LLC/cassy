@@ -568,14 +568,11 @@ def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
-        download_url = envelope.get("download_url")
-        if download_url is None:
-            fail("PDF post returned no verified PDF download URL; message permalink is not a PDF endpoint")
-        return message_id, message_permalink, checked_download_url(download_url)
-    file_id = file_block.get("file_id") or file_block.get("id") or message_id
-    file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
-    if not isinstance(file_id, str) or not file_id.strip():
         fail("PDF post returned no file id")
+    file_id = file_block.get("file_id") or file_block.get("id")
+    file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
+    if not isinstance(file_id, str) or not file_id.strip() or file_id == message_id:
+        fail("PDF post returned no distinct file id")
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
     download_url = file_block.get("download_url")
@@ -768,6 +765,7 @@ def main(argv: list[str]) -> int:
                 },
             },
         )
+        pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF")
         pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
             client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
@@ -797,6 +795,8 @@ def main(argv: list[str]) -> int:
                 "PAGE_COUNT": str(pages),
                 "PDF_FILE_PERMALINK": pdf_permalink,
                 "PDF_FILE_ID": pdf_file_id,
+                "PDF_MESSAGE_ID": pdf_message_id,
+                "PDF_MESSAGE_PERMALINK": pdf_message_permalink,
                 "HTML_FILE_ID": html_file_id,
                 "USER_THREAD_TS": user_thread,
                 "DEV_THREAD_TS": dev_thread,

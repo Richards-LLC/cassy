@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::Args;
-use crossterm::style::Color;
 
 use crate::cli::interactive::{PickerItem, PickerTag};
 use crate::ui::factory::SessionManager;
@@ -91,12 +90,10 @@ pub fn projects_to_picker_items(projects: &[ProjectEntry]) -> Vec<PickerItem> {
             let status_tag = if p.has_running_session {
                 PickerTag {
                     text: "running".to_string(),
-                    color: Color::Green,
                 }
             } else {
                 PickerTag {
                     text: "stopped".to_string(),
-                    color: Color::DarkGrey,
                 }
             };
 
@@ -170,8 +167,8 @@ pub fn execute(args: &OpenArgs) -> Result<()> {
 
 /// Launch a new factory session in the current directory (already cd'd into project).
 fn launch_factory_in_project() -> Result<()> {
-    use crate::cli::factory::FactoryArgs;
     use crate::cli::Cli;
+    use crate::cli::factory::FactoryArgs;
 
     let factory_args = FactoryArgs::default();
     let cli = Cli {

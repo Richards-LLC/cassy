@@ -6517,12 +6517,344 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 // gc_cleanup tests
 // =============================================================================
 
+/// A real verdict frees disposable build output immediately, keeping the small
+/// source checkout available for the existing two-hour audit grace period.
+fn review_target_env() -> FactoryTestEnv {
+    let mut env = FactoryTestEnv::with_server_supervisor();
+    // Match the canonical owner path written by scratch-checkout; macOS's
+    // temporary directory otherwise reaches the /var -> /private/var alias.
+    env.cas_root = env.cas_root.canonicalize().unwrap();
+    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    core.set_agent_id_for_testing("test-supervisor-id".into());
+    env.service = CasService::new(core, None);
+    env
+}
+
+#[tokio::test]
+async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
+    use fs2::FileExt;
+    use notify::Watcher;
+    let env = review_target_env();
+    init_sync_repo(&env, "verdict-target");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-review-target".into(), "review target".into());
+    task.assignee = Some("review-worker".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    std::fs::write(checkout.join("target/debug/output"), b"regenerable").unwrap();
+    drop(managed);
+
+    // The project collector lock serializes bulk deletion without preventing
+    // the guarded rename. Holding it proves response ordering without sleeps.
+    let slots = env.cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    let collector = std::fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(slots.join("review-trash.lock")).unwrap();
+    collector.lock_exclusive().unwrap();
+    let (events, receive) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| { let _ = events.send(event); }).unwrap();
+    watcher.watch(checkout.parent().unwrap(), notify::RecursiveMode::Recursive).unwrap();
+
+    let verdict = tokio::time::timeout(std::time::Duration::from_secs(30), env.service.verification(Parameters(serde_json::from_value(
+        serde_json::json!({"action":"add", "task_id":task.id,
+            "dispatch_id":dispatch.id, "status":"approved", "summary":"Reviewed"}),
+    ).unwrap()))).await.expect("verdict must return while bulk deletion is locked").unwrap();
+    assert_ne!(verdict.is_error, Some(true), "{verdict:?}");
+    assert!(!checkout.join("target").exists(), "resolved review target leaked: {verdict:?}");
+    let trash_payload = walkdir::WalkDir::new(checkout.parent().unwrap().join("trash"))
+        .into_iter().filter_map(Result::ok).map(|entry| entry.into_path())
+        .find(|path| path.file_name().is_some_and(|name| name == "output"))
+        .expect("verdict must stage intact output before returning, not delete it inline");
+    assert_eq!(std::fs::read(&trash_payload).unwrap(), b"regenerable");
+    let report = get_text(&env.service.factory_request(Parameters(factory_req("gc_report"))).await.unwrap());
+    // pin: the default human view must expose pending bytes, not only full/JSON.
+    assert!(report.contains("Reclaimable: 11 bytes; pending deletion: 11 bytes"), "{report}");
+    let mut full = factory_req("gc_report");
+    full.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(&env.service.factory_request(Parameters(full)).await.unwrap())).unwrap();
+    assert_eq!(report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"]["pending_reclaim_bytes"], 11);
+    assert_eq!(report["machine_status"]["TARGET_CACHE_STATUS_JSON"]["pending_reclaim_bytes"], 11);
+    assert_eq!(report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"]["reclaimed_bytes"], 0);
+    FileExt::unlock(&collector).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let event: notify::Result<notify::Event> = receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("background collector must eventually free the staged bytes");
+        let event = event.unwrap();
+        // Native watchers may coalesce child removals into a directory event.
+        // The notification wakes us; the actual path proves bytes are gone.
+        let _ = event;
+        if !trash_payload.exists() {
+            break;
+        }
+    }
+    // Join through the real collector lock after observing its deletion, so
+    // the following lease/reuse control cannot race the background guard drop.
+    collector.lock_exclusive().unwrap();
+    FileExt::unlock(&collector).unwrap();
+    assert!(!trash_payload.exists(), "background collector did not free output");
+    assert!(checkout.join("README").is_file(), "young review source must remain");
+    assert!(checkout.parent().unwrap().join("owner.json").is_file());
+
+    // A lease held while the verdict was written can defer eager cleanup.
+    // The ordinary GC reports those closed-task bytes and frees them in one pass.
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+    ).unwrap();
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
+    let mut closed = env.task_store().get(&task.id).unwrap();
+    closed.status = TaskStatus::Closed;
+    env.task_store().update(&closed).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(checkout.join("target/output").exists(), "held review lease was ignored");
+    drop(managed);
+    let mut report_request = factory_req("gc_report");
+    report_request.full = Some(true);
+    let report = get_text(&env.service.factory_request(Parameters(report_request)).await.unwrap());
+    let status: serde_json::Value = serde_json::from_str(report.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full GC report must include review status: {report}"))).unwrap();
+    assert_eq!(status["reclaimable_bytes"], b"regenerable".len(), "{report}");
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(!checkout.join("target").exists(), "one GC pass must reclaim deferred output: {}", get_text(&result));
+    assert!(checkout.join("README").is_file(), "target GC must retain young source");
+}
+
+/// A verifier can exit between any two unlinks. The public GC path must still
+/// account for and collect the legacy marker-first interruption state.
+#[tokio::test]
+async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
+    use fs2::FileExt;
+    let env = review_target_env();
+    let mut failures = Vec::new();
+    init_sync_repo(&env, "interrupted-review-trash");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let mut task = Task::new("cas-interrupted-trash".into(), "interrupted trash".into());
+    task.status = TaskStatus::Closed;
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root, project, &task.id, None, &head,
+    ).unwrap();
+    let checkout = managed.path.clone();
+    drop(managed);
+    let wrapper = checkout.parent().unwrap();
+    let trash = wrapper.join("trash");
+    std::fs::create_dir(&trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(wrapper.join("owner.json"), trash.join("owner.json")).unwrap();
+    std::fs::create_dir(trash.join("target")).unwrap();
+    std::fs::write(trash.join("target/output"), b"queued-output").unwrap();
+    // Old remove_dir_all could unlink this first, then lose its process.
+    std::fs::remove_file(trash.join("owner.json")).unwrap();
+
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    assert_eq!(review["pending_reclaim_bytes"], 13, "{report}");
+    assert_eq!(review["reclaimable_bytes"], 13, "{report}");
+    assert_eq!(report["machine_status"]["TARGET_CACHE_STATUS_JSON"]["pending_reclaim_bytes"], 13);
+
+    let slots = env.cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    let collector = std::fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(slots.join("review-trash.lock")).unwrap();
+    collector.lock_exclusive().unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    cleanup.full = Some(true);
+    let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
+    assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
+    let deferred_status: serde_json::Value = serde_json::from_str(deferred.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full deferred cleanup must include review status: {deferred}"))).unwrap();
+    if deferred_status["deferred"] != true {
+        failures.push(format!("busy collector JSON must say deferred: {deferred_status}"));
+    }
+    assert_eq!(std::fs::read(trash.join("target/output")).unwrap(), b"queued-output");
+    FileExt::unlock(&collector).unwrap();
+
+    cleanup.full = Some(true);
+    let result = get_text(&env.service.factory_request(Parameters(cleanup)).await.unwrap());
+    let status: serde_json::Value = serde_json::from_str(result.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full cleanup must include review status: {result}"))).unwrap();
+    assert_eq!(status["reclaimed_bytes"], 13, "{result}");
+    assert_eq!(status["pending_reclaim_bytes"], 0, "{result}");
+    assert!(!trash.exists(), "interrupted trash must be fully drained: {result}");
+    assert!(checkout.join("README").is_file(), "young source must remain");
+    assert!(wrapper.join("owner.json").is_file());
+
+    // Pending bytes remain visible for an active dispatch, but cannot be
+    // advertised as reclaimable while its checkout is retained.
+    let mut retained_task = Task::new("cas-retained-trash".into(), "retained trash".into());
+    retained_task.assignee = Some("review-worker".into());
+    env.task_store().add(&retained_task).unwrap();
+    let active = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &retained_task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let retained = cas::factory_review_scratch::create(
+        &env.cas_root, project, &retained_task.id, Some(&active.id), &head,
+    ).unwrap();
+    let retained_wrapper = retained.path.parent().unwrap().to_path_buf();
+    drop(retained);
+    let retained_trash = retained_wrapper.join("trash");
+    std::fs::create_dir(&retained_trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&retained_trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(retained_wrapper.join("owner.json"), retained_trash.join("owner.json")).unwrap();
+    std::fs::create_dir(retained_trash.join("target")).unwrap();
+    std::fs::write(retained_trash.join("target/output"), b"held-payload").unwrap();
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    let retained_row = review["rows"].as_array().unwrap().iter()
+        .find(|row| row["path"].as_str() == retained_wrapper.to_str()).unwrap();
+    if review["pending_reclaim_bytes"] != 12 || retained_row["reclaimable_bytes"] != 0 {
+        failures.push(format!("active dispatch bytes must be pending but not reclaimable: {review}"));
+    }
+
+    // A crash inside write_owner leaves its NamedTempFile in the private trash.
+    // The validated parent still owns the queued payload; GC must drain both.
+    std::fs::create_dir(&trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(trash.join(".tmpABC123"), b"{\"schema_version\":").unwrap();
+    std::fs::create_dir(trash.join("target")).unwrap();
+    std::fs::write(trash.join("target/output"), b"temp-output").unwrap();
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    let stale_row = review["rows"].as_array().unwrap().iter()
+        .find(|row| row["path"].as_str() == wrapper.to_str()).unwrap();
+    if review["pending_reclaim_bytes"] != 23 || stale_row["reclaimable_bytes"] != 11 {
+        failures.push(format!("stale owner temp must leave 11 reclaimable and 23 pending bytes: {review}"));
+    }
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    if trash.exists() || !retained_trash.join("target/output").exists() {
+        failures.push("GC must drain stale-temp trash while preserving active-dispatch trash".into());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Terminal dispatches may release targets on open tasks; active proof work
+/// remains protected even after a task closes or an earlier dispatch times out.
+#[tokio::test]
+async fn test_gc_preserves_active_review_target_cas_f275() {
+    let env = review_target_env();
+    init_sync_repo(&env, "active-review-target");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let mut failures = Vec::new();
+    for (kind, successor, reclaim) in [
+        ("pending", false, false),
+        ("timed_out", false, true),
+        ("invalidated", false, true),
+        ("timed_out", true, false),
+    ] {
+        let mut task = Task::new(format!("cas-{kind}-{successor}"), "review target".into());
+        env.task_store().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::hours(1), false,
+        ).unwrap();
+        let managed = cas::factory_review_scratch::create(
+            &env.cas_root, project, &task.id, Some(&dispatch.id), &head,
+        ).unwrap();
+        let checkout = managed.path.clone();
+        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+        std::fs::write(checkout.join("target/debug/output"), b"review proof").unwrap();
+        drop(managed);
+        match kind {
+            "timed_out" => {
+                cas_store::timeout_verification_dispatch(&env.cas_root, &task.id,
+                    chrono::Utc::now() + chrono::Duration::hours(2)).unwrap().unwrap();
+            }
+            "invalidated" => {
+                let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+                cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id,
+                    "test-supervisor-id", None, true).unwrap();
+                cas_store::invalidate_verification_dispatch_for_new_cycle(&env.cas_root, &task.id).unwrap().unwrap();
+            }
+            _ => {
+                let marker = checkout.parent().unwrap().join("owner.json");
+                let mut owner: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+                owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+                owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+                std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+                task.status = TaskStatus::Closed;
+                env.task_store().update(&task).unwrap();
+            }
+        }
+        if successor {
+            let next = cas_store::create_verification_dispatch_bound(
+                &env.cas_root, &task.id, "review-worker", "test-supervisor-id",
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::hours(1), true,
+            ).unwrap();
+            assert_ne!(next.id, dispatch.id);
+        }
+        let mut cleanup = factory_req("gc_cleanup");
+        cleanup.force = Some(true);
+        cleanup.dry_run = Some(false);
+        let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+        if checkout.join("target").exists() == reclaim {
+            failures.push(format!("{kind}/active_successor={successor}: {}", get_text(&result)));
+        }
+        assert!(checkout.join("README").is_file(), "young or active source must remain");
+        if kind == "pending" {
+            assert!(get_text(&result).contains("dispatch still active"), "active-state guard must be exercised: {}", get_text(&result));
+        }
+    }
+    assert!(failures.is_empty(), "wrong dispatch target eligibility: {}", failures.join("\n"));
+}
+
 /// A terminal task must not leave a registered proof checkout and its target
 /// behind forever. The fixture uses the managed ownership record, real Git,
 /// SQLite task state and the public factory GC handler.
 #[tokio::test]
 async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
-    let env = FactoryTestEnv::with_server_supervisor();
+    let env = review_target_env();
     init_sync_repo(&env, "review-control");
     let project = env.cas_root.parent().unwrap();
     // Real Cargo output is ignored; untracked reviewer notes are not.
@@ -6553,6 +6885,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    // Existing readers must retain a complete old record when reuse publishes
+    // its new timestamp; an in-place rewrite changes this open file too.
+    let mut previous_owner = std::fs::File::open(&marker).unwrap();
+    let previous_bytes = std::fs::read(&marker).unwrap();
     let retried =
         cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
     assert_eq!(
@@ -6560,6 +6896,14 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         "admission retries must reuse the same task/head checkout"
     );
     drop(retried);
+    let mut held_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut previous_owner, &mut held_bytes).unwrap();
+    drop(previous_owner);
+    assert_eq!(
+        held_bytes, previous_bytes,
+        "reuse must atomically replace owner.json, preserving existing readers"
+    );
+
     let mut owner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
     assert_ne!(
@@ -6627,6 +6971,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         .unwrap();
     assert!(owned.is_dir(), "changed review head must be retained");
     git_stdout(&checkout, &["checkout", "--detach", &head]);
+    // The first terminal pass already reclaimed the young target. Recreate
+    // output to exercise the independent open-file guard below.
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let file = std::fs::File::open(checkout.join("target/output")).unwrap();
     env.service
         .factory_request(Parameters(cleanup.clone()))
@@ -6754,6 +7102,113 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     assert_eq!(
         env.task_store().get(&task.id).unwrap().status,
         TaskStatus::Open
+    );
+}
+
+/// Inject one real filesystem write after Git's first clean status result.
+/// PATH interception is confined to a child, and every Git operation stays real.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_gc_retains_file_written_after_dirty_probe_cas_75ae() {
+    const CHILD: &str = "REVIEW_GC_RACE_CHILD_75AE";
+    if std::env::var_os(CHILD).is_none() {
+        let home = TempDir::new().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let inherited_path = std::env::var_os("PATH").unwrap();
+        let real_git = std::env::split_paths(&inherited_path)
+            .map(|path| path.join("git"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        cas::test_paths::warm_stub(
+            &bin.join("git"),
+            r#"#!/bin/sh
+if [ -f "$REVIEW_GC_RACE_CONTROL_75AE" ]; then
+    IFS= read -r checkout < "$REVIEW_GC_RACE_CONTROL_75AE"
+    if [ "$1" = '-C' ] && [ "$2" = "$checkout" ] && [ "$3" = 'status' ] && [ "$5" = '--untracked-files=all' ] && [ ! -f "$REVIEW_GC_RACE_CONTROL_75AE.done" ]; then
+        "$REVIEW_GC_REAL_GIT_75AE" "$@"
+        result=$?
+        [ "$result" -eq 0 ] || exit "$result"
+        printf 'late reviewer work\n' > "$checkout/late-notes.txt"
+        : > "$REVIEW_GC_RACE_CONTROL_75AE.done"
+        exit 0
+    fi
+fi
+exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&inherited_path)),
+        )
+        .unwrap();
+        let filter =
+            "factory_mcp_ops_test::test_gc_retains_file_written_after_dirty_probe_cas_75ae";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", filter, "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("REVIEW_GC_REAL_GIT_75AE", real_git)
+            .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated late-write GC failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), filter);
+        return;
+    }
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "review-race-control");
+    let project = env.cas_root.parent().unwrap();
+    let mut task = Task::new("cas-review-late-write".into(), "late reviewer notes".into());
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    let checkout = managed.path.clone();
+    drop(managed);
+    let marker = checkout.parent().unwrap().join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    git_stdout(project, &["config", "status.showUntrackedFiles", "no"]);
+    let control = PathBuf::from(std::env::var_os("REVIEW_GC_RACE_CONTROL_75AE").unwrap());
+    std::fs::write(&control, format!("{}\n", checkout.display())).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        control.with_extension("done").exists(),
+        "late-write injection did not run: {}",
+        get_text(&output)
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("late-notes.txt"))
+            .ok()
+            .as_deref(),
+        Some(b"late reviewer work\n".as_slice()),
+        "late untracked reviewer bytes deleted: {}",
+        get_text(&output)
+    );
+    assert!(
+        git_stdout(project, &["worktree", "list", "--porcelain"])
+            .contains(checkout.to_str().unwrap()),
+        "late-dirty checkout registration removed"
     );
 }
 
@@ -10633,6 +11088,14 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         git_stdout(project, &["push", "origin", "epic/foreign"]);
         let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
 
+        // A prior delivery awaiting review is handed off, so it must not make
+        // this clean, owned checkout busy. Its anchor is not this fresh tip.
+        active.status = TaskStatus::AwaitingMerge;
+        active.deliverables.factory_branch_anchor = Some(git_stdout(
+            &worker_path, &["rev-parse", "HEAD^"],
+        ));
+        store.update(&active).unwrap();
+
         let assigned = assign(&env, &task_b, assignee)
             .await
             .expect("a clean idle worker may accept work behind its target");
@@ -10679,6 +11142,156 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
             git_stdout(&worker_path, &["branch", "--show-current"]),
             worker_branch
         );
+    }
+}
+
+#[tokio::test]
+async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-cas-0a69-supervisor")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker = "stale-override-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-0a69-fixture\"\n",
+    )
+    .unwrap();
+    add_epic_with_id(&env, "cas-0a69-epic", TaskStatus::Open, "epic/requested");
+
+    let mut registered_worker = Agent::new("cas-0a69-worker-id".into(), worker.into());
+    registered_worker.role = AgentRole::Worker;
+    registered_worker.metadata.insert(
+        "clone_path".into(),
+        worker_path.to_string_lossy().into_owned(),
+    );
+    env.agent_store().register(&registered_worker).unwrap();
+
+    let task_id = child_task_of_epic(&env, "cas-0a69-epic", "Stale assignment override");
+    let tasks = env.task_store();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-0a69-fixture".into(),
+        target_branch: "epic/requested".into(),
+    });
+    tasks.update(&task).unwrap();
+
+    // A dirty old worker tree remains a start-time refusal, even when a
+    // supervisor explicitly accepts the stale assignment with an audit reason.
+    std::fs::write(worker_path.join("README"), "uncommitted local work\n").unwrap();
+    let reason = "reviewed the lane and scheduled a supervised refresh";
+    let missing_reason: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+    }))
+    .unwrap();
+    let refused = env
+        .service
+        .task(Parameters(missing_reason))
+        .await
+        .expect_err("an override needs an audit reason");
+    assert!(
+        refused
+            .message
+            .contains("supervisor_override=true requires a non-empty reason"),
+        "{refused}"
+    );
+
+    let request: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+        "reason": reason,
+    }))
+    .unwrap();
+    let response = env
+        .service
+        .task(Parameters(request))
+        .await
+        .expect("registered supervisor may explicitly accept stale assignment");
+    let receipt = get_text(&response);
+    assert!(receipt.contains("SUPERVISOR OVERRIDE"), "{receipt}");
+    // pin: the warning must name the limited start checks and require manual inspection.
+    assert!(
+        receipt.contains("Open task") && receipt.contains("another owned factory branch")
+            && receipt.contains("Inspect dirty or unpushed work"),
+        "warning must qualify the start-time checks: {receipt}"
+    );
+    let saved = tasks.get(&task_id).unwrap();
+    assert_eq!(saved.assignee.as_deref(), Some(worker));
+    assert!(
+        saved.notes.contains(reason),
+        "override reason must be durable: {}",
+        saved.notes
+    );
+    assert!(
+        saved.notes.contains(task_id.as_str()),
+        "audit must name this task: {}",
+        saved.notes
+    );
+
+    // A worker cannot use the same escape hatch, even with a reason.
+    task.assignee = None;
+    tasks.update(&task).unwrap();
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(registered_worker.id.clone());
+    let worker_service = CasService::new(worker_core, None);
+    let request: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+        "reason": reason,
+    }))
+    .unwrap();
+    let refused = worker_service
+        .task(Parameters(request))
+        .await
+        .expect_err("workers cannot override stale assignment gating");
+    assert!(
+        refused.message.contains("requires a live registered supervisor"),
+        "{refused}"
+    );
+    assert!(tasks.get(&task_id).unwrap().assignee.is_none());
+
+    let dirty_before = std::fs::read(worker_path.join("README")).unwrap();
+    // The warning must reflect the actual start path: a reused lane refuses
+    // earlier dirty work, while this task's own lane skips reconciliation.
+    for (branch, checks_reused_work) in [
+        (format!("factory/{worker}"), true),
+        (format!("factory/{worker}-{task_id}"), false),
+    ] {
+        git_stdout(&worker_path, &["checkout", "-B", &branch]);
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        tasks.update(&task).unwrap();
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task_id, "assignee": worker,
+            "supervisor_override": true, "reason": reason,
+        })).unwrap();
+        let receipt = get_text(&env.service.task(Parameters(request)).await.unwrap());
+        // pin: both branch paths receive the same accurately qualified caveat.
+        assert!(receipt.contains("Open task") && receipt.contains("another owned factory branch"), "{receipt}");
+        let start: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_id,
+        })).unwrap();
+        let result = worker_service.task(Parameters(start)).await;
+        if checks_reused_work {
+            let refusal = result.expect_err("reused branch checks earlier dirty work");
+            assert!(refusal.message.contains("uncommitted changes"), "{refusal}");
+            assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::Open);
+        } else {
+            result.expect("current task branch does not run reuse reconciliation");
+            assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
+        }
+        assert_eq!(std::fs::read(worker_path.join("README")).unwrap(), dirty_before);
     }
 }
 

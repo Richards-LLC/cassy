@@ -6,11 +6,110 @@ use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+#[cfg(unix)]
+static WORKER_WAIT_HANDLER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+extern "C" fn record_worker_wait_signal(signum: libc::c_int) {
+    WORKER_WAIT_SIGNAL.store(signum, Ordering::Relaxed);
+}
+
+/// Signal handling applies only while this worker Cargo command is owned.
+#[cfg(unix)]
+struct WorkerWaitSignals {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+#[cfg(unix)]
+impl WorkerWaitSignals {
+    fn install() -> std::io::Result<Self> {
+        let mut guard = Self {
+            _lock: WORKER_WAIT_HANDLER_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+            previous: Vec::new(),
+        };
+        WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);
+        for signum in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = record_worker_wait_signal as *const () as libc::sighandler_t;
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            if unsafe { libc::sigaction(signum, &action, &mut previous) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            guard.previous.push((signum, previous));
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WorkerWaitSignals {
+    fn drop(&mut self) {
+        for (signum, previous) in self.previous.iter().rev() {
+            unsafe { libc::sigaction(*signum, previous, std::ptr::null_mut()) };
+        }
+        WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+fn worker_group_has_live_members(group: libc::pid_t) -> bool {
+    let Ok(output) = Command::new("ps").args(["-A", "-o", "pgid=,stat="]).output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().any(|row| {
+        let mut fields = row.split_whitespace();
+        fields.next().and_then(|value| value.parse::<libc::pid_t>().ok()) == Some(group)
+            && fields.next().is_some_and(|state| !state.starts_with('Z'))
+    })
+}
+
+#[cfg(unix)]
+fn wait_for_worker_command(child: &mut std::process::Child) -> Result<std::process::ExitStatus> {
+    use std::time::{Duration, Instant};
+
+    let group = child.id() as libc::pid_t;
+    loop {
+        let signum = WORKER_WAIT_SIGNAL.swap(0, Ordering::Relaxed);
+        if signum != 0 {
+            // The group leader remains unreaped through both signals, so its
+            // PGID cannot be reused while its Python supervisor clears Cargo.
+            unsafe { libc::killpg(group, signum) };
+            let grace_deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < grace_deadline && worker_group_has_live_members(group) {
+                // try_wait would reap the group leader before the final KILL.
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if let Some(status) = child.try_wait()? {
+                    return Ok(status);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            bail!("worker command PID {group} did not exit after SIGKILL");
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckReceipt {
@@ -1211,21 +1310,167 @@ pub(crate) fn record_passing_test_for_tests(
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its
 // capped builder owns the lane, even between process inspection and spawn.
-pub(crate) struct LaneLock(File);
+pub(crate) struct LaneLock {
+    file: File,
+    stale_holder: Option<LaneLockHolder>,
+}
 impl Drop for LaneLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        // The file itself remains as the stable flock inode, but owner details
+        // should survive only a crashed holder, not a clean release.
+        let _ = self.file.set_len(0);
+        let _ = FileExt::unlock(&self.file);
     }
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+struct LaneLockHolder {
+    pid: u32,
+    command: String,
+    started_at: String,
+}
+
 pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
+    try_lock_lane_with_command(cas_root, repo, "factory lane operation")
+}
+
+fn try_lock_lane_with_command(
+    cas_root: &Path,
+    repo: &Path,
+    command: &str,
+) -> std::io::Result<Option<LaneLock>> {
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
-    let lock = lock_file(&lane_lock_path(cas_root, repo)?).map_err(std::io::Error::other)?;
+    let mut lock = lock_file(&lane_lock_path(cas_root, repo)?).map_err(std::io::Error::other)?;
     match lock.try_lock_exclusive() {
-        Ok(()) => Ok(Some(LaneLock(lock))),
+        Ok(()) => {
+            use std::io::{Read, Seek, SeekFrom, Write};
+            lock.seek(SeekFrom::Start(0))?;
+            let mut old_contents = String::new();
+            lock.read_to_string(&mut old_contents)?;
+            let stale_holder = serde_json::from_str::<LaneLockHolder>(&old_contents)
+                .ok()
+                .filter(|holder| lane_holder_is_alive(holder.pid) == Some(false));
+            let holder = LaneLockHolder {
+                pid: std::process::id(),
+                command: sanitize_lane_command(command),
+                started_at: chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            };
+            lock.set_len(0)?;
+            lock.seek(SeekFrom::Start(0))?;
+            serde_json::to_writer(&mut lock, &holder).map_err(std::io::Error::other)?;
+            lock.flush()?;
+            Ok(Some(LaneLock {
+                file: lock,
+                stale_holder,
+            }))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn sanitize_lane_command(command: &str) -> String {
+    command
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .take(240)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn worker_check_command(args: &[String]) -> String {
+    let suffix = args.join(" ");
+    // The executable is stable even when a private Cargo path is used for
+    // isolated tests; the suffix is exactly the admitted worker command.
+    let command = if suffix.is_empty() {
+        "cargo".to_string()
+    } else {
+        format!("cargo {suffix}")
+    };
+    sanitize_lane_command(&command)
+}
+
+fn lane_lock_refusal(path: &Path) -> anyhow::Error {
+    let details = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<LaneLockHolder>(&contents).ok())
+        .map(|holder| lane_holder_description(&holder, chrono::Utc::now()))
+        .unwrap_or_else(|| {
+            "holder details are unavailable; wait for it or retry later".to_string()
+        });
+    anyhow::anyhow!("This worktree already has a worker check; {details}")
+}
+
+fn stale_lane_holder_notice(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    let age = lane_holder_age(holder, now);
+    let command = sanitize_lane_command(&holder.command);
+    format!(
+        "worker-check lane: stale previous holder metadata for pid {} ({command}), started {age} ago; continuing with the lane",
+        holder.pid
+    )
+}
+
+fn lane_holder_description(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    let age = lane_holder_age(holder, now);
+    let start = sanitize_lane_command(&holder.started_at);
+    let command = sanitize_lane_command(&holder.command);
+    let when = format!("started {age} ago ({start})");
+    match lane_holder_is_alive(holder.pid) {
+        Some(true) => format!(
+            "held by pid {} ({command}), {when}; wait for it or stop that check",
+            holder.pid
+        ),
+        Some(false) => format!(
+            "stale holder metadata for pid {} ({command}), {when}; an OS lock is still held, so inspect its owner",
+            holder.pid
+        ),
+        None => format!(
+            "holder pid {} ({command}) has unknown liveness, {when}; wait for it or retry later",
+            holder.pid
+        ),
+    }
+}
+
+fn lane_holder_age(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    chrono::DateTime::parse_from_rfc3339(&holder.started_at)
+        .ok()
+        .map(|started| {
+            let seconds = (now - started.with_timezone(&chrono::Utc)).num_seconds().max(0);
+            if seconds >= 3600 {
+                format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+            } else if seconds >= 60 {
+                format!("{}m", seconds / 60)
+            } else {
+                format!("{seconds}s")
+            }
+        })
+        .unwrap_or_else(|| "an unknown time".to_string())
+}
+
+#[cfg(unix)]
+fn lane_holder_is_alive(pid: u32) -> Option<bool> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Some(false);
+    }
+    // SAFETY: signal zero only checks whether this recorded PID exists.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        Some(true)
+    } else {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Some(false),
+            Some(libc::EPERM) => Some(true),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lane_holder_is_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn lane_lock_path(cas_root: &Path, repo: &Path) -> std::io::Result<PathBuf> {
@@ -1508,8 +1753,12 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
     // same commit from overwriting one another.
     let lane_key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let _lane = try_lock_lane(&cas_root, &repo)?
-        .context("This worktree already has a worker check; retry later")?;
+    let lane_path = lane_lock_path(&cas_root, &repo)?;
+    let _lane = try_lock_lane_with_command(&cas_root, &repo, &worker_check_command(args))?
+        .ok_or_else(|| lane_lock_refusal(&lane_path))?;
+    if let Some(stale) = &_lane.stale_holder {
+        eprintln!("{}", stale_lane_holder_notice(stale, chrono::Utc::now()));
+    }
     crate::factory_target_cache::parked::resume(&cas_root, &repo)?;
     let receipt = match &test {
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
@@ -1580,7 +1829,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             return Err(error);
         }
     };
-    crate::factory_capacity_wait::admitted(&cas_root, &repo)?;
+    if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
+        tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
+    }
     // A parked target may contain proof logs but no debug artifacts. Seed only
     // missing children from the published immutable baseline under the lane lock.
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
@@ -1630,6 +1881,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
             .env_remove("VERIFIED_TEST_LOG")
             .env("CARGO", cargo);
+        command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
         command
     } else {
         let mut command = Command::new(cargo);
@@ -1685,12 +1937,24 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             command.env(variable, runner);
         }
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(unix)]
+    let worker_signals = WorkerWaitSignals::install()?;
     let mut child = command
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
     drop(admission);
+    #[cfg(unix)]
+    let status = wait_for_worker_command(&mut child)?;
+    #[cfg(not(unix))]
     let status = child.wait()?;
+    #[cfg(unix)]
+    drop(worker_signals);
     drop(slot);
     if !status.success() {
         bail!(
@@ -1743,6 +2007,120 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn term_to_worker_check_parent_cleans_cargo_descendants() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        const NAME: &str = "factory_worker_check::tests::term_to_worker_check_parent_cleans_cargo_descendants";
+        const FIXTURE: &str = "CAS_WORKER_TERM_PARENT_FIXTURE";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = PathBuf::from(root);
+            let mut command = Command::new("python3");
+            command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
+                .arg(root.join("worker-proof-guards.py"))
+                .arg(root.join("verified.sh"))
+                .arg(root.join("fake-cargo.py"))
+                .arg(root.join("count"))
+                .env("VERIFIED_TEST_REPO_ROOT", &root)
+                .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
+                .env("PID_FILE", root.join("pids"))
+                .env("CARGO", root.join("fake-cargo.py"))
+                .env("PYTHONPATH", &root)
+                // CI runs the suite under run-verified-tests.sh with a
+                // relative VERIFIED_TEST_LOG; the nested runner must not
+                // inherit it, or it cannot open the log and never starts Cargo.
+                .env_remove("VERIFIED_TEST_LOG")
+                .stdout(Stdio::null()).stderr(Stdio::null());
+            command.process_group(0);
+            let signals = WorkerWaitSignals::install().unwrap();
+            let mut child = command.spawn().unwrap();
+            let status = wait_for_worker_command(&mut child).unwrap();
+            drop(signals);
+            assert!(!status.success(), "TERM must stop the worker command");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let fake = root.path().join("fake-cargo.py");
+        std::fs::write(
+            root.path().join("worker-proof-guards.py"),
+            include_str!("../../scripts/worker-proof-guards.py"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
+        std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
+real_killpg = os.killpg
+def slow_group_term(group, signum):
+    if signum == signal.SIGTERM:
+        time.sleep(1.2)
+    return real_killpg(group, signum)
+os.killpg = slow_group_term
+"#).unwrap();
+        std::fs::write(&fake, r#"#!/usr/bin/env python3
+import os, pathlib, subprocess, sys
+marker = pathlib.Path(os.environ['PID_FILE'])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)])
+ready = marker.with_suffix('.ready')
+ready.write_text(f'{os.getpid()} {child.pid}')
+ready.replace(marker)
+print('    Finished `test` profile in 0.01s', flush=True)
+child.wait()
+"#).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(FIXTURE, root.path())
+            .stdout(Stdio::null()).stderr(Stdio::inherit())
+            .process_group(0)
+            .spawn().unwrap();
+        let marker = root.path().join("pids");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pids: Vec<i32> = marker.exists()
+            .then(|| std::fs::read_to_string(&marker).unwrap())
+            .unwrap_or_default().split_whitespace()
+            .map(|pid| pid.parse().unwrap()).collect();
+        if pids.len() == 2 {
+            unsafe { libc::kill(parent.id() as i32, libc::SIGTERM) };
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while status.is_none() && Instant::now() < deadline {
+            status = parent.try_wait().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if status.is_none() {
+            // The fixture's leader is still unreaped; only its owned group.
+            unsafe { libc::killpg(parent.id() as i32, libc::SIGKILL) };
+            status = Some(parent.wait().unwrap());
+        }
+        let survivors: Vec<_> = pids.into_iter().enumerate().filter(|(_, pid)| {
+            let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])
+                .output().unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            !state.trim().is_empty() && !state.trim().starts_with('Z')
+        }).collect();
+        for (index, pid) in &survivors {
+            let output = Command::new("ps").args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+                .output().unwrap();
+            let command = String::from_utf8_lossy(&output.stdout);
+            let owned = if *index == 0 { command.contains(fake.to_str().unwrap()) }
+                        else { command.contains(root.path().to_str().unwrap()) && command.contains("time.sleep(60)") };
+            if owned {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        }
+        assert!(marker.exists(), "fake Cargo never reached discovery");
+        assert_eq!(status.unwrap().code(), Some(0), "parent signal fixture failed");
+        assert!(survivors.is_empty(), "Cargo descendants survived: {survivors:?}");
+    }
 
     #[cfg(unix)]
     fn capacity_test_root(base: &Path, cap: usize) -> PathBuf {
@@ -1801,6 +2179,83 @@ mod tests {
                      2: -> FLOCK  ADVISORY  WRITE 4343 00:2f:555 0 EOF\n";
         assert!(super::flock_held_on_inode(locks, 918_273));
         assert!(!super::flock_held_on_inode(locks, 555), "a waiter does not hold the lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_check_lane_refusal_reports_live_and_stale_owner() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders=1\n",
+        )
+        .unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(waiting)"]
+            .map(str::to_string);
+
+        let path = lane_lock_path(&root, &repo).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lock = lock_file(&path).unwrap();
+        lock.lock_exclusive().unwrap();
+        let started = chrono::Utc::now() - chrono::Duration::seconds(210);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "command": "cargo nextest run -p cas --lib -E test(waiting)",
+                "started_at": started.to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let live = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(live.contains(&format!("pid {}", std::process::id())), "{live}");
+        assert!(
+            live.contains("cargo nextest run -p cas --lib -E test(waiting)"),
+            "{live}"
+        );
+        assert!(live.contains("started 3m ago"), "{live}");
+
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "pid": u32::MAX,
+                "command": "cargo nextest run -p cas --lib -E test(waiting)",
+                "started_at": started.to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stale = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(stale.contains("stale"), "{stale}");
+        assert!(
+            stale.contains("cargo nextest run -p cas --lib -E test(waiting)"),
+            "{stale}"
+        );
+        FileExt::unlock(&lock).unwrap();
+        let acquired = try_lock_lane_with_command(
+            &root,
+            &repo,
+            "cargo nextest run -p cas --lib -E test(waiting)",
+        )
+        .unwrap()
+        .unwrap();
+        let stale = acquired.stale_holder.as_ref().unwrap();
+        assert_eq!(stale.pid, u32::MAX);
+        assert!(stale_lane_holder_notice(stale, chrono::Utc::now()).contains("stale previous holder"));
+        drop(acquired);
+        drop(lock);
     }
 
     /// cas-3d04: Codex SIGKILLs the calling shell's process group when an
@@ -2912,11 +3367,12 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         )
         .unwrap();
         assert!(!repo.join(".context/zig/zig").exists());
-        // Preserve the tools needed by Git and the zero-test guard, but omit Zig.
+        // Preserve the tools needed by Git and the zero-test guard, including
+        // Python for nextest discovery; keep Zig absent from this PATH.
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let host_path = std::env::var_os("PATH").unwrap();
-        for tool in ["git", "bash", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
+        for tool in ["git", "bash", "python3", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
             let path = std::env::split_paths(&host_path)
                 .map(|dir| dir.join(tool))
                 .find(|path| executable(path))
@@ -3075,7 +3531,7 @@ PY"#);
         agents.init().unwrap();
         for (id, name, role) in [
             ("capacity-worker", "worker", AgentRole::Worker),
-            ("capacity-supervisor", "supervisor", AgentRole::Supervisor),
+            ("capacity-supervisor", "capacity-lead", AgentRole::Supervisor),
         ] {
             let mut agent = Agent::new_with_role(id.into(), name.into(), role);
             agent.factory_session = Some("capacity-fixture".into());
@@ -3141,7 +3597,7 @@ PY"#);
         let data = cas_factory::DirectorData::load_fast(&root).unwrap();
         let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
         let wake = FactoryDaemon::supervisor_wake_decision(
-            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt,
+            &data, "capacity-lead", "capacity-lead", &sender, &row.source, &row.prompt,
             PaneWakeState { composer_dirty: false, ready_for_injection: true,
                 silent_for: Some(std::time::Duration::from_secs(45)), tool_call: ToolCallEvidence::Idle },
             wait.since + chrono::Duration::minutes(30));
@@ -3155,38 +3611,86 @@ PY"#);
         // Explicit need uses the existing durable worker message immediately,
         // and consumes the same episode's later automatic escalation.
         let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
-        assert!(execute_at(&root, &args, &repo, &fake).is_err());
-        let mut explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
-        // The worker has not retried for six minutes. Admission no longer
-        // reserves a slot, but the live episode must consume its explicit page.
-        explicit.since -= chrono::Duration::minutes(6);
-        explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
-        let explicit_path = std::fs::read_dir(root.join("capacity-waits")).unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "json")).unwrap();
-        std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
-        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "gap exceeds admission freshness");
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("capacity-worker".into());
         let worker = CasService::new(core, None);
-        let need = "Need storage assistance to repair the scratch volume";
-        let delivered = worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
-            "action": "message", "target": "supervisor", "task_id": task.id,
-            "blocker": true, "summary": "Storage repair needed", "message": need,
-        })).unwrap())).await.unwrap();
-        assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
-        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
-            .iter().filter(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)).count(), 1,
-            "exactly one explicit assistance page is durably queued");
-        let after_need = notices.pending_count("capacity-supervisor").unwrap();
-        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
-        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+        let mut other = Agent::new_with_role(
+            "other-supervisor".into(), "other-lead".into(), AgentRole::Supervisor,
+        );
+        other.factory_session = Some("other-session".into());
+        agents.register(&other).unwrap();
+        let mut last_need = None;
+        for (target, consumes_notice) in [
+            ("supervisor", true), ("other-lead", false), ("capacity-lead", true),
+        ] {
+            crate::factory_capacity_wait::admitted(&root, &repo).unwrap();
+            assert!(execute_at(&root, &args, &repo, &fake).is_err());
+            let mut explicit =
+                crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now())
+                    .unwrap()
+                    .unwrap();
+            // A stale admission reservation still belongs to the live episode.
+            explicit.since -= chrono::Duration::minutes(6);
+            explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
+            let explicit_path = std::fs::read_dir(root.join("capacity-waits"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .unwrap();
+            std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
+            assert!(
+                crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now())
+                    .unwrap()
+                    .is_none(),
+                "gap exceeds admission freshness"
+            );
+            let need = format!("Need storage assistance to repair the scratch volume ({target})");
+            let delivered = worker
+                .coordination(Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "message", "target": target, "task_id": task.id,
+                        "blocker": true, "summary": "Storage repair needed", "message": need,
+                    }))
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
+            let resolved_target = if target == "supervisor" { "capacity-lead" } else { target };
+            assert_eq!(
+                crate::store::open_prompt_queue_store(&root)
+                    .unwrap()
+                    .peek_all(100)
+                    .unwrap()
+                    .iter()
+                    .filter(|prompt| prompt.target == resolved_target && prompt.prompt.contains(&need))
+                    .count(),
+                1,
+                "exactly one explicit assistance page is durably queued"
+            );
+            let after_need = notices.pending_count("capacity-supervisor").unwrap();
+            crate::factory_capacity_wait::reconcile(
+                &root,
+                Some("capacity-fixture"),
+                explicit.since + chrono::Duration::minutes(25),
+            )
+            .unwrap();
+            assert_eq!(
+                notices.pending_count("capacity-supervisor").unwrap(),
+                after_need + usize::from(!consumes_notice),
+                "a blocker sent to {target} only consumes its owner's automatic notice"
+            );
+            last_need = Some((
+                explicit.since, notices.pending_count("capacity-supervisor").unwrap(),
+            ));
+        }
+        let (explicit_since, after_need) = last_need.unwrap();
 
         // A replacement lease cannot inherit an earlier wait or its deadline.
         assert!(agents.release_lease_if_owner_epoch(&task.id, "capacity-worker", lease.epoch, "new ownership generation").unwrap());
         agents.try_claim(&task.id, "capacity-worker", 3600, Some("resumed")).unwrap();
         assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
-        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(30)).unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit_since + chrono::Duration::minutes(30)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
     }
 
@@ -3468,13 +3972,57 @@ PY"#);
 
     #[cfg(unix)]
     #[test]
+    fn capacity_binding_skips_missing_task_lease_cas_2083() {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Priority, TaskStatus};
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        register_capacity_worker(
+            &root,
+            "worker-id",
+            "worker",
+            "cas-live",
+            Priority::MEDIUM,
+            &repo,
+        );
+        let agents = open_agent_store(&root).unwrap();
+        agents
+            .try_claim("cas-missing", "worker-id", 3600, Some("orphaned lease"))
+            .unwrap();
+        let wait = crate::factory_capacity_wait::record_refusal(
+            &root,
+            &repo,
+            "fixture capacity refusal",
+            chrono::Utc::now(),
+        )
+        .expect("missing task leases are skipped")
+        .unwrap();
+        assert_eq!(wait.task_id, "cas-live");
+        assert!(
+            agents.get_lease("cas-missing").unwrap().is_some(),
+            "scanning does not mutate leases"
+        );
+        assert_eq!(
+            open_task_store(&root)
+                .unwrap()
+                .get("cas-live")
+                .unwrap()
+                .status,
+            TaskStatus::InProgress
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unresolved_capacity_wait_binding_does_not_abort_build() {
         use cas_types::Priority;
 
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_BUILD_GUARD",
-            "off",
-        )]);
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = capacity_test_root(dir.path(), 1);
         let shared_repo = root.join("worktrees/shared");
@@ -3509,6 +4057,18 @@ PY"#);
         assert!(
             shared_repo.join("target/cargo-ran").exists(),
             "Cargo still runs when task ownership cannot be resolved"
+        );
+        std::fs::remove_file(shared_repo.join("target/cargo-ran")).unwrap();
+        std::fs::create_dir_all(root.join("capacity-waits")).unwrap();
+        std::fs::write(root.join("capacity-waits/broken.json"), b"{not json").unwrap();
+        let result = execute_at(&root, &args, &shared_repo, &fake);
+        assert!(
+            result.is_ok(),
+            "episode-clear failure must not abort an admitted build: {result:?}"
+        );
+        assert!(
+            shared_repo.join("target/cargo-ran").exists(),
+            "admitted Cargo still runs"
         );
     }
 
@@ -3577,6 +4137,7 @@ for key in ['VIKTOR_API_KEY', 'VIKTOR_KEY', 'NEON_API_KEY', 'NEON_TOKEN', 'VERCE
 assert os.environ.get('XDG_CONFIG_HOME') == {xdg:?}, 'private config directory lost'
 assert os.environ.get('CAS_SESSION_ID') == 'worker-env-fixture', 'runtime identity lost'
 assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target'), 'private target lost'
+assert os.environ.get('CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS') == '120', 'discovery bound lost'
 (Path.cwd() / 'target' / 'environment-observed').write_text('credential-free private config')
 PYENV
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'

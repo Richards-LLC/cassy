@@ -270,6 +270,9 @@ impl UpkeepReport {
         let watch_warning = measurement
             .read(super::project_overview::DOC_PATH)
             .and_then(|overview| {
+                // Store config is commonly untracked. When the measured commit
+                // has no config, watch targets use the current live store config;
+                // that fallback is not pinned to the measured SHA.
                 let config = measurement
                     .read(".cas/config.toml")
                     .or_else(|| std::fs::read_to_string(measurement.store.join("config.toml")).ok())

@@ -956,6 +956,8 @@ impl CasCore {
             })?;
         }
 
+        crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+
         // Emit VerificationAdded event for task lifecycle tracking
         if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
             use cas_store::EventStore;

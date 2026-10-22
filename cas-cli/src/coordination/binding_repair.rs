@@ -1,7 +1,7 @@
 //! One ordinary authenticated invocation: durable gate -> actual local drain ->
 //! submitting -> direct HTTP response -> validated immutable receipt storage.
 use super::{
-    binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope},
+    binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope, PauseOrigin},
     binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
     binding_runtime::RuntimeInventory,
 };
@@ -102,6 +102,17 @@ impl OrdinaryBindingClient {
         }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
+        // A previous legacy_intake_active response is still waiting for the
+        // host to go quiet. Failure to submit this retry cannot settle it.
+        let preserve_pause = state.policies.iter().any(|policy| {
+            &policy.scope == scope
+                && matches!(
+                    policy.disposition,
+                    ChannelDisposition::Paused {
+                        origin: Some(PauseOrigin::LegacyIntakeActive),
+                    }
+                )
+        });
         // Reusing the scope's pause re-arms one an earlier blocked run released.
         let operation_id = state
             .pauses
@@ -110,9 +121,14 @@ impl OrdinaryBindingClient {
             .find(|pause| &pause.scope == scope)
             .map_or_else(Uuid::new_v4, |pause| pause.operation_id);
         let pause = journal.pause(scope.clone(), operation_id, state.generation)?;
-        // Nothing has left for Cloud yet: every refusal here releases the pause.
+        // Nothing has left for Cloud in this attempt. Release only a pause
+        // without a refusal origin, retaining a confirmed quiet-window hold.
         let blocked_before_submit = |error: String| -> Result<RepairReport, String> {
-            let error = match journal.release_unsubmitted(scope) {
+            let error = match if preserve_pause {
+                Ok(())
+            } else {
+                journal.release_unsubmitted(scope)
+            } {
                 Ok(()) => error,
                 Err(release) => format!("{error}; pause not released ({release}), rerun `cas update`"),
             };

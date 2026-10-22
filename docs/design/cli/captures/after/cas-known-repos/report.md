@@ -1,6 +1,6 @@
 terminal-qa: PASS cas-known-repos · 11 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-known-repos/report.json
 
-Command: `env HOME=/home/pippenz/.cas/artifacts/cas-2878/terminal-qa/home target/debug/cas known-repos prune-missing --dry-run`  
+Command: `env HOME=<artifacts>/cas-2878/terminal-qa/home target/debug/cas known-repos prune-missing --dry-run`\
 Generated: 2026-09-08T16:16:41.733Z
 
 ## Findings

@@ -1,7 +1,7 @@
 import {launchBrowser} from './browser-tools.mjs';
 import {proposalDrawing} from './drawings.mjs';
 import {writeFile,mkdir} from 'node:fs/promises';
-const out=process.argv[2]||'/home/pippenz/.cas/artifacts/cas-cc1b';
+const out=process.argv[2]||'artifacts/cas-cc1b';
 await mkdir(out,{recursive:true});
 const browser=await launchBrowser();const page=await browser.newPage();let defects=[];
 try{for(let n=1;n<=10;n++)for(const type of ['phone','desktop']){

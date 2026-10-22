@@ -77,7 +77,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn may_commit_managed_files(root: &Path) -> Result<bool> {
+fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
     let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -93,7 +93,7 @@ fn may_commit_managed_files(root: &Path) -> Result<bool> {
     {
         return Ok(false);
     }
-    let config = crate::config::Config::load(&root.join(".cas"))?;
+    let config = crate::config::Config::load(cas_root)?;
     let configured_base = config.factory().epic_base_branch;
     Ok(!configured_base.as_deref().is_some_and(|base| {
         let normalized = base
@@ -293,6 +293,9 @@ pub(crate) struct Report {
     /// An attempted Git commit failed; this is not a file-body conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_error: Option<String>,
+    /// Commit policy could not be read; the repair remains safely staged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_warning: Option<String>,
     pub conflicts: Vec<String>,
 }
 
@@ -533,7 +536,7 @@ impl Reconcile {
         !self.report.conflicts.is_empty()
     }
 
-    pub(crate) fn finish(mut self, harnesses: &[SupervisorCli]) -> Result<Report> {
+    pub(crate) fn finish(mut self, harnesses: &[SupervisorCli], cas_root: &Path) -> Result<Report> {
         let root = &self.root;
         if git(root, &["ls-files", "--stage", "-z"])? != self.index_signature {
             self.report.outcome = "staged";
@@ -623,7 +626,12 @@ impl Reconcile {
             }
         } else if self.staged_before
             || pending.iter().any(|p| !changed.contains(p))
-            || !may_commit_managed_files(root)?
+            || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
+                self.report.commit_warning = Some(
+                    "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
+                );
+                false
+            })
         {
             "staged"
         } else {
@@ -638,7 +646,7 @@ impl Reconcile {
                     "user.email=cassy@localhost",
                     "commit",
                     "-m",
-                    "chore(cassy): reconcile managed project files",
+                    crate::worktree::git::MANAGED_RECONCILE_SUBJECT,
                 ],
             ) {
                 Ok(_) => {

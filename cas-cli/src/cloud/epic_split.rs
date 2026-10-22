@@ -34,6 +34,7 @@ use chrono::{DateTime, Utc};
 use cas_store::{
     EpicSplit, SplitDirection, SplitState, decide_epic_split, get_epic_split, insert_epic_split,
     list_epic_splits, decide_epic_split_by, finish_epic_split_work,
+    list_epic_split_child_releases, mark_epic_split_child_released,
     pending_epic_split_work,
 };
 
@@ -232,11 +233,37 @@ pub(crate) fn current_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, Str
     projected_epic_splits(cas_root, false)
 }
 
+fn without_released_children(
+    cas_root: &Path,
+    splits: &mut Vec<EpicSplit>,
+) -> Result<(), String> {
+    if splits.is_empty() {
+        return Ok(());
+    }
+    let released: std::collections::HashSet<(String, String)> =
+        list_epic_split_child_releases(cas_root)
+            .map_err(|error| format!("epic split release store: {error}"))?
+            .into_iter()
+            .collect();
+    for split in splits.iter_mut() {
+        let split_id = &split.id;
+        split
+            .mine
+            .retain(|id| !released.contains(&(split_id.clone(), id.clone())));
+        split
+            .theirs
+            .retain(|id| !released.contains(&(split_id.clone(), id.clone())));
+    }
+    splits.retain(|split| !split.mine.is_empty() || !split.theirs.is_empty());
+    Ok(())
+}
+
 /// Overlap also reserves the original shares while claim cleanup is pending.
 /// Keep that historical coverage out of ordinary ownership/renewal projections.
 fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
-    let splits = list_epic_splits(cas_root)
+    let mut splits = list_epic_splits(cas_root)
         .map_err(|error| format!("epic split store: {error}"))?;
+    without_released_children(cas_root, &mut splits)?;
     if splits.is_empty() {
         return Ok(splits);
     }
@@ -288,12 +315,26 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
     Ok(current)
 }
 
+/// Admission and renewal retain historical ownership when task projection is
+/// unavailable. A stale hold can be cancelled; a missing hold admits peer work.
+fn guarded_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
+    current_epic_splits(cas_root).or_else(|error| {
+        tracing::warn!(%error, "could not project epic splits; retaining historical bindings");
+        let mut raw = list_epic_splits(cas_root)
+            .map_err(|raw_error| format!("{error}; epic split fallback: {raw_error}"))?;
+        if let Err(release_error) = without_released_children(cas_root, &mut raw) {
+            tracing::warn!(%release_error, "could not read epic split releases; retaining historical bindings");
+        }
+        Ok(raw)
+    })
+}
+
 /// The binding split, if any, under which `task_id` is the peer's.
 pub fn split_hold_for(cas_root: &Path, task_id: &str) -> Option<SplitHold> {
     if !has_store(cas_root) {
         return None;
     }
-    let splits = match current_epic_splits(cas_root) {
+    let splits = match guarded_epic_splits(cas_root) {
         Ok(splits) => splits,
         Err(error) => {
             tracing::debug!(%error, "could not read epic splits");
@@ -1327,17 +1368,192 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
     if !has_store(cas_root) {
         return 0;
     }
-    let Ok(splits) = current_epic_splits(cas_root) else {
+    if let Err(error) = release_obsolete_split_claims(cas_root, claims, None, None, Some(agent_id)) {
+        tracing::warn!(%error, agent = %agent_id, "could not settle obsolete epic split claims");
+    }
+    let Ok(splits) = guarded_epic_splits(cas_root) else {
         return 0;
     };
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return 0;
+    };
+    let task_leases = match agents.list_renewable_task_leases(agent_id) {
+        Ok(leases) => leases,
+        Err(error) => {
+            tracing::warn!(%error, agent = %agent_id, "could not read task leases before split renewal");
+            return 0;
+        }
+    };
+    let task_leases: std::collections::HashSet<String> = task_leases
+        .into_iter()
+        .filter(|lease| lease.is_valid())
+        .map(|lease| lease.task_id)
+        .collect();
     let now = Utc::now();
     splits
         .iter()
         .filter(|split| split.local_agent_id == agent_id && split.is_binding(now))
         .flat_map(|split| split.mine.iter())
+        .filter(|id| !task_leases.contains(*id))
         .filter(|id| claims.holder(id).ok().flatten().as_deref() == Some(agent_id))
         .filter(|id| claims.renew(id, agent_id, duration).is_ok())
         .count()
+}
+
+/// Release obsolete split-derived Cloud claims after a task's parent changed.
+/// Both shares are considered because a database may know the moved child as
+/// the peer's share; release is still fenced to the recorded owner in Cloud.
+pub(crate) fn release_obsolete_claims_for_task(
+    cas_root: &Path,
+    task_id: &str,
+) -> Result<usize, String> {
+    let Some(claims) = PeerClaims::for_project(cas_root) else {
+        return Ok(0);
+    };
+    release_obsolete_split_claims(cas_root, &claims, Some(task_id), None, None)
+}
+
+/// The split owner can settle one moved child without cancelling the rest of
+/// the split. The task must be in this supervisor's share and outside the
+/// split's epic; a current alternate split or task lease keeps its Cloud claim.
+pub fn release_moved_child(
+    cas_root: &Path,
+    caller: &Caller,
+    split_id: &str,
+    task_id: &str,
+) -> Result<String, String> {
+    let split = get_epic_split(cas_root, split_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no epic split {split_id} recorded here"))?;
+    if split.local_agent_id != caller.id {
+        return Err(format!("only split owner {} can release its child claim", split.local_agent_id));
+    }
+    if !split.mine.iter().any(|id| id == task_id) {
+        return Err(format!("{task_id} is not in your share of epic split {split_id}"));
+    }
+    let tasks = crate::store::open_task_store_local(cas_root)
+        .map_err(|error| format!("could not open the task store: {error}"))?;
+    if tasks.get_parent_epic(task_id).map_err(|error| error.to_string())?
+        .is_some_and(|parent| parent.id == split.epic_id)
+    {
+        return Err(format!("{task_id} is still a child of epic {}; move it before releasing this split claim", split.epic_id));
+    }
+    let claims = peer_claims(cas_root)?;
+    let released = release_obsolete_split_claims(
+        cas_root, &claims, Some(task_id), Some(split_id), Some(&caller.id),
+    )?;
+    Ok(format!(
+        "Released {released} obsolete split-derived Cloud claim(s) for {task_id} from epic split {split_id}; the split owner's share is marked released."
+    ))
+}
+
+fn split_claim_owner<'a>(split: &'a EpicSplit, task_id: &str) -> Option<&'a str> {
+    if split.mine.iter().any(|id| id == task_id) {
+        Some(&split.local_agent_id)
+    } else if split.theirs.iter().any(|id| id == task_id) {
+        Some(&split.peer_agent_id)
+    } else {
+        None
+    }
+}
+
+/// Release only when the task is no longer justified by this split. A newer
+/// binding split for the same owner, or that owner's live task lease, keeps
+/// the shared Cloud claim. Renewal calls scope candidates to its own `mine`.
+fn release_obsolete_split_claims(
+    cas_root: &Path,
+    claims: &PeerClaims,
+    only_task: Option<&str>,
+    only_split: Option<&str>,
+    renewing_owner: Option<&str>,
+) -> Result<usize, String> {
+    let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
+    if splits.is_empty() {
+        return Ok(0);
+    }
+    let released: std::collections::HashSet<(String, String)> =
+        list_epic_split_child_releases(cas_root)
+            .map_err(|error| format!("epic split release store: {error}"))?
+            .into_iter()
+            .collect();
+    let tasks = crate::store::open_task_store_local(cas_root)
+        .map_err(|error| format!("could not open the task store: {error}"))?;
+    let agents = crate::store::open_agent_store(cas_root)
+        .map_err(|error| format!("could not open the agent store: {error}"))?;
+    let now = Utc::now();
+    let mut cloud_released = 0;
+    let mut errors = Vec::new();
+
+    for split in &splits {
+        if only_split.is_some_and(|id| id != split.id) {
+            continue;
+        }
+        if renewing_owner.is_some_and(|owner| split.local_agent_id != owner) {
+            continue;
+        }
+        let candidates: Vec<(&String, &str)> = if renewing_owner.is_some() {
+            split.mine.iter().map(|task| (task, split.local_agent_id.as_str())).collect()
+        } else {
+            split.mine.iter().map(|task| (task, split.local_agent_id.as_str()))
+                .chain(split.theirs.iter().map(|task| (task, split.peer_agent_id.as_str())))
+                .collect()
+        };
+        for (task_id, owner_id) in candidates {
+            if only_task.is_some_and(|id| id != task_id)
+                || released.contains(&(split.id.clone(), task_id.clone()))
+            {
+                continue;
+            }
+            let parent = tasks.get_parent_epic(task_id)
+                .map_err(|error| format!("could not read split child parent for {task_id}: {error}"))?
+                .map(|epic| epic.id);
+            // A missing parent in a background scan may mean partial sync. The
+            // task-update path is explicit and may settle a removed parent.
+            let moved = match parent.as_deref() {
+                Some(parent) => parent != split.epic_id,
+                None => only_task.is_some(),
+            };
+            // Nonbinding is not terminal: an incoming pending proposal has
+            // not claimed anything yet, but its shares must survive acceptance.
+            let terminal = matches!(split.state, SplitState::Rejected | SplitState::Cancelled | SplitState::Expired)
+                || split.is_expired(now);
+            if !terminal && !moved {
+                continue;
+            }
+
+            let justified_elsewhere = parent.as_deref().is_some_and(|parent| {
+                splits.iter().any(|other| {
+                    other.id != split.id
+                        && other.is_binding(now)
+                        && other.epic_id == parent
+                        && split_claim_owner(other, task_id) == Some(owner_id)
+                        && !released.contains(&(other.id.clone(), task_id.clone()))
+                })
+            });
+            let has_owner_lease = agents.get_lease(task_id)
+                .map_err(|error| format!("could not inspect task lease for {task_id}: {error}"))?
+                .is_some_and(|lease| lease.is_valid() && lease.agent_id == owner_id);
+
+            if !justified_elsewhere && !has_owner_lease {
+                match claims.release_own(task_id, owner_id) {
+                    Ok(true) => cloud_released += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        errors.push(format!("{task_id} ({owner_id}): {error}"));
+                        continue;
+                    }
+                }
+            }
+            if let Err(error) = mark_epic_split_child_released(cas_root, &split.id, task_id, now) {
+                errors.push(format!("{task_id} ({}): could not mark split share released: {error}", split.id));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(cloud_released)
+    } else {
+        Err(format!("split claim cleanup failed for {}", errors.join("; ")))
+    }
 }
 
 #[cfg(test)]
@@ -1356,6 +1572,224 @@ mod tests {
             .register(&agent)
             .unwrap();
         agent
+    }
+
+    async fn claim_fixture(
+        root: &Path,
+        task_id: &str,
+        owner_id: &str,
+    ) -> (
+        wiremock::MockServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let project = "github.com/acme/split-cleanup";
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[project]\ncanonical_id = {project:?}\n"),
+        )
+        .unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("fixture-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(root)
+        .unwrap();
+        let key = crate::cloud::peer_claims::claim_key(project, task_id);
+        let mut lock = serde_json::to_value(crate::types::TaskLease::new(
+            key.clone(), owner_id.to_string(), 600,
+        )).unwrap();
+        lock["id"] = serde_json::json!("fixture-lock");
+        let renew_lock = lock.clone();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/agents/tasks/{key}/lock")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "lock": lock,
+            })))
+            .mount(&server)
+            .await;
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let seen_renewals = renewals.clone();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/agents/tasks/{key}/renew")))
+            .respond_with(move |_: &wiremock::Request| {
+                seen_renewals.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock": renew_lock}))
+            })
+            .mount(&server)
+            .await;
+        let releases = Arc::new(AtomicUsize::new(0));
+        let seen = releases.clone();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/agents/tasks/{key}/release")))
+            .respond_with(move |_: &wiremock::Request| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "status": "success" }))
+            })
+            .mount(&server)
+            .await;
+        (server, releases, renewals)
+    }
+
+    fn split_task_graph(root: &Path, current_parent: &str) {
+        let tasks = crate::store::open_task_store(root).unwrap();
+        tasks.init().unwrap();
+        for (id, title) in [("cas-8503-old", "Old epic"), ("cas-8503-new", "New epic")] {
+            let mut epic = crate::types::Task::new(id.into(), title.into());
+            epic.task_type = TaskType::Epic;
+            tasks.add(&epic).unwrap();
+        }
+        let child = crate::types::Task::new("cas-8503-child".into(), "Moved child".into());
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&crate::types::Dependency::new(
+            child.id.clone(), current_parent.to_string(), DependencyType::ParentChild,
+        )).unwrap();
+    }
+
+    fn split_for_child(
+        id: &str,
+        epic_id: &str,
+        owner_id: &str,
+        side: &str,
+        state: SplitState,
+    ) -> EpicSplit {
+        let now = Utc::now();
+        EpicSplit {
+            id: id.into(),
+            epic_id: epic_id.into(),
+            local_agent_id: if side == "mine" { owner_id } else { "local-peer" }.into(),
+            peer_agent_id: if side == "mine" { "remote-peer" } else { owner_id }.into(),
+            peer_name: "peer".into(),
+            peer_machine: "other-host".into(),
+            direction: SplitDirection::Outgoing,
+            mine: if side == "mine" { vec!["cas-8503-child".into()] } else { vec![] },
+            theirs: if side == "theirs" { vec!["cas-8503-child".into()] } else { vec![] },
+            state,
+            reason: None,
+            message_id: None,
+            expires_at: now + chrono::Duration::hours(1),
+            created_at: now,
+            decided_at: Some(now),
+            decided_by: Some(owner_id.into()),
+            cleanup_pending: false,
+            expiry_notice_pending: false,
+        }
+    }
+
+    fn insert_child_split(root: &Path, split: &EpicSplit) {
+        insert_epic_split(root, split).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reproposal_by_the_same_owner_keeps_the_live_claim() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        split_task_graph(dir.path(), "cas-8503-old");
+        let (_server, releases, renewals) = claim_fixture(dir.path(), "cas-8503-child", "split-owner").await;
+        insert_child_split(dir.path(), &split_for_child(
+            "split-old", "cas-8503-old", "split-owner", "mine", SplitState::Cancelled,
+        ));
+        insert_child_split(dir.path(), &split_for_child(
+            "split-new", "cas-8503-old", "split-owner", "mine", SplitState::Accepted,
+        ));
+
+        let claims = PeerClaims::for_project(dir.path()).unwrap();
+        assert_eq!(renew_split_claims(dir.path(), &claims, "split-owner", 600), 1);
+        assert_eq!(releases.load(Ordering::SeqCst), 0, "the replacement split still justifies the claim");
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert!(list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-old".into(), "cas-8503-child".into())));
+    }
+
+    #[tokio::test]
+    async fn resplit_after_retarget_keeps_the_same_owners_claim() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        split_task_graph(dir.path(), "cas-8503-new");
+        let (_server, releases, _renewals) = claim_fixture(dir.path(), "cas-8503-child", "split-owner").await;
+        insert_child_split(dir.path(), &split_for_child(
+            "split-old", "cas-8503-old", "split-owner", "mine", SplitState::Accepted,
+        ));
+        insert_child_split(dir.path(), &split_for_child(
+            "split-new", "cas-8503-new", "split-owner", "theirs", SplitState::Accepted,
+        ));
+
+        let claims = PeerClaims::for_project(dir.path()).unwrap();
+        assert_eq!(release_obsolete_split_claims(dir.path(), &claims, None, None, Some("split-owner")).unwrap(), 0);
+        assert_eq!(releases.load(Ordering::SeqCst), 0, "the new-epic split still justifies the claim");
+        assert!(list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-old".into(), "cas-8503-child".into())));
+        assert!(split_hold_for(dir.path(), "cas-8503-child").is_some(), "the current peer share remains an admission hold");
+    }
+
+    #[tokio::test]
+    async fn supervisors_task_lease_keeps_its_claim_when_old_split_ends() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        split_task_graph(dir.path(), "cas-8503-old");
+        let (_server, releases, renewals) = claim_fixture(dir.path(), "cas-8503-child", "split-owner").await;
+        let owner = test_supervisor(dir.path(), "split-owner", "split-owner", 0);
+        let tasks = crate::store::open_task_store(dir.path()).unwrap();
+        let mut child = tasks.get("cas-8503-child").unwrap();
+        child.status = TaskStatus::InProgress;
+        child.assignee = Some(owner.id.clone());
+        tasks.update(&child).unwrap();
+        assert!(crate::store::open_agent_store(dir.path()).unwrap()
+            .try_claim("cas-8503-child", &owner.id, 600, None).unwrap().is_success());
+        insert_child_split(dir.path(), &split_for_child(
+            "split-old", "cas-8503-old", "split-owner", "mine", SplitState::Cancelled,
+        ));
+
+        let claims = PeerClaims::for_project(dir.path()).unwrap();
+        assert_eq!(renew_split_claims(dir.path(), &claims, "split-owner", 600), 0);
+        assert_eq!(releases.load(Ordering::SeqCst), 0, "the task lease, not the old split, owns this claim");
+        assert_eq!(renewals.load(Ordering::SeqCst), 0, "the worker lease already renews this claim");
+        assert!(list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-old".into(), "cas-8503-child".into())),
+            "cleanup must reach the owner's lease check and settle the ended split");
+    }
+
+    #[tokio::test]
+    async fn a_moved_peer_share_releases_the_remote_owners_claim() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        split_task_graph(dir.path(), "cas-8503-new");
+        let (_server, releases, _renewals) = claim_fixture(dir.path(), "cas-8503-child", "remote-owner").await;
+        insert_child_split(dir.path(), &split_for_child(
+            "split-remote", "cas-8503-old", "remote-owner", "theirs", SplitState::Accepted,
+        ));
+
+        let released = release_obsolete_claims_for_task(dir.path(), "cas-8503-child").unwrap();
+        assert_eq!(released, 1);
+        assert_eq!(releases.load(Ordering::SeqCst), 1, "Cloud must release the peer-side owner too");
+        assert!(list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-remote".into(), "cas-8503-child".into())));
+    }
+
+    #[tokio::test]
+    async fn split_owner_can_release_one_moved_child_without_cancelling_the_split() {
+        let dir = tempfile::TempDir::new().unwrap();
+        split_task_graph(dir.path(), "cas-8503-new");
+        let (_server, releases, _renewals) = claim_fixture(dir.path(), "cas-8503-child", "split-owner").await;
+        let owner = test_supervisor(dir.path(), "split-owner", "split-owner", 0);
+        insert_child_split(dir.path(), &split_for_child(
+            "split-owner", "cas-8503-old", &owner.id, "mine", SplitState::Accepted,
+        ));
+
+        let result = release_moved_child(
+            dir.path(), &Caller { id: owner.id.clone(), name: owner.name.clone() },
+            "split-owner", "cas-8503-child",
+        ).unwrap();
+        assert!(result.contains("marked released"), "{result}");
+        assert_eq!(releases.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(get_epic_split(dir.path(), "split-owner").unwrap().unwrap().state, SplitState::Accepted);
     }
 
     fn accepted_split(root: &Path, owner_id: &str) {

@@ -25,6 +25,9 @@ fn scope() -> IntakeScope {
     }
 }
 fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
+    runtime_rounds(root, capability, 1)
+}
+fn runtime_rounds(root: &Path, capability: bool, rounds: usize) -> std::thread::JoinHandle<()> {
     use crate::ui::factory::daemon::runtime::violet_intake::*;
     use crate::ui::factory::*;
     let name = "bind-fx";
@@ -42,63 +45,193 @@ fn runtime(root: &Path, capability: bool) -> std::thread::JoinHandle<()> {
     let listener = std::os::unix::net::UnixListener::bind(gui_socket_path(name)).unwrap();
     let root = root.to_path_buf();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let welcome = serde_json::json!({ "Welcome": {"session_name":name,"state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":80,"rows":24},"scrollback":null,"protocol_version":3,"capabilities": if capability { vec!["binding_intake_control_v1"] } else { vec![] } }});
-        stream
-            .write_all(&encode_message(&welcome).unwrap())
-            .unwrap();
-        if !capability {
-            // Like a real runtime, stay connected until the client hangs up
-            // (here and after the drain reply below). On macOS, setsockopt on
-            // a peer-closed socket fails EINVAL before buffered frames are
-            // read (cas-cbcc).
-            let _ = stream.read(&mut [0; 1]);
-            return;
-        }
-        let mut header = [0; 4];
-        stream.read_exact(&mut header).unwrap();
-        let mut bytes = vec![0; u32::from_be_bytes(header) as usize];
-        stream.read_exact(&mut bytes).unwrap();
-        let ClientMessage::BindingIntakePause { request } = serde_json::from_slice(&bytes).unwrap()
-        else {
-            panic!("local pause required")
-        };
-        let state = IntakeJournal::new(&root).read().unwrap();
-        let pause = state
-            .pauses
-            .iter()
-            .find(|pause| pause.operation_id == request.operation_id)
-            .unwrap()
-            .clone();
-        // A busy factory broadcasts pane output to every GUI client, including
-        // this control probe, and a newer daemon may send frames this build
-        // cannot parse. Neither may exhaust the drain before its reply.
-        for index in 0..300 {
-            let frame = if index % 50 == 0 {
-                serde_json::json!({ "FutureBroadcast": { "index": index } })
-            } else {
-                serde_json::json!({ "OperatorNoticeResolved": { "notification_id": index } })
+        for _ in 0..rounds {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let welcome = serde_json::json!({ "Welcome": {"session_name":name,"state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":80,"rows":24},"scrollback":null,"protocol_version":3,"capabilities": if capability { vec!["binding_intake_control_v1"] } else { vec![] } }});
+            stream
+                .write_all(&encode_message(&welcome).unwrap())
+                .unwrap();
+            if !capability {
+                // Like a real runtime, stay connected until the client hangs up
+                // (here and after the drain reply below). On macOS, setsockopt on
+                // a peer-closed socket fails EINVAL before buffered frames are
+                // read (cas-cbcc).
+                let _ = stream.read(&mut [0; 1]);
+                return;
+            }
+            let mut header = [0; 4];
+            stream.read_exact(&mut header).unwrap();
+            let mut bytes = vec![0; u32::from_be_bytes(header) as usize];
+            stream.read_exact(&mut bytes).unwrap();
+            let ClientMessage::BindingIntakePause { request } =
+                serde_json::from_slice(&bytes).unwrap()
+            else {
+                panic!("local pause required")
             };
-            stream.write_all(&encode_message(&frame).unwrap()).unwrap();
-        }
-        let reply = IntakeReply {
-            nonce: request.nonce,
-            state: Some(state),
-            acknowledgement: Some(DrainAcknowledgement {
+            let state = IntakeJournal::new(&root).read().unwrap();
+            let pause = state
+                .pauses
+                .iter()
+                .find(|pause| pause.operation_id == request.operation_id)
+                .unwrap()
+                .clone();
+            // A busy factory broadcasts pane output to every GUI client, including
+            // this control probe, and a newer daemon may send frames this build
+            // cannot parse. Neither may exhaust the drain before its reply.
+            for index in 0..300 {
+                let frame = if index % 50 == 0 {
+                    serde_json::json!({ "FutureBroadcast": { "index": index } })
+                } else {
+                    serde_json::json!({ "OperatorNoticeResolved": { "notification_id": index } })
+                };
+                stream.write_all(&encode_message(&frame).unwrap()).unwrap();
+            }
+            let reply = IntakeReply {
                 nonce: request.nonce,
-                pause,
-                runtime: RuntimeIdentity::current(&root, name).unwrap(),
-            }),
-            error: None,
-        };
-        stream
-            .write_all(&encode_message(&DaemonMessage::BindingIntake { reply }).unwrap())
-            .unwrap();
-        let _ = stream.read(&mut [0; 1]);
+                state: Some(state),
+                acknowledgement: Some(DrainAcknowledgement {
+                    nonce: request.nonce,
+                    pause,
+                    runtime: RuntimeIdentity::current(&root, name).unwrap(),
+                }),
+                error: None,
+            };
+            stream
+                .write_all(&encode_message(&DaemonMessage::BindingIntake { reply }).unwrap())
+                .unwrap();
+            let _ = stream.read(&mut [0; 1]);
+        }
     })
+}
+
+/// A failed retry must not restart the presence that Cloud is waiting to expire.
+#[test]
+fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
+    use crate::ui::factory::daemon::runtime::violet_activity::VioletWakeRuntime;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    let scope = scope();
+    project(&root, &scope.team_id);
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_USER_CLOUD_JSON", env.home().join("cloud.json"));
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    crate::cloud::CloudConfig {
+        endpoint: endpoint.clone(),
+        token: Some("ordinary-fixture-user".into()),
+        ..Default::default()
+    }
+    .save_user()
+    .unwrap();
+    let gui = runtime_rounds(&root, true, 4);
+    let runtime = VioletWakeRuntime::start(&root, "bind-fx", "supervisor").unwrap();
+    let target = scope.clone();
+    let remote = std::thread::spawn(move || {
+        let receive = || {
+            server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("HTTP request")
+        };
+        let claim = receive();
+        assert_eq!(
+            claim.url(),
+            "/api/violet/activity/claim",
+            "ungated tick must actually claim"
+        );
+        claim
+            .respond(tiny_http::Response::from_string(
+                r#"{"events":[],"denied":[]}"#,
+            ))
+            .unwrap();
+        let mut claimed_during_hold = false;
+        for round in 0..4 {
+            let mut get = receive();
+            // Respond even on the broken path so the real tick and subsequent
+            // retry finish; assert the unwanted claim after joining both peers.
+            if round == 3 && get.url() == "/api/violet/activity/claim" {
+                claimed_during_hold = true;
+                get.respond(tiny_http::Response::from_string(
+                    r#"{"events":[],"denied":[]}"#,
+                ))
+                .unwrap();
+                get = receive();
+            }
+            assert_eq!(get.method().as_str(), "GET");
+            assert_eq!(get.url(), format!("/api/teams/{}/projects", target.team_id));
+            if round == 0 || round == 2 {
+                get.respond(
+                    tiny_http::Response::from_string("temporarily unavailable")
+                        .with_status_code(503),
+                )
+                .unwrap();
+                continue;
+            }
+            get.respond(tiny_http::Response::from_string(
+                serde_json::json!({"projects":[{"id":"project-id","canonical_id":PROJECT,"name":"fixture","contributor_count":0,"memory_count":0}]}).to_string(),
+            )).unwrap();
+            let post = receive();
+            assert_eq!(post.method().as_str(), "POST");
+            assert_eq!(post.url(), RECONCILE_PATH);
+            let mut body: serde_json::Value = serde_json::from_str(if round == 1 {
+                include_str!(
+                    "../../../tests/fixtures/binding_reconciliation/v1/legacy-intake-active.json"
+                )
+            } else {
+                include_str!("../../../tests/fixtures/binding_reconciliation/v1/completed.json")
+            })
+            .unwrap();
+            body["scope"]["team_id"] = target.team_id.clone().into();
+            body["binding"]["team_id"] = target.team_id.clone().into();
+            post.respond(
+                tiny_http::Response::from_string(body.to_string())
+                    .with_status_code(if round == 1 { 409 } else { 200 })
+                    .with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap(),
+                    ),
+            )
+            .unwrap();
+        }
+        assert!(server.try_recv().unwrap().is_none());
+        claimed_during_hold
+    });
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    let client = OrdinaryBindingClient::new(&endpoint, "ordinary-fixture-user").unwrap();
+    // A crash between pause and submit leaves no refusal-backed quiet window.
+    let journal = IntakeJournal::new(&root);
+    journal.pause(scope.clone(), Uuid::new_v4(), 0).unwrap();
+    let orphan_retry = client.repair(&root, &scope).unwrap();
+    assert!(matches!(orphan_retry.outcome, RepairOutcome::Blocked));
+    assert!(orphan_retry.response.is_none(), "orphan retry must not submit");
+    let orphan_released = journal.legacy_allowed().unwrap();
+    let refused = client.repair(&root, &scope).unwrap();
+    assert_eq!(
+        refused.response.unwrap().code,
+        ReconciliationCode::LegacyIntakeActive
+    );
+    assert!(!IntakeJournal::new(&root).legacy_allowed().unwrap());
+    let failed = client.repair(&root, &scope).unwrap();
+    assert!(
+        matches!(failed.outcome, RepairOutcome::Blocked),
+        "{failed:?}"
+    );
+    assert!(failed.response.is_none(), "preflight must not submit");
+    assert!(runtime.tick_blocking().0.errors.is_empty());
+    let completed = client.repair(&root, &scope).unwrap();
+    gui.join().unwrap();
+    let claimed_during_hold = remote.join().unwrap();
+    assert!(
+        matches!(completed.outcome, RepairOutcome::Managed),
+        "{completed:?}"
+    );
+    assert!(
+        !claimed_during_hold,
+        "failed preflight restarted v1 presence during the quiet window"
+    );
+    assert!(orphan_released, "preflight failure must release an orphaned pause");
 }
 
 #[test]

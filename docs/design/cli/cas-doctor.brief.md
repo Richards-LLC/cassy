@@ -61,6 +61,10 @@ and JSON document contracts apply; no new terminal PASS is claimed here.
 Message text itself (the cause and remedy sentences) belongs to the doctor self-heal work;
 this brief covers the render only.
 
+The managed-commits check omits a missing configured upstream, just as it omits
+an absent upstream: neither proves unpublished repairs. Other inspection
+failures retain the warning; existing findings and JSON shape stay unchanged.
+
 The cloud queue warning now separates pending registration conflicts from retryable transport
 failures: it reports parked rows and gives `cas cloud project set <registered-canonical-id>`
 or the cloud-owner alias path, then directs the operator to sync; it does not prescribe
@@ -95,16 +99,16 @@ After (with the doctor self-heal epic merged): `terminal-qa: PASS cas-doctor · 
 | Machine contract | 5 | `--json` unchanged, one array |
 
 The registration-conflict fixture capture was also run at
-`/home/pippenz/.cas/artifacts/cas-998a/terminal-qa/cas-doctor-registration-conflict-final/report.json`;
+`<artifacts>/cas-998a/terminal-qa/cas-doctor-registration-conflict-final/report.json`;
 it reports 36 truncation findings from existing doctor checks plus the new remedy. The focused
 `doctor_queue` tests pass 4/4; the shared doctor renderer remains a follow-up surface outside
 this task.
 
-Task capture: `terminal-qa: PASS cas-doctor-fcba · 12 runs · 0 fail · 8 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-fcba/terminal-qa/cas-doctor/report.json`.
+Task capture: `terminal-qa: PASS cas-doctor-fcba · 12 runs · 0 fail · 8 warn · 0 allowed · <artifacts>/cas-fcba/terminal-qa/cas-doctor/report.json`.
 The eight warnings are the existing 120-column word-split heuristics for temporary registered
 roots and the quarantine remedy; the new reachability row did not introduce a failure or overflow.
 
-SessionStart budget capture: `terminal-qa: PASS cas-doctor-budget · 12 runs · 0 fail · 4 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-6a20/terminal-qa/cas-doctor-budget/report.json`.
+SessionStart budget capture: `terminal-qa: PASS cas-doctor-budget · 12 runs · 0 fail · 4 warn · 0 allowed · <artifacts>/cas-6a20/terminal-qa/cas-doctor-budget/report.json`.
 The four warnings are the existing 120-column word-split heuristic on the quarantine remedy;
 the new `SessionStart budget` row is present in the 80-column capture and the JSON document,
 with no new failure or overflow.
@@ -123,10 +127,10 @@ Task capture: `terminal-qa: PASS cas-doctor-hub-service · 12 runs · 0 fail · 
 against the built binary with scrubbed HOME/XDG state and a stub `systemctl`; the inactive
 detached-service warning appeared in both human and JSON host reports.
 
-Task capture: `terminal-qa: PASS cas-doctor-866 · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-35be/terminal-qa/cas-doctor/report.json`.
+Task capture: `terminal-qa: PASS cas-doctor-866 · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-35be/terminal-qa/cas-doctor/report.json`.
 The rebuilt healthy-baseline host report stayed within 80/120 columns across four palettes,
 pipe, `NO_COLOR`, C locale, and JSON. Fixture captures at
-`/home/pippenz/.cas/artifacts/cas-35be/qa/` separately show managed stale-skill cleanup,
+`<artifacts>/cas-35be/qa/` separately show managed stale-skill cleanup,
 preserved unmarked user skills, intentional Claude/Codex/Grok twins, unexpected drift, and
 the attributed scratchpad policy row.
 
@@ -140,7 +144,7 @@ the attributed scratchpad policy row.
 
 Scored by Codex on 2026-09-14; hierarchy, fit, and craft floors hold.
 
-Task capture: `terminal-qa: PASS cas-af06 · 12 runs · 0 fail · 4 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-af06/terminal-qa/report.json`.
+Task capture: `terminal-qa: PASS cas-af06 · 12 runs · 0 fail · 4 warn · 0 allowed · <artifacts>/cas-af06/terminal-qa/report.json`.
 The new project-alias warning and dry-run/apply messages preserve the existing doctor
 renderer contract; the four warnings are the pre-existing 120-column quarantine-remedy
 word-split heuristic.

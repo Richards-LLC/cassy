@@ -925,8 +925,8 @@ fn prefer_fresher_base_ref_observed(
     let ahead = ahead.unwrap_or(0);
     if verify_origin && behind > 0 && ahead > 0 {
         return Err(format!(
-            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.",
-            observed_state(),
+            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.{}",
+            observed_state(), git.reconcile_commit_cause(base, &remote),
         ));
     }
 
@@ -982,11 +982,14 @@ fn ensure_local_spawn_parent(
         return Ok(None);
     }
     let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let local_label = crate::worktree::GitOperations::visible_git_label(local);
     let fetch_error = git.fetch_branch(local).err();
     if git.has_origin_remote() && let Some(error) = &fetch_error {
-        return Err(format!("SPAWN BASE UNVERIFIED: fetch from origin for '{local}' failed: {error}; no local spawn parent was created. Restore origin access before retrying."));
+        let cause = crate::worktree::GitOperations::visible_git_label(&error.to_string());
+        return Err(format!("SPAWN BASE UNVERIFIED: fetch from origin for '{local_label}' failed: {cause}; no local spawn parent was created. Restore origin access before retrying."));
     }
     let remote = format!("origin/{local}");
+    let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
     let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
         let parent_label = crate::worktree::GitOperations::visible_git_label(parent);
         let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
@@ -999,15 +1002,14 @@ fn ensure_local_spawn_parent(
         format!(
             "spawn base '{parent_label}' does not resolve locally or as '{remote_label}' after fetch{}; fetch and create a local branch from '{remote_label}' before retrying:\n{fetch}",
             fetch_error
-                .map(|error| format!(" ({error})"))
+                .map(|error| format!(" ({})", crate::worktree::GitOperations::visible_git_label(&error.to_string())))
                 .unwrap_or_default()
         )
     })?;
     git.create_branch_from(local, &remote).map_err(|error| {
-        format!("could not create local spawn base '{local}' from '{remote}': {error}")
+        let cause = crate::worktree::GitOperations::visible_git_label(&error.to_string());
+        format!("could not create local spawn base '{local_label}' from '{remote_label}': {cause}")
     })?;
-    let local_label = crate::worktree::GitOperations::visible_git_label(local);
-    let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
     Ok(Some(format!(
         "SPAWN BASE MATERIALIZED: local '{local_label}' created from '{remote_label}' ({}) for worker checkout and merge-back.",
         &remote_sha[..remote_sha.len().min(12)]
@@ -1266,10 +1268,11 @@ fn refresh_epic_base_from_parent(
         }
         if reset_reason.is_none() {
             return Err(format!(
-                "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`",
+                "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`{}",
                 &epic_sha[..epic_sha.len().min(8)],
                 &parent_sha[..parent_sha.len().min(8)],
                 epic_reconcile_command(repo_root, epic_branch, parent_ref)?,
+                git.reconcile_commit_cause(parent_ref, epic_branch),
             ));
         }
     }
@@ -2400,8 +2403,9 @@ impl WorkerSpawnContext {
                                     anyhow::bail!(
                                         "{}",
                                         epic_base_refresh_refusal(&format!(
-                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`",
+                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`{}",
                                             epic_reconcile_command(&repo_root, &parent_branch, &parent_ref).map_err(anyhow::Error::msg)?,
+                                            spawn_git.reconcile_commit_cause(&parent_ref, &parent_branch),
                                         ))
                                     );
                                 }
@@ -4639,6 +4643,30 @@ mod spawn_base_tests {
     }
 
     #[test]
+    fn spawn_parent_creation_failure_escapes_synced_branch_labels_cas_b010() {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        let branch = "epic/collision\u{85}/child";
+        let git = |repo: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&origin, &["branch", branch]);
+        let repo = tmp.path().join("repo");
+        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()]);
+        // A local prefix blocks materialization of the fetched child ref.
+        git(&repo, &["branch", "epic/collision\u{85}"]);
+        let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+        assert!(error.contains("could not create local spawn base"), "{error}");
+        assert!(error.contains("epic/collision\\u{85}/child"), "{error:?}");
+        assert!(error.contains("origin/epic/collision\\u{85}/child"), "{error:?}");
+        assert!(!error.contains('\u{85}'), "raw C1 leaked through labels or Git cause: {error:?}");
+        assert!(full_sha(&repo, &format!("refs/heads/{branch}")).is_none());
+    }
+
+    #[test]
     fn absent_spawn_base_still_refuses_without_writing_local_branch_gh_1034() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
@@ -4943,6 +4971,21 @@ mod spawn_base_tests {
         assert_eq!(short_sha(&repo, "origin/main"), remote_sha);
         assert!(!repo.join(".cas/worktrees/legacy-path-worker").exists());
         assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let repair_tip = short_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("repair-only divergence still refuses").to_string();
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(short_sha(&repo, "main"), repair_tip);
+        assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+        commit_file(&repo, "human-work.txt", "unpublished project work");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("mixed divergence still refuses").to_string();
+        assert!(!error.contains("Cause:"), "mixed history must not be blamed only on repairs: {error}");
     }
 
     #[test]
@@ -5939,6 +5982,33 @@ mod spawn_base_tests {
             stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
             "the divergence remains explicitly diagnosable to the spawning caller"
         );
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let parent_tip = head_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &repo.join(".cas"), "cas-legacy-child")
+            .err().expect("repair-only parent divergence still refuses").to_string();
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
+        assert_eq!(head_sha(&repo, "main"), parent_tip);
+
+        // A published repair can be ahead of the local parent after rebase
+        // merging. The real lane check chooses its remote-tracking parent.
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/main", parent_tip.as_str()],
+            vec!["reset", "--hard", "-q", "HEAD~1"],
+        ] {
+            assert!(Command::new("git").current_dir(&repo).args(args).status().unwrap().success());
+        }
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &repo.join(".cas"), "cas-legacy-child")
+            .err().expect("remote-parent repair divergence still refuses").to_string();
+        let cause = error.split("Cause:").nth(1).expect("Cassy-authored repair needs attribution");
+        assert!(!cause.contains("local-only"), "published repair was mislabelled: {error}");
+        assert!(cause.contains("not on") && cause.contains("epic/diverged"), "cause must identify the compared ref: {error}");
+        assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
+        assert_eq!(head_sha(&repo, "origin/main"), parent_tip);
     }
 
     /// GH #584 / cas-a075: the production spawn-preparation seam must stop

@@ -16,10 +16,28 @@ use crate::hooks::handlers::handlers_events::docs_freshness::{Measurement, Upkee
 
 pub(crate) fn measured_ref_line(reference: &str) -> String {
     let prefix = "Measured ref: ";
-    format!(
-        "{prefix}{}",
-        crate::ui::widgets::truncate(reference, 80 - prefix.len())
-    )
+    let room = 80 - prefix.len();
+    if reference.len() <= room {
+        return format!("{prefix}{reference}");
+    }
+    let Some((branch, sha)) = reference.rsplit_once('@') else {
+        return format!("{prefix}{}", crate::ui::widgets::truncate(reference, room));
+    };
+    let sha = if sha == "unavailable" { sha } else { sha.get(..7).unwrap_or(sha) };
+    let branch_room = room.saturating_sub(sha.len() + 1);
+    let branch = if branch.len() <= branch_room {
+        branch.to_owned()
+    } else {
+        // Keep both branch ends and the measured commit; ASCII dots also work
+        // in C locale. Byte budgets conservatively fit multibyte ref names.
+        let tail = branch
+            .char_indices()
+            .find(|(index, _)| branch.len() - index <= branch_room / 2)
+            .map(|(index, _)| &branch[index..])
+            .unwrap_or_default();
+        format!("{}{tail}", crate::ui::widgets::truncate(branch, branch_room - tail.len()))
+    };
+    format!("{prefix}{branch}@{sha}")
 }
 
 #[derive(Serialize)]
@@ -32,6 +50,8 @@ struct DebtSummary {
     history_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     history_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_notice: Option<&'static str>,
 }
 
 impl DebtSummary {
@@ -49,6 +69,7 @@ impl DebtSummary {
             grew: None,
             history_status: "unavailable",
             history_error: None,
+            history_notice: None,
         };
         for debt in &report.debt {
             *summary.by_kind.entry(debt.code.clone()).or_default() += 1;
@@ -82,7 +103,7 @@ impl DebtSummary {
                 row.get(0)
             })
             .optional()?;
-        let previous_total = previous
+        let prior = previous
             .map(|raw| -> Result<usize> {
                 let receipt: serde_json::Value = serde_json::from_str(&raw)?;
                 anyhow::ensure!(
@@ -94,7 +115,13 @@ impl DebtSummary {
                     .context("journey check receipt has no debt total")?;
                 Ok(usize::try_from(total)?)
             })
-            .transpose()?;
+            .transpose();
+        // A damaged receipt is not debt growth. Replace only this registry's
+        // baseline, while genuine database/transaction failures still surface.
+        let (previous_total, reset_history) = match prior {
+            Ok(previous) => (previous, false),
+            Err(_) => (None, true),
+        };
         let delta = previous_total
             .map(|previous| -> Result<i64> {
                 Ok(i64::try_from(self.total)? - i64::try_from(previous)?)
@@ -115,6 +142,8 @@ impl DebtSummary {
         self.previous_total = previous_total;
         self.delta = delta;
         self.grew = delta.map(|change| change > 0);
+        self.history_notice = reset_history
+            .then_some("invalid prior record replaced; new baseline recorded.");
         Ok(())
     }
 }
@@ -313,7 +342,10 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     }
                     _ => println!("Debt history unavailable; current check was not recorded."),
                 }
-                if !report.debt.is_empty() || debt_summary.history_error.is_some() {
+                if let Some(notice) = debt_summary.history_notice {
+                    println!("History reset: {notice}");
+                }
+                if !cli.verbose && (!report.debt.is_empty() || debt_summary.history_error.is_some()) {
                     println!("Details: cas qa journeys --check --verbose");
                 }
                 println!("Registry: {registry_path}");
@@ -364,6 +396,11 @@ enum CandidateCommand {
         #[arg(long)]
         plan: bool,
     },
+    /// Print a task's built candidate binary path (workers may run this)
+    Path {
+        #[arg(long)]
+        task: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -375,11 +412,18 @@ struct CandidatePlan {
     version_file: PathBuf,
     checksums_file: PathBuf,
     receipt_file: PathBuf,
+    /// cas-d0e6: the short form that resolves `binary` from the task id.
+    path_command: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct CandidateReceipt {
+    // The caller owns these paths; the builder's disk manifest contains
+    // identity fields, not its stdout-only candidate_dir summary field.
+    #[serde(skip_deserializing)]
     candidate_dir: PathBuf,
+    #[serde(skip_deserializing)]
+    receipt_file: PathBuf,
     revision: String,
     version: String,
     sha256: String,
@@ -400,8 +444,8 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
-    let CandidateCommand::Build { task, rev, plan } = &args.command;
+/// cas-d0e6: a task's canonical candidate directory, from its id alone.
+fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
     ensure!(
         task.starts_with("cas-")
             && task.len() > 4
@@ -412,6 +456,41 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     );
     let cas_root = cas_root.context("No Cassy project; run cas init first")?;
     let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
+    let config = crate::config::Config::load(cas_root)?;
+    let artifacts =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let artifacts = if artifacts.is_absolute() {
+        artifacts
+    } else {
+        project.join(artifacts)
+    };
+    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
+        .join(task)
+        .join("candidate");
+    Ok((project, candidate_dir))
+}
+
+fn candidate_path_command(task: &str) -> String {
+    format!("cas qa candidate path --task {task}")
+}
+
+fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
+    let (task, rev, plan) = match &args.command {
+        CandidateCommand::Build { task, rev, plan } => (task, rev, plan),
+        CandidateCommand::Path { task } => {
+            let (_, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
+            let binary = candidate_dir.join("cas");
+            ensure!(
+                binary.is_file(),
+                "no QA candidate built for {task} yet (expected {}); ask the supervisor to run \
+                 `cas qa candidate build --task {task} --rev <sha>`",
+                binary.display()
+            );
+            println!("{}", binary.display());
+            return Ok(());
+        }
+    };
+    let (project, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
     let revision = git_text(
         &project,
         &[
@@ -425,17 +504,6 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "resolved revision is not a full commit SHA"
     );
-    let config = crate::config::Config::load(cas_root)?;
-    let artifacts =
-        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let artifacts = if artifacts.is_absolute() {
-        artifacts
-    } else {
-        project.join(artifacts)
-    };
-    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
-        .join(task)
-        .join("candidate");
     let layout = CandidatePlan {
         task: task.clone(),
         revision: revision.clone(),
@@ -443,6 +511,7 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         version_file: candidate_dir.join("VERSION.txt"),
         checksums_file: candidate_dir.join("SHA256SUMS"),
         receipt_file: candidate_dir.join("RECEIPT.json"),
+        path_command: candidate_path_command(task),
         candidate_dir,
     };
     if *plan {
@@ -450,9 +519,10 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
             println!("{}", serde_json::to_string_pretty(&layout)?);
         } else {
             println!(
-                "Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json",
+                "Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json\nFind it: {}",
                 layout.candidate_dir.display(),
-                layout.revision
+                layout.revision,
+                layout.path_command
             );
         }
         return Ok(());
@@ -464,10 +534,11 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     let script = project.join("scripts/qa-candidate-build.py");
     ensure!(
         script.is_file(),
-        "QA candidate builder missing: {}",
-        script.display()
+        "QA candidate builder missing: scripts/qa-candidate-build.py\n\
+         Use an up-to-date Cassy source checkout, then rerun:\n\
+           cas qa candidate build --task {task} \\\n    --rev {revision}"
     );
-    let output = Command::new("python3")
+    let status = Command::new("python3")
         .arg(script)
         .arg("--repo")
         .arg(&project)
@@ -475,30 +546,38 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         .arg(&revision)
         .arg("--candidate-dir")
         .arg(&layout.candidate_dir)
-        .stdout(Stdio::piped())
+        // Git and cleanup helpers may write progress to stdout. The
+        // published file, not that stream, is the receipt contract.
+        .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .output()
+        .status()
         .context("run QA candidate build")?;
     ensure!(
-        output.status.success(),
+        status.success(),
         "QA candidate build exited {}",
-        output.status
+        status
     );
-    let receipt: CandidateReceipt =
-        serde_json::from_slice(&output.stdout).context("read QA candidate build receipt")?;
+    let mut receipt: CandidateReceipt = serde_json::from_slice(
+        &std::fs::read(&layout.receipt_file)
+            .with_context(|| format!("read QA candidate build receipt {}", layout.receipt_file.display()))?,
+    ).context("read QA candidate build receipt")?;
     ensure!(
-        receipt.revision == revision && receipt.candidate_dir == layout.candidate_dir,
-        "candidate receipt does not match requested revision and path"
+        receipt.revision == revision,
+        "candidate receipt does not match requested revision"
     );
+    receipt.candidate_dir = layout.candidate_dir;
+    receipt.receipt_file = layout.receipt_file;
     if cli.json {
-        print!("{}", String::from_utf8(output.stdout)?);
+        println!("{}", serde_json::to_string(&receipt)?);
     } else {
         println!(
-            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}",
+            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}\nReceipt: {}\nFind it: {}",
             receipt.candidate_dir.display(),
             receipt.version,
             receipt.revision,
-            receipt.sha256
+            receipt.sha256,
+            receipt.receipt_file.display(),
+            layout.path_command
         );
     }
     Ok(())

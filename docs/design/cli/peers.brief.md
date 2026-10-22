@@ -11,9 +11,9 @@
 
 ## Critique
 
-terminal-qa: PASS peers · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-559c/terminal-qa/peers/report.json
+terminal-qa: PASS peers · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-559c/terminal-qa/peers/report.json
 
-terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-559c/terminal-qa/peers-long/report.json
+terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-559c/terminal-qa/peers-long/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ Scored by golden-gazelle-73 on 2026-10-13 at f0b866541. Captures use the actual 
 
 ### Activation addition (cas-f82cb)
 
-terminal-qa: PASS peers-activation · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f82cb/terminal-qa/peers-activation/report.json
+terminal-qa: PASS peers-activation · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-f82cb/terminal-qa/peers-activation/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -38,3 +38,5 @@ terminal-qa: PASS peers-activation · 12 runs · 0 fail · 0 warn · 0 allowed �
 | Machine contract | 5 | The actual built CLI returns one JSON document with the original activation receipt. |
 
 Captures use the CLI built by the capped integration test at 99e3a387f and an isolated local Cloud fixture, never a live Slack read. The renderer and CLI inputs are unchanged by the subsequent body adapter.
+
+Published evidence: `art-0abf9796` (`cas-f82cb`).

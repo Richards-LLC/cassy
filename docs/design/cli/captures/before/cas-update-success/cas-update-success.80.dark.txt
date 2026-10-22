@@ -19,7 +19,7 @@ cas update: hub was running → verified at https://soundwave.tailf5a734.ts.net
   pippenz/Penguinz            ✓     ✓      ✓       ✓       ✓      migration     
   pippenz/ai-toolkit          ✓     ✓      ✓       –       –      not cloud-lin…
   pippenz/soundwave-config    ✓     ✓      ✓       –       –      not cloud-lin…
-  [OK] user-level store: migrated /home/pippenz/.cas; built-ins current
+  [OK] user-level store: migrated <home>/.cas; built-ins current
  ✓ 4.3s
 
 ✓ complete · Cassy 3.62.0 · 12 projects refreshed · 0 failed · 4.1s

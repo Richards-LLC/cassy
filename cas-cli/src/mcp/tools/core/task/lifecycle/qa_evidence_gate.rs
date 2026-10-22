@@ -332,7 +332,8 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     // A supervisor waiver covers implementer evidence at this exact delivered
     // commit, including bundles (GH #1199). Independent QA PASS and ancestor
     // waivers do not do so; skip/focus markers still run below.
-    let waiver = if tier != EvidenceTier::None || !matches!(&pair_coverage, Ok(false)) {
+    // None-tier evidence needs a waiver only when declared coverage failed.
+    let waiver = if tier != EvidenceTier::None || pair_coverage.is_err() {
         cas_store::satisfying_qa_passes(cas_root, &task.id)
             .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
             .into_iter()

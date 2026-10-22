@@ -605,6 +605,8 @@ def main() -> int:
         assert fields is not None
         assert fields["TAG"] == "v9.99.0"
         assert fields["PDF_FILE_ID"] == "F-report"
+        assert fields["PDF_MESSAGE_ID"] == "file-message"
+        assert fields["PDF_MESSAGE_PERMALINK"] == "https://example.test/files/report.pdf"
         assert fields["HTML_FILE_ID"] == "html-message"
         assert fields["USER_THREAD_TS"] == USER_THREAD
         assert fields["DEV_THREAD_TS"] == DEV_THREAD
@@ -635,7 +637,7 @@ def main() -> int:
         state.include_download_url = False
         result, fields = run_adapter(server, state, pdf)
         assert result.returncode != 0
-        assert "message permalink is not a PDF endpoint" in result.stderr
+        assert "no file id" in result.stderr
         assert fields is None
         assert state.download_requests == []
         methods = [request.get("method") for request in state.requests]

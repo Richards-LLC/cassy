@@ -23,8 +23,11 @@ receipt records current counts, the previous total and the check time. Different
 worktrees or registry paths have separate baselines; concurrent checks serialize
 their receipt updates. A completed validation records its count even when it
 finds problems; a read, YAML parse or Git failure does not replace the baseline.
-Checking never initializes a database or adds a state file. When the existing
-database or receipt cannot be read or written, current validation still runs;
+Checking never initializes a database or adds a state file. A corrupt receipt or
+an unsupported receipt version is replaced with the current check as a fresh
+baseline; comparisons are null and a one-line notice explains the reset. JSON
+includes the optional `debt_summary.history_notice`. Other registry baselines
+remain intact. When the existing database cannot be read or written, current validation still runs;
 `history_status` is `unavailable`, comparisons are null, and `history_error`
 explains why in JSON (or human `--verbose`). An unavailable baseline is not zero.
 

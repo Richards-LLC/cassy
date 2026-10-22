@@ -45,12 +45,20 @@ struct FakeState {
     renew_after_lock_reads: Option<(usize, bool)>,
     change_after_lock_read: Option<(usize, Option<String>)>,
     return_released_rows: bool,
+    // Apply a late release/competing claim in the claim-to-renew gap.
+    change_before_renew: Option<Option<String>>,
+    fail_renew: bool,
     // Pause exactly at the remote handoff, after the local lease has won.
     release_gate: Option<(tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     // cas-c55f: hold the next file-lease release until the test resumes it.
     file_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     // cas-978d: hold the next task-claim release until the test resumes it.
     task_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    // cas-da31: hold the next release on its own thread until the test
+    // resumes it, while every other request is still served (a slow Cloud).
+    async_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    // Observe actual late application, even after the client has timed out.
+    async_release_done: Option<std::sync::mpsc::Sender<(serde_json::Value, u16)>>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -90,6 +98,31 @@ impl FakeCloud {
             for mut request in thread_server.incoming_requests() {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
+                let async_gate = if request.url().ends_with("/release") {
+                    thread_state.lock().unwrap().async_release_gate.take()
+                } else {
+                    None
+                };
+                if let Some((entered, resume)) = async_gate {
+                    let state = Arc::clone(&thread_state);
+                    std::thread::spawn(move || {
+                        let _ = entered.send(());
+                        let _ = resume.recv();
+                        let (status, json) =
+                            Self::handle(&state, request.method().as_str(), request.url(), &body);
+                        if let Some(done) = state.lock().unwrap().async_release_done.take() {
+                            let _ = done.send((serde_json::from_str(&body).unwrap(), status));
+                        }
+                        let response = tiny_http::Response::from_string(json.to_string())
+                            .with_status_code(status)
+                            .with_header(
+                                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                    .unwrap(),
+                            );
+                        let _ = request.respond(response);
+                    });
+                    continue;
+                }
                 let gate = if request.url().ends_with("/release") {
                     thread_state.lock().unwrap().release_gate.take()
                 } else {
@@ -162,6 +195,19 @@ impl FakeCloud {
         let key = key.to_string();
         let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
         let now = Utc::now();
+        if method == "POST" && action == "renew" {
+            if let Some(winner) = state.change_before_renew.take()
+                && let Some(lock) = state.locks.get_mut(&key)
+            {
+                match winner {
+                    Some(winner) => { lock.agent_id = winner; lock.epoch += 1; }
+                    None => lock.status = "released".into(),
+                }
+            }
+            if state.fail_renew {
+                return (500, serde_json::json!({"error": "injected renewal failure"}));
+            }
+        }
         let active = state.locks.get(&key).filter(|lock| lock.status == "active").cloned();
         match (method, action) {
             ("POST", "claim") => match active {
@@ -202,6 +248,21 @@ impl FakeCloud {
                 }
             },
             ("POST", "release") => {
+                // petra-stella-cloud #164: a conditional release names the
+                // lock snapshot it expects, both fields or neither; a lock
+                // reacquired or renewed since answers 409.
+                let expected = (body["expected_epoch"].as_u64(), body["expected_renewal_count"].as_u64());
+                match expected {
+                    (Some(epoch), Some(renewals)) => {
+                        if let Some(lock) = state.locks.get(&key).filter(|lock| lock.status == "active")
+                            && (lock.epoch != epoch || u64::from(lock.renewal_count) != renewals)
+                        {
+                            return (409, serde_json::json!({"error": "lock_snapshot_changed"}));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => return (400, serde_json::json!({"error": "expected_epoch and expected_renewal_count go together"})),
+                }
                 if let Some(winner) = state.replace_on_release.take()
                     && let Some(lock) = state.locks.get_mut(&key)
                 { lock.agent_id = winner; lock.renewed_at = now; lock.epoch += 1; }
@@ -872,6 +933,272 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
     }
 }
 
+/// A same-agent re-claim leaves the old Cloud snapshot unchanged until
+/// renewal; a late release can therefore win that one-round-trip gap.
+#[tokio::test]
+async fn cas_cfe6_start_repairs_or_honestly_reports_a_failed_claim_renewal() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    for outcome in ["released", "peer", "unavailable"] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+        let restart = machine(&cloud.url, PROJECT, "restart-worker");
+        let peer = machine(&cloud.url, PROJECT, "peer-worker");
+        let task = "cas-renew-gap";
+        for m in [&alpha, &restart] {
+            m.put_task(task, TaskType::Task);
+        }
+        cloud.live(&peer, "peer-worker");
+        start(&alpha.core, task, false).await.unwrap();
+        let before = cloud.active_lock(task).unwrap().1;
+        {
+            let mut state = cloud.state.lock().unwrap();
+            if outcome == "unavailable" {
+                state.fail_renew = true;
+            } else {
+                state.change_before_renew =
+                    Some((outcome == "peer").then(|| peer.agent_id.clone()));
+            }
+        }
+        let result = start(&restart.core, task, false).await;
+        let local = open_agent_store(&restart.cas_dir)
+            .unwrap()
+            .get_lease(task)
+            .unwrap();
+        match outcome {
+            "released" => {
+                let started = result.expect("restart repairs its Cloud claim before success");
+                let (_, lock) = cloud
+                    .active_lock(task)
+                    .expect("the restarted claim exists immediately");
+                assert_eq!(lock.agent_id, restart.agent_id, "{started}");
+                assert!(
+                    lock.epoch > before.epoch,
+                    "a fresh claim replaced the released snapshot"
+                );
+                assert!(local.is_some(), "{started}");
+            }
+            "peer" => {
+                let error = result.expect_err("a peer winning the renewal gap refuses the start");
+                assert!(error.contains("peer-worker"), "{error}");
+                assert!(
+                    local.is_none(),
+                    "a refused restart publishes no local lease"
+                );
+                assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
+            }
+            _ => {
+                let started = result.expect("unavailable Cloud still permits a local lease");
+                assert!(started.to_lowercase().contains("unreachable"), "{started}");
+                assert!(local.is_some());
+                let renews = cloud
+                    .state
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .filter(|r| r.ends_with("/renew"))
+                    .count();
+                assert!(
+                    renews <= 3,
+                    "repair is bounded (including the initial start): {renews}"
+                );
+            }
+        }
+    }
+}
+
+/// Moving a local lease may find its Cloud mirror already moved to the winner.
+#[tokio::test]
+async fn cas_cfe6_local_transfer_classifies_the_current_cloud_holder() {
+    use cas::cloud::peer_claims::{Acquire, ClaimKind, PeerClaims};
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    for holder in ["self", "previous", "peer", "absent"] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "new-worker");
+        let previous = machine(&cloud.url, PROJECT, "old-worker");
+        let peer = machine(&cloud.url, PROJECT, "peer-worker");
+        cloud.live(&peer, "peer-worker");
+        let task = "cas-transfer-gap";
+        alpha.put_task(task, TaskType::Task);
+        start(&alpha.core, task, false).await.unwrap();
+        match holder {
+            "previous" => cloud.give_to(task, &previous.agent_id, None),
+            "peer" => cloud.give_to(task, &peer.agent_id, None),
+            "absent" => cloud.drop_lock(task),
+            _ => {}
+        }
+        let before = cloud.active_lock(task);
+        let claims = PeerClaims::for_project(&alpha.cas_dir).unwrap();
+        let answer = claims.take_from_local(
+            task,
+            ClaimKind::Task,
+            &previous.agent_id,
+            &alpha.agent_id,
+            "new-worker",
+            600,
+        );
+        if holder == "peer" {
+            assert!(matches!(answer, Acquire::PeerHolds(_)), "{answer:?}");
+            assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
+        } else {
+            assert!(matches!(answer, Acquire::Claimed), "{holder}: {answer:?}");
+            let after = cloud.active_lock(task).unwrap().1;
+            assert_eq!(after.agent_id, alpha.agent_id);
+            if holder == "self" {
+                let before = before.unwrap().1;
+                assert_eq!(
+                    (after.epoch, after.renewal_count),
+                    (before.epoch, before.renewal_count)
+                );
+                assert!(
+                    !cloud
+                        .state
+                        .lock()
+                        .unwrap()
+                        .requests
+                        .iter()
+                        .any(|r| r.ends_with("/release")),
+                    "a transfer must not release its winner's own claim"
+                );
+            }
+        }
+    }
+}
+
+/// cas-da31: a start whose local lease fails rolls its fresh Cloud claim
+/// back. When that release outlasts the start's Cloud budget it keeps
+/// running in the background. A restart by the same agent in that window
+/// must keep its own fresh claim: the stale release may not take it.
+#[tokio::test]
+async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+    alpha.put_task("cas-restart", TaskType::Task);
+    let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_start BEFORE INSERT ON task_leases
+         WHEN NEW.task_id = 'cas-restart'
+         BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;",
+    )
+    .unwrap();
+    // The rollback's Cloud release is held, on its own thread, until the test
+    // lets it go; every other request is still served.
+    let (entered, rollback_reached) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    cloud.state.lock().unwrap().async_release_gate = Some((entered, held));
+
+    // The failed start returns once its Cloud budget runs out; its rollback
+    // release is still held at the Cloud.
+    start(&alpha.core, "cas-restart", false).await.unwrap_err();
+    rollback_reached
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the rollback asked the Cloud to release");
+
+    db.execute_batch("DROP TRIGGER refuse_start;").unwrap();
+    let mut restart = Box::pin(start(&alpha.core, "cas-restart", false));
+    // Give the restart time to claim if nothing holds it back.
+    let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut restart).await;
+    resume.send(()).unwrap();
+    let restarted = match early {
+        Ok(result) => result,
+        Err(_) => restart.await,
+    };
+    restarted.expect("the same agent restarts the task");
+
+    // Once the stale release has reached the Cloud, the restart's claim stands.
+    let release_served = || {
+        cloud.state.lock().unwrap().requests.iter()
+            .any(|request| request.starts_with("POST ") && request.ends_with("/release"))
+    };
+    for _ in 0..200 {
+        if release_served() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(release_served(), "the rollback release reached the Cloud");
+    let (_, lock) = cloud
+        .active_lock("cas-restart")
+        .expect("the restart's fresh Cloud claim survives the stale rollback release");
+    assert_eq!(lock.agent_id, alpha.agent_id);
+}
+
+/// Exercise both remaining release entry paths, including a real HTTP timeout
+/// and a live 409 response that must settle the pending retry record.
+#[tokio::test]
+async fn delayed_retry_and_focus_releases_keep_same_agent_restart_cas_0760() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let mut lost = Vec::new();
+    for (entry, timeout) in [("retry", false), ("retry", true), ("focus", true)] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+        let restart = machine(&cloud.url, PROJECT, "restart-worker");
+        assert_eq!(alpha.agent_id, restart.agent_id);
+        let task = "cas-release-restart";
+        for machine in [&alpha, &restart] {
+            machine.put_task(task, TaskType::Task);
+        }
+        if entry == "focus" {
+            assert!(matches!(cas::cloud::peer_claims::claim_epic_focus(
+                &alpha.cas_dir, task, &alpha.agent_id,
+            ), Some(cas::cloud::peer_claims::Acquire::Claimed)));
+        } else {
+            start(&alpha.core, task, false).await.unwrap();
+            open_agent_store(&alpha.cas_dir).unwrap().release_lease(task, &alpha.agent_id).unwrap();
+            // A persisted failed release, retried by the real daemon renewal.
+            std::fs::write(alpha.cas_dir.join("claim-releases.json"),
+                serde_json::json!({task: Utc::now().timestamp()}).to_string()).unwrap();
+        }
+        let before = cloud.active_lock(task).unwrap().1;
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (resume, held) = std::sync::mpsc::channel();
+        let (done, applied) = std::sync::mpsc::channel();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.async_release_gate = Some((entered, held));
+            state.async_release_done = Some(done);
+        }
+        let root = alpha.cas_dir.clone();
+        let agent = alpha.agent_id.clone();
+        let mut releasing = Some(std::thread::spawn(move || {
+            if entry == "focus" {
+                assert_eq!(cas::cloud::peer_claims::release_epic_focus(&root, &agent).as_deref(), Some(task));
+            } else {
+                cas::cloud::peer_claims::renew_agent_claims(&root, &agent);
+            }
+        }));
+        reached.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        if timeout {
+            // Real request timeout releases the fence before Cloud applies it.
+            releasing.take().unwrap().join().unwrap();
+        }
+        start(&restart.core, task, false).await.expect("same agent restarts in its new database");
+        let fresh = cloud.active_lock(task).unwrap().1;
+        assert!(fresh.renewal_count > before.renewal_count);
+        resume.send(()).unwrap();
+        let (body, status) = applied.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        if let Some(releasing) = releasing { releasing.join().unwrap(); }
+        if cloud.active_lock(task).is_none() { lost.push((entry, timeout)); }
+        // Collect both entry failures before asserting so RED covers both.
+        if status == 409 {
+            assert_eq!(body["expected_epoch"], before.epoch);
+            assert_eq!(body["expected_renewal_count"], before.renewal_count);
+            if entry == "retry" && !timeout {
+                let pending = alpha.cas_dir.join("claim-releases.json");
+                assert!(!pending.exists(), "409 is settled, never retried against the fresh claim");
+            }
+        } else {
+            assert_eq!(status, 200, "unexpected fake Cloud response");
+        }
+    }
+    assert!(lost.is_empty(), "stale releases discarded same-agent restart claims: {lost:?}");
+}
+
 #[tokio::test]
 async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
     let mut env = TestEnvGuard::temp_home();
@@ -1057,7 +1384,9 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
 
     cloud.drop_lock("cas-pb01");
     let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
-    let (_, lock) = cloud.active_lock("cas-pb01").expect("renewal re-acquires the lost claim");
+    let (_, lock) = cloud
+        .active_lock("cas-pb01")
+        .expect("renewal re-acquires the lost claim");
     assert_eq!(lock.agent_id, alpha.agent_id, "{report:?}");
     assert_eq!(report.reacquired, 1, "{report:?}");
 
@@ -1070,7 +1399,46 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
     let (task, hold) = &report.conflicts[0];
     assert_eq!(task, "cas-pb01");
     assert_eq!(hold.name(), "bravo-sup", "{}", hold.describe());
-    assert_eq!(cloud.active_lock("cas-pb01").unwrap().1.agent_id, bravo.agent_id);
+    assert_eq!(
+        cloud.active_lock("cas-pb01").unwrap().1.agent_id,
+        bravo.agent_id
+    );
+
+    // cas-eb7ff: neither renew nor reacquire a stale local execution claim.
+    let tasks = open_task_store(&alpha.cas_dir).unwrap();
+    for (status, assignee) in [
+        (TaskStatus::InProgress, Some(bravo.agent_id.as_str())),
+        (TaskStatus::InProgress, None),
+        (TaskStatus::Open, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Blocked, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Closed, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Cancelled, Some(alpha.agent_id.as_str())),
+        (TaskStatus::AwaitingMerge, Some(alpha.agent_id.as_str())),
+    ] {
+        let mut task = tasks.get("cas-pb01").unwrap();
+        task.status = status;
+        task.assignee = assignee.map(str::to_string);
+        tasks.update(&task).unwrap();
+        cloud.give_to("cas-pb01", &alpha.agent_id, None);
+        let before = cloud.active_lock("cas-pb01").unwrap().1;
+        let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+        assert_eq!(
+            report.renewed + report.reacquired,
+            0,
+            "{status:?}/{assignee:?}: {report:?}"
+        );
+        assert_eq!(
+            cloud.active_lock("cas-pb01").unwrap().1.renewal_count,
+            before.renewal_count
+        );
+        cloud.drop_lock("cas-pb01");
+        let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+        assert_eq!(report.renewed + report.reacquired, 0, "{report:?}");
+        assert!(
+            cloud.active_lock("cas-pb01").is_none(),
+            "stale lease reacquired: {report:?}"
+        );
+    }
 }
 
 fn factory_service(m: &Machine) -> cas::mcp::CasService {
@@ -1188,6 +1556,11 @@ async fn a_claim_lost_to_a_peer_notifies_the_owning_supervisor_once() {
     agents.register(&worker).unwrap();
     // The worker holds the local lease, but a peer holds the cloud claim.
     agents.try_claim("cas-pb02", &worker.id, 600, Some("Task started")).unwrap();
+    let tasks = open_task_store(&alpha.cas_dir).unwrap();
+    let mut task = tasks.get("cas-pb02").unwrap();
+    task.assignee = Some(worker.id.clone());
+    task.status = TaskStatus::InProgress;
+    tasks.update(&task).unwrap();
     cloud.live(&bravo, "bravo-sup");
     start(&bravo.core, "cas-pb02", false).await.expect("bravo claims it");
 

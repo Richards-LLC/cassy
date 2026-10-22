@@ -79,6 +79,23 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+A nontransactional task merge records a recovery intent before Git changes and
+an immutable observation afterward. Once that observation is durable, advisory
+CI and explicit CI overrides finish the intent without requesting automatic
+close. Green published merges retain it only while close or verification
+dispatch still needs recovery. A repeated merge after completion returns
+`Already contained`, even if a peer advanced the target.
+
+While holding the target merge lock, the pending check (including first-use
+schema installation), intent write, observation write and intent clear each
+share a two-second bound across their SQLite busy waits and retries. Thus these
+four operations contribute at most eight seconds of deliberate contention
+waiting per request, rather than three independent roughly 32-second retry
+windows. Git commands and close/verification work have their own execution
+bounds; eight seconds is not a wall-clock timeout for the entire merge. A
+persistence failure reports the existing exact-merge retry action, preserving
+unfinished recovery state.
+
 Worker-idle merge notices wait for completed CI on the delivery's exact tip
 and a successful refresh of its integration target. Parked deliveries retry
 each minute, including when the director snapshot is unchanged. Pending CI
@@ -1136,6 +1153,21 @@ still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
 ### Assignment on task creation
 
+When `epic`, `target_repo` and `target_branch` are all omitted, task creation
+inherits the caller's active task's epic and exact WorkTarget together. A leased
+epic supplies its own ID and live delivery lane, so an automatically leased
+parent agrees with its child. Creating a new epic never uses this default: it
+gets its own branch and target. Only valid leases on InProgress tasks count;
+held or expired work does not. Multiple eligible tasks must agree on both
+bindings, or creation refuses and requests an
+explicit binding. The receipt names the source task, epic, repository and branch.
+Any explicit binding keeps the explicit resolver: an alternate epic follows
+that epic's lane, and `epic=""` deliberately creates standalone work. Omitted
+fields are never inherited independently. Parent edges record the caller's
+identity, so the caller's own epic updates and dependency additions do not
+trigger a planning-race warning; legacy anonymous `mcp` edges prove no other
+planner's identity.
+
 In factory mode, `task action=create assignee=<worker>` uses the same worker
 identity normalization and freshness policy as `task action=update assignee=`.
 A refused assignment rejects the entire create before saving a task or queuing
@@ -1575,8 +1607,22 @@ Publish durable proof outside that disposable home, in the task artifact root.
 root siblings of at least 1 GiB (apparent file bytes) as review-only. The
 unmanaged scan stops at that threshold and reports a lower bound, not a full
 recursive total.
-`gc_cleanup force=true dry_run=false` reclaims owned checkouts idle for at least
-two hours when the task is Closed/Cancelled or the exact dispatch is resolved.
+`gc_cleanup force=true dry_run=false` reclaims a managed review target as soon as
+the dispatch resolves, times out or is invalidated, or a task is Closed/Cancelled,
+provided no Pending/Claimed dispatch remains for that task.
+Verdict recording and task close await only a guarded atomic rename into private
+trash; measurement and deletion run in the background under the build-lane lock.
+The collector also reclaims other eligible checkouts' `repo/target` under those
+same guards. GC and disk-pressure admission recover interrupted trash, including
+legacy trash missing its marker when the private parent owner validates. Deletion
+removes the target first, then its marker, then the empty trash directory, so a
+process exit leaves recoverable state. Cleanup reports deletion as deferred when
+the project collector lock is busy or unavailable. Each pass visits at most 16 checkouts.
+The small source checkout and Git registration retain the two-hour idle grace period.
+`REVIEW_SCRATCH_STATUS_JSON` reports total and per-checkout `reclaimable_bytes`; a
+young terminal checkout contributes its disposable target bytes, not its source bytes.
+The default human report also shows that total. Both review and target-cache
+reports count queued trash as `pending_reclaim_bytes`, never as already freed space.
 Successful checkout reuse refreshes `last_used_at`; older records without that
 field use creation time. It
 checks leases and native process evidence (open files, cwd, mappings and argv),
@@ -1587,7 +1633,7 @@ concurrent source edits; ignored build output is disposable. Force is permitted
 only to remove a registration whose checkout directory is already gone. It then
 deletes the disposable home. Unknown/malformed ownership,
 changed heads, another repository's registration, live or unverifiable users,
-and younger checkouts are retained. Force alone remains a preview for this tier.
+and pending/claimed dispatches are retained. Young source checkouts are retained. Force alone remains a preview for this tier.
 These rules make interrupted verifier/supervisor output collectable without
 relying on an agent remembering to remove a large checkout.
 
@@ -1628,6 +1674,9 @@ substitutions remain refused; this profile is for targeted tests, not checks.
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+The bounded nextest discovery guard requires `python3` on PATH, including in
+projects using the embedded runner without this repository's scripts. It forwards
+TERM/INT/HUP to its owned Cargo process group and bounds cleanup after stdout EOF.
 On Unix, named tests and their guard processes run with private links to resolved
 Rust tools first on PATH. Rustup proxies are resolved to concrete toolchain
 executables, and the selected Cargo invocation uses that private link; this
@@ -2495,6 +2544,26 @@ command away.
 
 ### Builtin skill references
 
+`finish` is a shared builtin skill; Claude Code exposes it as `/finish`, and the
+other harnesses receive the same `SKILL.md`. It needs no personal HOME seed.
+Update also refreshes finish in named Claude/Codex accounts and their shared
+bases. The exact old cas-f4ea command seed is removed in favor of the skill.
+A customized Claude `commands/finish.md` blocks builtin installation: Cassy leaves both
+entrypoints untouched and skips installing its finish skill for that profile.
+An existing customized finish `SKILL.md` is preserved, even when it retains
+`managed_by: cas`. Delete the custom entrypoint and rerun `cas update` to accept
+the builtin. Other builtin skills keep their existing ownership policy.
+
+For Codex, a personal `~/.agents/skills/finish/SKILL.md` takes precedence over
+Cassy's default, named-account, shared-base and project copies. Update skips
+installing another finish and removes an earlier Cassy copy only when its hash
+matches the recorded baseline or a shipped version. Customized copies and
+symlinks are preserved; if both entrypoints exist, update warns with both paths
+so the operator can choose which to keep. Named-account/shared-base finish
+updates and preservations appear in human output and JSON `finish_accounts`;
+account-discovery failures appear in `account_discovery_warnings` and do not
+abort default-profile or shared-base refresh.
+
 Every file in a managed builtin skill directory other than its `SKILL.md` (references, scripts, examples, templates) is owned by that skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`. The ledger keeps deleted files too: sync prunes an installed file Cassy no longer ships only when its content proves it is Cassy's (a shipped hash, the recorded baseline, or `managed_by: cas`). Retired managed agents are pruned the same way, and `cas doctor` reports installed-vs-catalog drift as `host install parity`.
 
 **After changing, adding or deleting any builtin skill file — and before cutting a release — run:**
@@ -2613,6 +2682,16 @@ is not parked for merge. A valid integrated `commit_receipt` proves delivery
 even after a suffixed promotion branch was deleted and the canonical task
 branch never existed. If that receipt is invalid, close reports its validation
 reason before parking; `merged_into` does not override the declared work target.
+After rebasing a parked delivery, push the rewritten tip and re-run close with
+checks for that exact tip before requesting its merge. Close preserves the full
+parked patch set, allows attributable corrections while the worker exclusively
+owns the delivery, and audits the replacement anchor. An explicit receipt or
+stored anchor absent from the pushed source refuses at close with recovery
+guidance. Sending a merge request cannot advance the persisted park anchor.
+An empty checkpoint atop real task commits retains its parked anchor while
+content proof measures the attributed task commits beneath it. A delivery
+containing only empty commits still refuses; existing attribution and content
+loss checks remain in force.
 A transferred delivery also resolves its recorded parked or handoff branch
 when the receiving worker's lane belongs to another task, including a branch
 available only on origin. Already integrated work needs no branch adoption or

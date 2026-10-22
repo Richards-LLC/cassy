@@ -319,10 +319,6 @@ fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
     Ok(profile)
 }
 
-/// cas-f4ea: the HOME-level canonical copy of the operator's personal `/finish`
-/// command, kept beside the Codex user skill that carries the same text.
-const PERSONAL_FINISH_REFERENCE: &str = ".agents/skills/finish/references/finish.md";
-
 /// Equip a newly created account: link it to the shared base when one exists
 /// (cas-e1f4), otherwise seed it from `~/.claude` as the picker always has.
 /// Both the picker and `cas claude login` use this, so neither path can leave
@@ -350,43 +346,7 @@ fn link_or_seed_new_profile(home: &Path, profile_dir: &Path) -> Result<()> {
         )?;
         report_seeding(&seeding, "~/.claude");
     }
-    seed_missing_personal_finish(home, profile_dir)
-}
-
-/// cas-f4ea: when the account's own `commands/` (not a link into `~/.claude`
-/// or the shared base) has no `finish.md`, copy the HOME reference there.
-/// Never replaces a file, never writes through a link, and does nothing when
-/// the reference is absent.
-fn seed_missing_personal_finish(home: &Path, profile_dir: &Path) -> Result<()> {
-    use std::io::Write;
-
-    let reference = home.join(PERSONAL_FINISH_REFERENCE);
-    let commands = profile_dir.join("commands");
-    let target = commands.join("finish.md");
-    let commands_linked =
-        std::fs::symlink_metadata(&commands).is_ok_and(|meta| meta.file_type().is_symlink());
-    if commands_linked || std::fs::symlink_metadata(&target).is_ok() || !reference.is_file() {
-        return Ok(());
-    }
-    let bytes = std::fs::read(&reference)
-        .with_context(|| format!("could not read {}", reference.display()))?;
-    std::fs::create_dir_all(&commands)
-        .with_context(|| format!("could not create {}", commands.display()))?;
-    // create_new: a file that appeared meanwhile is the operator's and stays.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&target)
-    {
-        Ok(mut file) => file
-            .write_all(&bytes)
-            .with_context(|| format!("could not write {}", target.display()))?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not create {}", target.display()));
-        }
-    }
-    eprintln!("Added your personal /finish from ~/{PERSONAL_FINISH_REFERENCE}.");
+    crate::builtins::sync_finish_builtins(cas_mux::SupervisorCli::Claude, profile_dir)?;
     Ok(())
 }
 
@@ -1056,8 +1016,8 @@ mod tests {
     }
 
     /// cas-f4ea: `cas claude login` used to create a bare account dir, so a new
-    /// account had no shared skills and no personal `/finish`. It now equips the
-    /// account like the picker and copies only a missing `/finish`.
+    /// account had no shared skills or `/finish`. The builtin equips a new
+    /// account without a personal HOME seed and keeps existing commands.
     #[cfg(unix)]
     #[test]
     fn login_equips_new_accounts_and_keeps_existing_commands_cas_f4ea() {
@@ -1067,7 +1027,6 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         };
-        write(&home.join(PERSONAL_FINISH_REFERENCE), "FINISH");
         write(&home.join(".claude/skills/s/SKILL.md"), "shared skill");
         write(&home.join(".claude-old@x.com/commands/finish.md"), "MINE");
 
@@ -1077,8 +1036,12 @@ mod tests {
             home.join(".claude/skills")
         );
         assert_eq!(
-            std::fs::read_to_string(fresh.join("commands/finish.md")).unwrap(),
-            "FINISH"
+            std::fs::read_to_string(fresh.join("skills/finish/SKILL.md")).unwrap(),
+            crate::builtins::BUILTIN_SKILLS
+                .iter()
+                .find(|file| file.path == "skills/finish/SKILL.md")
+                .unwrap()
+                .content
         );
 
         let old = prepare_login_profile(&home, "old@x.com").unwrap();

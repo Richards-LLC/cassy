@@ -495,6 +495,9 @@ impl CasCore {
         task: &Task,
         assignee: &str,
         assignment_status: TaskStatus,
+        supervisor_override: bool,
+        supervisor_override_reason: Option<&str>,
+        override_audit: &mut Option<String>,
         warnings: &mut Vec<String>,
     ) -> Result<String, String> {
         if std::env::var("CAS_FACTORY_MODE").is_err() {
@@ -550,22 +553,99 @@ impl CasCore {
                 {
                     warnings.push(note);
                 } else {
+                    let mut assignment_override_applied = false;
                     if factory_config.block_stale_assignment
                         && behind_count >= factory_config.stale_threshold_commits
                     {
-                        let [rebase] =
-                            crate::worktree::GitOperations::git_remedies([&["rebase", &branch]])?;
-                        let branch = crate::worktree::GitOperations::visible_git_label(&branch);
-                        let worker_name =
-                            crate::worktree::GitOperations::visible_git_label(worker_name);
-                        return Err(format!(
-                            "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
-                            factory_config.stale_threshold_commits,
+                        if supervisor_override {
+                            let supervisor = self.resolve_live_supervisor_authority().map_err(
+                                |error| format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a live registered supervisor ({error:?})."
+                                ),
+                            )?;
+                            let reason = supervisor_override_reason
+                                .map(str::trim)
+                                .filter(|reason| !reason.is_empty())
+                                .ok_or_else(|| {
+                                    "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason.".to_string()
+                                })?;
+                            if worker.role != cas_types::AgentRole::Worker
+                                || !matches!(
+                                    worker.status,
+                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                                )
+                            {
+                                return Err(format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: assignee '{}' is not an active worker.",
+                                    worker.name
+                                ));
+                            }
+                            let active = task_store
+                                .ids_by_assignees_and_statuses(
+                                    &[&worker.name, &worker.id],
+                                    &[
+                                        TaskStatus::Open,
+                                        TaskStatus::InProgress,
+                                        TaskStatus::Blocked,
+                                    ],
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "SUPERVISOR OVERRIDE REJECTED: cannot verify active tasks for '{}': {error}",
+                                        worker.name
+                                    )
+                                })?;
+                            if active.iter().any(|id| id != &task.id) {
+                                return Err(format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: worker '{}' already has active task(s): {}.",
+                                    worker.name,
+                                    active
+                                        .iter()
+                                        .filter(|id| *id != &task.id)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                            let reason = reason.replace(['\n', '\r'], " ");
+                            let visible_branch =
+                                crate::worktree::GitOperations::visible_git_label(&branch);
+                            warnings.push(format!(
+                                "⚠️ SUPERVISOR OVERRIDE: {} accepted assignment to worker '{}' despite {behind_count} commits behind {visible_branch} (threshold: {}). The worktree was not changed. Inspect dirty or unpushed work before starting. For an Open task with a declared work target, `task start` runs reuse checks only on another owned factory branch. Other starts do not provide that check. Reason: {reason}",
+                                supervisor.name,
+                                worker.name,
+                                factory_config.stale_threshold_commits,
+                            ));
+                            *override_audit = Some(format!(
+                                "[{}] DECISION: supervisor_override=true accepted stale assignment task={} worker={} supervisor={} behind={} target={} reason={}",
+                                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                                task.id,
+                                worker.name,
+                                supervisor.id,
+                                behind_count,
+                                visible_branch,
+                                reason,
+                            ));
+                            assignment_override_applied = true;
+                        } else {
+                            let [rebase] = crate::worktree::GitOperations::git_remedies([
+                                &["rebase", &branch],
+                            ])?;
+                            let branch =
+                                crate::worktree::GitOperations::visible_git_label(&branch);
+                            let worker_name =
+                                crate::worktree::GitOperations::visible_git_label(worker_name);
+                            return Err(format!(
+                                "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
+                                factory_config.stale_threshold_commits,
+                            ));
+                        }
+                    }
+                    if !assignment_override_applied {
+                        warnings.push(format!(
+                            "⚠️ Worker '{worker_name}' is {behind_count} commit(s) behind {branch}. Consider syncing first."
                         ));
                     }
-                    warnings.push(format!(
-                        "⚠️ Worker '{worker_name}' is {behind_count} commit(s) behind {branch}. Consider syncing first."
-                    ));
                 }
             }
         }
@@ -613,7 +693,7 @@ impl CasCore {
         state_patch: Option<serde_json::Value>,
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
-        split_supervisor_override: bool,
+        supervisor_override: bool,
     ) -> Result<CallToolResult, McpError> {
         if let Some(message) = [req.notes.as_deref(), proof_scope_fix_reason]
             .into_iter()
@@ -643,7 +723,7 @@ impl CasCore {
             .and_then(normalize_assignee_update_value)
         {
             if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
-                if !split_supervisor_override {
+                if !supervisor_override {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
@@ -1595,6 +1675,7 @@ impl CasCore {
 
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
+        let mut assignee_override_audit = None;
 
         if let Some(ref assignee_raw) = req.assignee {
             // cas-bf98: empty/whitespace = explicit clear (unassign). Must run
@@ -1612,7 +1693,14 @@ impl CasCore {
                         .unwrap_or(task.status);
                     let canonical_assignee = self
                         .validate_task_assignee(
-                            task_store.as_ref(), &task, &assignee, assignment_status, &mut warnings,
+                            task_store.as_ref(),
+                            &task,
+                            &assignee,
+                            assignment_status,
+                            supervisor_override,
+                            proof_scope_fix_reason,
+                            &mut assignee_override_audit,
+                            &mut warnings,
                         )
                         .map_err(|message| McpError {
                             code: ErrorCode::INVALID_PARAMS,
@@ -1632,6 +1720,13 @@ impl CasCore {
                     }
                     task.assignee = Some(canonical_assignee);
                     task.deliverables.split_takeover = split_takeover.clone();
+                    if let Some(audit) = assignee_override_audit.take() {
+                        if !task.notes.is_empty() {
+                            task.notes.push_str("\n\n");
+                        }
+                        task.notes.push_str(&audit);
+                        changes.push("notes");
+                    }
                     if let Some(authorization) = &split_takeover {
                         task.notes.push_str(&format!(
                             "\n[{}] DECISION: SPLIT OVERRIDE split={} worker={} supervisor={} reason={}",
@@ -1927,6 +2022,7 @@ impl CasCore {
 
         // Captured before `req.epic` is consumed below — the blocked_by guard
         // (cas-d45f) needs to know the epic this same call is establishing.
+        let epic_update_supplied = req.epic.is_some();
         let req_epic_for_blocker_guard: Option<String> = req
             .epic
             .as_deref()
@@ -1985,7 +2081,7 @@ impl CasCore {
                     to_id: epic_id.to_string(),
                     dep_type: DependencyType::ParentChild,
                     created_at: chrono::Utc::now(),
-                    created_by: Some("mcp".to_string()),
+                    created_by: self.get_agent_id().ok(),
                 })
             };
             // cas-c85e / cas-6fb6: the delivery target a move into this
@@ -2337,6 +2433,21 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        if epic_update_supplied {
+            match crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &req.id,
+            ) {
+                Ok(released) if released > 0 => warnings.push(format!(
+                    "Released {released} obsolete split-derived Cloud claim(s) after retargeting."
+                )),
+                Ok(_) => {}
+                Err(error) => warnings.push(format!(
+                    "Task fields were updated, but split Cloud claim cleanup failed: {error}. Check the Cloud claim before starting the task."
+                )),
+            }
+        }
 
 
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the

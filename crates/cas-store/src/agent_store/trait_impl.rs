@@ -79,6 +79,10 @@ impl AgentStore for SqliteAgentStore {
     fn list_agent_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>> {
         self.lease_list_agent_leases(agent_id)
     }
+    fn list_renewable_task_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>> {
+        let conn = self.lock_conn()?;
+        Self::renewable_task_leases(&conn, agent_id)
+    }
     fn list_active_leases(&self) -> Result<Vec<TaskLease>> {
         self.lease_list_active_leases()
     }

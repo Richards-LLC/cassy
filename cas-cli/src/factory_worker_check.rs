@@ -1893,6 +1893,14 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         command
     };
     #[cfg(unix)]
+    if test.is_some()
+        && target_lease.is_none()
+        && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+    {
+        // Managed review checkouts have no lease-aware runner to replace this value.
+        command.env_remove(variable);
+    }
+    #[cfg(unix)]
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
     }

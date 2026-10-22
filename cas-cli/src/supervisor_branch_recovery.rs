@@ -172,7 +172,7 @@ impl Drop for RecoveryLease {
             self.lease.epoch,
             "bounded supervisor branch recovery ended",
         ) {
-            tracing::warn!(%error, task_id=%self.lease.task_id, "recovery lease release failed; bounded expiry remains");
+            tracing::warn!(%error, task_id=%self.lease.task_id, "recovery lease release failed; inspect the recorded recovery intent");
         }
     }
 }

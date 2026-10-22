@@ -13,7 +13,10 @@ fn preview(value: &serde_json::Value) -> serde_json::Value {
     };
     let mut result = serde_json::Map::new();
     for (key, value) in fields {
-        if key == "notes" || value.is_null() || value.as_str() == Some("") {
+        if matches!(key.as_str(), "notes" | "retired_lease")
+            || value.is_null()
+            || value.as_str() == Some("")
+        {
             continue;
         }
         if value.as_object().is_some_and(|v| v.is_empty())

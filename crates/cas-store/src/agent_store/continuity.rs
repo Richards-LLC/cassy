@@ -203,15 +203,25 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
             "SELECT epic_id FROM working_epics WHERE agent_id=?",
             &[&id],
         )?;
+        let leases = rows(
+            conn,
+            "task_leases",
+            "SELECT task_id,agent_id,epoch,acquired_at,expires_at FROM task_leases WHERE agent_id=? AND status='active' ORDER BY task_id",
+            &[&id],
+        )?;
         handoff.tasks = rows(conn, "tasks", "SELECT id,title,status,assignee,epic_verification_owner,deliverables,external_ref,notes FROM tasks WHERE status NOT IN ('closed','cancelled') ORDER BY id", &[])?
             .into_iter().filter(|task| {
                 ["assignee", "epic_verification_owner"].iter().any(|key| task[*key].as_str().is_some_and(|owner| owners.iter().any(|s| s == owner)))
                     || epic_ids.iter().any(|epic| epic["epic_id"] == task["id"])
                     || task["id"].as_str().is_some_and(|id| inherited_tasks.contains(id))
+                    || leases.iter().any(|lease| lease["task_id"] == task["id"])
             }).collect();
         // Notes are retained in the receipt; put them last in startup projections
         // so a long timeline cannot conceal the delivery ref or PR.
         for task in &mut handoff.tasks {
+            if let Some(lease) = leases.iter().find(|lease| lease["task_id"] == task["id"]) {
+                task["retired_lease"] = lease.clone();
+            }
             if let Some(encoded) = task["deliverables"].as_str()
                 && let Ok(deliverables) = serde_json::from_str::<Value>(encoded)
             {

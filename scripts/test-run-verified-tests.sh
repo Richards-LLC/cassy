@@ -92,7 +92,9 @@ expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
 cat >"${tmpdir}/stalled-nextest" <<'EOF'
 #!/usr/bin/env bash
 echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
-sleep 2
+trap 'echo TERM > "${CAS_TEST_TERM_MARKER}"' TERM
+sleep 2 &
+wait
 EOF
 chmod +x "${tmpdir}/stalled-nextest"
 cat >"${tmpdir}/sample" <<'EOF'
@@ -102,8 +104,11 @@ EOF
 chmod +x "${tmpdir}/sample"
 expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
     env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
-    VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_TEST_TERM_MARKER="${tmpdir}/terminated" \
+    CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
     "${guard}" nextest run -p cas --lib -E 'test(stalled)'
+expect pass 'TERM' 'stalled discovery kills its process group' \
+    cat "${tmpdir}/terminated"
 expect pass 'phase=--list PID=' 'stalled discovery names phase and child PID' \
     grep -F 'phase=--list PID=' "${tmpdir}/stalled.log"
 expect pass 'fake libtest stack: StdoutLock::write' 'stalled discovery logs a child sample' \

@@ -2080,7 +2080,7 @@ impl CasCore {
                     to_id: epic_id.to_string(),
                     dep_type: DependencyType::ParentChild,
                     created_at: chrono::Utc::now(),
-                    created_by: self.get_agent_id().ok(),
+                    created_by: Some("mcp".to_string()),
                 })
             };
             // cas-c85e / cas-6fb6: the delivery target a move into this

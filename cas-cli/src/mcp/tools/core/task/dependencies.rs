@@ -40,7 +40,7 @@ impl CasCore {
             to_id: req.to_id.clone(),
             dep_type,
             created_at: chrono::Utc::now(),
-            created_by: self.get_agent_id().ok(),
+            created_by: Some("mcp".to_string()),
         };
 
         // Parent-linking an existing task must establish the same durable

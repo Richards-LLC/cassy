@@ -1472,23 +1472,25 @@ pub(crate) fn drive(cas_root: &Path, lease: &mut Option<File>, cancel: &AtomicBo
             tracing::warn!(%error, "release-gate fixture sweep failed");
         }
     }
-    tick(cas_root, cancel)?;
-    post_sealed_runs(cas_root);
-    Ok(true)
+    // A failing tick must not stop posting already sealed packs.
+    let ticked = tick(cas_root, cancel);
+    post_sealed_runs(cas_root, Utc::now());
+    ticked.map(|()| true)
 }
 
 /// Posts every sealed generation missing from its pack's `slack.json`
 /// (cas-efb8): seals made by `record` in the CLI, which has no proxy, are
 /// posted here, and a failed post retries on the next tick.
-fn post_sealed_runs(cas_root: &Path) {
+pub(crate) fn post_sealed_runs(cas_root: &Path, now: DateTime<Utc>) {
     let Some(config) = super::configured(cas_root).filter(|c| !c.slack_channel.trim().is_empty()) else {
         return;
     };
+    let since = super::slack::channel_since(cas_root, config.slack_channel.trim(), now);
     for run in scan(cas_root).0.into_iter().filter(|run| run.state == State::Sealed) {
         let Ok(dir) = pack::pack_dir(cas_root, &run.sha) else {
             continue;
         };
-        let notes = super::slack::post_sealed(&config, &dir);
+        let notes = super::slack::post_sealed(&config, &dir, now, since);
         if !notes.is_empty()
             && let Err(error) = update(cas_root, &run.sha, |run| {
                 notes.into_iter().for_each(|note| run.note(note));

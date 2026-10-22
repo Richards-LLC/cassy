@@ -229,9 +229,21 @@ generation once.
   channel.
 - **Receipts:** the permalink is written to the run notes and to `slack.json`
   in the pack directory.
-- **Failures:** a failed post is not recorded, so the next tick retries it.
-  The run notes record each pack's failure once, not every tick. With no
-  Violet proxy in the serve process, the notes say the post is waiting.
+- **At most once:** before each upload, the attempt is recorded in
+  `slack.json`. If that write fails, nothing is posted. An attempt still in
+  flight on a later tick (the process died mid-post) is never retried,
+  because it may have reached Slack. A post whose record then fails to save
+  is not reposted by that process.
+- **Backoff:** only throttling and unavailability retry, with a persisted
+  backoff of 30 s doubling to a 30-minute cap. Any other refusal (policy,
+  audience, channel, a changed pack) stops posting for that generation. Run
+  notes record each pack's outcome once, not every tick. With no Violet proxy
+  in the serve process, the notes say the post is waiting.
+- **No back-posting:** `release-gate/slack-channel.json` records when the
+  driver first saw the current channel. A pack sealed before then and more
+  than 24 hours ago is never posted.
+- **Independent of the tick:** a failing driver tick still posts sealed
+  packs.
 - **Corrupt record:** a `slack.json` that does not parse is moved aside as
   `slack.json.corrupt-<time>` and the current generation posts again.
 - **Video sniffing:** a video's `ftyp` box must name a video brand (`isom`,

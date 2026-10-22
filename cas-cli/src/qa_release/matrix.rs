@@ -162,13 +162,13 @@ pub fn settle(rows: &mut [Row], journeys: &[&Journey]) -> Vec<Coverage> {
         }
         let mine: Vec<&Row> = rows.iter().filter(|r| r.journey == journey.id).collect();
         let cells = mine.iter().filter_map(|r| r.cell.as_deref()).collect::<std::collections::BTreeSet<_>>().len().max(1);
-        let counting = |row: &&Row| matches!(row.verdict, RowVerdict::Pass | RowVerdict::Fail { .. });
+        let counting = |row: &Row| matches!(row.verdict, RowVerdict::Pass | RowVerdict::Fail { .. });
         coverage.push(Coverage {
             journey: journey.id.clone(),
             cells: cells as u32,
             runs,
             required: cells as u32 * runs,
-            counted: mine.iter().filter(counting).count() as u32,
+            counted: mine.iter().filter(|r| counting(r)).count() as u32,
             missing: mine.iter().filter(|r| !counting(r)).map(|r| r.id.clone()).collect(),
         });
     }
@@ -187,7 +187,7 @@ pub fn grade_measured(
     let labels = &cell.record.as_ref()?.labels;
     let mut misses = Vec::new();
     for (criterion, value) in measured {
-        let Some(baseline) = labels.get(criterion).and_then(serde_json::Value::as_f64) else { continue };
+        let Some(baseline) = labels.get(criterion).and_then(serde_yaml::Value::as_f64) else { continue };
         let compare = registry
             .invariants
             .get(criterion)

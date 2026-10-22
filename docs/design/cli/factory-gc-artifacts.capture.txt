@@ -1,0 +1,7 @@
+- Durable task artifacts: 5 items
+  Counts: closed-task candidates=1 stray inventory=2 mode=review-only
+  Context: Retention: at least 7 days since close; open tasks and tasks updated
+           in the last 7 days preserve referenced evidence.
+
+Details: cas factory gc report --full
+JSON: cas factory gc report --json

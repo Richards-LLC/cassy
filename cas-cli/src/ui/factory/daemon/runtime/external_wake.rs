@@ -263,6 +263,18 @@ pub(crate) fn expire_dead_session_reminders(
     expired
 }
 
+/// cas-c634: pending reminders whose issuer and recipient are both gone
+/// (see [`session_gone`]). No live agent sees them otherwise.
+pub(crate) fn orphaned_reminder_count(
+    cas_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+) -> usize {
+    // Red: the pre-cas-c634 behaviour, which never counted them.
+    let _ = (cas_dir, now, process_alive);
+    0
+}
+
 /// One complete scan; runs on the scanner thread, never the daemon loop.
 fn run_external_wake_scan(
     cas_dir: &Path,
@@ -626,8 +638,16 @@ mod tests {
         let live_target = create("dead", "live", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let process_backed = create("zombie", "zombie", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let director_event = create("pruned", "pruned", "task_completed");
+        // cas-c634: a retired worker's reminder to itself that also expires
+        // on its own TTL is left to that TTL, but counted as orphaned.
+        let director_with_ttl = reminders
+            .create_with_scope(
+                "pruned", Some("pruned"), "wake", cas_store::ReminderTriggerType::Event, None,
+                Some("task_blocked"), None, 86_400 * 30, Some("old-factory"), None, true, None,
+            )
+            .unwrap();
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [missing_old, dead_ci, director_event] {
+        for id in [missing_old, dead_ci, director_event, director_with_ttl] {
             conn.execute(
                 "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
                 rusqlite::params![(now - chrono::Duration::hours(25)).to_rfc3339(), id],
@@ -636,8 +656,15 @@ mod tests {
         }
 
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 3);
+        // cas-c634: the never-expiring internal-event reminder of a retired
+        // worker (director_event) is expired with the external ones.
+        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 4);
         assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 0);
+        assert_eq!(
+            orphaned_reminder_count(&cas_dir, now, &process_alive),
+            1,
+            "the TTL'd internal reminder of a retired worker is counted"
+        );
 
         let mut pending: Vec<i64> = reminders
             .list_all_pending()
@@ -648,9 +675,9 @@ mod tests {
         pending.sort_unstable();
         assert_eq!(
             pending,
-            vec![restarted, live, recent, live_target, process_backed, director_event]
+            vec![restarted, live, recent, live_target, process_backed, director_with_ttl]
         );
-        for expired in [dead_self, missing_old, dead_ci] {
+        for expired in [dead_self, missing_old, dead_ci, director_event] {
             assert!(!pending.contains(&expired));
         }
     }

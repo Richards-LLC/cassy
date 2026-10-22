@@ -6625,6 +6625,16 @@ impl CasService {
             orphan_processes.servers.len(),
             orphan_processes.reapable_count(),
         ));
+        // cas-c634: reminders whose issuer and recipient are both gone; no
+        // live agent would otherwise see them held or expiring.
+        out.push_str(&format!(
+            "Orphaned reminders (issuer and recipient gone): {}\n",
+            crate::ui::factory::daemon::runtime::external_wake::orphaned_reminder_count(
+                &self.inner.cas_root,
+                chrono::Utc::now(),
+                &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
+            )
+        ));
         match agent_store.list(None) {
             Ok(agents) => out.push_str(&serve_memory_report(&agents)),
             Err(error) => out.push_str(&format!("\nServe memory: agent inventory unavailable: {error}\n")),

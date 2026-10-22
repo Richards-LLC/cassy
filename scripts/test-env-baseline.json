@@ -558,6 +558,14 @@
     {
       "id": "cas-cli/src/test_env_guard.rs::TestEnvGuard::set_current_dir::implementation-mutation::baa3498fcfe23fc9::1",
       "reason": "Canonical TestEnvGuard::set_current_dir implementation: this exact setter/restore site mutates process state while TestEnvGuard owns the one test_env_lock; matching test functions in this file receive no exemption."
+    },
+    {
+      "id": "cas-cli/src/test_env_guard.rs::TestEnvGuard::enter_dir::implementation-mutation::baa3498fcfe23fc9::1",
+      "reason": "Canonical TestEnvGuard::enter_dir implementation (cas-3fc8): this exact site changes the current directory while the calling TestEnvGuard owns the one test_env_lock; matching test functions in this file receive no exemption."
+    },
+    {
+      "id": "cas-cli/src/test_env_guard.rs::CurrentDirGuard::drop::unguarded-mutation::870663d89d5a1f0b::1",
+      "reason": "Canonical CurrentDirGuard::drop restore (cas-3fc8): only TestEnvGuard::enter_dir creates it, and tests declare it after their TestEnvGuard and the fixture it enters, so it restores the directory before the fixture is deleted and while the guard still owns test_env_lock."
     }
   ]
 }

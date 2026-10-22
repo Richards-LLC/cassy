@@ -946,8 +946,29 @@ pub(super) fn final_path_snapshot_proven(
     Some(false)
 }
 
-/// Prove the content of a merge-tip delivery from the task's first-parent
-/// commits rather than from the merge tip itself.
+/// Empty checkpoint commits preserve delivery history but supply no content
+/// proof themselves. Unreadable trees remain unknown rather than empty.
+pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<bool> {
+    if !is_safe_git_refname(commit) {
+        return None;
+    }
+    let trees = git_text(
+        repo,
+        &[
+            "rev-parse",
+            &format!("{commit}^{{tree}}"),
+            &format!("{commit}^1^{{tree}}"),
+        ],
+    )?;
+    let trees: Vec<_> = trees.lines().collect();
+    match trees.as_slice() {
+        [current, parent] => Some(current != parent),
+        _ => None,
+    }
+}
+
+/// Prove a merge or empty checkpoint delivery from the task's attributed
+/// content commits rather than from the tip itself.
 ///
 /// A worker commonly merges the current integration target into its factory
 /// branch before handing it back to the supervisor. That merge can have no
@@ -1074,10 +1095,13 @@ pub(super) fn merge_tip_content_presence(
 
     // Reverts are negative delivery evidence, never a later task delivery.
     // Apply the exclusion to every selection route, including known receipts.
+    // Checkpoints carry the range but supply no positive tree evidence.
     let mut content_commits = Vec::new();
     for commit in commits {
         let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
-        if !delivery_evolution::is_revert_message(&message) {
+        if !delivery_evolution::is_revert_message(&message)
+            && has_first_parent_tree_effect(repo, &commit)?
+        {
             content_commits.push(commit);
         }
     }

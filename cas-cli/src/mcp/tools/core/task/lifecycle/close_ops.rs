@@ -14180,7 +14180,11 @@ fn anchored_delivery_content_gate_unbounded(
     // delivery whose task commits are present on the tip's first-parent side.
     // Attribute the non-merge task commits instead. A merge with no
     // task-attributed content remains Unknown and therefore fail-closed.
-    let presence = if git_commit_parent_count(repo_path, anchor) >= 2 {
+    // cas-01dc: an ordinary empty checkpoint also carries its preceding
+    // task delivery. Prove that attributed range, never emptiness itself.
+    let presence = if git_commit_parent_count(repo_path, anchor) >= 2
+        || task_attribution::has_first_parent_tree_effect(repo_path, anchor) == Some(false)
+    {
         task_attribution::merge_tip_content_presence(
             repo_path,
             parent_branch,
@@ -14191,7 +14195,7 @@ fn anchored_delivery_content_gate_unbounded(
         )
         .unwrap_or_else(|| DeliveryContentPresence::Unknown {
             reason: format!(
-                "merge delivery commit `{anchor}` has no task-attributed non-merge content commits"
+                "delivery commit `{anchor}` has no task-attributed non-merge content commits with a tree effect"
             ),
         })
     } else {

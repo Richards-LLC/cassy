@@ -996,7 +996,7 @@ mod tests {
     use super::*;
     use crate::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
     use cas_types::{Agent, AgentRole, ClaimResult, Task, TaskStatus, VerificationDispatchState};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -2011,53 +2011,71 @@ mod tests {
     }
 
     #[test]
-    fn observed_delivery_merge_retries_busy_and_is_idempotent() {
-        let root = TempDir::new().unwrap();
-        drop(open(root.path()).unwrap());
-
-        let db_path = root.path().join("cas.db");
-        let (locked, ready) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let conn = Connection::open(db_path).unwrap();
-            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-            locked.send(()).unwrap();
-            std::thread::sleep(crate::SQLITE_BUSY_TIMEOUT + Duration::from_millis(250));
-            conn.execute_batch("COMMIT").unwrap();
-        });
-        ready.recv().unwrap();
-
-        let started = Instant::now();
-        let result = record_observed_delivery_merge(
-            root.path(),
-            "cas-observed-merge",
-            "factory/worker",
-            "epic/release",
-            &"a".repeat(40),
-            &"b".repeat(40),
-            "supervisor",
-        );
-        holder.join().unwrap();
-        result.expect("the observation should retry after one busy-timeout window");
-        assert!(started.elapsed() < Duration::from_secs(15));
-
-        record_observed_delivery_merge(
-            root.path(),
-            "cas-observed-merge",
-            "factory/worker",
-            "epic/release",
-            &"a".repeat(40),
-            &"b".repeat(40),
-            "supervisor",
-        )
-        .unwrap();
-        let conn = open(root.path()).unwrap();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
-                ["cas-observed-merge"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1, "retrying the same observation must be idempotent");
+    fn observed_delivery_merge_contention_is_bounded_and_recoverable() {
+        // Exercise all observation operations, including first-use schema
+        // installation by the pending check on an upgraded database.
+        for operation in ["check", "intent", "observe", "clear"] {
+            let root = TempDir::new().unwrap();
+            if operation != "check" {
+                record_pending_observed_delivery_merge(
+                    root.path(), "cas-bounded", "factory/worker", "epic/release", "source", "supervisor",
+                ).unwrap();
+            }
+            let holder = Connection::open(root.path().join("cas.db")).unwrap();
+            holder.execute_batch("BEGIN EXCLUSIVE; PRAGMA user_version = 1;").unwrap();
+            let path = root.path().to_path_buf();
+            let (sent, received) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = match operation {
+                    "check" => has_pending_observed_delivery_merge(
+                        &path, "cas-bounded", "factory/worker", "epic/release", "source",
+                    ).map(|_| ()),
+                    "intent" => record_pending_observed_delivery_merge(
+                        &path, "cas-bounded", "factory/worker", "epic/release", "source", "supervisor",
+                    ),
+                    "observe" => record_observed_delivery_merge(
+                        &path, "cas-bounded", "factory/worker", "epic/release", "source", "target", "supervisor",
+                    ),
+                    "clear" => clear_pending_observed_delivery_merge(
+                        &path, "cas-bounded", "factory/worker", "epic/release", "source",
+                    ),
+                    _ => unreachable!(),
+                };
+                sent.send(result).unwrap();
+            });
+            // Always release/join before asserting, even against the old
+            // unbounded implementation. No sleeping lock-holder thread leaks.
+            let result = received.recv_timeout(Duration::from_secs(3));
+            holder.execute_batch("COMMIT").unwrap();
+            worker.join().unwrap();
+            let error = result.expect("observation waits must end within three seconds")
+                .expect_err("the foreign lock must outlast the observation wait budget");
+            assert!(crate::shared_db::is_busy_error(match &error {
+                StoreError::Database(error) => error,
+                other => panic!("{operation}: {other}"),
+            }));
+            record_pending_observed_delivery_merge(
+                root.path(), "cas-bounded", "factory/worker", "epic/release", "source", "supervisor",
+            ).unwrap();
+            assert!(has_pending_observed_delivery_merge(
+                root.path(), "cas-bounded", "factory/worker", "epic/release", "source",
+            ).unwrap());
+            for _ in 0..2 {
+                record_observed_delivery_merge(
+                    root.path(), "cas-bounded", "factory/worker", "epic/release", "source", "target", "supervisor",
+                ).unwrap();
+                clear_pending_observed_delivery_merge(
+                    root.path(), "cas-bounded", "factory/worker", "epic/release", "source",
+                ).unwrap();
+            }
+            assert!(!has_pending_observed_delivery_merge(
+                root.path(), "cas-bounded", "factory/worker", "epic/release", "source",
+            ).unwrap());
+            let count: i64 = open(root.path()).unwrap().query_row(
+                "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = 'cas-bounded'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 1, "recovery must remain idempotent");
+        }
     }
 }

@@ -183,11 +183,13 @@ has_pending_run() {
 }
 
 complete_run_id=""
+artifacts_query_failed=false
 find_complete_run() {
     local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
     local artifact_query_ok artifact_attempt artifact_retry_limit
     local remaining sleep_for failure_reason
     complete_run_id=""
+    artifacts_query_failed=false
     mapfile -t run_ids < <(jq -r \
         '.workflow_runs[]? | select(.status == "completed" and .conclusion == "success") | .id // empty' \
         <<<"$runs_json" 2>/dev/null || true)
@@ -206,8 +208,8 @@ find_complete_run() {
                 artifact_query_ok=true
                 break
             fi
-            # Keep the initial pre-wait lookup unchanged. During the bounded
-            # wait, retry a transient artifacts failure while time remains.
+            # The initial lookup tries once. During the wait, retry once here,
+            # then check other runs; later polls can retry this run again.
             if [[ -z "$deadline" ]]; then
                 break
             fi
@@ -236,6 +238,7 @@ find_complete_run() {
             (( SECONDS < deadline )) || break
         done
         if [[ "$artifact_query_ok" != true ]]; then
+            artifacts_query_failed=true
             continue
         fi
         complete=true
@@ -271,7 +274,7 @@ if find_complete_run "$runs_json"; then
     exit 0
 fi
 
-if has_pending_run "$runs_json"; then
+if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
     deadline=$((SECONDS + wait_seconds))
     failed_polls=0
     retry_backoff=1
@@ -316,16 +319,18 @@ if has_pending_run "$runs_json"; then
         if find_complete_run "$runs_json" "$deadline"; then
             printf 'found=true\n'
             printf 'run-id=%s\n' "$complete_run_id"
-            printf 'reason=prebuild run %s completed during the bounded wait for %s\n' \
+            printf 'reason=prebuild run %s became available during the bounded wait for %s\n' \
                 "$complete_run_id" "$sha"
             exit 0
         fi
-        if ! has_pending_run "$runs_json"; then
+        if ! has_pending_run "$runs_json" && [[ "$artifacts_query_failed" != true ]]; then
             break
         fi
     done
 
-    if has_pending_run "$runs_json"; then
+    if [[ "$artifacts_query_failed" == true ]]; then
+        decline "prebuild artifacts query failed for $sha after ${wait_seconds}s"
+    elif has_pending_run "$runs_json"; then
         decline "prebuild still queued or in progress after ${wait_seconds}s"
     fi
 fi

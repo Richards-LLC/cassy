@@ -735,6 +735,105 @@ async fn test_follow_on_epic_continues_active_epic_branch_and_says_so() {
     );
 }
 
+/// Create an epic while on trunk and land `file` on its branch without
+/// leaving trunk: an open, unreleased epic. Returns (id, branch, tip).
+async fn unreleased_epic(
+    service: &cas::mcp::CasCore,
+    repo: &std::path::Path,
+    title: &str,
+    file: &str,
+) -> (String, String, String) {
+    let trunk = git_in(repo, &["branch", "--show-current"]);
+    let text = extract_text(
+        service
+            .cas_task_create(Parameters(epic_create_request(title)))
+            .await
+            .expect("epic create should succeed"),
+    );
+    let id = extract_task_id(&text).expect("should have epic ID").to_string();
+    let branch = git_in(repo, &["branch", "--list", "epic/*", "--format=%(refname:short)"])
+        .lines()
+        .find(|branch| branch.ends_with(&id))
+        .expect("the epic branch exists")
+        .to_string();
+    git_in(repo, &["checkout", "-q", &branch]);
+    std::fs::write(repo.join(file), "unreleased work").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "unreleased epic work"]);
+    let tip = git_in(repo, &["rev-parse", "HEAD"]);
+    git_in(repo, &["checkout", "-q", &trunk]);
+    (id, branch, tip)
+}
+
+/// cas-1630: v57 was created while v56 was open and unreleased, from a
+/// checkout on main, so it was cut from main and its follow-ups on v56 code
+/// could not start. An epic created blocked_by an open epic is its successor
+/// and starts from that epic's tip.
+#[tokio::test]
+async fn test_successor_epic_starts_from_its_open_predecessor_tip_cas_1630() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
+
+    let mut successor = epic_create_request("Burn Down V57");
+    successor.blocked_by = Some(v56.clone());
+    let text = extract_text(
+        service
+            .cas_task_create(Parameters(successor))
+            .await
+            .expect("successor epic create should succeed"),
+    );
+    let id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/burn-down-v57-{id}");
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        v56_tip,
+        "the successor must start from its open predecessor's tip: {text}"
+    );
+    assert!(
+        text.contains(&format!("STACKED ON PREDECESSOR: {v56} ({v56_branch})")),
+        "{text}"
+    );
+}
+
+/// cas-1630: a follow-up filed into an epic whose branch lacks the code it
+/// cites is told so at create, naming the open epic that has it.
+#[tokio::test]
+async fn test_follow_up_citing_code_its_epic_lacks_is_warned_at_create_cas_1630() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let (v56, v56_branch, v56_tip) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
+    let v57 = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(epic_create_request("Burn Down V57")))
+            .await
+            .expect("epic create should succeed"),
+    ))
+    .expect("should have epic ID")
+    .to_string();
+
+    let mut follow_up = epic_create_request("Follow up on the v56 fix");
+    follow_up.task_type = "task".to_string();
+    follow_up.epic = Some(v57.clone());
+    follow_up.description = Some(format!("Verifier follow-up on {} (run 39694702194).", &v56_tip[..9]));
+    let text = extract_text(
+        service
+            .cas_task_create(Parameters(follow_up))
+            .await
+            .expect("task create should succeed"),
+    );
+    assert!(text.contains("CITED CODE NOT ON THIS EPIC"), "{text}");
+    assert!(
+        text.contains(&format!("{} is not on epic/burn-down-v57-{v57}; it is on open epic {v56} ({v56_branch})", &v56_tip[..9])),
+        "{text}"
+    );
+    assert!(!text.contains("39694702194 is not on"), "a run id is not a commit: {text}");
+}
+
 #[tokio::test]
 async fn test_epic_create_states_the_gap_when_head_is_ahead_but_not_an_epic() {
     let mut test_env = TestEnvGuard::temp_home();

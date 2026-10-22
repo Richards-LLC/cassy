@@ -147,12 +147,18 @@ fake = root / 'discovery-cargo.py'
 fake.write_text('''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+leave_child = os.environ.get('LEAVE_CHILD') == '1'
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                         stdout=subprocess.DEVNULL if leave_child else None)
 marker = Path(os.environ['PID_FILE'])
 ready = marker.with_suffix('.ready')
 ready.write_text(json.dumps([os.getpid(), child.pid]))
 ready.replace(marker)
 print('    Finished `test` profile in 0.01s', flush=True)
+if leave_child:
+    print('    Starting 2 tests across 1 binary (0 skipped)', flush=True)
+    print('     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped', flush=True)
+    sys.exit(0)
 child.wait()
 ''')
 fake.chmod(0o755)
@@ -170,6 +176,49 @@ def exited_without_reaping(process, timeout):
             return event
         time.sleep(0.02)
     raise AssertionError(f'wrapper PID {process.pid} did not exit')
+
+def cleanup(wrapper, pids):
+    # The wrapper is still unreaped, so its group id cannot be reused.
+    try:
+        os.killpg(wrapper.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    # The fake Cargo leader waits 60s in signal cases; never target a reaped group.
+    if pids and live(pids[0]):
+        try:
+            os.killpg(pids[0], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for pid in pids[1:]:
+        if live(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    wrapper.wait(timeout=3)
+
+pid_file = root / 'pids-normal-exit'
+env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file), LEAVE_CHILD='1',
+           CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+pids = []
+with (root / 'normal-exit.log').open('wb') as log:
+    wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                               env=env, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists(), 'normal-exit fixture did not start'
+        pids = json.loads(pid_file.read_text())
+        assert live(pids[1]), 'normal-exit child must exist before cleanup'
+        assert exited_without_reaping(wrapper, 5).si_status == 0, 'normal nextest exit must pass'
+        deadline = time.monotonic() + 5
+        while live(pids[1]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not live(pids[1]), f'normal-exit Cargo descendant survived: {pids}'
+    finally:
+        cleanup(wrapper, pids)
 
 for interrupted, target in [
     (signal.SIGTERM, 'group'),
@@ -202,25 +251,8 @@ for interrupted, target in [
                 time.sleep(0.02)
             assert not any(live(pid) for pid in pids), f'{interrupted}: discovery children survived: {pids}'
         finally:
-            # The wrapper is still unreaped, so its group id cannot be reused.
-            try:
-                os.killpg(wrapper.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # The fake Cargo leader waits 60s; signal its group only if live.
-            if pids and live(pids[0]):
-                try:
-                    os.killpg(pids[0], signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            for pid in pids[1:]:
-                if live(pid):
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            wrapper.wait(timeout=3)
-print('signal cleanup passed: TERM, INT, HUP and wrapper TERM; no live discovery children')
+            cleanup(wrapper, pids)
+print('signal cleanup passed: normal exit, TERM, INT, HUP and wrapper TERM; no live discovery children')
 PYKILL
 expect pass 'signal cleanup passed' 'terminated discovery wrapper leaves no live children' \
     python3 "${tmpdir}/kill-discovery.py" "${guard}" "${tmpdir}"

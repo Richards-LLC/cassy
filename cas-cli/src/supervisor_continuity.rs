@@ -158,8 +158,8 @@ pub(crate) fn status_section(root: &Path) -> String {
         let mut text = "\nRecent supervisor session ends:\n".to_string();
         for row in rows {
             text.push_str(&format!(
-                "- {} ({}): {}; handoff {}\n",
-                row.name, row.agent_id, row.reason, row.id
+                "- {}: {}\n  Handoff: {}\n",
+                row.name, row.reason, row.id
             ));
         }
         Ok(text)

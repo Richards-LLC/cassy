@@ -3,8 +3,6 @@ use crate::ui::factory::daemon::imports::*;
 /// Daemonize and run factory daemon (legacy - spawns subprocess)
 #[cfg(unix)]
 pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
-    use std::process::Stdio;
-
     // Get current executable
     let exe = std::env::current_exe()?;
 
@@ -15,17 +13,27 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
     // Spawn daemon process (redirect stderr to log file for debugging)
     let log_path = daemon_log_path(&config.session_name);
     let log_file = open_log_file_append(&log_path)?;
-    let child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file))
-        .spawn()?;
+    let child = spawn_daemon_process(cmd, log_file)?;
 
     if let Some(store) = crate::hub::DaemonExitEvidenceStore::default_for_user() {
         let _ = crate::hub::supervise_spawned_daemon(&config.session_name, child, store);
     }
 
     Ok(())
+}
+
+/// One spawn boundary for the production re-exec and subprocess lifecycle tests.
+#[cfg(unix)]
+pub(super) fn spawn_daemon_process(
+    mut cmd: Command,
+    log_file: std::fs::File,
+) -> std::io::Result<std::process::Child> {
+    use std::process::Stdio;
+    cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file))
+        .spawn()
 }
 
 /// The `cas factory daemon …` arguments that relaunch this factory as a

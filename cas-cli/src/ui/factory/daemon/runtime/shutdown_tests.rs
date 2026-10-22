@@ -12,6 +12,132 @@ use cas_store::{SpawnLifecycleState, SpawnQueueStore};
 const SESSION: &str = "provision-test";
 const REPLACEMENT_STARTUP: &str = "REPLACEMENT CODEX: startup reached";
 
+/// Exercise the real daemon loop out of process: no LLM or operator launch
+/// gate, and no signals installed in the test runner itself.
+#[cfg(unix)]
+#[test]
+fn factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::process::{Child, Stdio};
+
+    const NAME: &str = "ui::factory::daemon::runtime::shutdown_tests::factory_daemon_lifetime_cleans_owned_groups_and_preserves_detach_cas_8fac1";
+    if let Some(root) = std::env::var_os("CAS_8FAC1_CHILD") {
+        let root = std::path::PathBuf::from(root);
+        let cas_dir = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let mut daemon = daemon(&cas_dir);
+        daemon.listener.set_nonblocking(true).unwrap();
+        daemon.gui_listener.set_nonblocking(true).unwrap();
+        let pty = cas_mux::Pty::spawn("owned-worker", cas_mux::PtyConfig {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "trap '' HUP TERM; sleep 300 & echo $! > \"$1\"; wait".into(),
+                "fixture".into(), root.join("descendant").to_string_lossy().into_owned()],
+            cwd: Some(root.clone()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let pgid = pty.process_group_id().unwrap();
+        daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            "owned-worker", cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+        ).unwrap());
+        std::fs::write(root.join("group"), pgid.to_string()).unwrap();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(daemon.run()).unwrap();
+        return;
+    }
+
+    struct Owned {
+        child: Child,
+        root: std::path::PathBuf,
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // Only the PTY group recorded by this fixture, never a name scan.
+            if let Ok(group) = std::fs::read_to_string(self.root.join("group"))
+                && let Ok(group) = group.parse::<i32>()
+            {
+                unsafe { libc::killpg(group, libc::SIGKILL); }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    fn running(pid: u32) -> bool {
+        std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()])
+            .output().ok().is_some_and(|output| {
+                let state = String::from_utf8_lossy(&output.stdout);
+                !state.trim().is_empty() && !state.trim().starts_with('Z')
+            })
+    }
+
+    struct Shared(Child);
+    impl Drop for Shared {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let mut shared = Shared(std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap());
+    let mut failures = Vec::new();
+    for route in ["quit", "term", "int", "hup", "client-death", "detach"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("project")).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+            .env_clear().env("HOME", root).env("PATH", "/usr/bin:/bin")
+            .env("XDG_CONFIG_HOME", root.join(".config")).env("CAS_8FAC1_CHILD", root);
+        let child = super::super::process::spawn_daemon_process(command,
+            std::fs::File::create(root.join("daemon.log")).unwrap()).unwrap();
+        let mut owned = Owned { child, root: root.into() };
+        let socket = root.join("project/.cas/test.sock");
+        assert!(wait_until(Duration::from_secs(20), || socket.exists() && root.join("descendant").exists()),
+            "{route}: daemon startup: {}", std::fs::read_to_string(root.join("daemon.log")).unwrap());
+        let mut client = UnixStream::connect(&socket).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        client.read_exact(&mut [0u8; 1]).unwrap(); // run() has accepted us and installed its lifecycle handlers.
+        let group: u32 = std::fs::read_to_string(root.join("group")).unwrap().parse().unwrap();
+        let descendant: u32 = std::fs::read_to_string(root.join("descendant")).unwrap().trim().parse().unwrap();
+        let daemon_pid = owned.child.id();
+        let listing = std::process::Command::new("/bin/ps")
+            .args(["-o", "pid,ppid,pgid,stat,command", "-p", &format!("{daemon_pid},{group},{descendant},{}", shared.0.id())])
+            .stdout(Stdio::piped()).output().unwrap();
+        eprintln!("{route} BEFORE\n{}", String::from_utf8_lossy(&listing.stdout));
+        if unsafe { libc::getpgid(daemon_pid as i32) } != daemon_pid as i32 {
+            failures.push(format!("{route}: daemon still shares its launcher's process group"));
+        }
+        match route {
+            "quit" => client.write_all(&[0x11]).unwrap(),
+            "client-death" => {},
+            "detach" => {
+                let mut detach = CONTROL_PREFIX.to_vec();
+                detach.extend_from_slice(b"detach"); detach.push(CONTROL_SUFFIX);
+                client.write_all(&detach).unwrap();
+            },
+            signal => unsafe { libc::kill(daemon_pid as i32, match signal {
+                "term" => libc::SIGTERM, "int" => libc::SIGINT, _ => libc::SIGHUP,
+            }); },
+        }
+        drop(client);
+        if route == "detach" {
+            std::thread::sleep(Duration::from_millis(700));
+            if owned.child.try_wait().unwrap().is_some() || !running(group) || !running(descendant) {
+                failures.push("intentional detach must retain the daemon and its children".into());
+            } else {
+                let mut reattached = UnixStream::connect(&socket).unwrap();
+                reattached.write_all(&[0x11]).unwrap();
+            }
+        }
+        let exited = wait_until(Duration::from_secs(12), || owned.child.try_wait().unwrap().is_some());
+        let gone = wait_until(Duration::from_secs(2), || !running(group) && !running(descendant));
+        if !exited || !gone {
+            failures.push(format!("{route}: exited={exited}, children_gone={gone}"));
+        }
+        let after = std::process::Command::new("/bin/ps")
+            .args(["-o", "pid,ppid,pgid,stat,command", "-p", &format!("{daemon_pid},{group},{descendant},{}", shared.0.id())])
+            .output().unwrap();
+        eprintln!("{route} AFTER\n{}", String::from_utf8_lossy(&after.stdout));
+        assert!(shared.0.try_wait().unwrap().is_none(), "a shared service must be unaffected");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// macOS has no /proc discovery. Keep that OS boundary deterministic on CI
 /// while retaining real PID checks, registry reads, PTYs and queue consumers.
 struct EmptyProcessTable;

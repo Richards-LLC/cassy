@@ -336,6 +336,32 @@ pub struct PendingChecker {
     pub due: String,
 }
 
+/// Who turns a hand-walked journey (no `spec`, or walked through the release
+/// gate's `record`) into automation: cas-160c's manual-check debt, per journey.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Automation {
+    pub owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due: Option<String>,
+}
+
+impl Automation {
+    /// `owner X[, task T][, due D]`.
+    pub fn summary(&self) -> String {
+        let mut summary = format!("owner {}", self.owner);
+        if let Some(task) = &self.task {
+            summary.push_str(&format!(", task {task}"));
+        }
+        if let Some(due) = &self.due {
+            summary.push_str(&format!(", due {due}"));
+        }
+        summary
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManualCheck {
     pub statement: String,
@@ -550,6 +576,9 @@ pub struct Journey {
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
+    /// The automation owner while the journey is hand-walked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automation: Option<Automation>,
     pub known_failure: Option<String>,
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
@@ -589,6 +618,7 @@ deserialize_with_extra!(Journey {
     fixtures,
     traffic,
     spec,
+    automation,
     known_failure,
     finisher,
     evidence,
@@ -850,6 +880,28 @@ impl ValidationReport {
                 None
             }
         }
+    }
+}
+
+impl ValidationReport {
+    /// A live journey without a spec is hand-walked: debt with its automation
+    /// owner, or unowned debt. A `due` date is checked like a pending checker.
+    fn hand_walk(&mut self, subject: &str, automation: Option<&Automation>, today: chrono::NaiveDate) {
+        let Some(automation) = automation.filter(|a| !a.owner.trim().is_empty()) else {
+            self.debt(
+                "hand_walk_unowned",
+                subject,
+                "hand-walked journey (no spec) has no automation owner; set automation: {owner, task?, due?}",
+            );
+            return;
+        };
+        if let Some(due) = &automation.due {
+            let pending = PendingChecker { owner: automation.owner.clone(), due: due.clone() };
+            if self.pending_checker(subject, &pending, today).is_none() {
+                return;
+            }
+        }
+        self.debt("hand_walk", subject, &format!("hand-walked: automation {}", automation.summary()));
     }
 }
 
@@ -1287,6 +1339,9 @@ impl Registry {
             }
             if journey.seeded {
                 report.debt("seeded", id, "seeded journey needs curation");
+            }
+            if journey.status == "live" && !present(journey.spec.as_deref()) {
+                report.hand_walk(id, journey.automation.as_ref(), today);
             }
             if journey.status == "live" {
                 if !journey.entry.as_ref().is_some_and(|entry| {
@@ -1833,6 +1888,47 @@ journeys:
                 .message
                 .contains("owner qa-team, due 2999-12-31")
         );
+
+        // Finding 21: a live journey without a spec is hand-walk debt naming
+        // its automation owner, or unowned debt.
+        let hand = yaml.replace(
+            "    spec: tests/signup.spec.ts\n",
+            "    automation: {owner: qa-team, task: cas-9999, due: \"2999-12-31\"}\n",
+        );
+        let owned = check(repo(&hand).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(owned.problems.is_empty(), "{:?}", owned.problems);
+        let hand_walk = |report: &ValidationReport| -> Vec<String> {
+            report
+                .debt
+                .iter()
+                .filter(|d| d.code.starts_with("hand_walk"))
+                .map(|d| format!("{} {} {}", d.code, d.subject, d.message))
+                .collect()
+        };
+        assert_eq!(
+            hand_walk(&owned),
+            ["hand_walk B2-home hand-walked: automation owner qa-team, task cas-9999, due 2999-12-31"]
+        );
+        let unowned = yaml.replace("    spec: tests/signup.spec.ts\n", "");
+        let unowned = check(repo(&unowned).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert_eq!(hand_walk(&unowned)[0].split(' ').take(2).collect::<Vec<_>>(), ["hand_walk_unowned", "B2-home"]);
+
+        // Manual rows carry minutes and the owner; the gate verdict ignores them.
+        use crate::qa_release::pack::{HandWalk, Pack, Row};
+        let manual = |id: &str, journey: &str, minutes: u32| -> Row {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "journey": journey, "verdict": {"verdict": "PASS"}, "manual_minutes": minutes
+            }))
+            .unwrap()
+        };
+        let mut pack = Pack::new("gabber", &"a".repeat(40), Vec::new());
+        pack.rows = vec![manual("home-1", "B2-home", 25), manual("promo", "promo", 30), manual("home-2", "B2-home", 20)];
+        pack.hand_walk = Some(HandWalk::measure(&pack.rows, Some(&parse(&hand).unwrap())));
+        assert_eq!(
+            pack.hand_walk.as_ref().unwrap().summary(3).unwrap(),
+            "75 manual minutes over 3 rows; top: `B2-home` 45 min (owner qa-team, task cas-9999, due 2999-12-31), `promo` 30 min (unowned)"
+        );
+        assert_eq!(pack.derive_gate().verdict, crate::qa_release::verdict::GateVerdict::Clean);
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub trait PrComments {
 }
 
 /// The pack as a PR comment: gate verdict, failed and owed rows, PR coverage,
-/// the flag snapshot and the media count. A body over [`MAX_CHARS`] is cut at
+/// hand-walk debt, the flag snapshot and the media count. A body over [`MAX_CHARS`] is cut at
 /// a line and ends with a pointer to the full pack.
 pub fn render_comment(pack: &Pack) -> String {
     let gate = &pack.gate;
@@ -58,6 +58,9 @@ pub fn render_comment(pack: &Pack) -> String {
             };
             body.push_str(&format!("- {}: {by}\n", pr.subject()));
         }
+    }
+    if let Some(summary) = pack.hand_walk.as_ref().and_then(|h| h.summary(3)) {
+        body.push_str(&format!("\n**Hand-walk debt** (never changes the verdict): {summary}\n"));
     }
     if let Some(flags) = &pack.flags {
         body.push_str(&format!("\n`{}`\n", flags.ledger_line()));

@@ -144,8 +144,86 @@ pub struct Pack {
     pub suites: Vec<SuiteTiming>,
     #[serde(default)]
     pub media: Vec<Media>,
+    /// Hand-walk debt this gate measured (finding 21). Never affects the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand_walk: Option<HandWalk>,
     /// Derived from rows and coverage at seal; a reader recomputes it.
     pub gate: Gate,
+}
+
+/// Manual minutes one journey cost this gate, with its automation owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandWalked {
+    pub journey: String,
+    pub minutes: u32,
+    pub rows: u32,
+    /// The registry's `automation`; `None` is unowned debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<crate::qa_registry::Automation>,
+}
+
+/// Hand-walk debt measured by one gate: manual rows (those with
+/// `manual_minutes`), their total, and each journey, most minutes first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandWalk {
+    pub total_minutes: u32,
+    pub rows: u32,
+    pub journeys: Vec<HandWalked>,
+}
+
+impl HandWalk {
+    /// Totals the manual rows and names each journey's automation owner.
+    pub fn measure(rows: &[Row], registry: Option<&crate::qa_registry::Registry>) -> Self {
+        let mut by_journey: std::collections::BTreeMap<&str, (u32, u32)> = Default::default();
+        for row in rows {
+            if let Some(minutes) = row.manual_minutes {
+                let entry = by_journey.entry(&row.journey).or_default();
+                entry.0 += minutes;
+                entry.1 += 1;
+            }
+        }
+        let mut journeys: Vec<HandWalked> = by_journey
+            .into_iter()
+            .map(|(journey, (minutes, rows))| HandWalked {
+                journey: journey.into(),
+                minutes,
+                rows,
+                automation: registry
+                    .and_then(|r| r.journeys.iter().find(|j| j.id == journey))
+                    .and_then(|j| j.automation.clone())
+                    .filter(|a| !a.owner.trim().is_empty()),
+            })
+            .collect();
+        journeys.sort_by(|a, b| b.minutes.cmp(&a.minutes).then_with(|| a.journey.cmp(&b.journey)));
+        Self {
+            total_minutes: journeys.iter().map(|j| j.minutes).sum(),
+            rows: journeys.iter().map(|j| j.rows).sum(),
+            journeys,
+        }
+    }
+
+    /// `N manual minutes over R rows; top: `j` M min (owner …), …` for the
+    /// `top` costliest journeys; `None` when nothing was hand-walked.
+    pub fn summary(&self, top: usize) -> Option<String> {
+        if self.rows == 0 {
+            return None;
+        }
+        let offenders: Vec<String> = self
+            .journeys
+            .iter()
+            .take(top)
+            .map(|j| {
+                let owner = j.automation.as_ref().map_or("unowned".into(), |a| a.summary());
+                format!("`{}` {} min ({})", super::printable(&j.journey), j.minutes, super::printable(&owner))
+            })
+            .collect();
+        Some(format!(
+            "{} manual minutes over {} rows; top: {}",
+            self.total_minutes,
+            self.rows,
+            offenders.join(", ")
+        ))
+    }
 }
 
 /// `<artifacts_root>/<project>/release/<sha>` for the project whose Cassy
@@ -174,6 +252,7 @@ impl Pack {
             resources: None,
             suites: Vec::new(),
             media: Vec::new(),
+            hand_walk: None,
             gate: gate([], Vec::new()),
         }
     }

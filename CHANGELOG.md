@@ -83,6 +83,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Observation errors** — Return an internal error for busy rule-observation writes rather than invalid parameters, and log candidate-read failures instead of silently hiding them.
 
+- **Old reminder cleanup** — Expire already-due time reminders with no expiry when both owning and target sessions are gone; report remaining TTL-bound orphan counts only when the count changes.
+
 - **Durable review ownership** — Sync the containing directory after publishing a review checkout's owner file, making the rename durable before reporting success.
 
 - **Nested check isolation** — Clear inherited host test runners for capped checks and for test commands in managed review checkouts without their own lease runner.

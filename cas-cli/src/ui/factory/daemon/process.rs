@@ -3,8 +3,6 @@ use crate::ui::factory::daemon::imports::*;
 /// Daemonize and run factory daemon (legacy - spawns subprocess)
 #[cfg(unix)]
 pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
-    use std::process::Stdio;
-
     // Get current executable
     let exe = std::env::current_exe()?;
 
@@ -15,17 +13,65 @@ pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
     // Spawn daemon process (redirect stderr to log file for debugging)
     let log_path = daemon_log_path(&config.session_name);
     let log_file = open_log_file_append(&log_path)?;
-    let child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file))
-        .spawn()?;
+    let child = spawn_daemon_process(cmd, log_file)?;
 
     if let Some(store) = crate::hub::DaemonExitEvidenceStore::default_for_user() {
         let _ = crate::hub::supervise_spawned_daemon(&config.session_name, child, store);
     }
 
     Ok(())
+}
+
+/// One spawn boundary for the production re-exec and subprocess lifecycle tests.
+#[cfg(unix)]
+pub(super) fn spawn_daemon_process(
+    mut cmd: Command,
+    log_file: std::fs::File,
+) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    // The re-exec path must have the same terminal isolation as the fork
+    // paths: a detached factory must not receive its former client's HUP.
+    // SAFETY: setsid and errno inspection are async-signal-safe after fork.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file))
+        .spawn()
+}
+
+#[cfg(unix)]
+pub(super) struct DaemonSignalGuard(tokio::task::JoinHandle<()>);
+
+#[cfg(unix)]
+impl Drop for DaemonSignalGuard {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
+/// Signals end the session through the same owned-child cleanup as quit.
+/// Keep the listener scoped to this daemon invocation, including error returns.
+#[cfg(unix)]
+pub(super) fn shutdown_on_signals(shutdown: Arc<AtomicBool>) -> std::io::Result<DaemonSignalGuard> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    let mut hup = signal(SignalKind::hangup())?;
+    Ok(DaemonSignalGuard(tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {},
+            _ = int.recv() => {},
+            _ = hup.recv() => {},
+        }
+        shutdown.store(true, Ordering::Relaxed);
+    })))
 }
 
 /// The `cas factory daemon …` arguments that relaunch this factory as a

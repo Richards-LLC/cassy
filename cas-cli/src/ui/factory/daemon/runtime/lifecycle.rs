@@ -3281,6 +3281,8 @@ impl FactoryDaemon {
 
     /// Run the daemon main loop with TUI rendering
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        let _signals = super::super::process::shutdown_on_signals(Arc::clone(&self.shutdown))?;
         crate::factory_build_memory::protect_interactive_memory();
         // Backstop for every entry path: a gone client must not kill the
         // daemon (cas-5918). The process entry points set it earlier.

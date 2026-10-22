@@ -46,6 +46,7 @@ impl FactoryDaemon {
                             view_mode: ClientViewMode::Full,
                             client_cols: self.cols,
                             client_rows: self.rows,
+                            detaching: false,
                         },
                     );
                     any_new = true;
@@ -100,6 +101,9 @@ impl FactoryDaemon {
 
                 // Parse input buffer for control sequences
                 let (input_data, events) = Self::parse_client_input(&mut client.input_buf);
+                if events.iter().any(|event| matches!(event, ControlEvent::Detach)) {
+                    client.detaching = true;
+                }
                 let has_activity = !input_data.is_empty() || !events.is_empty();
                 if has_activity {
                     let can_take = self.owner_client_id.is_none()
@@ -115,6 +119,7 @@ impl FactoryDaemon {
                         }
                         for event in events {
                             match event {
+                                ControlEvent::Detach => {},
                                 ControlEvent::Resize(cols, rows) => {
                                     // Store per-client dimensions
                                     if let Some(c) = self.clients.get_mut(&client_id) {
@@ -320,16 +325,7 @@ impl FactoryDaemon {
         }
 
         // Remove disconnected clients and recalibrate if any left
-        let had_disconnects = !disconnected.is_empty();
-        for id in disconnected {
-            self.clients.remove(&id);
-            if self.owner_client_id == Some(id) {
-                self.owner_client_id = None;
-            }
-        }
-        if had_disconnects {
-            self.recalibrate_after_disconnect();
-        }
+        self.disconnect_tui_clients(&disconnected);
 
         // Debounce resize: store pending event, apply in main loop after 100ms
         if let Some((cols, rows)) = resize_event {
@@ -346,7 +342,7 @@ impl FactoryDaemon {
     }
 
     /// Parse client input, extracting control sequences
-    fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
+    pub(super) fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
         let mut input_data = Vec::new();
         let mut events = Vec::new();
         let mut i = 0;
@@ -429,7 +425,7 @@ impl FactoryDaemon {
                                 _ => {}
                             }
                         } else if cmd_str == "detach" {
-                            // Client wants to detach - just disconnect them
+                            events.push(ControlEvent::Detach);
                         }
                     }
 

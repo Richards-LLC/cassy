@@ -783,7 +783,12 @@ large_artifact_dir = \"before\"\n",
                 assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
             }
             set_config_value(&mut config, key, &value, &cas_root, operator).unwrap();
-            let actual = Config::load(&cas_root).unwrap();
+            let stored_root = if key == "viktor.enabled" || key.starts_with("hub.") {
+                crate::config::host_config_dir()
+            } else {
+                cas_root.clone()
+            };
+            let actual = Config::load(&stored_root).unwrap();
             assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");
             if key == "factory.ai_enrichment.effort" {
                 let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();

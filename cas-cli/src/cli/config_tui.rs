@@ -810,6 +810,11 @@ mod tests {
         .unwrap();
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
+        assert_eq!(
+            app.values.get("hub.transport_mode").map(String::as_str),
+            Some("auto"),
+            "the editor should show the host-scoped value"
+        );
         app.current_section = Some("sync".into());
         app.option_keys = vec!["sync.enabled".into()];
         app.option_state.select(Some(0));
@@ -841,6 +846,81 @@ mod tests {
         assert_eq!(
             Config::load(&host_root).unwrap().hub.unwrap().transport_mode(),
             crate::config::HubTransportMode::Loopback
+        );
+    }
+
+    #[test]
+    fn config_tui_clear_optional_value_removes_override() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("projects/config-tui-clear");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "# keep project comment\n[issues]\nrepo = \"owner/old-repo\"\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("issues".into());
+        app.option_keys = vec!["issues.repo".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Enter).unwrap();
+        for _ in 0.."owner/old-repo".len() {
+            app.handle_value_edit_key(KeyCode::Backspace).unwrap();
+        }
+        app.handle_value_edit_key(KeyCode::Enter).unwrap();
+
+        app.save_config_with(|| InvocationContext::default()).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(
+            document
+                .get("issues")
+                .and_then(|issues| issues.get("repo"))
+                .is_none(),
+            "{saved}"
+        );
+        assert!(saved.contains("# keep project comment"), "{saved}");
+    }
+
+    #[test]
+    fn config_tui_reports_prior_host_write_when_project_save_fails() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let host_root = crate::config::host_config_dir();
+        std::fs::create_dir_all(&host_root).unwrap();
+        std::fs::write(
+            host_root.join("config.toml"),
+            "# host comment\n[hub]\ntransport_mode = \"auto\"\n",
+        )
+        .unwrap();
+        let project = env.home().join("projects/config-tui-partial-save");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "# project comment\n[sync]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config.set("hub.transport_mode", "required").unwrap();
+        app.config.set("sync.enabled", "false").unwrap();
+        app.has_unsaved = true;
+        std::fs::write(root.join("config.toml"), "[sync\n").unwrap();
+
+        let error = app
+            .save_config_with(|| InvocationContext::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already saved")
+                && error.contains(host_root.join("config.toml").to_string_lossy().as_ref()),
+            "{error}"
+        );
+        let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
+        assert!(
+            host_saved.contains("transport_mode = \"required\""),
+            "{host_saved}"
         );
     }
 

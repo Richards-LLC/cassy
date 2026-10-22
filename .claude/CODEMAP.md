@@ -76,7 +76,7 @@
 
 ## Factory runtime and terminals
 
-- `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/app/init.rs` - TUI state and startup wiring.
+- `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/app/init.rs` - TUI state, startup wiring and warm target seeding.
 - `cas-cli/src/ui/factory/app/provisioning.rs`, `cas-cli/src/ui/factory/app/render_and_ops/` - provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup delivery, events, probes, relays and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs` - lifecycle-owned Slack intake and pause control.
@@ -88,7 +88,7 @@
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_binary_skew.rs`, `cas-cli/src/history/epochs.rs` - live binary/version identity and runtime epoch history.
 - `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_build_guard.rs` - scratch paths and build-pressure admission.
-- `cas-cli/src/factory_review_scratch.rs` - task/dispatch-owned review proof checkouts, reuse and GC.
+- `cas-cli/src/factory_review_scratch.rs` - review proof checkouts, inherited Cargo flags, assigned-target reuse and GC.
 - `cas-cli/src/factory_worker_check.rs` - capped checks/tests, receipt rebinding and supervisor-recorded evidence.
 - `cas-cli/src/factory_target_cache.rs`, `cas-cli/src/factory_target_cache/` - cache inventory/GC, ownership, baselines and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch, readiness and terminal snapshots.

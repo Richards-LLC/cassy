@@ -93,6 +93,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Mounted sibling tests** — Resolve differently named sibling test parents through explicit Rust AST mounts, caching directory and parent parses within the changed-source batch instead of relying only on foo_tests.rs to foo.rs naming.
 
+- **Warm review builds** — Warm-seed eligible verifier review targets from the assigned quiescent target and mirror inherited rustflags/rustdocflags into private Cargo configuration so reusable artifacts keep matching fingerprints; retain a private cold-build fallback.
+
 - **Prebuild lookup fairness** — Bound per-run artifact retries, continue checking other completed runs, retry failed queries until the overall deadline, and label exit 137 as a timeout.
 
 ## [3.73.0] - 2026-10-22

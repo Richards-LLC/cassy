@@ -13476,12 +13476,6 @@ fn target_identical_delivered_paths(
     Some((note, dropped))
 }
 
-/// An epic must prove the child's delivery, not just the first-parent
-/// imports of its target-sync merge. Use the same attributed history and
-/// exact final-blob recovery as child close when that history is available.
-/// Legacy anchors without task-attributed history retain their existing proof.
-/// The recorded anchor is the only accepted snapshot: a reused live lane
-/// cannot supply another task's final blob to this child's epic accounting.
 /// A foreign task's ordinary commit can deliberately retire delivered lines.
 /// Qualify immutable history first, then ask the same ownership walk which
 /// qualified commit actually removed a live owner. Path touches alone grant
@@ -13518,6 +13512,7 @@ fn epic_anchor_supersession(
         }).flatten();
         let owner = named.or_else(|| children.iter().find(|child| {
             child.id != task.id && child.status == TaskStatus::Closed
+                && child.has_delivery_to_integrate()
                 && child.deliverables.factory_branch_anchor.as_deref() == Some(sha)
         }).map(|child| child.id.clone()));
         if let Some(owner) = owner { qualified.insert(sha.to_string(), owner); }
@@ -13546,6 +13541,12 @@ fn epic_anchor_supersession(
             evidence.into_iter().collect::<Vec<_>>().join("; "))))
 }
 
+/// An epic must prove the child's delivery, not just the first-parent
+/// imports of its target-sync merge. Use the same attributed history and
+/// exact final-blob recovery as child close when that history is available.
+/// Legacy anchors without task-attributed history retain their existing proof.
+/// The recorded anchor is the only accepted snapshot: a reused live lane
+/// cannot supply another task's final blob to this child's epic accounting.
 fn epic_anchor_content_presence(
     task: &Task,
     children: &[Task],
@@ -36590,7 +36591,7 @@ mod epic_status_gate_tests {
         git(p, &["add", "shared.rs"]);
         git(
             p,
-            &["commit", "-q", "-m", "evolve integrated worker delivery"],
+            &["commit", "-q", "-m", "refactor(cas-bbbb): evolve integrated worker delivery"],
         );
 
         assert!(
@@ -36627,9 +36628,18 @@ mod epic_status_gate_tests {
             git(p, &["commit", "-q", "-m", "feat(cas-aaaa): deliver helper"]);
             let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
             let removal = if mode == "merge" {
+                git(p, &["checkout", "-q", "-b", "factory/parallel"]);
+                std::fs::write(p.join("parallel.txt"), "parallel work\n").unwrap();
+                git(p, &["add", "parallel.txt"]);
+                git(p, &["commit", "-q", "-m", "parallel work"]);
                 git(p, &["checkout", "-q", "main"]);
-                git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/worker",
-                    "-m", "merge(cas-bbbb): discard helper"]);
+                git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+                git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/parallel"]);
+                // Both parents keep the helper; only the merge resolution
+                // removes it, even though its subject names another task.
+                std::fs::write(p.join("shared.rs"), baseline).unwrap();
+                git(p, &["add", "shared.rs"]);
+                git(p, &["commit", "-q", "-m", "merge(cas-bbbb): discard helper"]);
                 epic_git_stdout(p, &["rev-parse", "HEAD"])
             } else {
                 // Same reused lane, ordinary task rewrite before integration.

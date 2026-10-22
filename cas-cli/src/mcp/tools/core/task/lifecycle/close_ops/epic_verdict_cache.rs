@@ -167,7 +167,7 @@ pub(super) fn verdict_key(
     // A newly closed child can establish authority for an otherwise
     // unattributed retirement without moving any Git ref.
     let closed: std::collections::BTreeSet<_> = children.iter()
-        .filter(|child| child.status == cas_types::TaskStatus::Closed)
+        .filter(|child| child.status == cas_types::TaskStatus::Closed && child.has_delivery_to_integrate())
         .filter_map(|child| child.deliverables.factory_branch_anchor.as_deref()
             .map(|anchor| (child.id.as_str(), anchor)))
         .collect();

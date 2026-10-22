@@ -20,6 +20,7 @@ fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let home = tempfile::TempDir::new().unwrap();
     let _env = crate::test_support::TestEnvGuard::with_vars(&[
         ("HOME", home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", home.path().join(".config").to_str().unwrap()),
         ("CAS_PUSH_EPIC_BRANCH", "0"),
     ]);
     let origin = temp.path().join("origin.git");
@@ -239,6 +240,36 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
                 .is_empty()
             );
         }
+        let mut failures = Vec::new();
+        for (source_id, local_id, same_host, source_here) in [
+            (None, None, true, true),
+            (None, None, false, false),
+            (None, Some("local"), true, true),
+            (None, Some("local"), false, false),
+            (Some("local"), Some("local"), true, true),
+            (Some("local"), Some("local"), false, true),
+            (Some("source"), Some("local"), true, false),
+            (Some("source"), Some("local"), false, false),
+            (Some("source"), None, true, false),
+        ] {
+            match local_id {
+                Some(id) => crate::cloud::device::DeviceConfig {
+                    device_id: id.into(), name: None, registered_at: "now".into(),
+                }.save().unwrap(),
+                None => crate::cloud::device::DeviceConfig::delete().unwrap(),
+            }
+            let mut wire = serde_json::to_value(&epic).unwrap();
+            wire["deliverables"]["epic_branch_origin"]["device_id"] = serde_json::json!(source_id);
+            wire["deliverables"]["epic_branch_origin"]["host"] = serde_json::json!(
+                if same_host { host.clone() } else { format!("peer-{host}") });
+            tasks.update(&serde_json::from_value(wire).unwrap()).unwrap();
+            let receipt = focus(root);
+            // pin: source identity chooses restore advice, while peers must publish.
+            if receipt.contains("missing on originating host") != source_here {
+                failures.push(format!("source={source_id:?} local={local_id:?} same_host={same_host}: {receipt}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     });
 }
 

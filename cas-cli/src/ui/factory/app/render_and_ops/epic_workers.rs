@@ -4634,6 +4634,23 @@ mod spawn_base_tests {
         let error = ensure_local_spawn_parent(&repo, "epic/missing").unwrap_err();
         assert!(error.contains("git fetch origin epic/missing"), "{error}");
         assert!(full_sha(&repo, "epic/missing").is_none());
+        let mut failures = Vec::new();
+        for branch in ["epic/{a,b}", "epic/a!e", "epic/$(touch${IFS}SUBSTITUTED)", "epic/a b", "epic/a'quote"] {
+            let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+            let standalone = error.lines().find(|line| line.starts_with("git fetch "));
+            if standalone.is_none() {
+                failures.push(format!("fetch remedy is not a standalone line: {error}"));
+            }
+            let command = standalone.or_else(|| error.split('`').nth(1)).unwrap();
+            let output = super::spawn_readiness_tests::run_bash_remedy(
+                &repo, command, "git() { printf '%s\\0' \"$@\"; }");
+            let args = output.stdout.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect::<Vec<_>>();
+            if !output.status.success() || args != [b"fetch".as_slice(), b"origin".as_slice(), branch.as_bytes()] {
+                failures.push(format!("bash altered fetch arguments for {branch:?}: {output:?}"));
+            }
+        }
+        assert!(!repo.join("SUBSTITUTED").exists(), "remedy executed branch substitution");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while

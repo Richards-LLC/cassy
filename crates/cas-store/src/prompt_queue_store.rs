@@ -3493,8 +3493,8 @@ impl SqlitePromptQueueStore {
     }
 
     /// The scan behind [`Self::received_supervisor_messages_since_matching`],
-    /// reading at most `scan_cap` rows, filtered or not. Also says whether it
-    /// stopped at that cap before finding `limit` matches.
+    /// reading at most `scan_cap` rows, filtered or not. Also says whether
+    /// more rows lay beyond that cap when it stopped short of `limit` matches.
     pub(crate) fn received_supervisor_messages_scan(
         &self,
         recipient: &str,
@@ -3531,14 +3531,19 @@ impl SqlitePromptQueueStore {
                 recipient,
                 factory_session,
                 since.to_rfc3339(),
-                i64::try_from(scan_cap).unwrap_or(i64::MAX)
+                i64::try_from(scan_cap.saturating_add(1)).unwrap_or(i64::MAX)
             ],
             |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
         )?;
         let mut matched = Vec::new();
+        // cas-e13c: one row past the cap is read only to learn whether the
+        // scan truly stopped short; it is never filtered or returned.
         let mut scanned = 0usize;
         for row in rows {
             scanned += 1;
+            if scanned > scan_cap {
+                return Ok((matched, true));
+            }
             let (prompt, at) = row?;
             let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
             if include(&prompt, at) {
@@ -3548,7 +3553,7 @@ impl SqlitePromptQueueStore {
                 }
             }
         }
-        Ok((matched, scanned == scan_cap))
+        Ok((matched, false))
     }
 
     /// Remove the empty diagnostic artifact left by older installations/tools.
@@ -10334,13 +10339,14 @@ mod tests {
         for _ in 0..3 {
             send("unrelated chatter");
         }
-        let scan = |cap| {
+        let scan_with = |cap, wanted: &str| {
             store
                 .received_supervisor_messages_scan("worker", "history-session", since, 1, cap, |row, _| {
-                    !row.prompt.contains("unrelated")
+                    row.prompt.contains(wanted)
                 })
                 .unwrap()
         };
+        let scan = |cap| scan_with(cap, "answer");
 
         let (found, hit_cap) = scan(10);
         assert_eq!(found.iter().map(|(row, _)| row.id).collect::<Vec<_>>(), vec![answer]);
@@ -10349,6 +10355,12 @@ mod tests {
         let (found, hit_cap) = scan(3);
         assert!(found.is_empty(), "the answer is beyond a 3-row scan: {found:?}");
         assert!(hit_cap, "a scan stopped by its cap says so");
+
+        // cas-e13c: exactly `cap` rows read with too few matches is not a
+        // truncation; only a row beyond the cap is.
+        let (found, hit_cap) = scan_with(4, "nothing matches this");
+        assert!(found.is_empty());
+        assert!(!hit_cap, "all 4 rows were read; nothing was cut off");
     }
 
     #[test]

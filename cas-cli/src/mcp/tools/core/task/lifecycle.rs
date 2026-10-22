@@ -2531,9 +2531,10 @@ impl CasCore {
                     agent_name.clone(),
                     std::sync::Arc::clone(&local_agents),
                 );
+                let cas_root = self.cas_root.clone();
                 peer_budget
                     .run(move || {
-                        claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                        claims.acquire_for_start(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                             local.contains(holder)
                         })
                     })

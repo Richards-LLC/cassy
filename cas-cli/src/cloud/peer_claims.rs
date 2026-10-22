@@ -418,6 +418,31 @@ impl PeerClaims {
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
+    /// Cancel an old pending release before task start takes a new Cloud
+    /// claim. The per-task fence also waits out a release already in flight;
+    /// cancellation alone cannot invalidate that release's earlier snapshot.
+    /// Called on the blocking pool under the start request's peer budget.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn acquire_for_start(
+        &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
+        agent_id: &str, agent_name: &str, duration_secs: u32,
+        is_local: &dyn Fn(&str) -> bool,
+    ) -> Acquire {
+        let _fence = match lock_task_claim_release(cas_root, task_id) {
+            Ok(fence) => fence,
+            Err(error) => return Acquire::Unavailable(format!("task claim release fence: {error}")),
+        };
+        // The async caller may already have timed out while this blocking
+        // work waited for an in-flight release. Do not cancel newer work.
+        if let Err(error) = self.remaining() {
+            return Acquire::Unavailable(error.to_string());
+        }
+        if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
+            return Acquire::Unavailable("pending claim releases could not be cancelled safely".into());
+        }
+        self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local)
+    }
+
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
     /// within `budget`. `None` when the lock or its reason cannot be read.
     pub fn recorded_holder(&self, id: &str, reader: &str, budget: Duration) -> Option<ClaimHolder> {
@@ -1143,31 +1168,62 @@ fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<St
         .unwrap_or_default()
 }
 
+/// Serialize only this task's Cloud start/release, across processes. Keep
+/// these lock inodes: unlinking a held lock would allow a second lock owner.
+/// The shared records lock below never spans a network call.
+fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt;
+    let directory = cas_root.join("claim-release-locks");
+    std::fs::create_dir_all(&directory)?;
+    let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(directory.join(format!("{key}.lock")))?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
 /// Read-modify-write the pending releases under an exclusive file lock; no
 /// Cloud call runs inside `change`.
 fn update_pending_claim_releases<R>(
     cas_root: &Path,
     change: impl FnOnce(&mut std::collections::BTreeMap<String, i64>) -> R,
-) -> R {
+) -> Option<R> {
     use fs2::FileExt;
     let path = pending_claim_releases_path(cas_root);
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(path.with_extension("lock"));
-    let _guard = lock.as_ref().ok().filter(|file| file.lock_exclusive().is_ok());
+        .open(path.with_extension("lock"))
+        .and_then(|file| { file.lock_exclusive()?; Ok(file) });
+    let _guard = match lock {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(%error, "could not lock pending claim releases; leaving records unchanged");
+            return None;
+        }
+    };
     let mut pending = read_pending_claim_releases(cas_root);
     let result = change(&mut pending);
-    if pending.is_empty() {
-        let _ = std::fs::remove_file(&path);
-    } else if let Ok(text) = serde_json::to_string(&pending) {
+    let saved = if pending.is_empty() {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    } else {
+        let text = serde_json::to_string(&pending).expect("string-to-integer map serializes");
         let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+        let saved = std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path));
+        if saved.is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
+        saved
+    };
+    if let Err(error) = saved {
+        tracing::warn!(%error, "could not save pending claim releases");
+        return None;
     }
-    result
+    Some(result)
 }
 
 /// cas-978d: [`release_task_claim`] off the caller, for park, close and
@@ -1185,7 +1241,7 @@ pub(crate) fn release_task_claim_in_background_with(
 ) -> Option<std::thread::JoinHandle<()>> {
     let claims = claims?;
     let now = Utc::now().timestamp();
-    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now));
+    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now))?;
     let cas_root = cas_root.to_path_buf();
     std::thread::Builder::new()
         .name("cas-claim-release".into())
@@ -1198,6 +1254,12 @@ pub(crate) fn release_task_claim_in_background_with(
 /// so its claim is the new holder's and the record is dropped unreleased;
 /// so is one older than a lease's lifetime, whose claim has run out.
 pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) {
+    release_pending_task_claims_with(claims, cas_root, |_| {});
+}
+
+fn release_pending_task_claims_with(
+    claims: &PeerClaims, cas_root: &Path, before_release: impl Fn(&str),
+) {
     let pending = read_pending_claim_releases(cas_root);
     if pending.is_empty() {
         return;
@@ -1208,14 +1270,32 @@ pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) 
     let is_local = |id: &str| agents.get(id).is_ok();
     let now = Utc::now().timestamp();
     let lifetime = i64::from(lease_duration_secs(cas_root));
-    let mut settled = Vec::new();
     for (task_id, asked) in pending {
         let restarted = agents
             .get_lease(&task_id)
             .ok()
             .flatten()
             .is_some_and(|lease| lease.is_valid());
-        let done = restarted || now - asked >= lifetime || {
+        let expired = now - asked >= lifetime;
+        if !restarted && !expired {
+            before_release(&task_id);
+        }
+        let _fence = match lock_task_claim_release(cas_root, &task_id) {
+            Ok(fence) => fence,
+            Err(error) => {
+                tracing::warn!(task = %task_id, %error, "could not lock pending claim release; will retry");
+                continue;
+            }
+        };
+        // Start may have cancelled this snapshot before taking its Cloud
+        // claim. Recheck under the same fence used by acquisition, and hold
+        // it through release AND record settlement (not just the GET).
+        if read_pending_claim_releases(cas_root).get(&task_id) != Some(&asked) {
+            continue;
+        }
+        let restarted = agents.get_lease(&task_id).ok().flatten()
+            .is_some_and(|lease| lease.is_valid());
+        let done = restarted || expired || {
             let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
             match budgeted.release_local(&task_id, &is_local) {
                 Ok(_) => true,
@@ -1226,20 +1306,14 @@ pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) 
             }
         };
         if done {
-            settled.push((task_id, asked));
+            update_pending_claim_releases(cas_root, |pending| {
+                // A release asked again meanwhile keeps its newer record.
+                if pending.get(&task_id) == Some(&asked) {
+                    pending.remove(&task_id);
+                }
+            });
         }
     }
-    if settled.is_empty() {
-        return;
-    }
-    update_pending_claim_releases(cas_root, |pending| {
-        for (task_id, asked) in settled {
-            // A release asked again meanwhile keeps its newer record.
-            if pending.get(&task_id) == Some(&asked) {
-                pending.remove(&task_id);
-            }
-        }
-    });
 }
 
 /// What a spawn learns about peers before it queues anything (cas-0078).
@@ -1389,6 +1463,230 @@ pub fn lease_duration_secs(cas_root: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod pending_release_tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const TASK: &str = "cas-af26";
+        const AGENT: &str = "release-worker";
+
+        async fn fixture(fail_release: bool) -> (
+            MockServer, tempfile::TempDir, PeerClaims, Arc<Mutex<Option<serde_json::Value>>>,
+        ) {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let agents = crate::store::open_agent_store(dir.path()).unwrap();
+            agents.register(&crate::types::Agent::new(AGENT.into(), "worker".into())).unwrap();
+            let project = "github.com/acme/retry-race";
+            let key = claim_key(project, TASK);
+            let old = TaskLease::new(key.clone(), AGENT.into(), 600);
+            let mut lock = serde_json::to_value(old).unwrap();
+            lock["id"] = serde_json::json!("old-lock");
+            let held = Arc::new(Mutex::new(Some(lock)));
+            let read = held.clone();
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "lock": read.lock().unwrap().clone(),
+                    }))
+                }).mount(&server).await;
+            let listed = held.clone();
+            Mock::given(method("GET")).and(path("/api/agents/locks"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let locks: Vec<_> = listed.lock().unwrap().clone().into_iter().collect();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "status":"success", "locks":locks,
+                    }))
+                }).mount(&server).await;
+            let release = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if fail_release {
+                        return ResponseTemplate::new(503);
+                    }
+                    *release.lock().unwrap() = None;
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success"}))
+                }).mount(&server).await;
+            let claimed = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let mut fresh = serde_json::to_value(TaskLease::new(key.clone(), AGENT.into(), 600)).unwrap();
+                    fresh["id"] = serde_json::json!("fresh-lock");
+                    fresh["epoch"] = serde_json::json!(2);
+                    *claimed.lock().unwrap() = Some(fresh.clone());
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "status":"success", "result":"claimed", "lock":fresh,
+                    }))
+                }).mount(&server).await;
+            let claims = PeerClaims {
+                config: CloudConfig {
+                    endpoint: server.uri(), token: Some("sandbox-token".into()),
+                    ..Default::default()
+                },
+                project: project.into(), label: "local".into(),
+                retired_local: HashMap::new(), budget: None,
+            };
+            update_pending_claim_releases(dir.path(), |pending| {
+                pending.insert(TASK.into(), Utc::now().timestamp());
+            });
+            (server, dir, claims, held)
+        }
+
+        #[tokio::test]
+        async fn restarting_between_lease_check_and_cloud_read_keeps_fresh_claim_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                // A start that exhausted its peer budget while waiting for
+                // the fence must not cancel a later release on waking up.
+                let pending = read_pending_claim_releases(dir.path());
+                let expired = claims.clone().with_budget(PeerBudget::new(Duration::ZERO));
+                assert!(matches!(expired.acquire_for_start(
+                    dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                ), Acquire::Unavailable(_)));
+                assert_eq!(read_pending_claim_releases(dir.path()), pending,
+                    "a timed-out start must not cancel a pending release");
+                release_pending_task_claims_with(&claims, dir.path(), |task| {
+                    // The real task-start order: Cloud first, local lease later.
+                    assert!(crate::store::open_agent_store(dir.path()).unwrap().get_lease(task).unwrap().is_none());
+                    assert!(matches!(claims.acquire_for_start(
+                        dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    ), Acquire::Claimed));
+                    // Deliberately leave the local lease absent until retry ends.
+                });
+                assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT),
+                    "the old release retry removed the restart's fresh Cloud claim");
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert_eq!(held.lock().unwrap().as_ref().unwrap()["id"], "fresh-lock");
+            assert!(server.received_requests().await.unwrap().iter().all(|r| !r.url.path().ends_with("/release")));
+
+            // The opposite ordering: retry has already reached Cloud. The
+            // fence must span its GET, POST and settlement before start can
+            // acquire afresh. Channels force the network interleave; the
+            // nonblocking probes prove exclusion without a timing assertion.
+            let (server, dir, claims, held) = fixture(false).await;
+            let fence_path = dir.path().join("claim-release-locks")
+                .join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
+            let (entered, read_entered) = std::sync::mpsc::channel();
+            let (resume, proceed) = std::sync::mpsc::channel();
+            let proceed = Mutex::new(proceed);
+            let read = held.clone();
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let snapshot = read.lock().unwrap().clone();
+                    entered.send(()).unwrap();
+                    proceed.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock":snapshot}))
+                }).up_to_n_times(1).with_priority(1).mount(&server).await;
+            let posted_fence = fence_path.clone();
+            let release = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    use fs2::FileExt;
+                    let probe = std::fs::OpenOptions::new().write(true).open(&posted_fence).unwrap();
+                    assert!(probe.try_lock_exclusive().is_err(), "fence must span the release POST");
+                    *release.lock().unwrap() = None;
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success"}))
+                }).with_priority(1).mount(&server).await;
+            tokio::task::spawn_blocking(move || {
+                use fs2::FileExt;
+                let retry = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || release_pending_task_claims(&claims, &root))
+                };
+                read_entered.recv_timeout(Duration::from_secs(10)).unwrap();
+                let probe = std::fs::OpenOptions::new().write(true).open(fence_path).unwrap();
+                let fenced = probe.try_lock_exclusive().is_err();
+                drop(probe);
+                let restart = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || claims.acquire_for_start(
+                        &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    ))
+                };
+                resume.send(()).unwrap();
+                retry.join().unwrap();
+                assert!(matches!(restart.join().unwrap(), Acquire::Claimed));
+                assert!(fenced, "a retry must retain the fence across Cloud reads");
+                assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT));
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn restarted_local_lease_drops_pending_record_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                let agents = crate::store::open_agent_store(dir.path()).unwrap();
+                assert!(matches!(agents.try_claim(TASK, AGENT, 600, Some("restart")), Ok(ClaimResult::Success(_))));
+                release_pending_task_claims(&claims, dir.path());
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn failed_cloud_release_keeps_pending_record_cas_af26() {
+            let (_server, dir, claims, held) = fixture(true).await;
+            tokio::task::spawn_blocking(move || {
+                let before = read_pending_claim_releases(dir.path());
+                release_pending_task_claims(&claims, dir.path());
+                assert_eq!(read_pending_claim_releases(dir.path()), before);
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+        }
+
+        #[tokio::test]
+        async fn expired_release_drops_pending_record_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                update_pending_claim_releases(dir.path(), |pending| {
+                    pending.insert(TASK.into(), Utc::now().timestamp() - i64::from(lease_duration_secs(dir.path())));
+                });
+                release_pending_task_claims(&claims, dir.path());
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[test]
+        fn unavailable_record_lock_logs_and_never_updates_unlocked_cas_af26() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = pending_claim_releases_path(dir.path());
+            let original = serde_json::json!({TASK: Utc::now().timestamp()}).to_string();
+            std::fs::write(&path, &original).unwrap();
+            std::fs::create_dir(path.with_extension("lock")).unwrap();
+            let log = tempfile::tempfile().unwrap();
+            let capture = log.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_writer(move || capture.try_clone().unwrap()).finish();
+            let mut changed = false;
+            tracing::subscriber::with_default(subscriber, || {
+                update_pending_claim_releases(dir.path(), |pending| {
+                    changed = true;
+                    pending.clear();
+                });
+            });
+            assert!(!changed, "never run the update after failing to acquire its lock");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            use std::io::{Read, Seek};
+            let mut log = log;
+            log.rewind().unwrap();
+            let mut text = String::new();
+            log.read_to_string(&mut text).unwrap();
+            assert!(text.contains("pending claim releases") && text.contains("lock"), "{text}");
+        }
+    }
 
     #[tokio::test]
     async fn cas_8ea7_team_conflict_names_account_and_never_recovers_foreign_lock() {

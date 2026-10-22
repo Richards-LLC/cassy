@@ -380,7 +380,7 @@ mod tests {
 
         let before_value = before.get(key);
         for candidate in &candidates {
-            if candidate == meta.default || meta.validate(candidate).is_err() {
+            if before_value.as_deref() == Some(candidate.as_str()) || meta.validate(candidate).is_err() {
                 continue;
             }
             let mut probe = before.clone();
@@ -391,7 +391,7 @@ mod tests {
 
         candidates
             .into_iter()
-            .find(|candidate| candidate != meta.default && meta.validate(candidate).is_ok())
+            .find(|candidate| before_value.as_deref() != Some(candidate.as_str()) && meta.validate(candidate).is_ok())
             .unwrap_or_else(|| panic!("no valid non-default round-trip value for {key}"))
     }
     use crate::cli::config::read_ops::set_config_value;

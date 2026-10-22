@@ -1232,7 +1232,7 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         Ok(sealed) => notes.extend(publish_comments(root, config, &sealed)),
         Err(error) => notes.push(format!("pack reload for publication failed: {error}")),
     }
-    notes.extend(super::slack::post_sealed(config, &dir));
+    notes.extend(super::slack::seal_note(config));
     if let Err(error) = super::promotion::publish_freeze(cas_root, root, config, false) {
         notes.push(format!("freeze release not published: {}", printable(&error)));
     }
@@ -1348,7 +1348,31 @@ pub(crate) fn drive(cas_root: &Path, lease: &mut Option<File>, cancel: &AtomicBo
         }
     }
     tick(cas_root, cancel)?;
+    post_sealed_runs(cas_root);
     Ok(true)
+}
+
+/// Posts every sealed generation missing from its pack's `slack.json`
+/// (cas-efb8): seals made by `record` in the CLI, which has no proxy, are
+/// posted here, and a failed post retries on the next tick.
+fn post_sealed_runs(cas_root: &Path) {
+    let Some(config) = super::configured(cas_root).filter(|c| !c.slack_channel.trim().is_empty()) else {
+        return;
+    };
+    for run in scan(cas_root).0.into_iter().filter(|run| run.state == State::Sealed) {
+        let Ok(dir) = pack::pack_dir(cas_root, &run.sha) else {
+            continue;
+        };
+        let notes = super::slack::post_sealed(&config, &dir);
+        if !notes.is_empty()
+            && let Err(error) = update(cas_root, &run.sha, |run| {
+                notes.into_iter().for_each(|note| run.note(note));
+                Ok(())
+            })
+        {
+            tracing::warn!(%error, "release-gate Slack note not saved");
+        }
+    }
 }
 
 fn lock_lease(cas_root: &Path) -> Result<Option<File>> {

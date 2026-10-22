@@ -3589,7 +3589,7 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
         });
         result.unwrap();
         let warning = output.split_once("[WARN]").expect("modified reference warning").1;
-        assert!(warning.lines().all(|line| line.width() <= 80), "{output}");
+        assert!(output.lines().all(|line| line.width() <= 80), "{output}");
         let prose = warning.split_whitespace().collect::<Vec<_>>().join(" ");
         // pin: preserve the existing explanation in full; wrapping must not elide it.
         assert!(prose.contains("1 locally modified builtin reference file(s) in ~/.claude were preserved (content matches no version Cassy has shipped):"), "{output}");

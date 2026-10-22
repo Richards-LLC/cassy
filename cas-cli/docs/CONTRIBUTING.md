@@ -1608,12 +1608,16 @@ root siblings of at least 1 GiB (apparent file bytes) as review-only. The
 unmanaged scan stops at that threshold and reports a lower bound, not a full
 recursive total.
 `gc_cleanup force=true dry_run=false` reclaims a managed review target as soon as
-the exact dispatch resolves, or a task without an active dispatch is Closed/Cancelled.
-Verdict recording and task close run the same guarded target-only pass; disk-pressure
-admission retries it through existing GC. Each pass reclaims at most 16 checkouts.
+the dispatch resolves, times out or is invalidated, or a task is Closed/Cancelled,
+provided no Pending/Claimed dispatch remains for that task.
+Verdict recording and task close await only a guarded atomic rename into private
+trash; measurement and deletion run in the background under the build-lane lock.
+GC and disk-pressure admission recover interrupted trash. Each pass visits at most 16 checkouts.
 The small source checkout and Git registration retain the two-hour idle grace period.
 `REVIEW_SCRATCH_STATUS_JSON` reports total and per-checkout `reclaimable_bytes`; a
 young terminal checkout contributes its disposable target bytes, not its source bytes.
+The default human report also shows that total. Both review and target-cache
+reports count queued trash as `pending_reclaim_bytes`, never as already freed space.
 Successful checkout reuse refreshes `last_used_at`; older records without that
 field use creation time. It
 checks leases and native process evidence (open files, cwd, mappings and argv),

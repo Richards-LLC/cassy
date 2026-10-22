@@ -173,6 +173,12 @@ test("clean fixture passes with zero findings across every run", async (t) => {
   assert.ok(report.runs.every((r) => r.exit_code === 0));
 });
 
+test("literal progress ellipses pass without a truncation escape", async (t) => {
+  const { report } = await gate(t, "literal-progress-ellipsis.sh");
+  assert.equal(report.verdict, "PASS", JSON.stringify(report.findings, null, 2));
+  assert.deepEqual(report.findings, []);
+});
+
 const DEFECTS = [
   ["wrapped-table.sh", "overflow"],
   ["low-contrast.sh", "contrast"],
@@ -256,10 +262,10 @@ test("report.md opens with the receipt line and the receipt is the last stdout l
   assert.ok(json.runs.every((r) => fs.existsSync(path.resolve(r.files.ansi)) && fs.existsSync(path.resolve(r.files.txt))));
 });
 
-test("the built-in CLI craft runner prints its receipt through a symlinked skills directory", (t) => {
+test("the built-in CLI craft runner accepts literal progress ellipses through a symlinked skills directory", (t) => {
   const linkedScript = symlinkedBuiltinScript(t);
   const out = tmpOut(t);
-  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("Reconfiguring Cassy...")'], { encoding: "utf8" });
   assert.equal(cli.status, 0, cli.stderr + cli.stdout);
   assert.match(cli.stdout, /^terminal-qa: PASS symlinked-runner · 4 runs · 0 fail · 0 warn · 0 allowed · .*report\.json/m);
   const report = JSON.parse(fs.readFileSync(path.join(out, "report.json"), "utf8"));

@@ -705,52 +705,72 @@ mod tests {
     #[test]
     fn test_styled_status_marks_use_ascii_fallback_under_c_locale() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
-        env.remove("NO_COLOR");
-        let theme = ActiveTheme::default_light();
-        let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
-            panic!("text_error must use a concrete theme color");
-        };
-        let mut error_buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
-            fmt.error("configuration failed").unwrap();
-        }
-        assert_eq!(
-            String::from_utf8(error_buf).unwrap(),
-            format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
-        );
+        // Capture the original cache before priming either fixture policy.
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        // Without the guard, this cached shell policy survives env.remove below.
+        env.set("NO_COLOR", "1");
+        let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            let theme = ActiveTheme::default_light();
+            let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
+                panic!("text_error must use a concrete theme color");
+            };
+            let mut error_buf = Vec::new();
+            {
+                let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
+                fmt.error("configuration failed").unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(error_buf).unwrap(),
+                format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+            );
 
-        let mut success_buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut success_buf, theme);
-            fmt.success("sync complete").unwrap();
+            let mut success_buf = Vec::new();
+            {
+                let mut fmt = Formatter::styled(&mut success_buf, theme);
+                fmt.success("sync complete").unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(success_buf).unwrap(),
+                "\x1b[1m[OK]\x1b[0m sync complete\n"
+            );
         }
-        assert_eq!(
-            String::from_utf8(success_buf).unwrap(),
-            "\x1b[1m[OK]\x1b[0m sync complete\n"
-        );
     }
 
     #[test]
     fn test_sync_output_uses_default_text_and_palette_safe_success_mark() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
-        env.remove("NO_COLOR");
-        let mut buf = Vec::new();
-        {
-            let mut fmt = Formatter::new(
-                &mut buf,
-                OutputMode::Styled,
-                ActiveTheme::default_dark(),
-                80,
-            );
-            fmt.subheading("Syncing .claude files").unwrap();
-            fmt.success("Updated .mcp.json").unwrap();
-        }
+        // Capture the original cache before priming either fixture policy.
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        // Without the guard, this cached shell policy survives env.remove below.
+        env.set("NO_COLOR", "1");
+        let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            let mut buf = Vec::new();
+            {
+                let mut fmt = Formatter::new(
+                    &mut buf,
+                    OutputMode::Styled,
+                    ActiveTheme::default_dark(),
+                    80,
+                );
+                fmt.subheading("Syncing .claude files").unwrap();
+                fmt.success("Updated .mcp.json").unwrap();
+            }
 
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
-        );
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
+            );
+        }
 
         let luminance = |(r, g, b): (u8, u8, u8)| {
             let channel = |c: u8| {

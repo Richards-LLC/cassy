@@ -439,18 +439,9 @@ mod tests {
     fn picker_decorations_follow_locale_cas_ba0e() {
         use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
         use crate::ui::components::OutputMode;
-        use crossterm::style::{Color, Colored, force_color_output};
+        use crossterm::style::Color;
         let mut env = crate::test_support::TestEnvGuard::new();
-        // Crossterm memoizes NO_COLOR process-wide. Pin actual styled bytes
-        // independently of the harness environment, restoring even on panic.
-        struct RestoreColor(bool);
-        impl Drop for RestoreColor {
-            fn drop(&mut self) {
-                force_color_output(self.0);
-            }
-        }
-        let _restore = RestoreColor(!Colored::ansi_color_disabled_memoized());
-        force_color_output(true);
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
         let items = vec![
             PickerItem {
                 label: "Alpha".into(),

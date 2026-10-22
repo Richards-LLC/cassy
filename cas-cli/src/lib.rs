@@ -135,6 +135,55 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
+    /// Declare after `TestEnvGuard` and keep both alive through rendering, so
+    /// color-policy changes are serialized and restored before the env lock.
+    #[must_use]
+    pub(crate) struct StyledColorGuard(bool);
+
+    impl StyledColorGuard {
+        pub(crate) fn new(_env: &TestEnvGuard) -> Self {
+            use crossterm::style::{Colored, force_color_output};
+            let enabled = !Colored::ansi_color_disabled_memoized();
+            force_color_output(true);
+            Self(enabled)
+        }
+    }
+
+    impl Drop for StyledColorGuard {
+        fn drop(&mut self) {
+            crossterm::style::force_color_output(self.0);
+        }
+    }
+
+    #[test]
+    fn styled_color_guard_restores_cached_policy() {
+        use crossterm::style::{Color, SetForegroundColor, force_color_output};
+        let env = TestEnvGuard::new();
+        let _restore = StyledColorGuard::new(&env);
+        for enabled in [false, true] {
+            force_color_output(enabled);
+            for unwind in [false, true] {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _colors = StyledColorGuard::new(&env);
+                    assert_eq!(
+                        SetForegroundColor(Color::Green).to_string(),
+                        "\x1b[38;5;10m"
+                    );
+                    if unwind {
+                        panic!("exercise styled-color guard unwinding");
+                    }
+                }));
+                assert_eq!(result.is_err(), unwind);
+                assert_eq!(
+                    SetForegroundColor(Color::Green).to_string(),
+                    if enabled { "\x1b[38;5;10m" } else { "\x1b[m" },
+                    "cached policy not restored (enabled={enabled}, unwind={unwind})"
+                );
+            }
+        }
+    }
+
     /// Cargo's in-process test harness runs otherwise isolated Tantivy
     /// fixtures concurrently. Keep the tests that intentionally exercise
     /// short-lived disk writers out of each other's lock lifecycle; nextest

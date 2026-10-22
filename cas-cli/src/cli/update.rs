@@ -45,9 +45,37 @@ mod fixture;
 mod live;
 mod preview;
 
+/// Wrap the warning's prose without dropping words or adding elision. The
+/// caller has already written the first prefix; continuation lines align to it.
+fn write_reference_warning_prose(
+    fmt: &mut Formatter<'_>,
+    text: &str,
+    prefix_cells: usize,
+) -> io::Result<()> {
+    // UpdateStepTracker::phase replays captured lines with two more cells.
+    let limit = usize::from(fmt.width().min(80)).saturating_sub(2);
+    let mut cells = prefix_cells;
+    for word in text.split_whitespace() {
+        let word_cells = ratatui::text::Line::from(word).width();
+        if cells > prefix_cells && cells + 1 + word_cells > limit {
+            fmt.newline()?;
+            fmt.write_raw(&" ".repeat(prefix_cells))?;
+            cells = prefix_cells;
+        }
+        if cells > prefix_cells {
+            fmt.write_raw(" ")?;
+            cells += 1;
+        }
+        fmt.write_raw(word)?;
+        cells += word_cells;
+    }
+    fmt.newline()
+}
+
 fn report_modified_builtin_references(
     result: &SyncResult,
     location: &str,
+    refresh_command: &str,
     theme: &ActiveTheme,
 ) -> std::io::Result<()> {
     for warning in &result.warnings {
@@ -59,20 +87,32 @@ fn report_modified_builtin_references(
 
     let mut out = io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
+    let prefix_cells =
+        2 + ratatui::text::Line::from(Verdict::Warning.label(fmt.glyphs())).width() + 1;
     fmt.write_raw("  ")?;
-    fmt.warning(&format!(
-        "{} locally modified builtin reference file(s) in {location} were preserved \
-         (content matches no version Cassy has shipped):",
-        result.modified_reference_files.len()
-    ))?;
+    fmt.mark(Verdict::Warning)?;
+    fmt.write_raw(" ")?;
+    write_reference_warning_prose(
+        &mut fmt,
+        &format!(
+            "{} locally modified builtin reference file(s) in {location} were preserved \
+             (content matches no version Cassy has shipped):",
+            result.modified_reference_files.len()
+        ),
+        prefix_cells,
+    )?;
     for file in &result.modified_reference_files {
         fmt.write_raw(&format!("    ! {file}"))?;
         fmt.newline()?;
     }
     fmt.write_raw("    ")?;
-    fmt.write_raw(
-        "Review each file; to accept the Cassy version, delete it and rerun `cas update --sync`.",
+    write_reference_warning_prose(
+        &mut fmt,
+        "Review each file; to accept the Cassy version, delete it and rerun",
+        4,
     )?;
+    // Keep the command together on its own copyable line.
+    fmt.write_raw(&format!("    `{refresh_command}`."))?;
     fmt.newline()
 }
 
@@ -192,7 +232,7 @@ fn report_builtin_sync(
         }
     }
 
-    report_modified_builtin_references(result, location, theme)
+    report_modified_builtin_references(result, location, "cas update --sync", theme)
 }
 
 /// GitHub repository owner
@@ -3477,7 +3517,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.claude", &theme)?;
+            report_modified_builtin_references(&r, "~/.claude", "cas update --user", &theme)?;
         }
         Some(r)
     } else {
@@ -3518,7 +3558,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.codex", &theme)?;
+            report_modified_builtin_references(&r, "~/.codex", "cas update --user", &theme)?;
         }
         Some(r)
     } else {
@@ -3553,7 +3593,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             drop(fmt);
-            report_modified_builtin_references(&r, "~/.grok", &theme)?;
+            report_modified_builtin_references(&r, "~/.grok", "cas update --user", &theme)?;
         }
         Some(r)
     } else {

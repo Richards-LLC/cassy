@@ -1047,7 +1047,12 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
-        if req.wake == Some(false) || req.kind.as_deref() == Some("receipt") {
+        // Persist this message's classification before folding adds labels
+        // and other bodies that no longer look like a pure acknowledgement.
+        if req.wake == Some(false)
+            || req.kind.as_deref() == Some("receipt")
+            || crate::supervisor_message_wakes::pure_ack(&message)
+        {
             message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
         }
         // Resolve cross-machine peers before applying the local inbox cap.

@@ -228,8 +228,12 @@ Fired reminders use the same path and pane/tool/composer vetoes; a recent
 completed checkpoint plus continuing heartbeats does not postpone an idle
 supervisor's reminder. Self reminders that exhaust a wake budget stay readable
 and retry after the existing park interval, without inter-agent abandonment or
-unread escalation. Replacement supervisors retain self-addressing for those
-reminders; original owner and target IDs stay in the durable reminder record.
+unread escalation. Only a retired supervisor target can transfer its reminder to
+a replacement supervisor. A missing or retired worker target leaves its reminder pending until
+that exact target is available; a worker reminder reaches a supervisor only when
+the worker selected that target. Delegated reminders retain the issuing worker
+as sender. Supervisor self-reminders retain self-addressing on takeover; original
+owner and target IDs stay in the durable reminder record.
 
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.

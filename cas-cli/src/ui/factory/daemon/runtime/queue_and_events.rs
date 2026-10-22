@@ -12214,9 +12214,10 @@ fn resolve_reminder_delivery_target(
         return Some(name.clone());
     }
     // Cross-session rows can outlive their original daemon. A replacement
-    // factory may take over only after this project's store says the target
-    // shut down in the factory that created the reminder. Unknown, stale, or
-    // still-active agents leave the row pending.
+    // factory may take over only a supervisor target that shut down in the
+    // factory that created the reminder. A retired worker is not a delegation
+    // to its supervisor: leave that row pending for its actual target. Unknown,
+    // stale, or still-active agents also leave the row pending.
     let agent = crate::store::open_agent_store(cas_dir)
         .ok()?
         .get(&reminder.target_id)
@@ -12226,7 +12227,9 @@ fn resolve_reminder_delivery_target(
     {
         return None;
     }
-    (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+    (agent.role == cas_types::AgentRole::Supervisor
+        && agent.status == cas_types::AgentStatus::Shutdown)
+        .then(|| supervisor_name.to_string())
 }
 
 /// What one reminder pass needs, captured on the loop (cas-223f).
@@ -13162,7 +13165,9 @@ mod tests {
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
         let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
-        let mut old_owner = cas_types::Agent::new("supervisor-1".into(), "old-supervisor".into());
+        let mut old_owner = cas_types::Agent::new_with_role(
+            "supervisor-1".into(), "old-supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
         old_owner.status = cas_types::AgentStatus::Shutdown;
         old_owner.factory_session = Some("old-factory-session".into());
         agent_store.register(&old_owner).unwrap();
@@ -13365,89 +13370,139 @@ mod tests {
         assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-927a");
     }
 
-    /// GH #1015: a foreign factory must not consume a time reminder while
-    /// its original target is still active in this project's agent store.
+    /// cas-923c / GH #1015: a missing worker pane is not a delegation to the
+    /// supervisor. Only a retired supervisor's target can move to its successor.
     #[test]
-    fn cross_session_time_reminder_waits_for_its_target_across_factories() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> =
-            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
-        reminder_store.init().unwrap();
-        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
-            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
-        supervisor_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
-            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
-        prompt_store.init().unwrap();
-        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
-        let mut owner = cas_types::Agent::new("owner-id".into(), "young-swan-22".into());
-        owner.role = cas_types::AgentRole::Supervisor;
-        owner.factory_session = Some("origin-factory".into());
-        agent_store.register(&owner).unwrap();
+    fn reminder_delivery_preserves_owner_and_target_across_retirement_cas_923c() {
+        use cas_types::{Agent, AgentRole, AgentStatus};
 
-        let id = reminder_store
-            .create_with_scope(
-                "owner-id",
-                None,
-                "check PR 2514",
-                cas_store::ReminderTriggerType::Time,
-                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
-                None,
-                None,
-                3600,
-                Some("origin-factory"),
-                Some("creator-session"),
-                true,
-                None,
-            )
-            .unwrap();
-        let reminder = reminder_store
-            .get_due_time_reminders()
-            .unwrap()
-            .into_iter()
-            .find(|reminder| reminder.id == id)
-            .unwrap();
-        assert!(super::reminder_matches_factory_session(
-            reminder.session_id.as_deref(),
-            reminder.cross_session,
-            "foreign-factory"
-        ));
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut mismatches = Vec::new();
+        for role in [
+            AgentRole::Worker,
+            AgentRole::Standard,
+            AgentRole::Director,
+            AgentRole::Supervisor,
+        ] {
+            for delegated in [false, true] {
+                for cross_session in [false, true] {
+                    let temp = tempfile::TempDir::new().unwrap();
+                    let reminders = crate::store::open_reminder_store(temp.path()).unwrap();
+                    let prompts = crate::store::open_prompt_queue_store(temp.path()).unwrap();
+                    let agents = crate::store::open_agent_store(temp.path()).unwrap();
+                    let mut target =
+                        Agent::new_with_role("target-id".into(), "original-target".into(), role);
+                    target.factory_session = Some("origin-factory".into());
+                    agents.register(&target).unwrap();
+                    let owner_id = if delegated { "worker-id" } else { &target.id };
+                    if delegated {
+                        let mut worker = Agent::new_with_role(
+                            owner_id.into(),
+                            "issuing-worker".into(),
+                            AgentRole::Worker,
+                        );
+                        worker.factory_session = Some("origin-factory".into());
+                        agents.register(&worker).unwrap();
+                    }
+                    let id = reminders
+                        .create_with_scope(
+                            owner_id,
+                            delegated.then_some(target.id.as_str()),
+                            "checkpoint",
+                            cas_store::ReminderTriggerType::Time,
+                            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                            None,
+                            None,
+                            3600,
+                            Some("origin-factory"),
+                            Some("creator-session"),
+                            cross_session,
+                            None,
+                        )
+                        .unwrap();
+                    let scan = |session: &str, names| {
+                        super::run_reminder_scan(super::ReminderScanInput {
+                            cas_dir: temp.path().to_path_buf(),
+                            session_name: session.into(),
+                            supervisor_name: "replacement-supervisor".into(),
+                            agent_id_to_name: names,
+                            events: Vec::new(),
+                            external_ready: Vec::new(),
+                            ci_wakes: Vec::new(),
+                        })
+                    };
 
-        // The foreign daemon lacks owner-id in its own pane map. Its fallback
-        // supervisor (golden-spider-80) must not receive the prompt.
-        super::fire_reminder(
-            &reminder,
-            &reminder_store,
-            &Some(Arc::clone(&supervisor_store)),
-            &Some(Arc::clone(&prompt_store)),
-            "foreign-factory",
-            "golden-spider-80",
-            &HashMap::new(),
-            None,
-            temp.path(),
-        );
-        assert_eq!(reminder_store.get_due_time_reminders().unwrap().len(), 1);
-        assert!(prompt_store.peek_all(10).unwrap().is_empty());
-        assert!(supervisor_store.peek("owner-id", 10).unwrap().is_empty());
+                    // A foreign factory cannot consume a still-active target's row,
+                    // even when the reminder explicitly survives its creator session.
+                    scan("foreign-factory", HashMap::new());
+                    assert!(prompts.peek_all(10).unwrap().is_empty());
+                    assert_eq!(reminders.list_pending(owner_id).unwrap().len(), 1);
 
-        // The owner is present in its factory's map, so the same due row can
-        // fire to that exact pane without changing the cross-session gate.
-        super::fire_reminder(
-            &reminder,
-            &reminder_store,
-            &Some(Arc::clone(&supervisor_store)),
-            &Some(Arc::clone(&prompt_store)),
-            "origin-factory",
-            "origin-supervisor",
-            &HashMap::from([("owner-id".into(), "young-swan-22".into())]),
-            None,
-            temp.path(),
-        );
-        let prompts = prompt_store.peek_all(10).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].target, "young-swan-22");
-        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
-        assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
+                    target.status = AgentStatus::Shutdown;
+                    agents.register(&target).unwrap();
+                    scan("origin-factory", HashMap::new());
+                    scan("origin-factory", HashMap::new());
+                    let rows = prompts.peek_all(10).unwrap();
+                    let observed: Vec<_> = rows
+                        .iter()
+                        .map(|row| (row.source.as_str(), row.target.as_str()))
+                        .collect();
+                    let expected = if role == AgentRole::Supervisor {
+                        vec![(
+                            if delegated {
+                                "issuing-worker"
+                            } else {
+                                "replacement-supervisor"
+                            },
+                            "replacement-supervisor",
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    if observed != expected {
+                        mismatches.push(format!("{role} delegated={delegated} cross_session={cross_session}: expected {expected:?}, got {observed:?}"));
+                    }
+                    if role != AgentRole::Supervisor && rows.is_empty() {
+                        assert_eq!(reminders.list_pending(owner_id).unwrap().len(), 1);
+                        // The original target returns: only it gets the reminder,
+                        // retaining the issuer rather than impersonating a supervisor.
+                        target.status = AgentStatus::Active;
+                        agents.register(&target).unwrap();
+                        scan(
+                            "origin-factory",
+                            HashMap::from([(target.id.clone(), target.name.clone())]),
+                        );
+                        let rows = prompts.peek_all(10).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].target, "original-target");
+                        assert_eq!(
+                            rows[0].source,
+                            if delegated {
+                                "issuing-worker"
+                            } else {
+                                "original-target"
+                            }
+                        );
+                        assert_eq!(
+                            cas_store::parse_reminder_delivery_id(&rows[0].prompt),
+                            Some(id)
+                        );
+                        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+                    }
+                    let fired = reminders.list_recently_fired(60).unwrap();
+                    assert_eq!(fired.len(), 1);
+                    assert_eq!(
+                        fired[0].owner_id, owner_id,
+                        "durable issuer stays unchanged"
+                    );
+                    assert_eq!(
+                        fired[0].target_id, target.id,
+                        "durable target stays unchanged"
+                    );
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 
     /// cas-207e: a Commander ask's deadline reminder fires as a

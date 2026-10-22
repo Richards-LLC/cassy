@@ -52,8 +52,8 @@ impl BlockedExternal {
     /// [`VERDICT`]: after the verdict word, or in any `blocked:` cell.
     pub fn from_row(verdict: &str, cells: &[&str]) -> Option<Self> {
         let rest = verdict.strip_prefix(VERDICT)?;
-        let rest =
-            rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'));
+        let rest = rest
+            .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | ':' | '—' | '-'));
         Self::from_evidence(rest)
             .or_else(|| cells.iter().find_map(|cell| Self::from_evidence(cell)))
     }

@@ -22,10 +22,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const FIXTURE_PROJECT_ID: &str = "p";
 
 fn cas_cmd() -> Command {
-    Command::new(cas::test_paths::binary(
+    let mut command = Command::new(cas::test_paths::binary(
         "cas",
         option_env!("CARGO_BIN_EXE_cas").map(Into::into),
-    ))
+    ));
+    command.env_remove("COLUMNS");
+    command
 }
 
 #[test]

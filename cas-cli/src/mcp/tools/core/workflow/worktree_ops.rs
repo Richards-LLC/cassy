@@ -5130,14 +5130,21 @@ impl CasCore {
         let auto_close_expected = transactional_delivery.is_none()
             && !ci_override
             && push_outcome.is_published();
-        let ci_confirmed = matches!(branch_ci_state, BranchCiState::Green { .. });
+        let ci_admission = if ci_override {
+            cas_types::MergeCiAdmission::Override
+        } else if matches!(branch_ci_state, BranchCiState::Green { .. }) {
+            cas_types::MergeCiAdmission::Green
+        } else {
+            cas_types::MergeCiAdmission::Advisory
+        };
         let push_note = match (task_id, merge_commit.as_deref()) {
-            (Some(task_id), Some(merge_sha)) if auto_close_expected => {
+            (Some(task_id), Some(merge_sha))
+                if transactional_delivery.is_none() && push_outcome.is_published() => {
                 let outcome = self
-                    .close_after_published_merge(task_id, merge_sha, ci_confirmed)
+                    .close_after_published_merge(task_id, merge_sha, ci_admission)
                     .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
-                format!("{push_note}{}", outcome.receipt(task_id))
+                format!("{push_note}\nCI admission: {}\n{}", ci_admission.label(), outcome.receipt(task_id))
             }
             _ => push_note,
         };

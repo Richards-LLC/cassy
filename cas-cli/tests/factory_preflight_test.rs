@@ -96,6 +96,7 @@ fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
         .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
         .env("GROK_HOME", cwd.join(".test-grok-home"))
         .env_remove("CAS_ROOT")
+        .env_remove("COLUMNS")
         .env_remove("CAS_SOURCE_DIR")
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")
         .args(["--json", "factory", "preflight"]);

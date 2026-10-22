@@ -22,6 +22,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
         .env("XDG_CONFIG_HOME", home.join(".xdg"))
         .env("PATH", path)
         .env_remove("CAS_ROOT")
+        .env_remove("COLUMNS")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }

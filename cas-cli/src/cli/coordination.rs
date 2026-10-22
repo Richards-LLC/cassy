@@ -351,7 +351,9 @@ mod tests {
 
     #[test]
     fn coordination_help_describes_flags_and_fits_eighty_columns() {
-        let mut command = Cli::command();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("COLUMNS", "60");
+        let mut command = Cli::command().term_width(80);
         command.build();
         let coordination = command.find_subcommand("coordination").unwrap();
         let mut findings = Vec::new();
@@ -360,10 +362,12 @@ mod tests {
                 continue;
             }
             let error = Cli::command()
+                .term_width(80)
                 .try_get_matches_from(["cas", "coordination", subcommand.get_name(), "--help"])
                 .expect_err("help should exit before dispatching a coordination operation");
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
             let help = error.to_string();
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
             for line in help.lines().filter(|line| line.chars().count() > 80) {
                 findings.push(format!("{}: over 80 columns: {line}", subcommand.get_name()));
             }
@@ -375,7 +379,8 @@ mod tests {
                     .get_help()
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                if description.trim().is_empty() || !help.contains(&description) {
+                let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+                if description.is_empty() || !normalized.contains(&description) {
                     findings.push(format!(
                         "{}: --{} has no rendered explanation",
                         subcommand.get_name(),

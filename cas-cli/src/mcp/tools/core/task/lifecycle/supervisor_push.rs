@@ -431,10 +431,16 @@ pub(crate) fn queue_cassy_merge_close_notice(
     merge_commit: &str,
 ) -> Result<Option<i64>, String> {
     queue_assignee_notice(cas_root, task, |worker_name| {
+        let admission = task.deliverables.effective_merge_ci_admission();
+        let ci = if admission == cas_types::MergeCiAdmission::Green {
+            "green CI".to_string()
+        } else {
+            format!("CI {}", admission.label())
+        };
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with green CI and closed it with your parked close reason. No re-close is needed.",
+                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it with your parked close reason. No re-close is needed.",
                 task.id
             ),
             format!("Merged and closed by Cassy: {}", task.id),

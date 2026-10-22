@@ -1151,6 +1151,9 @@ mod tests {
     #[test]
     fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
         let details = [
+            "Output in JSON format",
+            "Show complete JSON, service paths/definitions, or GC report details",
+            "Verbose output",
             "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
             "Render a PDF with Playwright after rendering the HTML",
             "Re-fetch sources and replace the Markdown source, including a manual source",
@@ -1159,6 +1162,7 @@ mod tests {
 
         for width in [80, 120] {
             let mut command = Cli::command();
+            command.build();
             let mut report = command
                 .find_subcommand_mut("release")
                 .expect("release subcommand")

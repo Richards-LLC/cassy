@@ -40,6 +40,7 @@ fn violet(root: &Path) -> Command {
         .env("CODEX_HOME", home.join(".codex"))
         .env("CLAUDE_CONFIG_DIR", &home)
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .env_remove("COLUMNS")
         .timeout(Duration::from_secs(20));
     command.arg("violet");
     command

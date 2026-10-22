@@ -543,6 +543,7 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     task.deliverables.merge_conflicted = true;
     task.deliverables.parked_close_reason = Some("PASS conflicted-sha".to_string());
     task.deliverables.green_merge_commit = Some("merge-sha".to_string());
+    task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Advisory);
     store.add(&task).unwrap();
 
     task.status = TaskStatus::InProgress;
@@ -561,6 +562,7 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     // may close it with a parked reason.
     assert!(resumed.deliverables.parked_close_reason.is_none());
     assert!(resumed.deliverables.green_merge_commit.is_none());
+    assert!(resumed.deliverables.merge_ci_admission.is_none());
 }
 
 /// cas-eda0: Cassy records a green merge after reading the parked task. A
@@ -590,6 +592,11 @@ fn green_merge_record_never_reopens_a_task_closed_meanwhile() {
     let recorded = store.get(&parked.id).unwrap();
     assert_eq!(recorded.status, TaskStatus::AwaitingMerge);
     assert_eq!(recorded.deliverables.green_merge_commit.as_deref(), Some("merge-sha"));
+    assert_eq!(recorded.deliverables.effective_merge_ci_admission(), cas_types::MergeCiAdmission::Green);
+    for admission in [cas_types::MergeCiAdmission::Advisory, cas_types::MergeCiAdmission::Override] {
+        assert!(store.record_merge_admission(&parked.id, "merge-sha", admission).unwrap());
+        assert_eq!(store.get(&parked.id).unwrap().deliverables.merge_ci_admission, Some(admission));
+    }
 }
 
 #[test]

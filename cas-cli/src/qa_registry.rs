@@ -346,6 +346,7 @@ pub struct Problem {
 pub struct ValidationReport {
     pub problems: Vec<Problem>,
     pub debt: Vec<Problem>,
+    pub single_reference_owner_groups: BTreeMap<String, String>,
 }
 
 /// Parse delivered-head bytes without consulting the working tree or Git.
@@ -980,6 +981,20 @@ impl Registry {
                 }
             }
         }
+        for name in self.owner_groups.keys() {
+            let mut consumers = self
+                .journeys
+                .iter()
+                .filter(|journey| journey.owner_groups.contains(name));
+            if let (Some(journey), None) = (consumers.next(), consumers.next()) {
+                report.single_reference_owner_groups.insert(name.clone(), journey.id.clone());
+                report.debt(
+                    "single_reference_owner_group",
+                    &format!("owner_groups.{name}"),
+                    &format!("referenced only by journey {}; review shared ownership membership", journey.id),
+                );
+            }
+        }
         report
     }
 }
@@ -1121,7 +1136,10 @@ journeys:
         );
         let report = check(dir.path(), Path::new(&config.qa().registry.path)).unwrap();
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert!(report.debt.is_empty());
+        assert_eq!(
+            report.debt.iter().map(|row| row.code.as_str()).collect::<Vec<_>>(),
+            ["single_reference_owner_group"]
+        );
         let registry = load(&dir.path().join(custom_path)).unwrap();
         assert_eq!(
             registry.journeys[0].owners.globs(),
@@ -1173,6 +1191,8 @@ journeys:
         let debt: Vec<_> = report
             .debt
             .iter()
+            // Owner-group cardinality is covered by the CLI regression.
+            .filter(|row| row.code != "single_reference_owner_group")
             .map(|p| (p.code.as_str(), p.subject.as_str()))
             .collect();
         assert_eq!(
@@ -1212,6 +1232,7 @@ journeys:
         let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
         let rows = |rows: &[Problem]| {
             rows.iter()
+                .filter(|row| row.code != "single_reference_owner_group")
                 .map(|p| format!("{} {} {}", p.code, p.subject, p.message))
                 .collect::<Vec<_>>()
         };
@@ -1437,6 +1458,7 @@ journeys:
                 report
                     .debt
                     .iter()
+                    .filter(|row| row.code != "single_reference_owner_group")
                     .map(|p| p.code.as_str())
                     .collect::<Vec<_>>(),
                 debt,
@@ -1444,7 +1466,7 @@ journeys:
             );
             assert!(report.problems.iter().chain(&report.debt).all(|p| {
                 p.subject == "B2-home"
-                    || ["invariants.", "manual_checks.", "fixtures."]
+                    || ["invariants.", "manual_checks.", "fixtures.", "owner_groups."]
                         .iter()
                         .any(|prefix| p.subject.starts_with(prefix))
             }));

@@ -4026,6 +4026,7 @@ mod related_recall_response_tests {
     async fn cas_ddbb_create_inherits_only_an_eligible_active_binding() {
         use cas_types::{Agent, AgentRole, ClaimResult, Dependency, DependencyType, WorkTarget};
         let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
         const LANE: &str = "epic/burn-down-v57-ships-as-3-72-non-regression-follow-cas-09fb";
         for case in [
             "default",
@@ -4199,6 +4200,7 @@ mod related_recall_response_tests {
     async fn cas_ddbb_disagreeing_active_bindings_require_an_explicit_binding() {
         use cas_types::{Agent, Dependency, DependencyType};
         let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
         for disagreement in ["none", "epic", "target"] {
             let (_temp, repo) = epic_lane_repo();
             let root = epic_lane_cas_root(&repo);

@@ -36,6 +36,9 @@ Tracked terminal captures are under `captures/operator-config-refusal/`; both co
 | Machine output | No CLI JSON or config serialization changes; invalid entries do not update in-memory values or disk. |
 | Omitted | Do not echo webhook URLs or payloads into refusal logs; stored-value refusal gets one warning naming the setting. |
 
+The edit dialog uses 80% of terminal width and 50% of its height to keep the
+wrapped cause and Enter/Esc controls visible on an 80-by-24 terminal.
+
 Curl ignores default config with first-argument `-q` and has a ten-second total
 transfer budget. Existing destination normalization, protocol restrictions,
 glob suppression and option separation remain in place. Clearing the URL stays

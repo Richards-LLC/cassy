@@ -382,9 +382,11 @@ impl ConfigTuiApp {
 
                     // Validate
                     if let Some(meta) = self.registry.get(&key) {
-                        match meta.validate(&value) {
+                        let result = meta.validate(&value).and_then(|()| {
+                            self.config.set(&key, &value).map_err(|error| error.to_string())
+                        });
+                        match result {
                             Ok(()) => {
-                                self.config.set(&key, &value)?;
                                 self.values.insert(key.clone(), value);
                                 self.pending_resets.remove(&key);
                                 self.has_unsaved = true;

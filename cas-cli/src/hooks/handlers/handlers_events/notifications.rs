@@ -206,12 +206,20 @@ pub fn handle_notification(
 
     // Optional webhook support
     if let Some(ref webhook_url) = notification_config.webhook_url {
-        // Send async notification via webhook (fire and forget)
-        let url = webhook_url.clone();
-        let msg = message.clone();
-        std::thread::spawn(move || {
-            let _ = send_webhook_notification(&url, &msg);
-        });
+        // Diagnose old/hand-edited values before a fire-and-forget thread can
+        // be lost at process exit. Do not put the destination or body in logs.
+        match crate::config::validate_notification_webhook_url(webhook_url) {
+            Ok(Some(url)) => {
+                let msg = message.clone();
+                std::thread::spawn(move || {
+                    let _ = send_webhook_notification(url.as_str(), &msg);
+                });
+            }
+            Ok(None) => {}
+            Err(_) => eprintln!(
+                "cas: Warning: notification webhook refused; check notifications.webhook_url."
+            ),
+        }
     }
 
     // Log the notification event
@@ -237,9 +245,12 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
     // Use curl for simplicity (available on most systems)
     let output = std::process::Command::new("curl")
         .args([
+            "-q", // Must be first: ignore curl's default config files.
             "--globoff",
             "--proto",
             "=https,http",
+            "--max-time",
+            "10",
             "-s",
             "-X",
             "POST",

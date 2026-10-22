@@ -327,7 +327,7 @@ impl ConfigTuiApp {
     }
 
     pub(crate) fn render_value_edit(&self, frame: &mut Frame, area: Rect) {
-        let popup_area = crate::cli::config_tui::centered_rect(60, 40, area);
+        let popup_area = crate::cli::config_tui::centered_rect(80, 50, area);
         frame.render_widget(Clear, popup_area);
 
         if let Some(edit) = &self.value_edit {
@@ -361,7 +361,7 @@ impl ConfigTuiApp {
                 Line::from("Enter: Save | Esc: Cancel").style(Style::default().fg(Color::DarkGray)),
             );
 
-            let edit_widget = Paragraph::new(text).block(
+            let edit_widget = Paragraph::new(text).wrap(Wrap { trim: false }).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Edit Value ")

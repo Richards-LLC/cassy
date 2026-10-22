@@ -2293,7 +2293,7 @@ fn check_factory_launch(
         match result {
             Ok(capacity) if capacity.pressure => {
                 let warning = format!(
-                    "Cargo target-cache disk pressure: {filesystem} is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
+                    "Cargo target-cache disk pressure: {filesystem} is {}% used (factory high watermark {}%, low watermark {}%). Run cas factory gc report --full or --json (MCP gc_report full=true), review cache details, then explicitly run gc_cleanup force=true dry_run=false.",
                     capacity.used_percent,
                     capacity.high_watermark_percent,
                     capacity.low_watermark_percent,

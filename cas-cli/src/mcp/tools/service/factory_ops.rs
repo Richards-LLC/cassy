@@ -7707,9 +7707,10 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
     let metrics = sections.next().unwrap_or_default();
     let category_count = sections.clone().filter(|section| {
         !section.lines().next().is_some_and(gc_report_is_machine_status_line)
+            && !section.starts_with("Note:")
     }).count();
     let mut summary = format!(
-        "[INFO] GC review: {category_count} inventory categories\nPreview cleanup: cas factory gc cleanup\n\n"
+        "[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n"
     );
     if !metrics.is_empty() {
         for line in metrics.lines() {
@@ -7729,6 +7730,11 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             continue;
         };
         if gc_report_is_machine_status_line(heading) {
+            continue;
+        }
+        if heading.starts_with("Note:") {
+            summary.push_str(section);
+            summary.push('\n');
             continue;
         }
         let label = gc_report_category_label(heading);

@@ -5232,10 +5232,24 @@ async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe()
             assert!(text.contains(&source_id), "{text}");
             let error = started.expect_err("a peer update must not revoke the live lease");
             assert!(error.message.contains("locked"), "{error}");
-            assert_eq!(
-                agents.get_lease(&id).unwrap().unwrap().epoch,
-                original.epoch
+            assert!(
+                error
+                    .message
+                    .contains(&format!("task action=release id={id}")),
+                "{error}"
             );
+            let before = agents.get_lease(&id).unwrap().unwrap();
+            agents.heartbeat(&source_id).unwrap();
+            let after = agents.get_lease(&id).unwrap().unwrap();
+            assert_eq!(
+                after.renewal_count, before.renewal_count,
+                "a live old worker must not renew after the task is reassigned"
+            );
+            assert!(
+                agents.renew_lease(&id, &source_id, 600).is_err(),
+                "explicit renewal must also reject a non-assignee"
+            );
+            assert_eq!(after.epoch, original.epoch);
         } else {
             started.unwrap_or_else(|error| {
                 panic!("{path}: new assignee must start without override: {error}")

@@ -7,6 +7,63 @@ use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
 impl SqliteAgentStore {
+    /// Shared selection for local heartbeat, explicit renewal and Cloud renewal.
+    /// Call inside the write transaction when extending a local lease, so a
+    /// concurrent reassignment cannot slip between authorization and mutation.
+    pub(super) fn renewable_task_leases(
+        conn: &rusqlite::Connection,
+        agent_id: &str,
+    ) -> Result<Vec<TaskLease>> {
+        // Agent-only databases are valid (e.g. during bootstrap). They must
+        // still heartbeat worktree leases, but cannot authorize task renewal.
+        if !conn.table_exists(None, "tasks")? {
+            return Ok(Vec::new());
+        }
+        let mut identities =
+            conn.prepare_cached("SELECT id, name FROM agents ORDER BY registered_at DESC")?;
+        let identities = identities
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT l.task_id, l.agent_id, l.status, l.acquired_at, l.expires_at,
+                    l.renewed_at, l.renewal_count, l.epoch, l.claim_reason, t.assignee
+             FROM task_leases l
+             JOIN tasks t ON t.id = l.task_id
+             JOIN agents a ON a.id = l.agent_id
+             WHERE l.agent_id = ? AND l.status = 'active'
+               AND a.status IN ('active', 'idle') AND t.status = 'in_progress'",
+        )?;
+        let rows = stmt
+            .query_map(params![agent_id], |row| {
+                Ok((Self::lease_from_row(row)?, row.get::<_, Option<String>>(9)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(lease, assignee)| {
+                let token = assignee.as_deref()?.trim();
+                if token.is_empty() {
+                    return None;
+                }
+                // Match task lifecycle's identity resolution: ids take precedence
+                // over names; a reused display name resolves to the newest session.
+                let assigned = identities
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(token))
+                    .or_else(|| {
+                        identities
+                            .iter()
+                            .find(|(_, name)| name.eq_ignore_ascii_case(token))
+                    });
+                assigned
+                    .filter(|(id, _)| id.eq_ignore_ascii_case(agent_id))
+                    .map(|_| lease)
+            })
+            .collect())
+    }
+
     pub(crate) fn lease_try_claim(
         &self,
         task_id: &str,
@@ -300,48 +357,35 @@ impl SqliteAgentStore {
         duration_secs: i64,
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
-        let conn = self.lock_conn()?;
-        let now = Utc::now();
-        let expires_at = now + chrono::Duration::seconds(duration_secs);
-
-        // Get current epoch before renewing
-        let epoch: Option<i64> = conn
-            .query_row(
-                "SELECT epoch FROM task_leases WHERE task_id = ? AND agent_id = ? AND status = 'active'",
-                params![task_id, agent_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        let rows = conn.execute(
-            "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
-             WHERE task_id = ? AND agent_id = ? AND status = 'active'",
-            params![expires_at.to_rfc3339(), now.to_rfc3339(), task_id, agent_id],
-        )?;
-
-        if rows == 0 {
-            return Err(StoreError::NotFound(format!(
-                "No active lease found for task {task_id} owned by {agent_id}"
-            )));
-        }
-
-        // Log the renewal event
-        if let Some(ep) = epoch {
+            let conn = self.lock_conn()?;
+            let tx = ImmediateTx::new(&conn)?;
+            let lease = Self::renewable_task_leases(&tx, agent_id)?
+                .into_iter()
+                .find(|lease| lease.task_id == task_id)
+                .ok_or_else(|| StoreError::NotFound(format!(
+                    "No renewable lease for task {task_id}: {agent_id} must be live and assigned to its in-progress task"
+                )))?;
+            let now = Utc::now();
+            let expires_at = now + chrono::Duration::seconds(duration_secs);
+            tx.execute(
+                "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
+                 WHERE task_id = ? AND agent_id = ? AND status = 'active' AND epoch = ?",
+                params![expires_at.to_rfc3339(), now.to_rfc3339(), task_id, agent_id, lease.epoch as i64],
+            )?;
             let details = format!(r#"{{"duration_secs":{duration_secs}}}"#);
             Self::log_lease_event(
-                &conn,
+                &tx,
                 task_id,
                 agent_id,
                 "renewed",
-                ep as u64,
+                lease.epoch,
                 Some(&details),
                 None,
                 None,
             )?;
-        }
-
-        Ok(())
-        }) // with_write_retry
+            tx.commit()?;
+            Ok(())
+        })
     }
     pub(crate) fn lease_get_lease(&self, task_id: &str) -> Result<Option<TaskLease>> {
         let conn = self.lock_conn()?;

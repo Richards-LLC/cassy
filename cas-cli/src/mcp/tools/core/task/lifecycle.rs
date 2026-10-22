@@ -2657,9 +2657,10 @@ impl CasCore {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "Task is locked by {} until {}",
+                            "Task is locked by {} until {}. A registered live supervisor can release it: task action=release id={}",
                             holder_display,
-                            expires_at.format("%H:%M")
+                            expires_at.format("%H:%M"),
+                            task.id
                         ),
                     ));
                 }

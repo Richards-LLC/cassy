@@ -443,7 +443,7 @@ impl SqliteAgentStore {
                 }
             }
 
-            // cas-85d9: renew this agent's active task AND worktree leases
+            // Renew only still-assigned running task leases, plus worktree leases
             // in the SAME transaction as the heartbeat itself. Root-cause
             // fix for the "leases are never renewed" gap (cas-d165
             // finding).
@@ -504,14 +504,16 @@ impl SqliteAgentStore {
             // continuously fresh; a worker that stops heartbeating for
             // longer than the window still lets the lease expire
             // naturally (defense in depth alongside `mark_stale`).
-            let renewed_until =
-                (now_dt + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
-                    .to_rfc3339();
-            tx.execute(
-                "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
-                 WHERE agent_id = ? AND status = 'active'",
-                params![renewed_until, now, id],
-            )?;
+            let renewed_until = (now_dt
+                + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
+            .to_rfc3339();
+            for lease in Self::renewable_task_leases(&tx, id)? {
+                tx.execute(
+                    "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
+                     WHERE task_id = ? AND agent_id = ? AND status = 'active' AND epoch = ?",
+                    params![renewed_until, now, lease.task_id, id, lease.epoch as i64],
+                )?;
+            }
             tx.execute(
                 "UPDATE worktree_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
                  WHERE agent_id = ? AND status = 'active'",

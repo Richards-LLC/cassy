@@ -37,7 +37,7 @@ class: Commander needs JavaScript for pairing/live state/terminals, and its nosc
 There are no contrast, clipping, overlap, viewport or print exceptions.
 
 After rebasing onto epic 8dc1b283 (including Units 2, 4 and 6), `npm run visual-qa --
---artifact-dir <artifacts>/cas-0a8e/correction-fixture-final` exits 0:
+--artifact-dir &lt;artifacts&gt;/cas-0a8e/correction-fixture-final` exits 0:
 `PASS 9 fixtures x 2 schemes x 2 viewports`. The report contains 36 captures, zero findings,
 and eight existing plan allowances (four JavaScript dependency, two collapsed-pane overflow,
 two terminal clipping). No new allowlist entry was added. Unit 7 owns the assembled critique.

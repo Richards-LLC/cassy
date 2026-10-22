@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-error-renderer · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-d0b1/terminal-qa/error-renderer/report.json
+terminal-qa: PASS cas-error-renderer · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-d0b1/terminal-qa/error-renderer/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |

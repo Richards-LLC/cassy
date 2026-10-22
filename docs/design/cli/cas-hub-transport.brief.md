@@ -25,9 +25,9 @@ existing transport object stable.
 
 ## Critique
 
-terminal-qa: PASS cas-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4c4b/terminal-qa/cas-hub-status/report.json
+terminal-qa: PASS cas-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-4c4b/terminal-qa/cas-hub-status/report.json
 
-terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4c4b/terminal-qa/cas-doctor-hub-transport/report.json
+terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-4c4b/terminal-qa/cas-doctor-hub-transport/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -69,9 +69,9 @@ Scored by the worker on 2026-09-11; floor holds.
 
 ### Wedged-holder recovery rendering
 
-terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-be89/terminal-qa/report.json
+terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-be89/terminal-qa/report.json
 
-terminal-qa: PASS cas-be89-doctor-hub-transport-allowlisted · 12 runs · 0 fail · 0 warn · 12 allowed · <artifacts>/cas-be89/terminal-qa-doctor-allowlisted/report.json
+terminal-qa: PASS cas-be89-doctor-hub-transport-allowlisted · 12 runs · 0 fail · 0 warn · 12 allowed · &lt;artifacts&gt;/cas-be89/terminal-qa-doctor-allowlisted/report.json
 
 The doctor receipt has a raw companion failure at `<artifacts>/cas-be89/terminal-qa-doctor/report.json`; its 12 findings are pre-existing truncations in unrelated stale-registration and cloud-purge diagnostics, each explicitly allowlisted in `<artifacts>/cas-be89/terminal-qa-doctor-allowlist.json`. The hub transport row remains one compact `✓ hub transport` check in the captured doctor output, and the status surface retains a three-line verdict/owner/transport hierarchy.
 
@@ -91,7 +91,7 @@ The healthy route now renders `Tailscale Serve: OK - route targets the live hub 
 while the unavailable and no-route messages retain their warning and compact loopback forms.
 The updated terminal capture is stored under `<artifacts>/cas-5b1b/terminal-qa/`.
 
-terminal-qa: PASS cas-hub-status-cas-5b1b · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-5b1b/terminal-qa/cas-hub-status/report.json
+terminal-qa: PASS cas-hub-status-cas-5b1b · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-5b1b/terminal-qa/cas-hub-status/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

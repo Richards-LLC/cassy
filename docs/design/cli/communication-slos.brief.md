@@ -25,9 +25,9 @@ It shares the production SQL, and negative controls must reject each breach.
 
 ## Critique
 
-terminal-qa: PASS communication-slos-pass · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-7e24/terminal-qa/pass/report.json
+terminal-qa: PASS communication-slos-pass · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-7e24/terminal-qa/pass/report.json
 
-terminal-qa: PASS communication-slos-breach · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-7e24/terminal-qa/breach/report.json
+terminal-qa: PASS communication-slos-breach · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-7e24/terminal-qa/breach/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

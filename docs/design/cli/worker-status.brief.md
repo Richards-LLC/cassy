@@ -26,7 +26,7 @@ fleet poll.
 
 ## Critique
 
-terminal-qa: PASS worker-liveness · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-7b7b/terminal-qa/report.json
+terminal-qa: PASS worker-liveness · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-7b7b/terminal-qa/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

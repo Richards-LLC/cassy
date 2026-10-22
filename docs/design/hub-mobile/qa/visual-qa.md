@@ -15,12 +15,12 @@ None.
 
 ## Screenshots
 
-- [127-0-0-1-8418-light-portrait.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-light-portrait.png) — <http://127.0.0.1:8418> · light · portrait
-- [127-0-0-1-8418-light-landscape.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-light-landscape.png) — <http://127.0.0.1:8418> · light · landscape
-- [127-0-0-1-8418-light-desktop.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-light-desktop.png) — <http://127.0.0.1:8418> · light · desktop
-- [127-0-0-1-8418-dark-portrait.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-dark-portrait.png) — <http://127.0.0.1:8418> · dark · portrait
-- [127-0-0-1-8418-dark-landscape.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-dark-landscape.png) — <http://127.0.0.1:8418> · dark · landscape
-- [127-0-0-1-8418-dark-desktop.png](<artifacts>/cas-cc1b/visual-qa/127-0-0-1-8418-dark-desktop.png) — <http://127.0.0.1:8418> · dark · desktop
+- [127-0-0-1-8418-light-portrait.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-light-portrait.png) — <http://127.0.0.1:8418> · light · portrait
+- [127-0-0-1-8418-light-landscape.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-light-landscape.png) — <http://127.0.0.1:8418> · light · landscape
+- [127-0-0-1-8418-light-desktop.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-light-desktop.png) — <http://127.0.0.1:8418> · light · desktop
+- [127-0-0-1-8418-dark-portrait.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-dark-portrait.png) — <http://127.0.0.1:8418> · dark · portrait
+- [127-0-0-1-8418-dark-landscape.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-dark-landscape.png) — <http://127.0.0.1:8418> · dark · landscape
+- [127-0-0-1-8418-dark-desktop.png](&lt;artifacts&gt;/cas-cc1b/visual-qa/127-0-0-1-8418-dark-desktop.png) — <http://127.0.0.1:8418> · dark · desktop
 
 ## Method
 

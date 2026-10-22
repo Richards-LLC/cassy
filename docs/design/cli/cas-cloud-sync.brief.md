@@ -19,7 +19,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-280c-cloud-sync · 11 runs · 0 fail · 0 warn · 17 allowed · <artifacts>/cas-280c/terminal-qa/report.json
+terminal-qa: PASS cas-280c-cloud-sync · 11 runs · 0 fail · 0 warn · 17 allowed · &lt;artifacts&gt;/cas-280c/terminal-qa/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

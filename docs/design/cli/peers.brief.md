@@ -11,9 +11,9 @@
 
 ## Critique
 
-terminal-qa: PASS peers · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-559c/terminal-qa/peers/report.json
+terminal-qa: PASS peers · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-559c/terminal-qa/peers/report.json
 
-terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-559c/terminal-qa/peers-long/report.json
+terminal-qa: PASS peers-long · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-559c/terminal-qa/peers-long/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ Scored by golden-gazelle-73 on 2026-10-13 at f0b866541. Captures use the actual 
 
 ### Activation addition (cas-f82cb)
 
-terminal-qa: PASS peers-activation · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-f82cb/terminal-qa/peers-activation/report.json
+terminal-qa: PASS peers-activation · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-f82cb/terminal-qa/peers-activation/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

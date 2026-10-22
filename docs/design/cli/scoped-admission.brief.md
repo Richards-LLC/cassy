@@ -12,7 +12,7 @@
 
 ## Critique
 
-terminal-qa: PASS scoped-admission-classifier · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-2fcf/terminal-qa-scoped-admission-classifier/report.json
+terminal-qa: PASS scoped-admission-classifier · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-2fcf/terminal-qa-scoped-admission-classifier/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |

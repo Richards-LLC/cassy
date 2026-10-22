@@ -120,14 +120,14 @@ All tested C/plain/unset rawANSI is ASCII. Six styledUTF8 before/after captures
 are byte-identical outside the permitted box; no other normalization is used.
 The4published init captures use `<project>` rather than a machine scratch path.
 
-- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed · <artifacts>/cas-8bc8/terminal-qa/yes-utf8-scoped/report.json
-- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · <artifacts>/cas-8bc8/terminal-qa/yes-c-scoped/report.json
-- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · <artifacts>/cas-8bc8/terminal-qa/yes-unset-scoped/report.json
-- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 457 allowed · <artifacts>/cas-8bc8/terminal-qa/fresh-utf8-scoped/report.json
-- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed · <artifacts>/cas-8bc8/terminal-qa/interactive-utf8-scoped/report.json
-- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · <artifacts>/cas-8bc8/terminal-qa/interactive-c-scoped/report.json
-- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · <artifacts>/cas-8bc8/terminal-qa/interactive-unset-scoped/report.json
-- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-8bc8/terminal-qa/root-help-unset/report.json
+- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-utf8-scoped/report.json
+- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-c-scoped/report.json
+- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-unset-scoped/report.json
+- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 457 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/fresh-utf8-scoped/report.json
+- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-utf8-scoped/report.json
+- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-c-scoped/report.json
+- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-unset-scoped/report.json
+- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/root-help-unset/report.json
 
 These passes retain only the4exact inherited exception sets and tasks already
 approved4206333/4206384, reaffirmed4206624. All190entries remain byte-identical.

@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS issue-repo-origin-merged · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-828c/terminal-qa/issue-repo-origin-merged/report.json
+terminal-qa: PASS issue-repo-origin-merged · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-828c/terminal-qa/issue-repo-origin-merged/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

@@ -16,7 +16,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-history-embed-cas-1734 · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-1734/terminal-qa/cas-history-embed-cas-1734/report.json
+terminal-qa: PASS cas-history-embed-cas-1734 · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-1734/terminal-qa/cas-history-embed-cas-1734/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |

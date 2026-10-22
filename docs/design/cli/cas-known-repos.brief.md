@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-2878-known-repos · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-2878/terminal-qa/known-repos/report.json
+terminal-qa: PASS cas-2878-known-repos · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-2878/terminal-qa/known-repos/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

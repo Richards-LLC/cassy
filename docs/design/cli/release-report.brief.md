@@ -33,7 +33,7 @@ repository; use `--refresh-sources` to intentionally replace a Markdown source.
 
 ## Critique
 
-terminal-qa: PASS cas-release-report-cas-ca80 · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-ca80/terminal-qa/report.json
+terminal-qa: PASS cas-release-report-cas-ca80 · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-ca80/terminal-qa/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

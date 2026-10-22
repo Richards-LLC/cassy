@@ -23,7 +23,7 @@ sweep: not configured
 
 | M05 | Revisit and switch images after zooming | A new image opens at fit width; the correct caption and system context follow it. | Reopening a different image reset to fit width and showed its own caption; mouse wheel zoom increased the new image scale. | PASS | real-build | M05-revisit-desktop-image.png | none |
 
-| M06 | JavaScript disabled and print | All ten proposals, baseline images and the comparison remain available. | JavaScript off: 10 proposals, 10 comparison rows and all 25 images decoded; print PDF contains the study. | PASS | real-build | M06-no-javascript.png; <artifacts>/cas-cc1b/qa/study-print.pdf | none |
+| M06 | JavaScript disabled and print | All ten proposals, baseline images and the comparison remain available. | JavaScript off: 10 proposals, 10 comparison rows and all 25 images decoded; print PDF contains the study. | PASS | real-build | M06-no-javascript.png; &lt;artifacts&gt;/cas-cc1b/qa/study-print.pdf | none |
 
 | M07 | Offline standalone file and all embedded images | The study opens from a local file and loads every image without network access. | Opened standalone file with browser offline; zero HTTP(S) requests; all embedded images decoded and current-state lightbox opened. | PASS | real-build | M07-offline-current-image.png | none |
 

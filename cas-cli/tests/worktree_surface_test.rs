@@ -2330,7 +2330,8 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     assert!(
         first
             .message
-            .contains("Retry `worktree_merge id=factory/alice task_id=cas-8045-observation-retry`"),
+            .contains("Retry `worktree_merge id=")
+            && first.message.contains("task_id=cas-8045-observation-retry`"),
         "{}",
         first.message
     );

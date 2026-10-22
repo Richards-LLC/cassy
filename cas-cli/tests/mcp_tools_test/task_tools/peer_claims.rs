@@ -54,6 +54,8 @@ struct FakeState {
     // cas-da31: hold the next release on its own thread until the test
     // resumes it, while every other request is still served (a slow Cloud).
     async_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    // Observe actual late application, even after the client has timed out.
+    async_release_done: Option<std::sync::mpsc::Sender<(serde_json::Value, u16)>>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -105,6 +107,9 @@ impl FakeCloud {
                         let _ = resume.recv();
                         let (status, json) =
                             Self::handle(&state, request.method().as_str(), request.url(), &body);
+                        if let Some(done) = state.lock().unwrap().async_release_done.take() {
+                            let _ = done.send((serde_json::from_str(&body).unwrap(), status));
+                        }
                         let response = tiny_http::Response::from_string(json.to_string())
                             .with_status_code(status)
                             .with_header(
@@ -970,6 +975,78 @@ async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() 
         .active_lock("cas-restart")
         .expect("the restart's fresh Cloud claim survives the stale rollback release");
     assert_eq!(lock.agent_id, alpha.agent_id);
+}
+
+/// Exercise both remaining release entry paths, including a real HTTP timeout
+/// and a live 409 response that must settle the pending retry record.
+#[tokio::test]
+async fn delayed_retry_and_focus_releases_keep_same_agent_restart_cas_0760() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let mut lost = Vec::new();
+    for (entry, timeout) in [("retry", false), ("retry", true), ("focus", true)] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+        let restart = machine(&cloud.url, PROJECT, "restart-worker");
+        assert_eq!(alpha.agent_id, restart.agent_id);
+        let task = "cas-release-restart";
+        for machine in [&alpha, &restart] {
+            machine.put_task(task, TaskType::Task);
+        }
+        if entry == "focus" {
+            assert!(matches!(cas::cloud::peer_claims::claim_epic_focus(
+                &alpha.cas_dir, task, &alpha.agent_id,
+            ), Some(cas::cloud::peer_claims::Acquire::Claimed)));
+        } else {
+            start(&alpha.core, task, false).await.unwrap();
+            open_agent_store(&alpha.cas_dir).unwrap().release_lease(task, &alpha.agent_id).unwrap();
+            // A persisted failed release, retried by the real daemon renewal.
+            std::fs::write(alpha.cas_dir.join("claim-releases.json"),
+                serde_json::json!({task: Utc::now().timestamp()}).to_string()).unwrap();
+        }
+        let before = cloud.active_lock(task).unwrap().1;
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (resume, held) = std::sync::mpsc::channel();
+        let (done, applied) = std::sync::mpsc::channel();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            state.async_release_gate = Some((entered, held));
+            state.async_release_done = Some(done);
+        }
+        let root = alpha.cas_dir.clone();
+        let agent = alpha.agent_id.clone();
+        let mut releasing = Some(std::thread::spawn(move || {
+            if entry == "focus" {
+                assert_eq!(cas::cloud::peer_claims::release_epic_focus(&root, &agent).as_deref(), Some(task));
+            } else {
+                cas::cloud::peer_claims::renew_agent_claims(&root, &agent);
+            }
+        }));
+        reached.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        if timeout {
+            // Real request timeout releases the fence before Cloud applies it.
+            releasing.take().unwrap().join().unwrap();
+        }
+        start(&restart.core, task, false).await.expect("same agent restarts in its new database");
+        let fresh = cloud.active_lock(task).unwrap().1;
+        assert!(fresh.renewal_count > before.renewal_count);
+        resume.send(()).unwrap();
+        let (body, status) = applied.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        if let Some(releasing) = releasing { releasing.join().unwrap(); }
+        if cloud.active_lock(task).is_none() { lost.push((entry, timeout)); }
+        // Collect both entry failures before asserting so RED covers both.
+        if status == 409 {
+            assert_eq!(body["expected_epoch"], before.epoch);
+            assert_eq!(body["expected_renewal_count"], before.renewal_count);
+            if entry == "retry" && !timeout {
+                let pending = alpha.cas_dir.join("claim-releases.json");
+                assert!(!pending.exists(), "409 is settled, never retried against the fresh claim");
+            }
+        } else {
+            assert_eq!(status, 200, "unexpected fake Cloud response");
+        }
+    }
+    assert!(lost.is_empty(), "stale releases discarded same-agent restart claims: {lost:?}");
 }
 
 #[tokio::test]

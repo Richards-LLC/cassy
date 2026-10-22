@@ -99,12 +99,9 @@ impl CasCore {
         let Some(merge_commit) = task.deliverables.green_merge_commit.clone() else {
             return CassyMergeClose::NotEligible;
         };
-        let mut reason = task.deliverables.parked_close_reason.clone().unwrap_or_else(|| {
+        let reason = task.deliverables.parked_close_reason.clone().unwrap_or_else(|| {
             format!("Merged at {merge_commit}; closed by Cassy after the merge.")
         });
-        if task.notes.contains(&format!("CI unconfirmed at merge {merge_commit}")) {
-            reason.push_str(&format!(" CI unconfirmed at merge {merge_commit}."));
-        }
         let request = TaskCloseRequest {
             no_delivery: None,
             stranded_branch_override: None,

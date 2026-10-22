@@ -673,12 +673,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let task = task_store.get(&task.id).unwrap();
             assert_eq!(task.status == TaskStatus::Closed, closes, "{row}: {recorded}");
             if closes {
-                if row == "advisory-no-checks" {
-                    let reason = task.close_reason.as_deref().unwrap();
-                    assert!(reason.starts_with(&parked_reason) && reason.contains("CI unconfirmed"), "{row}: {reason}");
-                } else {
-                    assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
-                }
+                assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
                 assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
             }
         } else {

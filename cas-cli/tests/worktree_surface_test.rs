@@ -2922,7 +2922,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         .expect("retry should reconcile the already-published merge");
     let text = get_text(&retry);
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap();
-    if conclusion == "success" {
+    if !ci_override {
         assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
         assert_eq!(
             dispatch
@@ -2931,12 +2931,12 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
                 .state,
             cas::types::VerificationDispatchState::Pending
         );
+        if conclusion == "neutral" {
+            assert!(tasks.get(task_id).unwrap().notes.contains("CI unconfirmed"), "{text}");
+        }
     } else {
         assert!(!retry.is_error.unwrap_or(false), "{text}");
-        assert!(
-            dispatch.is_none(),
-            "advisory/override merges do not auto-close"
-        );
+        assert!(dispatch.is_none(), "override merges do not auto-close");
     }
     let observations: i64 = conn
         .query_row(

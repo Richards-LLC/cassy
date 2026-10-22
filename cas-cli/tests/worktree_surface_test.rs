@@ -2252,13 +2252,13 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     run_git(&["push", "origin", "main", "epic/observation"], &repo.root);
 
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
     std::fs::write(
         cas_root.join("config.toml"),
         "[verification]\nenabled = true\n[project]\ncanonical_id = \"delivery-observation\"\n",
     )
     .unwrap();
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
-    disable_system_a(&cas_root);
     register_delivery_agent(
         &cas_root,
         "observation-supervisor",

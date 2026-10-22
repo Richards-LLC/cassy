@@ -2098,9 +2098,11 @@ registrations are rechecked. Other registered remaps and their bases stay
 intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`, `cargo-home`
 and `bin` siblings may be reclaimed. The operator's main checkout stays
 registered and intact.
-`gc_report` includes paths, reclaimed/reclaimable and retained bytes in
-`RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
-and `dry_run=false`. Reports never create locks or owner records.
+`gc_report` summarizes release-scratch inventory by default. Its explicit
+`--full` view (MCP `full=true`) includes paths, reclaimed/reclaimable and retained
+bytes in `RELEASE_SCRATCH_STATUS_JSON`; `--json` (MCP `json=true`) exposes the
+same records in typed `machine_status`. Scratch `gc_cleanup` requires both
+`force=true` and `dry_run=false`. Reports never create locks or owner records.
 
 Verified dead owners are swept on the next start, including fresh SIGKILL
 leftovers; age only protects unknown provenance. A surviving descendant's
@@ -2170,8 +2172,10 @@ Explicit `gc_cleanup force=true dry_run=false` removes stale owned detached prev
 including their Git registration, after revalidating ownership, process liveness
 and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
 previews created before provenance was recorded remain inventory-only. The
-`TARGET_CACHE_STATUS_JSON` report includes preview target sizes and
-`lane_previews` dispositions. The existing high/low watermark configuration
+explicit `gc_report --full` view (MCP `full=true`) includes preview target sizes
+and `lane_previews` dispositions in `TARGET_CACHE_STATUS_JSON`; `--json` (MCP
+`json=true`) includes the typed record in `machine_status`. The default summary
+omits raw status records. The existing high/low watermark configuration
 controls cache pressure warnings; preview cleanup does not need disk pressure.
 On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
 that probe is unavailable or reports errors. Only the evictor's held Cargo-lock

@@ -102,6 +102,11 @@ impl OrdinaryBindingClient {
         }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
+        // A previous legacy_intake_active response is still waiting for the
+        // host to go quiet. Failure to submit this retry cannot settle it.
+        let preserve_pause = state.policies.iter().any(|policy| {
+            &policy.scope == scope && policy.disposition == ChannelDisposition::Paused
+        });
         // Reusing the scope's pause re-arms one an earlier blocked run released.
         let operation_id = state
             .pauses
@@ -110,9 +115,14 @@ impl OrdinaryBindingClient {
             .find(|pause| &pause.scope == scope)
             .map_or_else(Uuid::new_v4, |pause| pause.operation_id);
         let pause = journal.pause(scope.clone(), operation_id, state.generation)?;
-        // Nothing has left for Cloud yet: every refusal here releases the pause.
+        // Nothing has left for Cloud in this attempt. Release only a pause
+        // armed here, retaining an earlier quiet-window hold across retries.
         let blocked_before_submit = |error: String| -> Result<RepairReport, String> {
-            let error = match journal.release_unsubmitted(scope) {
+            let error = match if preserve_pause {
+                Ok(())
+            } else {
+                journal.release_unsubmitted(scope)
+            } {
                 Ok(()) => error,
                 Err(release) => format!("{error}; pause not released ({release}), rerun `cas update`"),
             };

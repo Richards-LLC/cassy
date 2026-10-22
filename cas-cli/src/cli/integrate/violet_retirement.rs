@@ -327,9 +327,9 @@ pub fn retire_project_proxy(path: &Path) -> Result<bool> {
 /// Host-wide update calls it for each discovered project's native sync phase.
 pub fn repair_proxy_credentials_on_update(project_proxy: Option<&Path>) {
     for (path, reason) in proxy_update_advisories(project_proxy, true) {
-        eprintln!(
-            "warning: Violet update advisory: {}: {reason}",
-            path.display()
+        crate::cli::update::report_update_warning(
+            &format!("Violet update advisory: {}: {reason}", path.display()),
+            "Retry: cas update --user",
         );
     }
 }
@@ -588,15 +588,18 @@ impl ProfileRetirement {
         {
             return;
         }
-        eprintln!(
-            "warning: Violet migration skipped {}: {reason}",
-            path.display()
+        crate::cli::update::report_update_warning(
+            &format!("Violet migration skipped {}: {reason}", path.display()),
+            "Review the named profile/link target, then retry: cas update --user",
         );
         self.warnings.push((path.to_path_buf(), reason));
     }
     fn credential_repair(&mut self, warning: String) {
         if !self.credential_warnings.contains(&warning) {
-            eprintln!("warning: Violet credential reference repaired: {warning}");
+            crate::cli::update::report_update_warning(
+                &format!("Violet credential reference repaired: {warning}"),
+                "Verify: cas doctor",
+            );
             self.credential_warnings.push(warning);
         }
     }

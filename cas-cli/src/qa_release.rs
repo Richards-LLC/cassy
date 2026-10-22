@@ -1067,6 +1067,7 @@ mod tests {
         let bundle = slack_bundle(&dir, limit, &FakeTranscoder).unwrap();
         assert!(bundle.files.iter().all(|f| f.bytes <= limit), "{bundle:?}");
         let sources: Vec<&str> = bundle.files.iter().map(|f| f.source.as_str()).collect();
+        // pin: post order (pack.json first) and the transcode/local-only split are the Slack contract.
         assert_eq!(sources, ["pack.json", "media/frame.png", "media/fits.mp4 (transcoded)"]);
         let local: Vec<&str> = bundle.local_only.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(local, ["media/huge.mp4", "media/trace.zip"]);

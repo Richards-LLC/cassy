@@ -2,7 +2,9 @@
 
 Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
 
-**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `rebind_branch`, `available`, `mine`.
+
+Approve an existing replacement delivery branch with `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"` after the assigned worker checks it out cleanly. Use `request_changes` first for a parked delivery. Cassy records the old tip, preserves assignment and target, and keeps normal close gates.
 
 ## Task risk declarations
 

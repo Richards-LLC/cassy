@@ -1502,6 +1502,7 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
     assert_eq!(metadata["retired_agent"]["role"], "supervisor");
     assert_eq!(metadata["retired_agent"]["machine_id"], "stable-machine");
     assert_eq!(metadata["retired_agent"]["factory_session"], "old-factory");
+    assert_eq!(metadata["end_reason"], "unknown", "missing evidence must retain an explicit unknown end reason");
     assert!(metadata["retired_agent"].get("metadata").is_none());
     assert!(!metadata.to_string().contains("private-value"));
 }

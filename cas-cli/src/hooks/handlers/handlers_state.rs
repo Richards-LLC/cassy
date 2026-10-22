@@ -881,12 +881,14 @@ mod supervisor_handoff_tests {
 
     #[test]
     fn ct2_p3_session_end_hands_off_epics() {
+        let mut env = crate::test_support::TestEnvGuard::new();
         let temp = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         let agents = open_agent_store(&root).unwrap();
         let tasks = open_task_store(&root).unwrap();
         let mut ending = Agent::new("ending-id".into(), "ending".into());
         ending.role = AgentRole::Supervisor;
+        ending.machine_id = Some(Agent::get_or_generate_machine_id());
         ending.factory_session = Some("old-session".into());
         agents.register(&ending).unwrap();
         let mut peer = Agent::new("peer-id".into(), "peer".into());
@@ -907,10 +909,23 @@ mod supervisor_handoff_tests {
             }
             tasks.add(&task).unwrap();
         }
+        let mut worker = Agent::new("live-worker-id".into(), "live-worker".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = ending.factory_session.clone();
+        agents.register(&worker).unwrap();
+        let mut parked = Task::new("cas-parked".into(), "Pending delivery".into());
+        parked.assignee = Some(worker.name.clone());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.parked_branch = Some("factory/live-worker-cas-parked".into());
+        parked.external_ref = Some("https://example.test/pull/42".into());
+        tasks.add(&parked).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        queue.enqueue("requester", "ending", "Pending ask: approve delivery 42").unwrap();
         // Exercise the real SessionEnd handler, including unconditional cleanup.
         handle_session_end(
             &HookInput {
                 session_id: ending.id.clone(),
+                reason: Some("compaction".into()),
                 ..Default::default()
             },
             Some(&root),
@@ -944,12 +959,12 @@ mod supervisor_handoff_tests {
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         crate::supervisor_notices::adopt_operator_notices(&root, "old-session").unwrap();
         assert_eq!(
-            queue.peek_all(100).unwrap().len(),
+            queue.peek_all(100).unwrap().iter().filter(|r| r.source.starts_with("supervisor-notice:")).count(),
             2,
             "a surviving daemon can adopt its own session's orphan notice"
         );
         crate::supervisor_notices::adopt_operator_notices(&root, "peer-session").unwrap();
-        let rows = queue.peek_all(100).unwrap();
+        let rows: Vec<_> = queue.peek_all(100).unwrap().into_iter().filter(|r| r.source.starts_with("supervisor-notice:")).collect();
         assert_eq!(rows.len(), 2, "one grouped notice per peer and operator");
         assert!(
             rows.iter()
@@ -970,9 +985,22 @@ mod supervisor_handoff_tests {
         )
         .unwrap();
         assert_eq!(
-            queue.peek_all(100).unwrap().len(),
+            queue.peek_all(100).unwrap().iter().filter(|r| r.source.starts_with("supervisor-notice:")).count(),
             2,
             "repeated SessionEnd does not repeat the event"
         );
+        // Reopen through the real startup handler after the predecessor was deleted.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "successor");
+        let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
+        let output = handle_session_start(&start, Some(&root)).unwrap();
+        let context = serde_json::to_string(&output).unwrap();
+        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "compaction"] {
+            assert!(context.contains(expected), "startup lost {expected}: {context}");
+        }
+        assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
+        let again = serde_json::to_string(&handle_session_start(&start, Some(&root)).unwrap()).unwrap();
+        assert!(!again.contains("Supervisor handoff"), "handoff must surface once");
+
     }
 }

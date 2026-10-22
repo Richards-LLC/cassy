@@ -2305,11 +2305,6 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     )
     .unwrap();
     let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
-    conn.execute(
-        "DELETE FROM observed_delivery_merges WHERE task_id = 'fixture-schema'",
-        [],
-    )
-    .unwrap();
     conn.execute_batch(
         "CREATE TRIGGER fail_fixture_observation
          BEFORE INSERT ON observed_delivery_merges

@@ -206,13 +206,14 @@ impl ConfigTuiApp {
             .max(3)
             .try_into()
             .unwrap_or(u16::MAX);
+        let body_min_height = if self.status_message.is_some() { 6 } else { 10 };
 
         // Main layout: header, body, footer
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
-                Constraint::Min(10),   // Body
+                Constraint::Min(body_min_height), // Body
                 Constraint::Length(footer_height), // Footer/status
             ])
             .split(area);

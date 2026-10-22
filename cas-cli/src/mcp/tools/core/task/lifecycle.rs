@@ -4312,6 +4312,117 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn cas_ddbb_standard_start_keeps_followups_on_its_epic_lane() {
+        use cas_types::{Agent, Dependency, DependencyType, WorkTarget};
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("isolated host registry");
+        let mut failures = Vec::new();
+        for case in ["child-and-parent", "epic-only", "new-epic"] {
+            let (_temp, repo) = epic_lane_repo();
+            let root = epic_lane_cas_root(&repo);
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            let agents = core.open_agent_store().unwrap();
+            agents
+                .register(&Agent::new("filing-agent".into(), "qa-agent".into()))
+                .unwrap();
+            core.set_agent_id_for_testing("filing-agent".into());
+            let target = super::super::repo_context::declare_work_target(
+                &root,
+                Some(repo.to_str().unwrap()),
+                Some("epic/current-release"),
+            )
+            .unwrap()
+            .unwrap();
+            let mut epic = Task::new("cas-current".into(), "Existing release train".into());
+            epic.task_type = TaskType::Epic;
+            epic.branch = Some("epic/current-release".into());
+            epic.deliverables.work_target = Some(WorkTarget {
+                target_branch: "main".into(),
+                ..target.clone()
+            });
+            store.add(&epic).unwrap();
+            let start_id = if case == "child-and-parent" {
+                let mut child = Task::new("cas-active-qa".into(), "Validate rendering".into());
+                child.deliverables.work_target = Some(target.clone());
+                store.add(&child).unwrap();
+                store
+                    .add_dependency(&Dependency::new(
+                        child.id.clone(),
+                        epic.id.clone(),
+                        DependencyType::ParentChild,
+                    ))
+                    .unwrap();
+                child.id
+            } else {
+                epic.id.clone()
+            };
+            core.cas_task_start(Parameters(IdRequest {
+                id: start_id.clone(),
+            }))
+            .await
+            .expect("real Standard start claims its epic too");
+            let leases = agents.list_agent_leases("filing-agent").unwrap();
+            assert!(
+                leases
+                    .iter()
+                    .any(|lease| lease.task_id == epic.id && lease.is_valid())
+            );
+            assert_eq!(leases.len(), if case == "child-and-parent" { 2 } else { 1 });
+            let mut request = plain_task_request("Independent diagnostics followup");
+            if case == "new-epic" {
+                request.task_type = "epic".into();
+            }
+            let result = core.cas_task_create(Parameters(request)).await;
+            let response = match result {
+                Ok(response) => text(response),
+                Err(error) => {
+                    failures.push(format!("{case}: create refused: {error}"));
+                    continue;
+                }
+            };
+            let created = store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.title == "Independent diagnostics followup")
+                .unwrap();
+            let parent = store
+                .get_parent_epic(&created.id)
+                .unwrap()
+                .map(|task| task.id);
+            if case == "new-epic" {
+                let lane = created
+                    .branch
+                    .as_deref()
+                    .expect("new epic gets its own lane");
+                if parent.is_some()
+                    || lane == "epic/current-release"
+                    || created
+                        .deliverables
+                        .work_target
+                        .as_ref()
+                        .map(|target| target.target_branch.as_str())
+                        != Some(lane)
+                    || response.contains("Inherited")
+                {
+                    failures.push(format!("{case}: new epic inherited old binding: {response}; parent={parent:?}; target={:?}", created.deliverables.work_target));
+                }
+            } else if parent.as_deref() != Some("cas-current")
+                || created.deliverables.work_target.as_ref() != Some(&target)
+                || !response.contains("Inherited")
+                || !response.contains(&start_id)
+            {
+                failures.push(format!(
+                    "{case}: wrong binding: {response}; parent={parent:?}; target={:?}",
+                    created.deliverables.work_target
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
     async fn cas_ddbb_disagreeing_active_bindings_require_an_explicit_binding() {
         use cas_types::{Agent, Dependency, DependencyType};
         let _env = TestEnvGuard::temp_home();

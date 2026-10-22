@@ -530,6 +530,9 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
     if hashes(main_hooks)? == hashes(own)? {
         return Ok(());
     }
+    // Ordinary single quotes preserve spaces, history tokens and substitutions.
+    // cas-pty cannot depend on the CLI's Git remedy renderer.
+    let main_arg = format!("'{}'", main.display().to_string().replace('\'', "'\\''"));
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
@@ -539,8 +542,8 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
              checkout .codex/hooks.json`), then respawn.",
             main_hooks.display(),
             own.display(),
-            main.display(),
-            main.display()
+            main_arg,
+            main_arg
         ),
     ))
 }

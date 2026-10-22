@@ -161,6 +161,7 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
         Some("epic/{a,b}"),
         Some("epic/a!e"),
         Some("epic/a'quote"),
+        Some("epic/café"),
         Some("epic/control\u{85}label"),
         Some("epic/invisible\u{202e}label"),
         Some("epic/invisible\u{200b}label"),
@@ -279,6 +280,10 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 assert!(error.contains(escaped), "invisible ref must be visible: {error:?}");
                 assert!(!error.contains(branch), "invisible ref printed literally: {error:?}");
                 assert!(!error.lines().any(|line| line.starts_with("git ")), "invisible ref must not produce executable advice: {error:?}");
+                if branch.contains('\u{202e}') {
+                    // pin: invisible-ref refusal layout is the terminal-QA fixture.
+                    assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-invisible-ref.capture.txt").trim_end());
+                }
             } else if control_ref {
                 // pin: control-bearing refs require visible identity and manual action, never a command.
                 assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-control-ref.capture.txt").trim_end());

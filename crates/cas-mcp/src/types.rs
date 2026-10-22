@@ -383,7 +383,7 @@ pub struct TaskRequest {
     /// below plus a non-empty close `reason`. Ordinary closes that omit this
     /// flag retain the merge-state gate unchanged.
     #[schemars(
-        description = "Supervisor-only close of a measured negative result whose experimental delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a non-empty reason; the decision is logged. Ordinary closes omit it and need merge evidence."
+        description = "Supervisor-only close of a measured negative result whose experimental delivery stays unmerged: needs negative_result_artifact_path, negative_result_reference and a reason; logged. Ordinary closes omit it and need merge evidence."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub negative_result: Option<bool>,

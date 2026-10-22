@@ -6538,6 +6538,10 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    // Existing readers must retain a complete old record when reuse publishes
+    // its new timestamp; an in-place rewrite changes this open file too.
+    let mut previous_owner = std::fs::File::open(&marker).unwrap();
+    let previous_bytes = std::fs::read(&marker).unwrap();
     let retried =
         cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
     assert_eq!(
@@ -6545,6 +6549,14 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         "admission retries must reuse the same task/head checkout"
     );
     drop(retried);
+    let mut held_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut previous_owner, &mut held_bytes).unwrap();
+    drop(previous_owner);
+    assert_eq!(
+        held_bytes, previous_bytes,
+        "reuse must atomically replace owner.json, preserving existing readers"
+    );
+
     let mut owner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
     assert_ne!(
@@ -6739,6 +6751,113 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     assert_eq!(
         env.task_store().get(&task.id).unwrap().status,
         TaskStatus::Open
+    );
+}
+
+/// Inject one real filesystem write after Git's first clean status result.
+/// PATH interception is confined to a child, and every Git operation stays real.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_gc_retains_file_written_after_dirty_probe_cas_75ae() {
+    const CHILD: &str = "REVIEW_GC_RACE_CHILD_75AE";
+    if std::env::var_os(CHILD).is_none() {
+        let home = TempDir::new().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let inherited_path = std::env::var_os("PATH").unwrap();
+        let real_git = std::env::split_paths(&inherited_path)
+            .map(|path| path.join("git"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        cas::test_paths::warm_stub(
+            &bin.join("git"),
+            r#"#!/bin/sh
+if [ -f "$REVIEW_GC_RACE_CONTROL_75AE" ]; then
+    IFS= read -r checkout < "$REVIEW_GC_RACE_CONTROL_75AE"
+    if [ "$1" = '-C' ] && [ "$2" = "$checkout" ] && [ "$3" = 'status' ] && [ "$5" = '--untracked-files=all' ] && [ ! -f "$REVIEW_GC_RACE_CONTROL_75AE.done" ]; then
+        "$REVIEW_GC_REAL_GIT_75AE" "$@"
+        result=$?
+        [ "$result" -eq 0 ] || exit "$result"
+        printf 'late reviewer work\n' > "$checkout/late-notes.txt"
+        : > "$REVIEW_GC_RACE_CONTROL_75AE.done"
+        exit 0
+    fi
+fi
+exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&inherited_path)),
+        )
+        .unwrap();
+        let filter =
+            "factory_mcp_ops_test::test_gc_retains_file_written_after_dirty_probe_cas_75ae";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", filter, "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("REVIEW_GC_REAL_GIT_75AE", real_git)
+            .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated late-write GC failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), filter);
+        return;
+    }
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "review-race-control");
+    let project = env.cas_root.parent().unwrap();
+    let mut task = Task::new("cas-review-late-write".into(), "late reviewer notes".into());
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    let checkout = managed.path.clone();
+    drop(managed);
+    let marker = checkout.parent().unwrap().join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    git_stdout(project, &["config", "status.showUntrackedFiles", "no"]);
+    let control = PathBuf::from(std::env::var_os("REVIEW_GC_RACE_CONTROL_75AE").unwrap());
+    std::fs::write(&control, format!("{}\n", checkout.display())).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        control.with_extension("done").exists(),
+        "late-write injection did not run: {}",
+        get_text(&output)
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("late-notes.txt"))
+            .ok()
+            .as_deref(),
+        Some(b"late reviewer work\n".as_slice()),
+        "late untracked reviewer bytes deleted: {}",
+        get_text(&output)
+    );
+    assert!(
+        git_stdout(project, &["worktree", "list", "--porcelain"])
+            .contains(checkout.to_str().unwrap()),
+        "late-dirty checkout registration removed"
     );
 }
 

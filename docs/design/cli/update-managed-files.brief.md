@@ -25,6 +25,20 @@ repair as staged changes. Their managed-files receipt uses the existing
 was attempted. The compact staged line is scoped for terminal QA, with the
 operator recovery procedure in ARCHITECTURE.md.
 
+## Commit guard uncertainty (cas-bb3c)
+
+A guard config read failure keeps the repair staged and adds one short ASCII
+warning naming the unreadable commit-guard config, the staged outcome and the
+retry action. The existing staged receipt supplies `git diff --cached`.
+`managed_files.commit_warning` carries the same warning in JSON; it is distinct
+from `commit_error`, so this safe refusal exits zero and remains a warning in
+compact sweeps. The guard uses the CAS root passed to sync, including worktrees
+without a local `.cas`. Detached HEAD and an unidentifiable default branch keep
+repairs staged. This adds no automatic push, reset or config rewrite.
+
+Fresh terminal evidence for this addition belongs to the cas-bb3c task's
+commit-bound ledger; earlier captures below cover only their named changes.
+
 ## Local-only commits (cas-3b812)
 
 A committed repair keeps the managed-files verdict and adds one ASCII next-step

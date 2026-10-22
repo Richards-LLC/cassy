@@ -105,3 +105,34 @@ capped named update-sync integration test; binary mtime 2026-10-21 14:36:25 UTC.
 | Machine contract | 5 | Native JSON remains one document with outcome staged and null commit; every real fixture preserves HEAD. |
 
 Scored by ready-bear-59 on 2026-10-21; all mechanical checks and score floors pass.
+
+### cas-bb3c commit guard warning
+
+`terminal-qa: PASS cas-bb3c-config-error · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+`terminal-qa: PASS cas-bb3c-detached · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+```text
+Managed files: staged; review with git diff --cached
+WARN: Commit guard config unreadable; repair staged. Fix config, then retry.
+```
+
+Supervisor-run candidate `cas 3.72.0 (230f8dc 2026-10-22)` maps to
+`230f8dc50c4de89e4d6a88b184f7040829d278ae`. The isolated actual-CLI probe
+keeps the caller's factory role and emits the native changed rows; full output,
+Git refs, staged paths and config-obstruction readbacks are retained in cas-bb3c
+artifacts. `terminal-config-error/report.json` and `terminal-detached/report.json`
+cover 80/120 columns, four palettes, pipe, C locale, NO_COLOR and JSON. All 27
+readbacks passed, including normal work-branch, staging and unknown-default JSON
+controls. No live project or factory configuration was rewritten by the probe.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The staged verdict gives `git diff --cached`; line two names the config cause and retry action. |
+| Fit | 5 | One warning follows the existing receipt; detached HEAD needs only the staged row. |
+| Craft | 4 | The warning is 76 ASCII cells at 80 columns, with no wrapping or elision. |
+| Theme safety | 5 | Uncolored native text is identical across the four palettes and monochrome captures. |
+| Machine contract | 5 | JSON is one document with staged outcome, null commit and optional `commit_warning`; all safe refusals exit zero. |
+
+Scoped text and mechanical captures reviewed by fierce-marten-72 on 2026-10-22;
+this does not grade the unchanged full sync inventory or claim a GUI screenshot.

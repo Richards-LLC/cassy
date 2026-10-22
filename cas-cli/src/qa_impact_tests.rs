@@ -426,3 +426,54 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         "parity needs a production source merge that selects journeys"
     );
 }
+
+/// cas-d863 (+ cas-9779 carry-over): G8 reads only the verdict column. A
+/// BLOCKED_EXTERNAL journey row stays owed and names its provider, and a
+/// journey's `independence_key` counts distinct run identities, refusing
+/// duplicates by name.
+#[test]
+fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs() {
+    use crate::mcp::tools::core::task::lifecycle::qa_impact::ledger_refusal;
+    let temp = repo();
+    let repo = temp.path();
+    write(repo, "src/audit.ts", "audit");
+    write(
+        repo,
+        crate::qa_registry::DEFAULT_PATH,
+        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Audited, check: Read the run}\njourneys:\n  - id: AUDIT\n    status: live\n    entry: {url: /audit, trigger: Audit}\n    steps: [Submit]\n    owners: ['src/audit.ts']\n    invariants: [INV]\n    independence_key: post_audit_v2_runs.id\n",
+    );
+    let head = commit(repo);
+    let report = analyze(
+        repo,
+        &QaConfig::default(),
+        &[Change::modified("src/audit.ts")],
+        None,
+        Some(&head),
+    )
+    .unwrap();
+    assert!(report.registry.valid, "{:?}", report.registry);
+    let mut impact = serde_json::to_value(&report).unwrap();
+    impact["head_sha"] = head.clone().into();
+    let header = "| id | cell | expected | observed | verdict | label | evidence | defect |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n";
+    let refusal = |rows: &str| ledger_refusal(&impact, &head, &format!("{header}{rows}"));
+
+    let blocked = refusal(
+        "| AUDIT | instagram url | audited | FAIL: 502 | BLOCKED_EXTERNAL | real-build | blocked: provider=rapidapi error=502 failed_fetch | - |\n",
+    )
+    .expect("a blocked row is owed, not a verdict");
+    assert!(
+        blocked.contains("AUDIT (cell instagram url) is BLOCKED_EXTERNAL{provider=rapidapi, error=502 failed_fetch}"),
+        "{blocked}"
+    );
+    let run = |id: &str| {
+        format!("| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | qa/{id}.png | - |\n")
+    };
+    let duplicate = refusal(&[run("a1"), run("b2"), run("b2")].concat())
+        .expect("a duplicate run identity is not an independent run");
+    assert!(
+        duplicate.contains("3 AUDIT runs recorded, 2 independent")
+            && duplicate.contains("duplicate post_audit_v2_runs.id=b2"),
+        "{duplicate}"
+    );
+    assert_eq!(refusal(&[run("a1"), run("b2"), run("c3")].concat()), None);
+}

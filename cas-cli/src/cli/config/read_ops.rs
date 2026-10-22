@@ -952,58 +952,62 @@ mod tests {
         keys.dedup();
 
         for key in keys {
-            let raw = if key == "factory.write_roots" {
+            let document = if key == "factory.write_roots" {
                 let mut config = Config::default();
                 config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
-                toml::to_string(&config).unwrap()
+                toml_edit::Document::parse(toml::to_string(&config).unwrap())
+                    .unwrap()
+                    .into_mut()
             } else if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
                 let (parent, leaf) = key.rsplit_once('.').expect("nested config key");
-                format!("[{parent}]\n{leaf} = \"sentinel\"\n")
+                toml_edit::Document::parse(format!("[{parent}]\n{leaf} = \"sentinel\"\n"))
+                    .unwrap()
+                    .into_mut()
             } else {
-                let value = match key {
-                    "factory.worker_build_jobs" => "8",
-                    "factory.cargo_build_jobs" => "9",
-                    "staging.staging_dir" => "roundtrip-staging-dir",
-                    "staging.large_artifact_dir" => "roundtrip-large-artifact-dir",
-                    "llm.harness" => "codex",
-                    "llm.model" => "roundtrip-model",
-                    "llm.reasoning_effort" => "medium",
-                    "llm.supervisor.harness" => "codex",
-                    "llm.supervisor.model" => "roundtrip-supervisor-model",
-                    "llm.supervisor.reasoning_effort" => "medium",
-                    "llm.worker.harness" => "claude",
-                    "llm.worker.model" => "roundtrip-worker-model",
-                    "llm.worker.reasoning_effort" => "high",
-                    "qa.deployed_origins" => "https://example.com",
-                    _ => {
-                        let meta = registry.get(key).expect("registered key");
-                        if meta.default.is_empty() {
-                            match key {
-                                "slack.stakeholder_contacts" => "[]",
-                                "factory.scratch_root" => "/tmp/cas-config-path",
-                                "issues.repo"
-                                | "issues.components.cassy"
-                                | "issues.components.violet"
-                                | "issues.components.cloud" => "example/repo",
-                                _ if matches!(
-                                    meta.constraint,
-                                    crate::config::Constraint::ValidPath
-                                ) => "/tmp/cas-config-path",
-                                _ => "example",
-                            }
-                        } else {
-                            meta.default
-                        }
+                let meta = registry.get(key).or_else(|| match key {
+                    "factory.cargo_build_jobs" => registry.get("factory.worker_build_jobs"),
+                    "staging.large_artifact_dir" => registry.get("staging.staging_dir"),
+                    _ => None,
+                }).expect("registered key or compatibility alias");
+                let mut candidates = vec![meta.default.to_owned()];
+                if key == "factory.scratch_root" {
+                    candidates.push("/tmp/cas-config-path".into());
+                } else if key == "qa.deployed_origins" {
+                    candidates.push("https://example.com".into());
+                } else if key == "slack.stakeholder_contacts" {
+                    candidates.push("[]".into());
+                } else if key.starts_with("issues.") {
+                    candidates.push("example/repo".into());
+                }
+                if let crate::config::Constraint::OneOf(values) = &meta.constraint {
+                    candidates.extend(values.iter().cloned());
+                }
+                candidates.extend(meta.examples().into_iter().map(str::to_owned));
+                candidates.extend(
+                    ["example", "example/repo", "/tmp/cas-config-path", "https://example.com"]
+                        .into_iter()
+                        .map(str::to_owned),
+                );
+                candidates.sort();
+                candidates.dedup();
+
+                let mut resolved = None;
+                for value in candidates {
+                    let mut config = Config::default();
+                    if config.set(key, &value).is_err() {
+                        continue;
                     }
-                };
-                let mut config = Config::default();
-                config
-                    .set(key, value)
-                    .unwrap_or_else(|error| panic!("failed to materialize {key}: {error}"));
-                toml::to_string(&config).unwrap()
+                    let raw = toml::to_string(&config).unwrap();
+                    let candidate = toml_edit::Document::parse(raw).unwrap().into_mut();
+                    let (_, stored_path, _) = config_document_paths(&candidate, key);
+                    if config_document_item(candidate.as_item(), stored_path).is_some() {
+                        resolved = Some(candidate);
+                        break;
+                    }
+                }
+                resolved.unwrap_or_else(|| panic!("no TOML value materialized registry key {key}"))
             };
 
-            let document = toml_edit::Document::parse(&raw).unwrap().into_mut();
             let (_, stored_path, _) = config_document_paths(&document, key);
             assert!(
                 config_document_item(document.as_item(), stored_path).is_some(),

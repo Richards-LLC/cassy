@@ -697,7 +697,7 @@ mod tests {
             let screen = (0..height)
                 .map(|y| {
                     (0..width)
-                        .map(|x| terminal.backend().buffer().get((x, y)).symbol().to_owned())
+                        .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
                         .collect::<Vec<_>>()
                         .join("")
                         .trim_end()

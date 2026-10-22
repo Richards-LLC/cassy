@@ -104,6 +104,14 @@ fn lease(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
+fn write_owner(directory: &Path, record: &Owner) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(file.as_file_mut(), record)?;
+    file.as_file().sync_all()?;
+    file.persist(directory.join("owner.json"))?;
+    Ok(())
+}
+
 /// Create or reuse one detached, disposable checkout per task/dispatch/head.
 /// No legacy directory is adopted, and changed source is never reset.
 /// Callers retain this value while running tests; standalone creation releases
@@ -167,9 +175,9 @@ pub fn create(
     let lock = lease(&directory, fresh)?;
     if fresh {
         // Write ownership before Git, so interrupted creation stays visible.
-        fs::write(
-            directory.join("owner.json"),
-            serde_json::to_vec(&Owner {
+        write_owner(
+            &directory,
+            &Owner {
                 schema_version: 1,
                 cas_root: cas.clone(),
                 task_id: task_id.into(),
@@ -177,7 +185,7 @@ pub fn create(
                 head: head.into(),
                 created_at: Utc::now(),
                 last_used_at: Some(Utc::now()),
-            })?,
+            },
         )?;
     } else {
         let record = owner(&cas, &directory)?;
@@ -214,7 +222,7 @@ pub fn create(
     // return to a checkout long after its original creation.
     let mut record = owner(&cas, &directory)?;
     record.last_used_at = Some(Utc::now());
-    fs::write(directory.join("owner.json"), serde_json::to_vec(&record)?)?;
+    write_owner(&directory, &record)?;
     Ok(Checkout { path, _lease: lock })
 }
 
@@ -384,6 +392,16 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
     if registered.contains(&checkout) {
         let path = checkout.to_str().context("non-UTF-8 checkout")?;
         if checkout.exists() {
+            // State/process probes can take time; include untracked files even
+            // when local Git configuration hides them from worktree removal.
+            ensure!(
+                git(
+                    &checkout,
+                    &["status", "--porcelain", "--untracked-files=all"]
+                )?
+                .is_empty(),
+                "review checkout has source changes"
+            );
             // Git rechecks dirtiness itself. Never force removal of existing
             // source: ignored Cargo output is already disposable without it.
             git(repo, &["worktree", "remove", path])?;

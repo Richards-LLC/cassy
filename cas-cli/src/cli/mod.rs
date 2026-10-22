@@ -1128,6 +1128,7 @@ mod tests {
 
         for width in [80, 120] {
             let mut command = Cli::command();
+            command.build();
             let mut report = command
                 .find_subcommand_mut("release")
                 .expect("release subcommand")

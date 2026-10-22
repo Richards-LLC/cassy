@@ -1097,6 +1097,30 @@ print_publication_status() {
     print_release_report_status || true
 }
 
+release_train_report_thread_id() {
+    python3 - "$1" "$2" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+fields = dict(line.split("=", 1) for line in Path(sys.argv[1]).read_text().splitlines() if "=" in line)
+prefix = sys.argv[2]
+raw = fields.get(prefix + "_PART_IDS")
+if raw is None:
+    # Legacy receipts predate ordered part IDs and contain one message ID.
+    print(fields.get(prefix + "_ID", ""))
+else:
+    try:
+        parts = json.loads(raw)
+        if not isinstance(parts, list) or not parts or any(not isinstance(part, str) or not part.strip() for part in parts):
+            raise ValueError()
+    except (ValueError, TypeError):
+        sys.exit("release report: invalid " + prefix + "_PART_IDS; preserve the receipt and reconcile before posting")
+    # Violet's split root thread is the first part; the singular ID is last.
+    print(parts[0])
+PY
+}
+
 run_report() {
     if release_train_announcement_embargo_active; then
         printf 'BLOCKER report: explicit announcement embargo; runtime publication and install proof remain required\n' >&2
@@ -1118,8 +1142,8 @@ run_report() {
     local announce_receipt="$run_dir/announce.receipt"
 
     if [[ -s "$announce_receipt" ]]; then
-        [[ -n "$report_user_thread" ]] || report_user_thread="$(sed -n 's/^USER_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
-        [[ -n "$report_dev_thread" ]] || report_dev_thread="$(sed -n 's/^DEV_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
+        [[ -n "$report_user_thread" ]] || report_user_thread="$(release_train_report_thread_id "$announce_receipt" USER_TOP_LEVEL)"
+        [[ -n "$report_dev_thread" ]] || report_dev_thread="$(release_train_report_thread_id "$announce_receipt" DEV_TOP_LEVEL)"
     fi
 
     if [[ ! -f "${report_prefix}.md" || ! -f "${report_prefix}.html" || ! -f "${report_prefix}.pdf" ]]; then

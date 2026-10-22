@@ -909,6 +909,7 @@ mod supervisor_handoff_tests {
             let mut task = Task::new(id.into(), id.into());
             task.task_type = TaskType::Epic;
             task.epic_verification_owner = Some(owner.into());
+            task.notes = "long prior task history ".repeat(300);
             if terminal {
                 task.status = TaskStatus::Closed;
             }
@@ -1014,6 +1015,9 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let handoff_start = context.find("Supervisor handoff").unwrap();
+        let handoff_end = context.find("verify current liveness before recovery.").unwrap();
+        assert!(handoff_end - handoff_start < 2800, "long history must stay in the full receipt, inside startup's context budget");
         for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "Previously delivered open ask: select branch", "compaction"] {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }

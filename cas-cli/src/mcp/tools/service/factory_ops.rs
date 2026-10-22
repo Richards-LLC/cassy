@@ -17323,10 +17323,6 @@ effort = "high"
         assert_eq!(got, TranscriptResolution::Resolved(expected));
     }
 
-    /// Characterization for cas-fa69: worker_status resolves its live
-    /// activity/context/in-flight path through `transcript_path_fast`.
-    /// A real Codex rollout exists and is discoverable by the established
-    /// cwd-aware resolver, so that production path must return it too.
     #[tokio::test]
     async fn cas_3963_worker_status_flags_old_mcp_against_installed_binary() {
         use cas_store::{AgentStore, HistoryStore, SqliteHistoryStore};
@@ -17351,7 +17347,17 @@ effort = "high"
         worker.pid = Some(std::process::id());
         crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
         crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let daemon = Child(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        assert_ne!(worker.pid, Some(daemon.0.id()));
         let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
+        epoch.pid = Some(daemon.0.id().into());
         epoch.version = Some("9.99.1".into());
         SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
         let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
@@ -17451,6 +17457,7 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 8, "{output}");
         assert!(
             lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
                 && line.contains("has not reported a mailbox poll")),
@@ -17488,6 +17495,10 @@ effort = "high"
         }
     }
 
+    /// Characterization for cas-fa69: worker_status resolves its live
+    /// activity/context/in-flight path through `transcript_path_fast`.
+    /// A real Codex rollout exists and is discoverable by the established
+    /// cwd-aware resolver, so that production path must return it too.
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
         let _lock = crate::hooks::test_env_lock();

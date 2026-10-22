@@ -1704,6 +1704,11 @@ mod tests {
         split_task_graph(dir.path(), "cas-8503-old");
         let (_server, releases, renewals) = claim_fixture(dir.path(), "cas-8503-child", "split-owner").await;
         let owner = test_supervisor(dir.path(), "split-owner", "split-owner", 0);
+        let tasks = crate::store::open_task_store(dir.path()).unwrap();
+        let mut child = tasks.get("cas-8503-child").unwrap();
+        child.status = TaskStatus::InProgress;
+        child.assignee = Some(owner.id.clone());
+        tasks.update(&child).unwrap();
         assert!(crate::store::open_agent_store(dir.path()).unwrap()
             .try_claim("cas-8503-child", &owner.id, 600, None).unwrap().is_success());
         insert_child_split(dir.path(), &split_for_child(

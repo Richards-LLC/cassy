@@ -1786,6 +1786,9 @@ fi"#);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        // A capped outer test already has a release runner. Observe only what
+        // this fixture's check/test invocation installs, not inherited state.
+        env.remove(variable);
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,

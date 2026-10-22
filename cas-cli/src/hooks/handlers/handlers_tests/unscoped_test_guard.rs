@@ -163,7 +163,8 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
     for extra in ["-u CAS_SESSION_ID", "CAS_AGENT_ROLE=supervisor", "CARGO_BUILD_JOBS=64"] {
         let command = format!("env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN {extra} XDG_CONFIG_HOME=/private/config cargo nextest run -p cas --lib -E 'test(one)'");
         let reason = deny_reason(&handle_pre_tool_use(&input(&command, "worker"), None).unwrap()).expect("extra environment authority must refuse");
-        assert!(reason.contains("NO WORKER RUST BUILDS"), "{command}: {reason}");
+        let expected = if extra.starts_with("CAS_AGENT_ROLE=") { "ROLE SPOOF REFUSED" } else { "NO WORKER RUST BUILDS" };
+        assert!(reason.contains(expected), "{command}: {reason}");
     }
 }
 

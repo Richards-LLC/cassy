@@ -2273,6 +2273,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         (TaskStatus::InProgress, TaskStatus::Cancelled),
         (TaskStatus::Blocked, TaskStatus::InProgress),
         (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
+        (TaskStatus::AwaitingMerge, TaskStatus::Closed),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());

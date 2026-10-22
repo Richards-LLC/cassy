@@ -3537,11 +3537,16 @@ pub(crate) fn render_sync_summary(
                     .map(|count| pull_summary_label(key, *count))
             })
             .collect::<Vec<_>>();
-            let mut details = if count_details.is_empty() {
-                vec!["nothing newer".to_string()]
-            } else {
-                vec![count_details.join(", ")]
-            };
+            let mut details = Vec::new();
+            if !count_details.is_empty() {
+                details.push(count_details.join(", "));
+            } else if summary.team_counts.is_empty() {
+                details.push(if summary.errors.is_empty() && summary.team_errors.is_empty() {
+                    "nothing newer".to_string()
+                } else {
+                    "no rows applied".to_string()
+                });
+            }
             let conflicts = summary.conflicts_resolved + summary.team_conflicts_resolved;
             if conflicts > 0 {
                 details.push(format!("{conflicts} conflicts resolved"));
@@ -4100,6 +4105,16 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     execute_pull_with_output(args, cli, cas_root, true)
 }
 
+fn print_pull_summary(summary: &SyncSummary, verbose: bool) -> io::Result<()> {
+    if summary.errors.is_empty() && summary.team_errors.is_empty() {
+        let mut out = io::stdout();
+        render_sync_summary(&mut Formatter::stdout(&mut out, ActiveTheme::default()), summary, verbose)
+    } else {
+        let mut err = io::stderr();
+        render_sync_summary(&mut Formatter::stderr(&mut err, ActiveTheme::default()), summary, verbose)
+    }
+}
+
 fn execute_pull_with_output(
     args: &CloudPullArgs,
     cli: &Cli,
@@ -4265,9 +4280,7 @@ fn execute_pull_with_output(
             }
             println!("{output}");
         } else if emit_output {
-            let mut out = io::stdout();
-            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+            print_pull_summary(&summary, cli.verbose)?;
         }
 
         // Return the display-ready result so callers such as `cas update` can
@@ -4711,9 +4724,7 @@ fn execute_team_only_pull_with_output(
         summary.merge_team_summary(&team_summary);
     }
     if emit_output && !cli.json {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+        print_pull_summary(&summary, cli.verbose)?;
     }
     Ok(summary)
 }
@@ -8184,15 +8195,22 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_zero_pull_as_one_quiet_line() {
-        let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-
-        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-
-        assert_eq!(
-            tf.output(),
-            "[OK] Pull complete · nothing newer · personal only\n"
-        );
+        for team_tasks in [0, 1] {
+            let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+            if team_tasks > 0 {
+                summary.merge_team_pull(&crate::cloud::SyncResult {
+                    pulled_tasks: team_tasks,
+                    ..Default::default()
+                });
+            }
+            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+            assert_eq!(tf.output(), if team_tasks == 0 {
+                "[OK] Pull complete · nothing newer · personal only\n"
+            } else {
+                "[OK] Pull complete · team 1 task · team + personal\n"
+            });
+        }
     }
 
     #[test]

@@ -406,13 +406,19 @@ impl std::fmt::Display for CapacityRefusal {
 impl std::error::Error for CapacityRefusal {}
 
 fn recorded_refusal(root: &Path, repo: &Path, cause: &str) -> anyhow::Error {
-    let mut message = waiting_for_admission(cause);
     match crate::factory_capacity_wait::record_refusal(root, repo, cause, chrono::Utc::now()) {
-        Ok(Some(wait)) => message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339())),
-        Ok(None) => {},
-        Err(error) => message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed.")),
+        Ok(Some(wait)) => {
+            let mut message = waiting_for_admission(&wait.cause);
+            message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
+            anyhow::anyhow!(message)
+        }
+        Ok(None) => anyhow::anyhow!(waiting_for_admission(cause)),
+        Err(error) => {
+            let mut message = waiting_for_admission(cause);
+            message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed."));
+            anyhow::anyhow!(message)
+        }
     }
-    anyhow::anyhow!(message)
 }
 
 #[derive(Debug)]
@@ -1461,8 +1467,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
+        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "));
         drop(admission);
-        return Err(recorded_refusal(&cas_root, &repo, &violations.join("; ")));
+        return Err(refusal);
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
@@ -1472,13 +1479,24 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
+    if let Some(cause) = crate::factory_capacity_wait::priority_refusal(
+        &cas_root,
+        &repo,
+        chrono::Utc::now(),
+    )? {
+        let refusal = recorded_refusal(&cas_root, &repo, &cause);
+        drop(admission);
+        return Err(refusal);
+    }
     let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
         Ok(slot) => slot,
         Err(error) => {
-            drop(admission);
             if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
-                return Err(recorded_refusal(&cas_root, &repo, &refusal.0));
+                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0);
+                drop(admission);
+                return Err(refusal);
             }
+            drop(admission);
             return Err(error);
         }
     };

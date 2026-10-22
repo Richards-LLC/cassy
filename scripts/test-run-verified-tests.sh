@@ -205,7 +205,7 @@ for interrupted, target in [
             # The wrapper is still unreaped, so its group id cannot be reused.
             try:
                 os.killpg(wrapper.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass
             # The fake Cargo leader waits 60s; signal its group only if live.
             if pids and live(pids[0]):

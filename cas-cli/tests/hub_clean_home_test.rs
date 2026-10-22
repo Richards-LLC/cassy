@@ -2379,8 +2379,9 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
 
     // cas-036b: a stop can acquire the machine lock between the launcher
     // releasing it and the new foreground hub acquiring it. Force a real
-    // failed first acquisition, then finish cleanup before allowing retry.
-    {
+    // failed first acquisition, then either finish cleanup or hold it through
+    // the bounded startup wait so the caller receives the specific failure.
+    for cleanup_finishes in [true, false] {
         let home = private_home();
         let bin = home.path().join("bin");
         fs::create_dir(&bin).unwrap();
@@ -2418,6 +2419,8 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let launcher = launcher.unwrap();
         let mut cleanup_lock = paths.acquire_instance_lock().unwrap();
         cleanup_lock.set_phase("stopping").unwrap();
+        let unrelated_error = paths.root().join(".launcher-unrelated.error");
+        fs::write(&unrelated_error, b"another launch's diagnostic").unwrap();
         fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
         let contention = barrier.join(format!("startup-lock-waiter-{launcher}"));
         let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
@@ -2426,11 +2429,31 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         {
             thread::sleep(Duration::from_millis(10));
         }
-        drop(cleanup_lock);
+        let cleanup_lock = Some(cleanup_lock);
+        let held_lock = if cleanup_finishes {
+            drop(cleanup_lock);
+            None
+        } else {
+            cleanup_lock
+        };
         fs::write(barrier.join("release-startup-lock"), b"release\n").unwrap();
         fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
         let output = start.wait_with_output().unwrap();
         assert!(contention.exists(), "hub did not attempt the contended lock: {output:?}");
+        let errors = fs::read_dir(paths.root()).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".error"))
+            .map(|entry| entry.path()).collect::<Vec<_>>();
+        assert_eq!(errors, vec![unrelated_error.clone()], "launch leaked its diagnostic file");
+        assert_eq!(fs::read(&unrelated_error).unwrap(), b"another launch's diagnostic");
+        if !cleanup_finishes {
+            assert!(!output.status.success(), "hub ignored the held machine lock: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("machine lock remained held"),
+                "startup timeout lost its specific diagnostic: {stderr}");
+            assert!(!paths.root().join("process.json").exists(), "timed-out hub published a record");
+            drop(held_lock);
+            continue;
+        }
         assert!(output.status.success(), "hub abandoned a transient cleanup lock: {output:?}");
         let started: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(started["pid"], launcher);

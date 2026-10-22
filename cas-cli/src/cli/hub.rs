@@ -27,6 +27,7 @@ const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 // Leave the launcher's readiness budget time to observe a peer or child exit.
 const HUB_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const _: () = assert!(HUB_STARTUP_LOCK_TIMEOUT.as_nanos() < HUB_LAUNCH_TIMEOUT.as_nanos());
 const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
 const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -236,6 +237,9 @@ pub struct HubServeArgs {
     /// Internal timestamp captured by the detached launcher.
     #[arg(long, hide = true)]
     pub launched_at: Option<String>,
+    /// Launch-owned channel for a detached child's startup failure.
+    #[arg(long, hide = true)]
+    pub startup_error_file: Option<std::path::PathBuf>,
     /// Cassy-created cgroup scope passed through the detached launch barrier.
     #[arg(long, hide = true)]
     pub cgroup: Option<std::path::PathBuf>,
@@ -263,6 +267,7 @@ impl Default for HubServeArgs {
             port: DEFAULT_HUB_PORT,
             launched_by: "cli".to_owned(),
             launched_at: None,
+            startup_error_file: None,
             cgroup: None,
             prior_tailscale_serve_port: None,
             prior_tailscale_serve_target: None,
@@ -1657,6 +1662,10 @@ fn start_with_output_resolved(
     let launch_file = paths
         .root()
         .join(format!(".launcher-{stamp}-{}.go", std::process::id()));
+    let startup_error_file = paths
+        .root()
+        .join(format!(".launcher-{stamp}-{}.error", std::process::id()));
+    let _startup_error_file_guard = ScopedFile::new(startup_error_file.clone());
     let _launcher_pid_file_guard = ScopedFile::new(launcher_pid_file.clone());
     let _launch_file_guard = ScopedFile::new(launch_file.clone());
 
@@ -1689,6 +1698,8 @@ fn start_with_output_resolved(
         .arg(launch_origin.as_str())
         .arg("--launched-at")
         .arg(&launched_at)
+        .arg("--startup-error-file")
+        .arg(&startup_error_file)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
@@ -1816,8 +1827,13 @@ fn start_with_output_resolved(
                 terminate_failed_launch(&mut child, cgroup.as_deref());
                 return Err(error);
             }
+            let startup_reason = std::fs::read_to_string(&startup_error_file)
+                .ok()
+                .filter(|reason| !reason.trim().is_empty())
+                .map(|reason| format!(": {}", reason.trim()))
+                .unwrap_or_default();
             let error = anyhow::anyhow!(
-                "cas hub replacement exited with {status} before becoming ready; inspect {}",
+                "cas hub replacement exited with {status} before becoming ready{startup_reason}; inspect {}",
                 paths.log_path().display()
             );
             terminate_failed_launch(&mut child, cgroup.as_deref());
@@ -2054,7 +2070,16 @@ fn serve_foreground_logged(
         // than treating a transient owner in that gap as a failed launch.
         let mut lock = match lock {
             Some(lock) => lock,
-            None => paths.wait_for_instance_lock(HUB_STARTUP_LOCK_TIMEOUT)?,
+            None => match paths.wait_for_instance_lock(HUB_STARTUP_LOCK_TIMEOUT) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    // Keep this launch's actual failure separate from shared hub.log.
+                    if let Some(path) = &args.startup_error_file {
+                        let _ = std::fs::write(path, format!("{error:#}"));
+                    }
+                    return Err(error);
+                }
+            },
         };
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())

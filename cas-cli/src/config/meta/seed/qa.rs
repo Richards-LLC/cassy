@@ -93,6 +93,8 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         ("qa.release.timeout_secs", "Release adapter timeout secs", "Per-call adapter timeout.", ConfigType::Int, "120", Constraint::Min(1)),
         ("qa.release.retention_days", "Release media retention days", "Days evidence-pack media stay on local disk; pack.json is kept.", ConfigType::Int, "30", Constraint::Min(1)),
         ("qa.release.components", "Release served components", "JSON object of served component name to repository paths, for served-SHA equivalence.", ConfigType::String, "{}", Constraint::None),
+        ("qa.release.target_env", "Release target env", "Environment the release gate walks, sent as every adapter request's env.", ConfigType::String, "staging", Constraint::None),
+        ("qa.release.suites", "Release suites", "JSON object of suite name to {journeys or kinds, wall_clock_mins, concurrency}; rows past the wall clock are NOT_EXERCISED{timed_out}.", ConfigType::String, "{}", Constraint::None),
         ("qa.release.grant_envs", "Release grant envs", "Environments where release-gate preflight may call the adapter's `grant` verb to cover a balance shortfall; elsewhere a shortfall refuses.", ConfigType::StringList, "staging", Constraint::None),
         ("qa.release.migrations.paths", "Release migration paths", "Repository-relative patterns with exactly one `*` (the migration id). A merge into integration_branch that adds a match needs the adapter's `migrations` verb to report it applied.", ConfigType::StringList, "", Constraint::None),
         ("qa.release.migrations.env", "Release migration env", "Environment whose applied migrations a merge into integration_branch needs, for example staging.", ConfigType::String, "", Constraint::None),

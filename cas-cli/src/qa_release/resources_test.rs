@@ -270,7 +270,7 @@ fn resources_throttle() {
     );
     env.set("FAKE_CALL_LOG", &log);
     let registry = metered_registry(
-        "resources:\n  staging-api: {kind: rate, per_min: 3, concurrency: 1}\n  credits: {kind: balance}\njourneys:\n  - id: audit\n    consumes: {staging-api: 1}\n  - id: checkout\n    consumes: {credits: 5}\n  - id: bulk\n    consumes: {staging-api: 4}\n",
+        "resources:\n  staging-api: {kind: rate, per_min: 3, concurrency: 1}\n  credits: {kind: balance}\n  visits: {kind: quota, per_day: 2}\njourneys:\n  - id: audit\n    consumes: {staging-api: 1}\n  - id: checkout\n    consumes: {credits: 5}\n  - id: bulk\n    consumes: {staging-api: 4}\n  - id: visit\n    consumes: {visits: 1}\n  - id: huge\n    consumes: {visits: 3}\n",
     );
     let sha = "a".repeat(40);
     let run = |journey: &crate::qa_registry::Journey, clock_secs: u64| {
@@ -333,4 +333,14 @@ fn resources_throttle() {
         matches!(run(checkout, 5), Err(MeteredError::Blocked(b)) if b.provider == "fake-health")
     );
     assert_eq!(calls(), 4, "a 402 is not retried");
+
+    // A quota take that can never fit reports today's actual remainder.
+    assert!(matches!(run(&registry.journeys[3], 5), Err(MeteredError::Blocked(_))));
+    match run(&registry.journeys[4], 5) {
+        Err(MeteredError::Refused(refusal)) => assert_eq!(
+            refusal.to_string(),
+            "RESOURCE SHORTFALL: visits needs 3, 1 of 2 left in 24h on staging"
+        ),
+        other => panic!("expected the quota refusal, got {other:?}"),
+    }
 }

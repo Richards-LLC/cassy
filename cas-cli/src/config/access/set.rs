@@ -735,6 +735,15 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.components = components;
             }
+            "qa.release.target_env" => {
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.target_env = value.trim().to_string();
+            }
+            "qa.release.suites" => {
+                let suites = crate::qa_release::ReleaseConfig::parse_suites(value).map_err(MemError::Parse)?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.suites = suites;
+            }
             "qa.release.grant_envs" => {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.grant_envs = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();

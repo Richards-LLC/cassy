@@ -8,6 +8,9 @@
 #               map of the request's env (flags and balance also accept prod).
 #   balance:    answers FAKE_BALANCE, the {resource: amount} map.
 #   grant:      answers FAKE_GRANT, the {resource: new balance} map.
+#   run:        writes one frame into args.media_dir and answers pass, or fail
+#               for a journey named in FAKE_RUN_FAIL; FAKE_RUN_ERROR_KIND answers
+#               run alone with that classified error.
 # FAKE_CALL_LOG records each request; FAKE_SLEEP delays the answer;
 # FAKE_ERROR_KIND answers any verb with that classified error instead, with
 # retry_after_s FAKE_RETRY_AFTER (default 30).
@@ -39,5 +42,17 @@ case "$1" in
     printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_BALANCE" ;;
   grant)
     printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_GRANT" ;;
+  run)
+    if [ -n "${FAKE_RUN_ERROR_KIND:-}" ]; then
+      printf '{"v":1,"ok":false,"error":{"kind":"%s","provider":"fake-api","status":429,"message":"slow down"}}\n' "$FAKE_RUN_ERROR_KIND"
+      exit 0
+    fi
+    field() { printf '%s' "$request" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+    journey=$(field journey); row=$(field row); media=$(field media_dir)
+    [ -n "$row" ] && [ -d "$media" ] || exit 1
+    printf 'frame of %s' "$journey" >"$media/frame.txt"
+    status=pass
+    case " ${FAKE_RUN_FAIL:-} " in *" $journey "*) status=fail ;; esac
+    printf '{"v":1,"ok":true,"data":{"status":"%s","reason":"fake failure","frames":["media/%s/frame.txt"]}}\n' "$status" "$row" ;;
   *) exit 1 ;;
 esac

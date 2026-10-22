@@ -570,11 +570,24 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    for state in ["missing", "existing", "directory"] {
+    for state in ["missing", "existing", "directory", "malformed", "malformed-grok", "array-root", "array-servers", "null-root", "null-servers"] {
         let temp = TempDir::new().unwrap();
-        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        if state == "malformed-grok" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            std::fs::create_dir(temp.path().join(".grok")).unwrap();
+        } else {
+            std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        }
         let mcp_path = temp.path().join(".mcp.json");
         let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
+        let invalid_content: Option<&[u8]> = match state {
+            "malformed" | "malformed-grok" => Some(b"{\"mcpServers\": {\"other\":"),
+            "array-root" => Some(b"[]"),
+            "array-servers" => Some(b"{\"mcpServers\":[\"x\"]}"),
+            "null-root" => Some(b"null"),
+            "null-servers" => Some(b"{\"mcpServers\":null}"),
+            _ => None,
+        };
         match state {
             "existing" => std::fs::write(
                 &mcp_path,
@@ -582,28 +595,34 @@ fn test_init_json() {
             )
             .unwrap(),
             "directory" => std::fs::create_dir(&mcp_path).unwrap(),
+            _ if invalid_content.is_some() => std::fs::write(&mcp_path, invalid_content.unwrap()).unwrap(),
             _ => {}
         }
 
         let output = cas_cmd(temp.path())
             .current_dir(&temp)
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
             .args(["init", "--no-integrations", "--json"])
             .output()
             .unwrap();
-        if state == "directory" {
+        if state == "directory" || invalid_content.is_some() {
             assert!(
-                !output.status.success(),
-                "MCP provisioning failure must fail init"
+                output.status.code() == Some(1),
+                "MCP provisioning failure must exit 1 without panicking ({state}): {}",
+                String::from_utf8_lossy(&output.stderr)
             );
             assert!(
                 output.stdout.is_empty(),
                 "failed init must not report initialized"
             );
             assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
-            assert!(
-                mcp_path.is_dir(),
-                "failed init must preserve the obstructing directory"
-            );
+            if state == "directory" {
+                assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
+            } else {
+                assert_eq!(std::fs::read(&mcp_path).unwrap(), invalid_content.unwrap());
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains("JSON"), "malformed config needs an explicit parse error: {error}");
+            }
             continue;
         }
 
@@ -632,6 +651,80 @@ fn test_init_json() {
 }
 
 #[test]
+fn test_init_failure_reports_force_retry() {
+    let mut missing_hints = Vec::new();
+    for harness in ["claude", "codex"] {
+        let clean = TempDir::new().unwrap();
+        std::fs::create_dir(clean.path().join(format!(".{harness}"))).unwrap();
+        cas_cmd(clean.path()).current_dir(&clean)
+            .env("CODEX_HOME", clean.path().join(".test-home/.codex"))
+            .args(["init", "--json", "--no-integrations"])
+            .assert().success();
+        let clean_config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(clean.path().join(".cas/config.toml")).unwrap(),
+        ).unwrap();
+        for (mode, retry_mode) in [
+            ("json", "json"), ("json", "yes"), ("yes", "yes"), ("interactive", "yes"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let config_dir = temp.path().join(format!(".{harness}"));
+            std::fs::create_dir(&config_dir).unwrap();
+            let blocked = if harness == "claude" {
+                temp.path().join(".mcp.json")
+            } else {
+                config_dir.join("config.toml")
+            };
+            std::fs::create_dir(&blocked).unwrap();
+            let user_codex = temp.path().join(".test-home/.codex");
+            let mut command = cas_cmd(temp.path());
+            command.current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--no-integrations"]);
+            match mode {
+                "json" => { command.arg("--json"); }
+                "yes" => { command.arg("--yes"); }
+                _ => { command.write_stdin("y\n"); }
+            }
+            let output = command.output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{harness}/{mode} must fail provisioning");
+            assert!(temp.path().join(".cas/cas.db").is_file());
+            assert!(blocked.is_dir(), "the user's obstruction must remain intact");
+            if !error.lines().any(|line| line == "Fix the reported error, then re-run: cas init --force")
+                || error.lines().any(|line| line.chars().count() > 80)
+            {
+                missing_hints.push(format!("{harness}/{mode}: {error}"));
+            }
+            std::fs::remove_dir(&blocked).unwrap();
+            // Removing the obstruction alone does not finish an existing
+            // store. Prove that the suggested force retry actually repairs it.
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--json", "--no-integrations"])
+                .assert().success().stdout(predicate::str::contains("already_initialized"));
+            assert!(!blocked.exists());
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", if retry_mode == "json" { "--json" } else { "--yes" }, "--no-integrations", "--force"])
+                .assert().success();
+            let recovered_config: toml::Value = toml::from_str(
+                &std::fs::read_to_string(temp.path().join(".cas/config.toml")).unwrap(),
+            ).unwrap();
+            assert_eq!(recovered_config, clean_config,
+                "{harness}/{mode} -> {retry_mode}: force recovery must keep the full clean-init config");
+            if harness == "claude" {
+                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcpServers"]["cas"]["command"], "cas");
+            } else {
+                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcp_servers"]["cs"]["command"].as_str(), Some("cas"));
+            }
+        }
+    }
+    assert!(missing_hints.is_empty(), "failed init must explain force recovery: {missing_hints:#?}");
+}
+
+#[test]
 fn test_init_already_initialized() {
     let temp = TempDir::new().unwrap();
 
@@ -649,6 +742,18 @@ fn test_init_already_initialized() {
         .assert()
         .success()
         .stdout(predicate::str::contains("already initialized"));
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n";
+    std::fs::write(&config_path, custom_config).unwrap();
+    let output = cas_cmd(temp.path()).current_dir(&temp)
+        .args(["init", "--no-integrations"]).write_stdin("").output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(error.contains("stdin closed before a selection"), "{error}");
+    assert!(!error.contains("Initialization is incomplete") && !error.contains("cas init --force"),
+        "a valid pre-existing store must not receive partial-init recovery advice: {error}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config);
 }
 
 /// Regression test for cas-bf06: a reinit of `cas init` (interactive, no
@@ -730,22 +835,31 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
 
 #[test]
 fn test_init_force_reinit() {
-    let temp = TempDir::new().unwrap();
+    for mode in ["json", "yes", "interactive"] {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        cas_cmd(temp.path()).current_dir(&temp)
+            .args(["init", "--yes", "--no-integrations"]).assert().success();
+        let config_path = temp.path().join(".cas/config.toml");
+        let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n[hooks]\ntoken_budget = 1234\n";
+        std::fs::write(&config_path, custom_config).unwrap();
+        let mcp_path = temp.path().join(".mcp.json");
+        std::fs::remove_file(&mcp_path).unwrap();
 
-    // First init
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Force reinit should succeed
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes", "--force"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"));
+        let mut command = cas_cmd(temp.path());
+        command.current_dir(&temp).args(["init", "--force", "--no-integrations"]);
+        match mode {
+            "json" => { command.arg("--json"); }
+            "yes" => { command.arg("--yes"); }
+            _ => { command.write_stdin("y\n"); }
+        }
+        command.assert().success().stdout(predicate::str::contains(
+            if mode == "json" { "initialized" } else { "Cassy initialized" }));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config,
+            "{mode} force retry must preserve the operator's config bytes");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["cas"]["command"], "cas", "{mode} must repair provisioning");
+    }
 }
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the

@@ -587,6 +587,16 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
 /// as the stable machine-readable representation.
 pub fn human_error_message(error: &anyhow::Error) -> String {
     let message = format!("{error:#}");
+    if let Some(cause) = message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        return format!(
+            "{}\n{}",
+            init::INCOMPLETE_INIT_RECOVERY,
+            crate::cloud::presence::wrap_line(cause).trim_end()
+        );
+    }
     let Some(detail) = message
         .strip_prefix("refused: ")
         .filter(|_| message.contains("operator-only because"))

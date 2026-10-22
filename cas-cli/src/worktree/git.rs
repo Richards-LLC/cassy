@@ -15,6 +15,13 @@ mod epic_branch;
 
 pub use branch_ops::{TargetPushOutcome, TargetReconcile};
 
+pub(crate) const MANAGED_RECONCILE_SUBJECT: &str = "chore(cassy): reconcile managed project files";
+
+pub(crate) struct ReconcileCommits {
+    pub count: usize,
+    pub total: usize,
+}
+
 /// Errors that can occur during git operations
 #[derive(Debug, Error)]
 pub enum GitError {

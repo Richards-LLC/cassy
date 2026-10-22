@@ -170,6 +170,44 @@ impl GitOperations {
         }
     }
 
+    /// Read only the local-only range. Subject alone does not establish Cassy ownership.
+    pub(crate) fn reconcile_commits_ahead(
+        &self, local: &str, upstream: &str,
+    ) -> Result<super::ReconcileCommits, String> {
+        let local = self.resolve_commit(local).ok_or("local branch does not resolve")?;
+        let upstream = self.resolve_commit(upstream).ok_or("upstream does not resolve")?;
+        let mut command = Command::new("git");
+        command.current_dir(&self.repo_root).args([
+            "log", "--no-use-mailmap", "--format=%an%x00%ae%x00%s",
+            &format!("{upstream}..{local}"), "--",
+        ]);
+        let output = Self::run_command_bounded(command, Duration::from_secs(2))
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err("could not inspect local-only commit metadata".into());
+        }
+        let metadata = String::from_utf8_lossy(&output.stdout);
+        let mut result = super::ReconcileCommits { count: 0, total: 0 };
+        for row in metadata.lines() {
+            result.total += 1;
+            let fields: Vec<_> = row.split('\0').collect();
+            if fields.as_slice() == ["Cassy", "cassy@localhost", super::MANAGED_RECONCILE_SUBJECT] {
+                result.count += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Only attribute divergence when every unique commit on this side is a repair.
+    pub(crate) fn reconcile_commit_cause(&self, local: &str, upstream: &str) -> String {
+        match self.reconcile_commits_ahead(local, upstream) {
+            Ok(commits) if commits.count > 0 && commits.count == commits.total => format!(
+                "\nCause: {} local-only Cassy reconcile commit(s).\nNext: push the reconcile commits to origin and open a PR.", commits.count,
+            ),
+            _ => String::new(),
+        }
+    }
+
     /// The same cached local/origin comparison used by legacy spawn preparation.
     /// Fetch is owned by the observation, so retries here add no network work.
     pub(crate) fn shared_parent_ref(&self, branch: &str) -> Result<Option<String>, String> {
@@ -203,11 +241,13 @@ impl GitOperations {
         }
         if behind == 0 {
             return Err(format!(
-                "local parent '{branch_label}' ({local}) is ahead of shared '{remote_label}' ({remote}); refusing unpublished local parent"
+                "local parent '{branch_label}' ({local}) is ahead of shared '{remote_label}' ({remote}); refusing unpublished local parent{}",
+                self.reconcile_commit_cause(&local, &remote),
             ));
         }
         Err(format!(
-            "recorded parent '{branch_label}' and fetched '{remote_label}' have diverged; refusing to choose a worker base"
+            "recorded parent '{branch_label}' and fetched '{remote_label}' have diverged; refusing to choose a worker base{}",
+            self.reconcile_commit_cause(&local, &remote),
         ))
     }
 
@@ -270,7 +310,8 @@ impl GitOperations {
                 .map_err(|e| e.to_string())?;
             if ahead > 0 && behind > 0 {
                 return Ok(EpicBranchReadiness::preserved(format!(
-                    "EPIC BRANCH DIVERGED: '{branch_label}' local {local}, origin {remote}; no refs changed or published. Reconcile before relying on this lane."
+                    "EPIC BRANCH DIVERGED: '{branch_label}' local {local}, origin {remote}; no refs changed or published. Reconcile before relying on this lane.{}",
+                    self.reconcile_commit_cause(&local, &remote),
                 )));
             }
             if ahead == 0 {

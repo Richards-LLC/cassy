@@ -925,8 +925,8 @@ fn prefer_fresher_base_ref_observed(
     let ahead = ahead.unwrap_or(0);
     if verify_origin && behind > 0 && ahead > 0 {
         return Err(format!(
-            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.",
-            observed_state(),
+            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.{}",
+            observed_state(), git.reconcile_commit_cause(base, &remote),
         ));
     }
 
@@ -1268,10 +1268,11 @@ fn refresh_epic_base_from_parent(
         }
         if reset_reason.is_none() {
             return Err(format!(
-                "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`",
+                "epic base '{epic_branch}' ({}) and recorded parent '{parent_ref}' ({}) have diverged; refusing to cut a worker from an unreconciled base. Reconcile: `{}`{}",
                 &epic_sha[..epic_sha.len().min(8)],
                 &parent_sha[..parent_sha.len().min(8)],
                 epic_reconcile_command(repo_root, epic_branch, parent_ref)?,
+                git.reconcile_commit_cause(parent_ref, epic_branch),
             ));
         }
     }
@@ -2402,8 +2403,9 @@ impl WorkerSpawnContext {
                                     anyhow::bail!(
                                         "{}",
                                         epic_base_refresh_refusal(&format!(
-                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`",
+                                            "epic base '{parent_branch}' and recorded parent '{parent_ref}' have diverged; no refs changed. Reconcile: `{}`{}",
                                             epic_reconcile_command(&repo_root, &parent_branch, &parent_ref).map_err(anyhow::Error::msg)?,
+                                            spawn_git.reconcile_commit_cause(&parent_ref, &parent_branch),
                                         ))
                                     );
                                 }
@@ -4969,6 +4971,21 @@ mod spawn_base_tests {
         assert_eq!(short_sha(&repo, "origin/main"), remote_sha);
         assert!(!repo.join(".cas/worktrees/legacy-path-worker").exists());
         assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let repair_tip = short_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("repair-only divergence still refuses").to_string();
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(short_sha(&repo, "main"), repair_tip);
+        assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+        commit_file(&repo, "human-work.txt", "unpublished project work");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("mixed divergence still refuses").to_string();
+        assert!(!error.contains("Cause:"), "mixed history must not be blamed only on repairs: {error}");
     }
 
     #[test]
@@ -5965,6 +5982,17 @@ mod spawn_base_tests {
             stale_spawn_base_notice(&repo, "epic/diverged", "main").is_some(),
             "the divergence remains explicitly diagnosable to the spawning caller"
         );
+        let amended = Command::new("git").current_dir(&repo).args([
+            "-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost",
+            "commit", "--amend", "--reset-author", "-qm", "chore(cassy): reconcile managed project files",
+        ]).output().unwrap();
+        assert!(amended.status.success());
+        let parent_tip = head_sha(&repo, "main");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &repo.join(".cas"), "cas-legacy-child")
+            .err().expect("repair-only parent divergence still refuses").to_string();
+        assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
+        assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
+        assert_eq!(head_sha(&repo, "main"), parent_tip);
     }
 
     /// GH #584 / cas-a075: the production spawn-preparation seam must stop

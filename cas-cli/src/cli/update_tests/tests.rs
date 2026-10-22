@@ -2810,6 +2810,39 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
 }
 
 #[test]
+fn managed_commit_names_local_only_pr_next_step_cas_3b812() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    let (result, output) = capture_phase(true, || {
+        sync_claude_files_into(&update_test_cli(false), Some(&root), Some(&project))
+    });
+    let report = result.unwrap();
+    assert_eq!(report.outcome, "committed");
+    assert_ne!(cas_6718_git(&project, &["rev-parse", "HEAD"]), before);
+    let next: Vec<_> = output.lines().filter(|line| line.contains("local-only")).collect();
+    assert_eq!(next.len(), 1, "committed repair needs one local-only next step: {output}");
+    assert!(next[0].contains("origin") && next[0].contains("PR"), "{}", next[0]);
+    assert!(next[0].is_ascii() && next[0].len() <= 80, "{}", next[0]);
+    let (result, current) = capture_phase(true, || {
+        sync_claude_files_into(&update_test_cli(false), Some(&root), Some(&project))
+    });
+    assert_eq!(result.unwrap().outcome, "current");
+    assert!(!current.contains("local-only"), "{current}");
+    // The multi-project sweep must not hide a pending PR in successful details.
+    let sweep_project = cas_6718_drifted_project(&env.home().join("sweep"));
+    let sweep_root = sweep_project.join(".cas");
+    env.set("CAS_ROOT", &sweep_root);
+    let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(false), &sweep_root, false));
+    assert!(matches!(phase, ProjectPhase::Warning(_)), "{phase:?}");
+    assert!(phase.detail().contains("local-only") && phase.detail().contains("PR"), "{phase:?}");
+}
+
+#[test]
 fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.remove("CAS_AGENT_ROLE");

@@ -7658,6 +7658,21 @@ impl CasCore {
                 .to_path_buf(),
         };
 
+        // A start recorded on the preceding parked lane must not prevent
+        // an independently proven integrated receipt from reaching close.
+        // This only retires stale attribution; it never rebinds a branch or
+        // skips the checkout, pre-close, merge, QA or verification gates.
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && task.deliverables.factory_branch_start.is_some()
+        {
+            let lease_history = self.open_agent_store().ok()
+                .and_then(|store| store.get_lease_history(&req.id, None).ok())
+                .unwrap_or_default();
+            task_attribution::recover_stale_start_for_integrated_receipt(
+                &close_project_root, &mut task, receipt, &lease_history,
+            );
+        }
+
         // Resolve the worker checkout before the branch target so a degraded
         // close (where Cassy's own root is not inside a repository) can still
         // discover the standalone task's configured or detected trunk from

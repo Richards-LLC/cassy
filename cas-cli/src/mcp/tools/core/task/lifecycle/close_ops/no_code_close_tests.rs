@@ -1341,7 +1341,7 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
 #[tokio::test]
 async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
     let mut env = TestEnvGuard::temp_home();
-    for supervisor in [false, true] {
+    for (supervisor, same_lane) in [(false, false), (true, false), (false, true), (true, true)] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
         let worker_path = f.cas_dir().join("worktrees").join(WORKER);
@@ -1360,7 +1360,7 @@ async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
         git(&worker_path, &["push", "-q", "origin", &own_lane]);
         git(repo, &["merge", "-q", "--no-ff", &own_lane, "-m", "Merge own delivery"]);
         git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge preceding delivery"]);
-        git(repo, &["commit", "-q", "--allow-empty", "-m", "empty receipt"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-8603): empty receipt"]);
         let empty = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["push", "-q", "origin", "main"]);
         git(repo, &["checkout", "-q", "-b", "unmerged", "main"]);
@@ -1373,7 +1373,7 @@ async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
             work_target: task.deliverables.work_target.clone().unwrap(),
             assignee: WORKER.into(),
-            branch: old_lane.clone(),
+            branch: if same_lane { own_lane.clone() } else { old_lane.clone() },
             base_sha: f.foreign_tip.clone(),
         });
         f.put(&task);
@@ -1392,9 +1392,14 @@ async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
             "action": "close", "id": id, "reason": "Reviewed integrated own delivery",
             "commit_receipt": receipt, "supervisor_override": supervisor,
         })).await;
-        assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}: {response}");
+        if same_lane {
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "an own-lane history rewrite still refuses: {response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, task.deliverables.factory_branch_start);
+        } else {
+            assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}: {response}");
+            assert!(f.task(id).notes.contains(&f.foreign_tip), "the original boundary must remain audited");
+        }
         assert_eq!(git(repo, &["rev-parse", &old_lane]), old_tip,
             "recovery must not move the previous task's lane");
-        assert!(f.task(id).notes.contains(&f.foreign_tip), "the original boundary must remain audited");
     }
 }

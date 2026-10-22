@@ -374,7 +374,7 @@ fn reconcile_reused_factory_branch(
         // Only the reusable base lane may move after preserving its old tip.
         if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some() {
             return Err(format!(
-                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` before starting."
+                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` BEFORE task action=start; do not start and then switch branches."
             ));
         }
         require_clean_tracked_tree()?;

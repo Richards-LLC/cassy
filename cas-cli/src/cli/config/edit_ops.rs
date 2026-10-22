@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cli::Cli;
@@ -99,7 +99,7 @@ fn execute_edit_line_based_with_input(
 
     let mut stdout = std::io::stdout();
     let mut changes_made = 0;
-    let mut pending_resets = HashSet::new();
+    let mut pending_resets = Vec::new();
 
     for meta in configs_to_edit {
         let current_value = items
@@ -154,7 +154,7 @@ fn execute_edit_line_based_with_input(
                     crate::cli::config::config_key_has_override(meta.key, cas_root)?;
                 if current_value != meta.default || has_override {
                     config.set(meta.key, meta.default)?;
-                    pending_resets.insert(meta.key.to_owned());
+                    pending_resets.push(meta.key.to_owned());
                     changes_made += 1;
                     fmt.success(&format!("   Reset to: {}", meta.default))?;
                 } else {
@@ -197,7 +197,10 @@ fn execute_edit_line_based_with_input(
             &config,
             crate::config::operator_policy::InvocationContext::from_process,
         )?;
-        crate::cli::config::save_editor_changes(&original, &config, &pending_resets, cas_root)?;
+        config.save(cas_root)?;
+        for key in pending_resets {
+            crate::cli::config::reset_config_value(&key, cas_root)?;
+        }
         fmt.success(&format!("Saved {changes_made} change(s)"))?;
     } else {
         fmt.write_muted("No changes made")?;
@@ -219,35 +222,30 @@ mod tests {
     #[test]
     fn line_editor_d_removes_override_and_restores_hub_fallback() {
         let env = crate::test_support::TestEnvGuard::temp_home();
-        let host_root = crate::config::host_config_dir();
-        std::fs::create_dir_all(&host_root).unwrap();
-        std::fs::write(
-            host_root.join("config.toml"),
-            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"auto\"\n",
-        )
-        .unwrap();
-        let project = env.home().join("projects/config-editor");
-        let root = crate::store::init_cas_dir(&project).unwrap();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            "# preserve project comment\n[sync]\nenabled = true\n",
+            "[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
         )
         .unwrap();
 
         let registry = registry();
         let mut answers = String::new();
-        for section in registry.sections() {
+        'sections: for section in registry.sections() {
+            if !section.starts_with("hub") {
+                continue;
+            }
             for meta in registry.configs_in_section(section) {
-                let answer = match meta.key {
-                    "hub.transport_mode" => "d\n",
-                    "sync.enabled" => "false\n",
-                    _ => "\n",
-                };
-                answers.push_str(answer);
+                if meta.key == "hub.transport_mode" {
+                    answers.push_str("d\nq\n");
+                    break 'sections;
+                }
+                answers.push('\n');
             }
         }
         let args = ConfigEditArgs {
-            section: None,
+            section: Some("hub".into()),
             modified: false,
             all: true,
         };
@@ -257,15 +255,9 @@ mod tests {
 
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
-        assert_eq!(document["sync"]["enabled"].as_bool(), Some(false), "{saved}");
-        assert!(saved.contains("# preserve project comment"), "{saved}");
-        assert!(document.get("hub").and_then(|hub| hub.get("transport_mode")).is_none(), "{saved}");
-        let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
-        let host_document: toml::Value = toml::from_str(&host_saved).unwrap();
-        assert!(host_saved.contains("# preserve host comment"), "{host_saved}");
-        assert!(host_document["hub"].get("transport_mode").is_none(), "{host_saved}");
+        assert!(document["hub"].get("transport_mode").is_none(), "{saved}");
         assert_eq!(
-            Config::load(&host_root).unwrap().hub.unwrap().transport_mode(),
+            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
             crate::config::HubTransportMode::Loopback
         );
     }

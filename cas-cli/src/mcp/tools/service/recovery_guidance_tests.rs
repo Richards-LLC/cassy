@@ -591,11 +591,14 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
     assert_eq!(git(root, &["rev-parse", "HEAD"]), tip, "source checkout untouched");
     let after = tasks.get(&task.id).unwrap();
     assert_eq!(after.assignee.as_deref(), Some("recovery-caller"));
+    assert!(agents.get_lease(&task.id).unwrap().is_none(), "bounded recovery releases only its own lease");
     assert!(after.notes.contains("BRANCH RECOVERED"), "{}", after.notes);
     for expected in [source, &tip, "recovery-caller"] {
         assert!(after.notes.contains(expected), "missing audit {expected}");
         assert!(receipt.contains(expected), "missing receipt {expected}");
     }
+    let replay = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
+    assert_eq!(text(service.factory(Parameters(replay)).await.unwrap()), receipt, "same exact recovery is idempotent");
     // The real private pre-push guard still refuses a supervisor's ordinary
     // push from the dead worker's checkout. Recovery has no foreign-ref bypass.
     let hooks = tempfile::TempDir::new().unwrap();

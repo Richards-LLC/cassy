@@ -3,8 +3,8 @@
 use std::{path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use cas_store::{AgentStore, EventStore};
-use cas_types::{Agent, AgentRole, EventType};
+use cas_store::AgentStore;
+use cas_types::{Agent, AgentRole, AgentStatus, ClaimResult, TaskLease};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::factory::daemon::runtime::teams::TeamsManager;
@@ -129,23 +129,53 @@ fn ensure_dead(core: &CasCore, prior: &str) -> Result<()> {
             bail!("source worker {prior} is still live; leave its checkout and lease alone");
         }
     }
-    if !matching.is_empty() {
-        return Ok(());
+    let store = cas_store::SqliteAgentStore::open(&core.cas_root)?;
+    let retired = store.retired_workers_named(prior)?;
+    for source in &retired {
+        let mut worker = Agent::new_with_role(
+            source.agent_id.clone(),
+            source.name.clone(),
+            AgentRole::Worker,
+        );
+        worker.status = AgentStatus::Shutdown;
+        worker.pid = source.pid;
+        worker.ppid = source.ppid;
+        worker.pid_starttime = source.pid_starttime;
+        if let Some(starttime) = source.parent_starttime {
+            worker.metadata.insert(
+                crate::mcp::daemon::PPID_STARTTIME_KEY.into(),
+                starttime.to_string(),
+            );
+        }
+        if crate::mcp::tools::service::agent_liveness::agent_process_is_alive(&worker) {
+            bail!(
+                "source worker {prior} is still live after retirement; wait for its harness to end"
+            );
+        }
     }
-    // Deleted registrations need positive retained identity, not an assumption
-    // that any unregistered name authorizes a foreign branch.
-    let events = cas_store::SqliteEventStore::open(&core.cas_root)?;
-    let retired = events.list_by_type(EventType::AgentShutdown, 1000)?;
-    let proven = retired.iter().any(|event| {
-        event.metadata.as_ref().is_some_and(|m| {
-            let agent = &m["retired_agent"];
-            (event.entity_id == prior || agent["name"] == prior) && agent["role"] == "worker"
-        })
-    });
-    if !proven {
-        bail!("source worker retirement is unproven; retain or restore its registration evidence");
+    if matching.is_empty() && retired.is_empty() {
+        bail!("source worker retirement is unproven; retain its registration evidence");
     }
     Ok(())
+}
+
+/// Hold the normal task lease while the bounded Git operation runs. A worker
+/// cannot acquire an unleased task between death validation and final binding.
+struct RecoveryLease {
+    store: std::sync::Arc<dyn cas_store::AgentStore>,
+    lease: TaskLease,
+}
+impl Drop for RecoveryLease {
+    fn drop(&mut self) {
+        if let Err(error) = self.store.release_lease_if_owner_epoch(
+            &self.lease.task_id,
+            &self.lease.agent_id,
+            self.lease.epoch,
+            "bounded supervisor branch recovery ended",
+        ) {
+            tracing::warn!(%error, task_id=%self.lease.task_id, "recovery lease release failed; bounded expiry remains");
+        }
+    }
 }
 
 pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Receipt> {
@@ -270,8 +300,25 @@ pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Re
     );
     tasks.append_trusted_note(task_id, &audit)?;
     let before = tasks.get(task_id)?;
+    let agents = core
+        .open_agent_store()
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let lease = match agents.try_claim(
+        task_id,
+        &actor.id,
+        300,
+        Some("bounded supervisor branch recovery"),
+    )? {
+        ClaimResult::Success(lease) => lease,
+        _ => bail!("task lease changed before recovery; leave the new holder alone"),
+    };
+    let recovery_lease = RecoveryLease {
+        store: agents,
+        lease,
+    };
+
     // Serialize recoveries in this repository without mutating the source's
-    // checkout, hooks or HEAD. This lock is not a branch-ownership capability.
+    // checkout or HEAD. This lock is not a branch-ownership capability.
     let common = git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -342,6 +389,14 @@ pub(crate) fn recover(core: &CasCore, task_id: &str, payload: &str) -> Result<Re
         }
         if destination.remote_tip(&url, &reference)? != request.head {
             bail!("push returned but the destination tip could not be verified");
+        }
+        let held = recovery_lease.store.get_lease(task_id)?;
+        if !held.is_some_and(|lease| {
+            lease.agent_id == actor.id && lease.epoch == recovery_lease.lease.epoch
+        }) {
+            bail!(
+                "push completed but recovery lease changed; retain the new holder and inspect the recovery intent"
+            );
         }
         let mut next = before.clone();
         next.assignee = Some(actor.name.clone());

@@ -95,6 +95,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/ui/factory/director/` - task dispatch, worker coordination, reminders, and stall handling.
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment evidence and directed supervisor wake batching.
 - `cas-cli/src/ui/factory/server_registry/` - owned server records and lifecycle.
+- `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable lane succession and authenticated recovery of committed worker branches.
 - `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_worker_check.rs` - target-path resolution, capped worker proof admission, and authenticated supervisor-recorded exact-tip test evidence.
 - `cas-cli/src/factory_target_cache/` - target ownership, baseline seeding, parked caches, and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch/environment projections, pane readiness, and terminal snapshots.
@@ -119,6 +120,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 
 ## Storage, retrieval, and clients
 
+- `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, observed end causes, process evidence, and single-successor claims.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/accepted_proposal_store.rs` - durable prompt delivery and cross-project proposal ownership.
 - `crates/cas-store/src/task_note_markers.rs` - reserve trusted artifact/proposal marker appends in the untrusted task timeline.
 - `crates/cas-store/src/rule_candidate_store.rs`, `crates/cas-store/src/communication_slo/` - rule-candidate review state and communication metrics/SQL.

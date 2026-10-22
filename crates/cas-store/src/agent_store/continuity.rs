@@ -11,13 +11,21 @@ use sha2::{Digest, Sha256};
 /// One project/host-scoped lane snapshot. IDs and original ownership are evidence,
 /// not an instruction to transfer live workers or overwrite current assignments.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SupervisorHandoff {
+pub struct SessionEnd {
     pub id: String,
     pub agent_id: String,
     pub name: String,
     pub reason: String,
     pub registered_at: String,
     pub factory_session: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub ppid: Option<u32>,
+    #[serde(default)]
+    pub pid_starttime: Option<u64>,
+    #[serde(default)]
+    pub parent_starttime: Option<u64>,
     pub tasks: Vec<Value>,
     pub workers: Vec<Value>,
     pub pending: Vec<Value>,
@@ -103,13 +111,30 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         }
         return Ok(());
     }
-    let mut handoff = SupervisorHandoff {
+    let (pid, ppid, pid_starttime, metadata): (Option<u32>, Option<u32>, Option<u64>, String) =
+        conn.query_row(
+            "SELECT pid,ppid,pid_starttime,metadata FROM agents WHERE id=?",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let parent_starttime = serde_json::from_str::<Value>(&metadata)
+        .ok()
+        .and_then(|value| {
+            value["ppid_starttime"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+        });
+    let mut handoff = SessionEnd {
         id: format!("{:x}", Sha256::digest(format!("{id}\0{epoch}").as_bytes())),
         agent_id: id.into(),
         name: name.clone(),
         reason: reason.into(),
         registered_at: epoch.clone(),
         factory_session: session.clone(),
+        pid,
+        ppid,
+        pid_starttime,
+        parent_starttime,
         tasks: Vec::new(),
         workers: Vec::new(),
         pending: Vec::new(),
@@ -133,7 +158,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut inherited_receipts = Vec::new();
         for (receipt, payload) in inherited {
-            let previous: SupervisorHandoff =
+            let previous: SessionEnd =
                 serde_json::from_str(&payload).map_err(|e| StoreError::Other(e.to_string()))?;
             for task in previous.tasks {
                 if let Some(id) = task["id"].as_str() {
@@ -236,8 +261,8 @@ pub(super) fn end_reason(conn: &Connection, id: &str) -> Result<String> {
         .unwrap_or_else(|| "unknown".into()))
 }
 
-fn decode(payload: String, reason: String) -> Result<SupervisorHandoff> {
-    let mut handoff: SupervisorHandoff =
+fn decode(payload: String, reason: String) -> Result<SessionEnd> {
+    let mut handoff: SessionEnd =
         serde_json::from_str(&payload).map_err(|e| StoreError::Other(e.to_string()))?;
     handoff.reason = reason;
     Ok(handoff)
@@ -258,7 +283,7 @@ impl SqliteAgentStore {
 
     /// One winner per predecessor, even with concurrent successor startups.
     /// Failed outbox publication remains retryable by that winner.
-    pub fn claim_supervisor_handoffs(&self, successor: &Agent) -> Result<Vec<SupervisorHandoff>> {
+    pub fn claim_supervisor_handoffs(&self, successor: &Agent) -> Result<Vec<SessionEnd>> {
         if successor.role != AgentRole::Supervisor
             || !successor.is_alive()
             || successor.machine_id.is_none()
@@ -305,11 +330,24 @@ impl SqliteAgentStore {
         Ok(())
     }
 
-    pub fn recent_session_ends(
-        &self,
-        machine: &str,
-        limit: usize,
-    ) -> Result<Vec<SupervisorHandoff>> {
+    /// Retained worker identity is authority even after optional activity-event
+    /// retention. Keep exact process fingerprints so retirement cannot hide a
+    /// still-running harness from a recovery request.
+    pub fn retired_workers_named(&self, identity: &str) -> Result<Vec<SessionEnd>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare("SELECT payload,reason FROM agent_session_ends WHERE role='worker' AND (agent_id=?1 OR json_extract(payload,'$.name')=?1) ORDER BY ended_at DESC")?;
+        let records = statement
+            .query_map([identity], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        records
+            .into_iter()
+            .map(|(payload, reason)| decode(payload, reason))
+            .collect()
+    }
+
+    pub fn recent_session_ends(&self, machine: &str, limit: usize) -> Result<Vec<SessionEnd>> {
         let conn = self.lock_conn()?;
         if !table_exists(&conn, "agent_session_ends")? {
             return Ok(Vec::new());

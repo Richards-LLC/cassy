@@ -145,6 +145,40 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
 
 /// cas-ba56: the real close path accepts a parent's capped selection when
 /// its delivery changes a sibling test mounted by #[path] and a child module.
+#[test]
+fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
+    let repo = tempfile::tempdir().unwrap();
+    let src = repo.path().join("cas-cli/src/nested");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("gear_tests.rs"), "#[test] fn turns() {}\n").unwrap();
+    let changed = vec!["cas-cli/src/nested/gear.rs".into(), "cas-cli/src/nested/gear_tests.rs".into()];
+    let mut task = Task::new("cas-ba56-declaration".into(), "parent proof".into());
+    task.risk = vec![TaskRisk::BlastRadius];
+    task.proof_targets = vec!["cas-cli nested::gear".into()];
+    for (body, covered) in [
+        ("#[cfg(test)]\n#[path = \"gear_tests.rs\"]\nmod tests;\n", true),
+        ("#[path=\"gear_tests.rs\"] pub(crate) mod tests;\n", true),
+        ("#[path = \"gear_tests.rs\"] mod gear_tests;\n", true),
+        ("// #[path = \"gear_tests.rs\"] mod tests;\n", false),
+        ("const EXAMPLE: &str = r#\"#[path = \"gear_tests.rs\"] mod tests;\"#;\n", false),
+        ("#[path = \"other_tests.rs\"] mod tests;\n", false),
+        ("mod tests {}\n", false),
+        ("mod gear_tests;\n", false),
+    ] {
+        std::fs::write(src.join("gear.rs"), body).unwrap();
+        // Exercise the live declaration gate without receipt widening or build
+        // evidence; factory workers defer those build proofs to assembly.
+        let result = validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task, &changed, repo.path(), repo.path(), None, None,
+            BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
+        );
+        assert_eq!(result.is_ok(), covered, "{body:?}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.contains("nested::gear_tests"), "{error}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     let mut env = TestEnvGuard::temp_home();
@@ -161,14 +195,14 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     git(&f.worker_path, &["commit", "-q", "-m", "test(cas-br01): parent selection covers mounted tests and child"]);
     git(&f.worker_path, &["push", "-q", "origin", LANE]);
     let updated = call(&f.worker, serde_json::json!({
-        "action": "update", "id": ID, "proof_targets": ["widget gear"],
+        "action": "update", "id": ID, "proof_targets": ["unrelated"],
     })).await;
-    assert_eq!(f.task().proof_targets, ["widget gear"], "{updated}");
+    assert_eq!(f.task().proof_targets, ["unrelated"], "{updated}");
     let head = git(&f.worker_path, &["rev-parse", "HEAD"]);
     // A receipt in another crate must not make the mounted file disappear
     // from the focused-proof obligation.
     crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &head, "other-crate", "test(gear)",
+        &f.cas_dir(), &f.worker_path, &head, "other-crate", "test(gear::tests)",
     );
     let refused = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
@@ -176,13 +210,15 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     assert!(refused.contains("FOCUSED PROOF REQUIRED"), "{refused}");
     assert_eq!(f.task().status, TaskStatus::InProgress);
     crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(), &f.worker_path, &head, "widget", "test(gear)",
+        &f.cas_dir(), &f.worker_path, &head, "widget", "test(gear::tests)",
     );
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
     })).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    let note = f.task().notes;
+    assert!(note.lines().any(|line| line.contains("PROOF SCOPE derived") && line.contains("widget::gear_tests")), "{note}");
     git(f.dir.path(), &["merge", "--no-ff", "-m", "merge delivery", LANE]);
     git(f.dir.path(), &["push", "-q", "origin", "main"]);
     let closed = call(&f.supervisor, serde_json::json!({
@@ -190,7 +226,7 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     })).await;
     assert!(closed.contains("Closed task"), "{closed}");
     assert_eq!(f.task().status, TaskStatus::Closed);
-    assert_eq!(f.task().proof_targets, ["widget gear"], "no administrative scope widening");
+    assert_eq!(f.task().proof_targets, ["unrelated"], "no administrative scope widening");
 }
 
 /// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input

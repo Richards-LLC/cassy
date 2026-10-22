@@ -2312,6 +2312,21 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
             && refused.contains("action=close"),
             "an absent receipt must refuse at close with the current-tip recovery: {refused}");
         assert_eq!(tasks.get(task_id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(old_anchor.as_str()));
+        // An identical rebase preserves a handed-off delivery. Corrections
+        // still require exclusive ownership, even without a sibling lease.
+        let mut sibling = Task::new("cas-749f-next".into(), "Later task".into());
+        sibling.status = TaskStatus::InProgress;
+        sibling.assignee = Some("alice".into());
+        tasks.add(&sibling).unwrap();
+        if corrected_after_rebase {
+            let held = service.task(Parameters(close_request())).await.unwrap();
+            let held = get_text(&held);
+            assert!(held.contains("PARK REFUSED") && held.contains(&tip)
+                && held.contains("action=close"), "{held}");
+            assert_eq!(tasks.get(task_id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(old_anchor.as_str()));
+            sibling.status = TaskStatus::Closed;
+            tasks.update(&sibling).unwrap();
+        }
         let retry = service.task(Parameters(close_request())).await.unwrap();
         assert!(get_text(&retry).contains("MERGE REQUIRED"), "{}", get_text(&retry));
         let parked = tasks.get(task_id).unwrap();

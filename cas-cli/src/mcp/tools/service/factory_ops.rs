@@ -7952,6 +7952,9 @@ mod gc_report_render_tests {
         );
 
         let summary = render_gc_report_response(&report, None, None);
+        assert!(summary.is_ascii(), "shared human output has an ASCII fallback");
+        assert!(summary.lines().all(|line| line.len() <= 79), "human report overflows an 80-column terminal: {summary}");
+        assert!(!summary.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "raw status belongs behind the explicit machine/full view");
         let line = summary
             .lines()
             .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))

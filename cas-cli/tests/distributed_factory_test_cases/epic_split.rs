@@ -290,14 +290,15 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
 async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let mut failures = Vec::new();
-    for (old_status, reparented, released, repair_error, cleanup_pending, projection_error) in [
-        (TaskStatus::Closed, false, true, false, false, false),
-        (TaskStatus::Cancelled, false, true, false, false, false),
-        (TaskStatus::InProgress, true, true, false, false, false),
-        (TaskStatus::InProgress, false, false, false, false, false),
-        (TaskStatus::InProgress, false, false, true, false, false),
-        (TaskStatus::Closed, true, true, false, true, false),
-        (TaskStatus::InProgress, false, false, false, false, true),
+    for (old_status, reparented, released, repair_error, cleanup_pending, projection_error, child_released) in [
+        (TaskStatus::Closed, false, true, false, false, false, false),
+        (TaskStatus::Cancelled, false, true, false, false, false, false),
+        (TaskStatus::InProgress, true, true, false, false, false, false),
+        (TaskStatus::InProgress, false, false, false, false, false, false),
+        (TaskStatus::InProgress, false, false, true, false, false, false),
+        (TaskStatus::Closed, true, true, false, true, false, false),
+        (TaskStatus::InProgress, false, false, false, false, true, false),
+        (TaskStatus::InProgress, false, true, false, false, true, true),
     ] {
         let cloud = FakeCloud::start();
         let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
@@ -339,6 +340,9 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
             expiry_notice_pending: false,
         };
         cas_store::insert_epic_split(root, &historical).unwrap();
+        if child_released {
+            assert!(cas_store::mark_epic_split_child_released(root, &historical.id, child, now).unwrap());
+        }
         let claims = cas::cloud::peer_claims::PeerClaims::for_project(root).unwrap();
         for id in &historical.mine {
             assert_eq!(claims.acquire(id, cas::cloud::peer_claims::ClaimKind::Task,

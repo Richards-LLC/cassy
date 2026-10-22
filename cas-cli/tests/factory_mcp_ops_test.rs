@@ -6510,6 +6510,8 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "review-control");
     let project = env.cas_root.parent().unwrap();
+    // Real Cargo output is ignored; untracked reviewer notes are not.
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
     let scratch = project.join("scratch");
     std::fs::write(
         env.cas_root.join("config.toml"),
@@ -6530,12 +6532,26 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         cas_types::factory_scratch::project_scratch_dir(&scratch, &env.cas_root).join("verify")
     ));
     drop(managed);
-    let retried = cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
-    assert_eq!(retried.path, checkout, "admission retries must reuse the same task/head checkout");
-    drop(retried);
     let marker = owned.join("owner.json");
     let mut owner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let retried =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    assert_eq!(
+        retried.path, checkout,
+        "admission retries must reuse the same task/head checkout"
+    );
+    drop(retried);
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_ne!(
+        owner["last_used_at"],
+        serde_json::json!("2020-01-01T00:00:00Z"),
+        "successful reuse must refresh last-used age"
+    );
     std::fs::create_dir_all(checkout.join("target")).unwrap();
     std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
     let mut cleanup = factory_req("gc_cleanup");
@@ -6554,7 +6570,8 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         .await
         .unwrap();
     assert!(owned.is_dir(), "young terminal checkout must be retained");
-    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    // Legacy markers without last_used_at still age from creation.
+    owner.as_object_mut().unwrap().remove("last_used_at");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     let lease_file = std::fs::OpenOptions::new()
         .read(true)
@@ -6581,12 +6598,18 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     assert!(owned.is_dir(), "preview removed review checkout");
     owner["schema_version"] = serde_json::json!(999);
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
-    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
     assert!(owned.is_dir(), "unknown ownership schema must be retained");
     owner["schema_version"] = serde_json::json!(1);
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     git_stdout(&checkout, &["checkout", "--detach", "epic/foreign"]);
-    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
     assert!(owned.is_dir(), "changed review head must be retained");
     git_stdout(&checkout, &["checkout", "--detach", &head]);
     let file = std::fs::File::open(checkout.join("target/output")).unwrap();
@@ -6596,6 +6619,32 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         .unwrap();
     assert!(owned.is_dir(), "open proof output must prevent reclamation");
     drop(file);
+    // A terminal task does not make source edits or untracked notes disposable.
+    // Exercise both alongside the clean checkout through the same public GC.
+    // The guard must not inherit a config that hides untracked reviewer notes.
+    git_stdout(project, &["config", "status.showUntrackedFiles", "no"]);
+    let mut preserved = Vec::new();
+    for (kind, filename) in [("edited", "README"), ("untracked", "notes.txt")] {
+        let mut task = Task::new(format!("cas-review-{kind}"), kind.into());
+        env.task_store().add(&task).unwrap();
+        let managed =
+            cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head)
+                .unwrap();
+        let checkout = managed.path.clone();
+        let marker = checkout.parent().unwrap().join("owner.json");
+        drop(managed);
+        let mut owner: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+        let contents = format!("{kind} reviewer work\n").into_bytes();
+        std::fs::write(checkout.join(filename), &contents).unwrap();
+        task.status = TaskStatus::Closed;
+        env.task_store().update(&task).unwrap();
+        preserved.push((kind, checkout, filename, contents));
+    }
+
     let output = env
         .service
         .factory_request(Parameters(cleanup))
@@ -6610,6 +6659,23 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         !git_stdout(project, &["worktree", "list", "--porcelain"])
             .contains(checkout.to_str().unwrap()),
         "GC must remove the Git registration as well as the files"
+    );
+
+    let registrations = git_stdout(project, &["worktree", "list", "--porcelain"]);
+    let mut lost = Vec::new();
+    for (kind, checkout, filename, contents) in preserved {
+        if std::fs::read(checkout.join(filename)).ok().as_deref() != Some(contents.as_slice()) {
+            lost.push(format!("{kind} reviewer bytes deleted or changed"));
+        }
+        if !registrations.contains(checkout.to_str().unwrap()) {
+            lost.push(format!("{kind} checkout registration deleted"));
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "GC lost non-disposable work: {}; output: {}",
+        lost.join("; "),
+        get_text(&output)
     );
 
     // A resolved dispatch releases its own proof checkout even if the task
@@ -6640,6 +6706,7 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     let mut owner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
     owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
     std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
@@ -6708,7 +6775,7 @@ async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
     );
     assert!(
         text.contains(&format!(
-            "{}: 1073741824 bytes (never auto-deleted)",
+            "{}: at least 1073741824 bytes (never auto-deleted)",
             unmanaged.display()
         )),
         "{text}"

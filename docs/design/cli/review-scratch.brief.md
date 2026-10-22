@@ -12,7 +12,16 @@ Review output is ASCII, monochrome and append-only. The existing GC renderer
 owns truncation and pagination. Checkout creation prints a filesystem path,
 which is consumed as data rather than as a shell command.
 
-## Critique
+## Reclamation safety correction
+
+GC retains edited tracked files and untracked reviewer notes. Existing source
+checkouts use non-force Git removal; only a vanished checkout permits forced
+registration cleanup. Successful reuse refreshes the two-hour idle clock, with
+creation-time fallback for legacy records. Unmanaged size inventory stops at
+1 GiB and prints an explicit lower bound. Correction proof and the same-command
+before/after real-build ledger are stored in task artifacts under `correction/`.
+
+## Original delivery critique
 
 Candidate: `cas 3.71.0 (3d88af2 2026-10-22)`, supervisor-built revision
 `3d88af29a725d9f2bd67dcf99072fa4c4c61f21b`. The five-cell real-build walk

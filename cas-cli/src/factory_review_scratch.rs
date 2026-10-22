@@ -19,6 +19,8 @@ struct Owner {
     dispatch_id: Option<String>,
     head: String,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 /// The lease spans admission and the capped test; native process probes protect
@@ -174,6 +176,7 @@ pub fn create(
                 dispatch_id: dispatch_id.map(str::to_owned),
                 head: head.into(),
                 created_at: Utc::now(),
+                last_used_at: Some(Utc::now()),
             })?,
         )?;
     } else {
@@ -192,7 +195,7 @@ pub fn create(
             "review checkout head or ownership changed"
         );
         ensure!(
-            git(&path, &["status", "--porcelain"])?.is_empty(),
+            git(&path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
             "review checkout has source changes; preserve them before retrying"
         );
     } else {
@@ -207,6 +210,11 @@ pub fn create(
             ],
         )?;
     }
+    // Successful reuse starts a new idle grace period; admission retries can
+    // return to a checkout long after its original creation.
+    let mut record = owner(&cas, &directory)?;
+    record.last_used_at = Some(Utc::now());
+    fs::write(directory.join("owner.json"), serde_json::to_vec(&record)?)?;
     Ok(Checkout { path, _lease: lock })
 }
 
@@ -222,8 +230,10 @@ fn owner(cas: &Path, directory: &Path) -> Result<Owner> {
     {
         use std::os::unix::fs::MetadataExt;
         let parent = fs::metadata(directory)?;
+        // SAFETY: geteuid has no preconditions and only returns this process's effective user ID.
+        let effective_uid = unsafe { libc::geteuid() };
         ensure!(
-            parent.uid() == unsafe { libc::geteuid() }
+            parent.uid() == effective_uid
                 && parent.mode() & 0o077 == 0
                 && metadata.uid() == parent.uid()
                 && metadata.nlink() == 1,
@@ -278,7 +288,7 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
     );
     ensure!(
         Utc::now()
-            .signed_duration_since(record.created_at)
+            .signed_duration_since(record.last_used_at.unwrap_or(record.created_at))
             .num_seconds()
             >= MIN_AGE_SECS,
         "review checkout younger than 2 hours"
@@ -286,15 +296,21 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
     Ok(())
 }
 
-fn bytes(path: &Path) -> u64 {
-    walkdir::WalkDir::new(path)
+fn bytes(path: &Path, limit: Option<u64>) -> u64 {
+    let mut size = 0u64;
+    for metadata in walkdir::WalkDir::new(path)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter_map(|entry| entry.metadata().ok())
-        .map(|metadata| metadata.len())
-        .sum()
+    {
+        size = size.saturating_add(metadata.len());
+        if limit.is_some_and(|limit| size >= limit) {
+            break;
+        }
+    }
+    size
 }
 
 fn entries(path: &Path) -> Vec<PathBuf> {
@@ -347,6 +363,14 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
             )? == expected,
             "review Git registration belongs to another repository"
         );
+        ensure!(
+            git(
+                &checkout,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )?
+            .is_empty(),
+            "review checkout has source changes"
+        );
     }
     if !clean {
         return Ok("reclaimable");
@@ -358,17 +382,15 @@ fn reclaim(cas: &Path, directory: &Path, clean: bool) -> Result<&'static str> {
         "review output became live"
     );
     if registered.contains(&checkout) {
-        // --force removes disposable ignored Cargo output as well as the checkout.
-        // For an interrupted/missing checkout this also removes its registration.
-        git(
-            repo,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                checkout.to_str().context("non-UTF-8 checkout")?,
-            ],
-        )?;
+        let path = checkout.to_str().context("non-UTF-8 checkout")?;
+        if checkout.exists() {
+            // Git rechecks dirtiness itself. Never force removal of existing
+            // source: ignored Cargo output is already disposable without it.
+            git(repo, &["worktree", "remove", path])?;
+        } else {
+            // Only a vanished checkout permits forced stale-registration removal.
+            git(repo, &["worktree", "remove", "--force", path])?;
+        }
     }
     fs::remove_dir_all(directory)?;
     Ok("reclaimed")
@@ -381,7 +403,7 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
     let mut reclaimed = 0u64;
     for task in entries(&base) {
         for directory in entries(&task) {
-            let size = bytes(&directory);
+            let size = bytes(&directory, None);
             let disposition = match reclaim(cas, &directory, clean) {
                 Ok(status) => {
                     if status == "reclaimed" {
@@ -426,13 +448,13 @@ pub(crate) fn unmanaged_large(cas: &Path) -> String {
         }) {
             continue;
         }
-        let size = bytes(&path);
+        let size = bytes(&path, Some(LARGE_BYTES));
         if size >= LARGE_BYTES {
             if out.is_empty() {
                 out.push_str("\nLarge unmanaged scratch directories (review-only; >= 1 GiB):\n");
             }
             out.push_str(&format!(
-                "- {}: {size} bytes (never auto-deleted)\n",
+                "- {}: at least {size} bytes (never auto-deleted)\n",
                 path.display()
             ));
         }

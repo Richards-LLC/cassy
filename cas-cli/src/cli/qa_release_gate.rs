@@ -74,7 +74,13 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
     let run = match (&args.command, &args.sha) {
         (None, Some(sha)) => run::start(root, sha)?,
         (None, None) => bail!("pass --sha <sha> to start a gate, or use status, record or abort"),
-        (Some(ReleaseGateCommand::Status { sha }), _) => run::resolve(root, sha.as_deref())?,
+        (Some(ReleaseGateCommand::Status { sha }), _) => {
+            // A corrupt run file is reported even when it hides the live run.
+            for (path, error) in run::unreadable(root) {
+                eprintln!("[WARN] unreadable release-gate run file {}: {error}", path.display());
+            }
+            run::resolve(root, sha.as_deref())?
+        }
         (Some(ReleaseGateCommand::Abort { sha, reason }), _) => run::abort(root, sha.as_deref(), reason)?,
         (Some(ReleaseGateCommand::Verify { sha }), _) => {
             return crate::qa_release::promotion::verify_cli(root, sha, cli.json);
@@ -134,7 +140,7 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
 /// The human status: state and freeze first, then counts, then what is owed.
 fn render(run: &Run, hand_walk: &crate::qa_release::pack::HandWalk) -> String {
     let state = serde_json::to_value(run.state).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-    let mut out = format!("Release gate {} on {}: {state}\n", &run.sha[..12], run.env);
+    let mut out = format!("Release gate {} on {}: {state}\n", run::short(&run.sha), run.env);
     if let Some(gate) = &run.gate {
         let word = serde_json::to_value(gate.verdict).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         out.push_str(&format!("Gate: {word} (pack generation {})\n", run.generation));

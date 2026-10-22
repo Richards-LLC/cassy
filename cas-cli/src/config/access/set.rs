@@ -734,6 +734,11 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.retention_days = days;
             }
+            "qa.release.max_cells" => {
+                let cells = value.trim().parse().ok().filter(|cells| *cells > 0).ok_or_else(|| MemError::Parse("Expected a positive number of rows".into()))?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.max_cells = cells;
+            }
             "qa.release.components" => {
                 let components = crate::qa_release::ReleaseConfig::parse_components(value).map_err(MemError::Parse)?;
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
@@ -744,8 +749,9 @@ impl Config {
                 release.target_env = value.trim().to_string();
             }
             "qa.release.gate_env" => {
+                let env = crate::qa_release::ReleaseConfig::parse_gate_env(value).map_err(MemError::Parse)?;
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
-                release.gate_env = value.trim().to_string();
+                release.gate_env = env;
             }
             "qa.release.suites" => {
                 let suites = crate::qa_release::ReleaseConfig::parse_suites(value).map_err(MemError::Parse)?;

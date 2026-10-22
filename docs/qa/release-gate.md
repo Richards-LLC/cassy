@@ -42,6 +42,7 @@ env = "staging"
 | `timeout_secs` | Per-call timeout (default 120). |
 | `slack_channel` | Slack channel the `cas serve` driver posts each sealed pack to through Violet (default empty: no post). |
 | `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
+| `max_cells` | Most rows (cells × runs) one golden-set journey may expand into (default 500). |
 | `components` | Served component name to the repository paths it is built from. |
 | `grant_envs` | Environments where preflight may `grant` a balance shortfall (default `["staging"]`). |
 | `target_env` | Environment promotion serves; promotion reads its `flags` once (default `prod`). |
@@ -349,8 +350,68 @@ journeys:
 cell. Only distinct ids count toward the runs a gate requires; a duplicate id
 or a row without one is refused by name, for example
 `3 audit runs recorded, 2 independent by post_audit_v2_runs.id: duplicate post_audit_v2_runs.id=b2 (2 rows)`.
-The approved `qa_record` journey check (G8) applies it today; the golden-set
-matrix (C8) passes its `runs` count to the same rule.
+The approved `qa_record` journey check (G8) applies it, and so does each
+golden-set cell (see below).
+
+## Golden sets
+
+A golden set is a journey with a `fixture_set`, a `matrix` or `runs` above 1:
+
+```yaml
+journeys:
+  - id: audit
+    spec: e2e/audit.spec.ts
+    invariants: [INV-SLIDES]
+    fixture_set: docs/qa/golden.tsv
+    matrix: {route: [talking_head, carousel], source: [upload, link]}
+    runs: 2
+    independence_key: post_audit_v2_runs.id
+```
+
+The fixture set is a tracked file of records: `id`, the frozen artifact and
+the expected value of each labeled criterion. It comes in two forms:
+
+- **JSONL:** one `{id, frozen: {sha256, storage_key}, labels}` object per
+  line.
+- **TSV:** a header naming `id`, `sha256`, `storage_key` and `labels`, where
+  `labels` is a JSON object (an empty cell is unlabeled).
+
+`cas qa journeys --check` reports these problems:
+
+- the file is untracked or unreadable;
+- an id repeats or is not a plain token;
+- a frozen digest is not 64 hex characters, or a storage key is missing;
+- a matrix axis or value is empty;
+- `runs: 0`.
+
+It reports `unlabeled_cell` debt for a record with no label for one of the
+journey's labeled criteria.
+
+**Expansion.** Cells are every record crossed with one value of every axis.
+Each cell is walked `runs` times, one row per run:
+
+- the row id is `<journey>.<record>.<value>….r<n>`;
+- `cell` is `fixture=<id> <axis>=<value> …`;
+- `run` is n.
+
+Resource preflight needs consumes × runs × cells. Start refuses before the
+freeze, and persists nothing, when a journey expands past
+`qa.release.max_cells` rows (default 500). The refusal names the journey,
+cells, runs and limit.
+
+**Grading.** The `run` request's `args` carry the cell:
+`{id, record: {id, frozen, labels}, axes}` and `run`. The answer may add
+`measured: {criterion: number}`. Each measured value is graded against the
+cell's label with the criterion's `compare` (default `exact`). A band miss
+is a FAIL that names the value, the % of the baseline and the baseline. The
+answer's `subjects` value for `independence_key` is the run's identity.
+
+**Coverage.** At seal, each cell counts only distinct identities. A
+duplicate or unidentified run is rejected as `NOT_EXERCISED` and names the
+duplicate, so the cell stays OWED; a run with no verdict is OWED too. The
+pack's `matrix` lists each golden journey's cells, runs, required
+(cells × runs), counted runs and the rows still missing. The PR comment
+shows `<journey>: counted/required runs (cells × runs)`.
 
 ## Deploy failure alerts
 
@@ -645,9 +706,11 @@ nothing. It checks, once each:
 | `aborted` | Ended by `abort`, with no pack. |
 
 **Driver.** One `cas serve` per project holds the driver lease
-(`.cas/release-gate/driver.lock`) and ticks every 30 seconds. A tick walks
-each unfinished suite, moves to `manual`, and seals once every planned row
-has a verdict. At driver start, expired fixture cleanups are replayed. Each
+(`.cas/release-gate/driver.lock`) and ticks every 30 seconds. Every server
+retries the lease each interval, so another one takes over when the holder
+exits. A tick walks each unfinished suite, moves to `manual`, and seals once
+every planned row has a verdict. On taking the lease, a server replays
+expired fixture cleanups. Each
 row is written as soon as it is walked. A restart or shutdown resumes the run
 and reruns only rows with no verdict. The suite clock is stored with the run,
 so a restart never extends it.
@@ -680,6 +743,8 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 
 - `cas qa release-gate status [--sha <sha>]` shows the state, the freeze,
   rows by verdict, owed rows and manual minutes. `--json` prints the run.
+  An unreadable run file is warned about on stderr. It freezes nothing,
+  because row-end `SERVED_DRIFT` still guards the verdicts.
 - `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
   records a manual row. Optional flags are `--reason`, `--cause`,
   `--minutes`, `--subject kind=id`, `--covers-pr N` and `--covers-commit <sha>`. Files in `<dir>`
@@ -694,8 +759,9 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 `--sha` defaults to the live run.
 
 **Sealing.** The pack is sealed when the last row gets its verdict. At
-the freeze TTL, unrecorded manual rows become `NOT_EXERCISED{timed_out}` and
-the pack is sealed. After the seal, Cassy does two things:
+the freeze TTL, merges are allowed again, so no suite starts or runs past it:
+every row still without a verdict, automated or manual, becomes
+`NOT_EXERCISED{timed_out}` and the pack is sealed. After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

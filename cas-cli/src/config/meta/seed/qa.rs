@@ -92,6 +92,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         ("qa.release.env", "Release adapter env", "Environment variable names allowed into the adapter.", ConfigType::StringList, "", Constraint::None),
         ("qa.release.timeout_secs", "Release adapter timeout secs", "Per-call adapter timeout.", ConfigType::Int, "120", Constraint::Min(1)),
         ("qa.release.slack_channel", "Release gate Slack channel", "Slack channel the cas serve driver posts each sealed evidence pack to through Violet, once per pack generation. Empty posts nothing.", ConfigType::String, "", Constraint::None),
+        ("qa.release.max_cells", "Release golden-set row limit", "Most rows (cells × runs) one golden-set journey may expand into; a larger expansion refuses the gate at start.", ConfigType::Int, "500", Constraint::Min(1)),
         ("qa.release.retention_days", "Release media retention days", "Days evidence-pack media stay on local disk; pack.json is kept.", ConfigType::Int, "30", Constraint::Min(1)),
         ("qa.release.components", "Release served components", "JSON object of served component name to repository paths, for served-SHA equivalence.", ConfigType::String, "{}", Constraint::None),
         ("qa.release.target_env", "Release target env", "Environment promotion serves (for example prod); the release gate reads its `flags` once and compares them with the pack's snapshot.", ConfigType::String, "prod", Constraint::None),

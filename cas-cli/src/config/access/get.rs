@@ -202,6 +202,7 @@ impl Config {
             "qa.release.timeout_secs" => Some(qa.release.clone().unwrap_or_default().timeout_secs.to_string()),
             "qa.release.retention_days" => Some(qa.release.clone().unwrap_or_default().retention_days.to_string()),
             "qa.release.slack_channel" => Some(qa.release.clone().unwrap_or_default().slack_channel),
+            "qa.release.max_cells" => Some(qa.release.clone().unwrap_or_default().max_cells.to_string()),
             "qa.release.components" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().components).expect("serializable components")),
             "qa.release.target_env" => Some(qa.release.clone().unwrap_or_default().target_env),
             "qa.release.gate_env" => Some(qa.release.clone().unwrap_or_default().gate_env),

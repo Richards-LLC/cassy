@@ -66,6 +66,12 @@ pub struct PlannedRow {
     pub manual: bool,
     /// `release_always`, `impacted` or `no_base` (no CLEAN ancestor or merge base).
     pub why: String,
+    /// The golden-set cell this row walks (finding 18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<super::matrix::Cell>,
+    /// Which of the cell's runs this row is, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,7 +149,7 @@ impl Freeze {
     pub fn refusal(&self, target: &str) -> String {
         format!(
             "{FREEZE_LABEL}: the release gate for {} holds {target} until {}. Seal it, or abort it with `cas qa release-gate abort --sha {} --reason <why>`, then retry.",
-            &self.sha[..12],
+            short(&self.sha),
             self.until.format("%Y-%m-%d %H:%M UTC"),
             self.sha,
         )
@@ -194,12 +200,27 @@ fn lock(cas_root: &Path, sha: &str) -> Result<File> {
     lock_file(run_path(cas_root, sha)?.with_extension("lock"))
 }
 
+/// The first 12 characters, or all of a shorter string; never panics.
+pub fn short(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
+/// Reads the run for `sha`. A run whose recorded SHA is not the 40-hex SHA
+/// its file is named for is refused, so no caller slices a malformed SHA.
 pub fn load(cas_root: &Path, sha: &str) -> Result<Option<Run>> {
-    match fs::read(run_path(cas_root, sha)?) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).context("release-gate run file")?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    let path = run_path(cas_root, sha)?;
+    let run: Run = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("release-gate run file")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    ensure!(
+        full_sha(&run.sha).is_ok() && run.sha.eq_ignore_ascii_case(sha),
+        "release-gate run file {} records sha {:?}, not its own",
+        path.display(),
+        printable(&run.sha)
+    );
+    Ok(Some(run))
 }
 
 fn save(cas_root: &Path, run: &mut Run) -> Result<()> {
@@ -220,26 +241,49 @@ fn update<T>(cas_root: &Path, sha: &str, change: impl FnOnce(&mut Run) -> Result
     Ok(out)
 }
 
-/// The project's live run, if any (at most one).
-pub fn active(cas_root: &Path) -> Result<Option<Run>> {
+/// Every `<40-hex>.json` run file: the runs that load and, by path, the
+/// errors of those that do not.
+fn scan(cas_root: &Path) -> (Vec<Run>, Vec<(PathBuf, String)>) {
+    let (mut runs, mut bad) = (Vec::new(), Vec::new());
     let Ok(entries) = fs::read_dir(dir(cas_root)) else {
-        return Ok(None);
+        return (runs, bad);
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let Some(sha) = path.file_stem().and_then(|s| s.to_str()) else {
+        // Other JSON here (promotion's freeze-status.json) is not a run.
+        let Some(sha) = path.file_stem().and_then(|s| s.to_str()).filter(|s| full_sha(s).is_ok()) else {
             continue;
         };
-        if let Ok(Some(run)) = load(cas_root, sha)
-            && run.state.live()
-        {
-            return Ok(Some(run));
+        match load(cas_root, sha) {
+            Ok(Some(run)) => runs.push(run),
+            Ok(None) => {}
+            Err(error) => bad.push((path, format!("{error:#}"))),
         }
     }
-    Ok(None)
+    (runs, bad)
+}
+
+/// Run files that cannot be read, for `status`. The freeze stays fail-open
+/// on them by design: row-end SERVED_DRIFT still guards the verdicts.
+pub fn unreadable(cas_root: &Path) -> Vec<(PathBuf, String)> {
+    scan(cas_root).1
+}
+
+/// The project's live run, if any (at most one). An unreadable run file is
+/// warned about once per process.
+pub fn active(cas_root: &Path) -> Result<Option<Run>> {
+    static WARNED: std::sync::OnceLock<Mutex<BTreeSet<PathBuf>>> = std::sync::OnceLock::new();
+    let (runs, bad) = scan(cas_root);
+    for (path, error) in bad {
+        let warned = WARNED.get_or_init(Default::default);
+        if warned.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone()) {
+            tracing::warn!(path = %path.display(), %error, "unreadable release-gate run file skipped");
+        }
+    }
+    Ok(runs.into_iter().find(|run| run.state.live()))
 }
 
 /// The run `--sha` names, or the live run when it is omitted.
@@ -357,7 +401,32 @@ fn plan(
         let suite = (!manual)
             .then(|| config.suites.iter().find(|(_, s)| s.selects(journey)).map(|(n, _)| n.clone()))
             .flatten();
-        rows.push(PlannedRow { id: journey.id.clone(), journey: journey.id.clone(), suite, manual, why: why.into() });
+        if journey.is_golden_set() {
+            let expansion = super::matrix::expand(root, journey, config.max_cells).map_err(anyhow::Error::msg)?;
+            for cell in &expansion.cells {
+                for run in 1..=expansion.runs {
+                    rows.push(PlannedRow {
+                        id: super::matrix::row_id(&journey.id, cell, run),
+                        journey: journey.id.clone(),
+                        suite: suite.clone(),
+                        manual,
+                        why: why.into(),
+                        cell: Some(cell.clone()),
+                        run: Some(run),
+                    });
+                }
+            }
+            continue;
+        }
+        rows.push(PlannedRow {
+            id: journey.id.clone(),
+            journey: journey.id.clone(),
+            suite,
+            manual,
+            why: why.into(),
+            cell: None,
+            run: None,
+        });
     }
     Ok(rows)
 }
@@ -372,6 +441,7 @@ fn row(id: &str, journey: &str, verdict: RowVerdict) -> Row {
         frames: Vec::new(),
         readbacks: Vec::new(),
         manual_minutes: None,
+        identity: None,
         covers_prs: Vec::new(),
         covers_commits: Vec::new(),
     }
@@ -410,14 +480,26 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
     let served_start = preflight_served(root, &config, &env, &sha).map_err(anyhow::Error::msg)?;
     let base = scope_base(cas_root, root, &config, &sha);
     let plan = plan(&registry, &qa, &config, root, base.as_deref(), &sha)?;
-    let journeys: Vec<Journey> = plan
-        .iter()
-        .filter_map(|p| registry.journeys.iter().find(|j| j.id == p.journey).cloned())
-        .collect();
+    let mut journeys: Vec<Journey> = Vec::new();
+    for planned in &plan {
+        if !journeys.iter().any(|j| j.id == planned.journey)
+            && let Some(journey) = registry.journeys.iter().find(|j| j.id == planned.journey)
+        {
+            journeys.push(journey.clone());
+        }
+    }
     let flags = super::flags::read(root, &config, &env, &sha, &journeys)
         .map_err(|e| anyhow::anyhow!("FLAGS UNKNOWN: {e}"))?;
-    let uses: Vec<PlannedUse<'_>> =
-        journeys.iter().map(|journey| PlannedUse { journey, runs: 1, cells: 1 }).collect();
+    // A golden set needs consumes × runs × cells (finding 18).
+    let uses: Vec<PlannedUse<'_>> = journeys
+        .iter()
+        .map(|journey| {
+            let rows = plan.iter().filter(|p| p.journey == journey.id);
+            let runs = rows.clone().filter_map(|p| p.run).max().unwrap_or(1);
+            let cells = (rows.count() as u32 / runs).max(1);
+            PlannedUse { journey, runs, cells }
+        })
+        .collect();
     let resources = resources::preflight(root, cas_root, &config, &env, &sha, &registry.resources, &uses)
         .map_err(anyhow::Error::msg)?;
     let clocks: i64 = config
@@ -525,7 +607,10 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
             .cloned()
             .with_context(|| format!("row {} names no registry journey", printable(&input.row)))?
     };
-    let reseal = update(cas_root, &sha, |run| {
+    // Whether `input` may be written to `run`, and whether that reseals.
+    // Checked before the walk and again in the write step: a TTL seal may
+    // land in between, and its timed-out row is then owed and reseals.
+    let admit = |run: &Run| -> Result<bool> {
         let planned = run.plan.iter().find(|p| p.id == input.row);
         match run.state {
             State::Sealed => {
@@ -556,9 +641,12 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
             input.row
         );
         Ok(run.state == State::Sealed)
-    })?;
+    };
+    admit(&load(cas_root, &sha)?.context("no release-gate run")?)?;
     let walked = walk_manual(cas_root, root, &config, &sha, &journey, input)?;
+    let mut reseal = false;
     let mut run = update(cas_root, &sha, |run| {
+        reseal = admit(run)?;
         run.put(walked);
         if reseal {
             run.note(format!("RECORD {} after seal; resealing", input.row));
@@ -608,6 +696,7 @@ fn walk_manual(
     walked.frames = frames;
     walked.readbacks = readbacks;
     walked.manual_minutes = input.minutes;
+    walked.identity = identity(journey, &input.subjects);
     walked.covers_prs = input.covers_prs.clone();
     walked.covers_commits = input.covers_commits.clone();
     Ok(walked)
@@ -656,6 +745,16 @@ struct RunAnswer {
     frames: Vec<String>,
     #[serde(default)]
     subjects: BTreeMap<String, String>,
+    /// Golden-set measurements by criterion, graded against the cell's labels.
+    #[serde(default)]
+    measured: BTreeMap<String, f64>,
+}
+
+/// The run's `independence_key` value, when the journey names a key and the
+/// run reported it.
+fn identity(journey: &Journey, subjects: &BTreeMap<String, String>) -> Option<String> {
+    let key = journey.independence_key.as_ref()?;
+    subjects.get(key).filter(|id| !id.is_empty()).map(|id| printable(id))
 }
 
 /// Everything a row walk reads; shared by a suite's worker threads.
@@ -712,11 +811,13 @@ impl Walk<'_> {
                 "spec": journey.spec,
                 "media_dir": media.to_string_lossy(),
                 "fixtures": outputs,
+                "cell": planned.cell,
+                "run": planned.run,
             }),
         };
         let answer = super::resources::call_metered(self.root, self.config, &meter, journey, Verb::Run, request);
         walked.verdict = match answer {
-            Ok(data) => self.grade(&mut walked, journey, data),
+            Ok(data) => self.grade(&mut walked, journey, planned, data),
             Err(MeteredError::Blocked(blocked)) => RowVerdict::BlockedExternal(blocked),
             Err(MeteredError::Budget { resource }) => {
                 not_exercised(NotExercisedCause::TimedOut, format!("no {resource} budget before the wall clock"))
@@ -753,7 +854,7 @@ impl Walk<'_> {
         walked
     }
 
-    fn grade(&self, walked: &mut Row, journey: &Journey, data: Value) -> RowVerdict {
+    fn grade(&self, walked: &mut Row, journey: &Journey, planned: &PlannedRow, data: Value) -> RowVerdict {
         // The parse error is dropped: it could quote adapter data.
         let Ok(answer) = serde_json::from_value::<RunAnswer>(data) else {
             return not_exercised(NotExercisedCause::Automation, "run data is not {status, frames, …}");
@@ -781,7 +882,14 @@ impl Walk<'_> {
                 .unwrap_or_else(crate::qa_readback::Outcome::Missing)
         });
         walked.readbacks.extend(readback_record(readback.as_ref()));
-        RowVerdict::grade(runner, walked.frames.len(), readback)
+        walked.identity = identity(journey, &answer.subjects);
+        let verdict = RowVerdict::grade(runner, walked.frames.len(), readback);
+        match (&verdict, &planned.cell) {
+            (RowVerdict::Pass, Some(cell)) => {
+                super::matrix::grade_measured(self.registry, cell, &answer.measured).unwrap_or(verdict)
+            }
+            _ => verdict,
+        }
     }
 }
 
@@ -812,9 +920,9 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     };
     let sha = run.sha.clone();
     let (registry, _) = registry(cas_root)?;
-    // Suites run in name order.
+    // Suites run in name order; none starts once the freeze has ended.
     let suites: BTreeSet<String> = run.pending().filter_map(|p| p.suite.clone()).collect();
-    for suite in suites {
+    for suite in suites.into_iter().filter(|_| Utc::now() < run.freeze_until) {
         match walk_suite(cas_root, &config, &registry, &sha, &suite, cancel)? {
             Stop::Done => {}
             Stop::Cancelled | Stop::Aborted => return Ok(()),
@@ -823,11 +931,13 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     let run = load(cas_root, &sha)?.context("run vanished")?;
     let automated_done = run.pending().all(|p| p.manual);
     let expired = Utc::now() >= run.freeze_until;
-    if run.state.live() && automated_done && (run.pending().next().is_none() || expired) {
+    // At the TTL every row still without a verdict, automated or manual, is
+    // timed out: merges are allowed again, so nothing more is walked.
+    if run.state.live() && (expired || (automated_done && run.pending().next().is_none())) {
         update(cas_root, &sha, |run| {
             let timed_out: Vec<PlannedRow> = run.pending().cloned().collect();
             for p in timed_out {
-                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not recorded before the freeze ended")));
+                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not walked before the freeze ended")));
             }
             Ok(())
         })?;
@@ -861,10 +971,11 @@ fn walk_suite(
         run.suites.push(SuiteTiming { name: suite.into(), started_at: now, finished_at: None });
         Ok(now)
     })?;
-    let clock = ChronoDuration::minutes(i64::from(settings.wall_clock_mins));
-    let left = (started + clock - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-    let deadline = Instant::now() + left;
     let run = load(cas_root, sha)?.context("run vanished")?;
+    let clock = ChronoDuration::minutes(i64::from(settings.wall_clock_mins));
+    let end = (started + clock).min(run.freeze_until);
+    let left = (end - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+    let deadline = Instant::now() + left;
     let pending: Vec<PlannedRow> = run.pending().filter(|p| p.suite.as_deref() == Some(suite)).cloned().collect();
     let root = project_root(cas_root)?;
     let mut fixtures = BTreeMap::new();
@@ -995,6 +1106,33 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
             let prs = coverage::candidate_prs(root, base, sha)?;
             pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
         }
+        // Golden sets: every planned row names its cell and run, a duplicate
+        // run is rejected, and coverage counts cells × runs (finding 18).
+        for row in &mut pack.rows {
+            if let Some(planned) = run.plan.iter().find(|p| p.id == row.id && p.cell.is_some()) {
+                row.cell = planned.cell.as_ref().map(super::matrix::Cell::label);
+                row.run = planned.run;
+            }
+        }
+        let golden: Vec<super::matrix::Planned<'_>> = registry
+            .journeys
+            .iter()
+            .filter_map(|journey| {
+                let rows: Vec<(String, String)> = run
+                    .plan
+                    .iter()
+                    .filter(|p| p.journey == journey.id)
+                    .filter_map(|p| Some((p.id.clone(), p.cell.as_ref()?.label())))
+                    .collect();
+                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows })
+            })
+            .collect();
+        pack.matrix = super::matrix::settle(&mut pack.rows, &golden);
+        for row in &pack.rows {
+            if run.row(&row.id).is_some_and(|r| r.verdict != row.verdict) {
+                run.put(row.clone());
+            }
+        }
         pack.fixtures = run.fixtures.clone();
         pack.resources = Some(run.resources.clone());
         pack.suites = run.suites.clone();
@@ -1089,14 +1227,6 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
     if super::configured(&cas_root).is_none() {
         return;
     }
-    let lease = match lock_lease(&cas_root) {
-        Ok(Some(lease)) => lease,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(%error, "could not acquire the release-gate driver lease");
-            return;
-        }
-    };
     struct CancelOnDrop(std::sync::Arc<AtomicBool>);
     impl Drop for CancelOnDrop {
         fn drop(&mut self) {
@@ -1104,24 +1234,18 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
         }
     }
     tokio::spawn(async move {
-        let _lease = lease;
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(cancel.clone());
-        // A crash left fixture handles: replay their teardown once.
-        let root = cas_root.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let config = super::configured(&root)?;
-            super::fixtures::sweep(root.parent()?, &root, &config).ok()
-        })
-        .await;
+        let lease = std::sync::Arc::new(Mutex::new(None));
         loop {
             let root = cas_root.clone();
             let flag = cancel.clone();
+            let held = lease.clone();
             let result = tokio::task::spawn_blocking(move || {
                 if super::configured(&root).is_none() {
                     return Ok(false);
                 }
-                tick(&root, &flag).map(|()| true)
+                drive(&root, &mut held.lock().unwrap_or_else(|p| p.into_inner()), &flag).map(|_| true)
             })
             .await
             .unwrap_or_else(|error| Err(error.into()));
@@ -1133,6 +1257,27 @@ pub(crate) fn spawn_driver(cas_root: PathBuf) {
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
+}
+
+/// One driver interval: takes the project's driver lease if no server holds
+/// it (so another `cas serve` takes over when the holder exits), then ticks.
+/// On acquiring it, replays expired fixture cleanups once. Returns whether
+/// this process holds the lease and ticked.
+pub(crate) fn drive(cas_root: &Path, lease: &mut Option<File>, cancel: &AtomicBool) -> Result<bool> {
+    if lease.is_none() {
+        let Some(acquired) = lock_lease(cas_root)? else {
+            return Ok(false);
+        };
+        *lease = Some(acquired);
+        // A crashed holder left fixture handles: replay their teardown.
+        if let (Some(config), Some(project)) = (super::configured(cas_root), cas_root.parent())
+            && let Err(error) = super::fixtures::sweep(project, cas_root, &config)
+        {
+            tracing::warn!(%error, "release-gate fixture sweep failed");
+        }
+    }
+    tick(cas_root, cancel)?;
+    Ok(true)
 }
 
 fn lock_lease(cas_root: &Path) -> Result<Option<File>> {

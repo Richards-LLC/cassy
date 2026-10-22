@@ -18,6 +18,7 @@ pub mod fixtures;
 pub mod flags;
 pub mod comment;
 pub mod coverage;
+pub mod matrix;
 pub mod media;
 pub mod pack;
 pub mod verdict;
@@ -59,6 +60,8 @@ pub struct ReleaseConfig {
     pub migrations: Option<MigrationsConfig>,
     /// Days evidence-pack media stay on disk (`pack.json` is kept).
     pub retention_days: u32,
+    /// Most rows (cells × runs) one golden-set journey may expand into.
+    pub max_cells: u32,
     /// The environment the gate walks, sent as every request's `env`.
     pub gate_env: String,
     /// Named suites, run in name order; a journey runs in the first that selects it.
@@ -124,6 +127,7 @@ impl Default for ReleaseConfig {
             target_env: "prod".into(),
             migrations: None,
             retention_days: 30,
+            max_cells: 500,
             gate_env: "staging".into(),
             suites: BTreeMap::new(),
             slack_channel: String::new(),
@@ -201,10 +205,20 @@ impl ReleaseConfig {
             Self::parse_migration_paths(&migrations.paths.join(","))?;
         }
         Self::check_suites(&self.suites)?;
-        if !plain_name(&self.gate_env) {
-            return Err("qa.release.gate_env must be a plain environment name".into());
-        }
+        Self::parse_gate_env(&self.gate_env)?;
         Ok(())
+    }
+
+    /// Validates `qa.release.gate_env`: a plain environment name.
+    pub fn parse_gate_env(value: &str) -> Result<String, String> {
+        let value = value.trim();
+        if plain_name(value) {
+            Ok(value.to_owned())
+        } else {
+            Err(format!(
+                "qa.release.gate_env {value:?} must be a plain environment name (letters, digits, `_` or `-`)"
+            ))
+        }
     }
 
     /// Parses and validates `qa.release.migrations.paths`.
@@ -889,6 +903,7 @@ mod tests {
     include!("qa_release/run_test.rs");
     include!("qa_release/slack_test.rs");
     include!("qa_release/promotion_test.rs");
+    include!("qa_release/matrix_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes
     /// the allow-listed `FAKE_SERVED_SHA`, and `FAKE_ERROR_KIND` answers with a
@@ -1073,6 +1088,7 @@ mod tests {
             frames: Vec::new(),
             readbacks: Vec::new(),
             manual_minutes: None,
+            identity: None,
             covers_prs: Vec::new(),
             covers_commits: Vec::new(),
         }

@@ -3083,6 +3083,12 @@ fn stop_with_output_before(
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STOP_WAIT_BARRIER",
+            "stop-wait",
+            "release-stop-wait",
+            std::process::id(),
+        )?;
         wait_for_stop_or_satisfying_hub(
             &paths,
             Some(record.pid),
@@ -3106,7 +3112,17 @@ fn stop_with_output_before(
         )?
     };
     let cleanup_lock = match cleanup_lock {
-        StopWait::AlreadySatisfied(record) => return Ok(StopOutcome::AlreadySatisfied(record)),
+        StopWait::AlreadySatisfied(record) => {
+            // Adoption skips teardown of the live peer, but not removal of an
+            // empty old scope. Never kill here or remove a shared/ancestor
+            // scope containing the winner (including legacy shared scopes).
+            if let Some(old_scope) = hub_cgroup.as_deref()
+                && record.cgroup.as_deref().is_none_or(|live_scope| !live_scope.starts_with(old_scope))
+            {
+                crate::ui::factory::cgroup::remove_scope(old_scope);
+            }
+            return Ok(StopOutcome::AlreadySatisfied(record));
+        }
         StopWait::Quiescent(lock) => lock,
     };
     hold_hub_test_barrier(

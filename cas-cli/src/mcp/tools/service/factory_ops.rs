@@ -5752,19 +5752,15 @@ impl CasService {
                 format!("Failed to open message queue: {e}"),
             )
         })?;
-        let source = self
-            .inner
-            .get_agent_id()
-            .unwrap_or_else(|_| "unknown".to_string());
+        let caller = self.inner.get_agent_id().ok();
+        let source = caller.clone().unwrap_or_else(|| "unknown".to_string());
         // cas-d9a8: stamp the reset control row with the registry id of the
         // caller CAS actually resolved. `source` above falls back to the string
         // "unknown", which is not an identity, so the stamp is taken from a
         // real agent row or omitted entirely.
         let source_agent = agent_store.get(&source).ok();
-        let resume_source = source_agent
-            .as_ref()
-            .map(|agent| agent.name.clone())
-            .unwrap_or_else(|| source.clone());
+        let resume_source =
+            resume_brief_sender(agent_store.as_ref(), caller.as_deref(), factory_session.as_deref());
         let queue_origin = source_agent
             .map(|agent| cas_store::QueueOrigin::RegisteredAgent { agent_id: agent.id });
 
@@ -7948,6 +7944,66 @@ fn gc_report_short_line(line: &str) -> String {
         line
     } else {
         format!("{}...", &line[..GC_REPORT_SAMPLE_CHARS - 3])
+    }
+}
+
+/// cas-d1e0: who a context-reset resume brief says it is from.
+fn resume_brief_sender(
+    agents: &dyn cas_store::AgentStore,
+    caller: Option<&str>,
+    factory_session: Option<&str>,
+) -> String {
+    // The caller's own name when it has an agent record.
+    if let Some(agent) = caller.and_then(|id| agents.get(id).ok()) {
+        return agent.name;
+    }
+    // Otherwise the factory session's supervisor, the identity it acts for.
+    let Some(session) = factory_session else {
+        return "supervisor".to_string();
+    };
+    agents
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && agent.factory_session.as_deref() == Some(session)
+                && agent.status != cas_types::AgentStatus::Shutdown
+        })
+        .max_by_key(|agent| agent.last_heartbeat)
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| format!("supervisor (factory session {session})"))
+}
+
+#[cfg(test)]
+mod resume_brief_sender_tests {
+    use super::resume_brief_sender;
+    use cas_store::AgentStore;
+
+    /// cas-d1e0: a caller with no agent record is not "unknown": the brief
+    /// names its factory session's supervisor, or at least the session.
+    #[test]
+    fn a_caller_without_a_record_sends_as_the_session_supervisor_cas_d1e0() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let agents = cas_store::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut lead = cas_types::Agent::new_with_role(
+            "lead-id".into(),
+            "swift-octopus-83".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        lead.factory_session = Some("session-a".into());
+        agents.register(&lead).unwrap();
+
+        assert_eq!(resume_brief_sender(&agents, Some("lead-id"), Some("session-a")), "swift-octopus-83");
+        assert_eq!(resume_brief_sender(&agents, Some("unregistered"), Some("session-a")), "swift-octopus-83");
+        assert_eq!(resume_brief_sender(&agents, None, Some("session-a")), "swift-octopus-83");
+        for sender in [
+            resume_brief_sender(&agents, None, Some("session-b")),
+            resume_brief_sender(&agents, None, None),
+        ] {
+            assert!(!sender.contains("unknown"), "{sender}");
+        }
     }
 }
 

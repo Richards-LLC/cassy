@@ -376,6 +376,9 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
 
     cloud.registration_id = SUCCESSOR;
     cloud.ack_response = None;
+    // cas-3f9b: keep different-width seconds eligible for actual delivery,
+    // so their timeline distinguishes numeric sorting from text sorting.
+    cloud.activation = Some(activation("C08COORD01", Some("1970-01-01T00:00:00.000Z")));
     cloud.recover = fixture(RECOVER, "successor on another machine");
     // cas-30c0: a disorderly recovery batch, including equal numeric times
     // written with different fractional precision and a duplicate admission.
@@ -385,18 +388,28 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     let tie_first = "0000de11-1111-4111-8111-00000000de11";
     let tie_last = "0000de12-1111-4111-8111-00000000de12";
     let late = "0000de13-1111-4111-8111-00000000de13";
+    let narrow = "0000de14-1111-4111-8111-00000000de14";
+    let wide = "0000de15-1111-4111-8111-00000000de15";
+    let missing = "0000de01-1111-4111-8111-00000000de01";
+    let invalid = "0000de02-1111-4111-8111-00000000de02";
     let admission = |id: &str, ts: &str| {
         let mut row = pending.clone();
         row["delivery"]["id"] = json!(id);
         row["target"]["message_ts"] = json!(ts);
         row
     };
+    let mut missing_time = admission(missing, "unused");
+    missing_time["target"].as_object_mut().unwrap().remove("message_ts");
     cloud.recover["admissions"] = json!([
+        admission(invalid, "not-a-timestamp"),
+        admission(wide, "1000.0"),
         admission(late, "1760616001.9"),
         admission(tie_last, "1760616001.100000"),
         pending,
         admission(early, "1760615999.900000"),
         admission(tie_first, "1760616001.1"),
+        missing_time,
+        admission(narrow, "999.1"),
         admission(early, "1760615999.900000"),
         notice,
     ]);
@@ -413,6 +426,8 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     // Hand-written chronological expectation: new claims remain first, then
     // recovery uses numeric message_ts, delivery id for ties, and types once.
     for (id, ts) in [
+        (narrow, "999.1"),
+        (wide, "1000.0"),
         (early, "1760615999.900000"),
         (resumed, "1760616000.123456"),
         (tie_first, "1760616001.1"),
@@ -430,6 +445,10 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
         format!("rebind {uncertain} 2"),
         format!("notice {uncertain} into factory-session"),
         format!("receipt {uncertain} consumed"),
+        // Unknown times come after every valid timestamp, ordered by id,
+        // and are withheld without rebind, body fetch, typing or receipts.
+        format!("quarantine {missing} unknown"),
+        format!("quarantine {invalid} unknown"),
         format!("ack {DELIVERY} admitted"),
     ]);
     assert_eq!(cloud.log(), expected, "recovered backlog must be chronological without delaying fresh claims or typing twice");

@@ -779,7 +779,9 @@ the freeze TTL, merges are allowed again, so no suite starts or runs past it:
 every row still without a verdict, automated or manual, becomes
 `NOT_EXERCISED{timed_out}` and the pack is sealed. A `record` without
 `--sha` then refuses with "the run … was sealed by the TTL; retry the record
-with --sha <sha> to reseal". After the seal, Cassy does three things:
+with --sha <sha> to reseal". A `record` arriving after the TTL timed its
+row out, but before the seal, refuses with "the TTL timed row <id> out; retry
+after the run seals to reseal it" and removes the evidence it copied. After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

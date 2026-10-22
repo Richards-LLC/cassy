@@ -47,7 +47,7 @@ impl PrCoverage {
     pub fn subject(&self) -> String {
         match self.pr {
             Some(number) => format!("PR #{number}"),
-            None => format!("push {}", &self.commit[..self.commit.len().min(7)]),
+            None => format!("push {}", super::prefix(&self.commit, 7)),
         }
     }
 

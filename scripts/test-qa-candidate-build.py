@@ -93,6 +93,7 @@ Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
             self.assertFalse(target.exists(), 'candidate output must be pruned after artifact copy')
             self.assertEqual((destination / 'cas').read_bytes(), binary.read_bytes())
             self.assertEqual(result['version'], version)
+            # pin: SHA256 is the public receipt field for the published candidate bytes.
             self.assertEqual(json.loads((destination / 'RECEIPT.json').read_text())['sha256'],
                              hashlib.sha256((destination / 'cas').read_bytes()).hexdigest())
             self.assertTrue((destination / 'SHA256SUMS').is_file())

@@ -3567,8 +3567,6 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
 
 #[test]
 fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
-    use unicode_width::UnicodeWidthStr;
-
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     env.set("NO_COLOR", "1");
     let home = env.home().to_path_buf();
@@ -3589,7 +3587,7 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
         });
         result.unwrap();
         let warning = output.split_once("[WARN]").expect("modified reference warning").1;
-        assert!(output.lines().all(|line| line.width() <= 80), "{output}");
+        assert!(output.lines().all(|line| ratatui::text::Line::from(line).width() <= 80), "{output}");
         let prose = warning.split_whitespace().collect::<Vec<_>>().join(" ");
         // pin: preserve the existing explanation in full; wrapping must not elide it.
         assert!(prose.contains("1 locally modified builtin reference file(s) in ~/.claude were preserved (content matches no version Cassy has shipped):"), "{output}");
@@ -3609,7 +3607,7 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
         report_builtin_sync(&result, ".claude", &ActiveTheme::default())
     });
     reported.unwrap();
-    assert!(output.lines().all(|line| line.width() <= 80), "{output}");
+    assert!(output.lines().all(|line| ratatui::text::Line::from(line).width() <= 80), "{output}");
     let prose = output.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(prose.contains("cas update --sync") && !prose.contains("--user"), "{output}");
 }

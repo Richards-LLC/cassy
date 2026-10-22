@@ -290,13 +290,14 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
 async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let mut failures = Vec::new();
-    for (old_status, reparented, released, repair_error, cleanup_pending) in [
-        (TaskStatus::Closed, false, true, false, false),
-        (TaskStatus::Cancelled, false, true, false, false),
-        (TaskStatus::InProgress, true, true, false, false),
-        (TaskStatus::InProgress, false, false, false, false),
-        (TaskStatus::InProgress, false, false, true, false),
-        (TaskStatus::Closed, true, true, false, true),
+    for (old_status, reparented, released, repair_error, cleanup_pending, projection_error) in [
+        (TaskStatus::Closed, false, true, false, false, false),
+        (TaskStatus::Cancelled, false, true, false, false, false),
+        (TaskStatus::InProgress, true, true, false, false, false),
+        (TaskStatus::InProgress, false, false, false, false, false),
+        (TaskStatus::InProgress, false, false, true, false, false),
+        (TaskStatus::Closed, true, true, false, true, false),
+        (TaskStatus::InProgress, false, false, false, false, true),
     ] {
         let cloud = FakeCloud::start();
         let soundwave = side(&cloud, "machine-soundwave", "sw", "soundwave");
@@ -309,7 +310,7 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
         tasks.add(&old_epic).unwrap();
         let child = "cas-a1";
         if !reparented {
-            for id in std::iter::once(child).chain(repair_error.then_some("cas-a2")) {
+            for id in std::iter::once(child).chain((repair_error || projection_error).then_some("cas-a2")) {
                 tasks.remove_dependency_of_type(id, EPIC, DependencyType::ParentChild).unwrap();
                 tasks.add_dependency(&Dependency::new(
                     id.into(), old_epic.id.clone(), DependencyType::ParentChild,
@@ -320,12 +321,12 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
         let historical = cas_store::EpicSplit {
             id: "split-687eb1ce".into(),
             epic_id: old_epic.id.clone(),
-            local_agent_id: if repair_error || cleanup_pending { "sw" } else { "gone-owner" }.into(),
+            local_agent_id: if repair_error || cleanup_pending || projection_error { "sw" } else { "gone-owner" }.into(),
             peer_agent_id: "gone-peer".into(),
             peer_name: "patient-gopher-67".into(),
             peer_machine: "prowl".into(),
             direction: cas_store::SplitDirection::Outgoing,
-            mine: if cleanup_pending { vec![child.into()] } else if repair_error { vec!["cas-a2".into()] } else { vec![] },
+            mine: if cleanup_pending { vec![child.into()] } else if repair_error || projection_error { vec!["cas-a2".into()] } else { vec![] },
             theirs: if cleanup_pending { vec![] } else { vec![child.into()] },
             state: if cleanup_pending { cas_store::SplitState::Cancelled } else { cas_store::SplitState::Accepted },
             reason: None,
@@ -356,15 +357,31 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
             assert!(tasks.init().unwrap_err().to_string().contains("injected split repair failure"));
             assert!(open_task_store(root).is_err(), "the normal task-store open must replay the repair failure");
         }
+        if projection_error {
+            // A real SQLite decoding error breaks both epic and parent reads,
+            // while historical split rows and the agent store remain readable.
+            rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .execute("UPDATE tasks SET title = x'ff' WHERE id = ?1", [&old_epic.id]).unwrap();
+            let local = cas::store::open_task_store_local(root).unwrap();
+            assert!(local.get(&old_epic.id).is_err(), "the projection must actually fail");
+            assert!(local.get_parent_epic(child).is_err(), "cleanup must not mistake a read failure for movement");
+            assert_eq!(cas_store::list_epic_splits(root).unwrap(), vec![historical.clone()]);
+        }
         let released_now = cas::cloud::epic_split::split_hold_for(root, child).is_none();
-        let renewed = repair_error.then(|| cas::cloud::epic_split::renew_split_claims(root, &claims, "sw", 600));
+        let check_renewal = repair_error || projection_error;
+        let renewed = check_renewal.then(|| cas::cloud::epic_split::renew_split_claims(root, &claims, "sw", 600));
+        if projection_error {
+            assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("sw"), "a projection error must not release the owner's claim");
+            rusqlite::Connection::open(root.join("cas.db")).unwrap()
+                .execute("UPDATE tasks SET title = ?1 WHERE id = ?2", [&old_epic.title, &old_epic.id]).unwrap();
+        }
         if repair_error {
             rusqlite::Connection::open(root.join("cas.db")).unwrap()
                 .execute_batch("DROP TRIGGER fail_split_repair;").unwrap();
             tasks.init().unwrap();
         }
-        if (released_now, renewed) != (released, repair_error.then_some(1)) {
-            failures.push(format!("binding/renewal: {old_status:?}, reparented={reparented}, repair_error={repair_error}: released={released_now}, renewed={renewed:?}"));
+        if (released_now, renewed) != (released, check_renewal.then_some(1)) {
+            failures.push(format!("binding/renewal: {old_status:?}, reparented={reparented}, repair_error={repair_error}, projection_error={projection_error}: released={released_now}, renewed={renewed:?}"));
         }
         if released && !reparented {
             tasks

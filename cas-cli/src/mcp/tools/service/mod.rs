@@ -1240,7 +1240,7 @@ impl CasService {
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
             let capacity_assistance = matches!(action.as_str(), "message" | "interrupt")
-                && req.blocker == Some(true) && req.target.as_deref() == Some("supervisor");
+                && req.blocker == Some(true);
 
             // Destructive operations fail closed on fields that belong to
             // another action in this unified request. Serde catches unknown
@@ -1564,7 +1564,7 @@ impl CasService {
             {
                 if let Err(error) = crate::factory_capacity_wait::assistance_queued(
                     &this.inner.cas_root, &worker_id,
-                    (!event_task_id.is_empty()).then_some(event_task_id.as_str()), chrono::Utc::now())
+                    (!event_task_id.is_empty()).then_some(event_task_id.as_str()), &event_target, chrono::Utc::now())
                 { tracing::warn!(%error, "capacity assistance queued but wait stamp failed"); }
             }
 

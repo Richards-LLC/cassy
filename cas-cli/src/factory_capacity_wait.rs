@@ -177,7 +177,11 @@ fn binding(root: &Path, repo: &Path, now: DateTime<Utc>) -> Result<Option<Capaci
             continue;
         }
         for lease in agents.list_agent_leases(&worker.id)? {
-            let task = tasks.get(&lease.task_id)?;
+            let task = match tasks.get(&lease.task_id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
             if task.status != TaskStatus::InProgress
                 || lease.expires_at <= now
                 || !crate::mcp::tools::core::task::task_assignee_matches_agent(
@@ -366,6 +370,7 @@ pub(crate) fn assistance_queued(
     root: &Path,
     worker: &str,
     task: Option<&str>,
+    target: &str,
     now: DateTime<Utc>,
 ) -> Result<()> {
     if !path(root, worker).exists() {
@@ -376,8 +381,21 @@ pub(crate) fn assistance_queued(
         && current(root, &wait, now)?
         && task.is_none_or(|task| task == wait.task_id)
     {
-        wait.notified = true;
-        write(root, &wait)?;
+        // Match the logical supervisor routing policy, including its session
+        // metadata fallback. A successful message to another live supervisor
+        // must not consume this owner's automatic capacity notice.
+        let agents = open_agent_store(root)?;
+        let owns_notice = target.eq_ignore_ascii_case("supervisor")
+            || wait.session.as_deref().filter(|session| !session.trim().is_empty())
+                .and_then(|session| {
+                    crate::mcp::tools::core::task::lifecycle::supervisor_push::resolve_worker_supervisor(
+                        agents.as_ref(), Some(session))
+                })
+                .is_some_and(|owner| owner.name.eq_ignore_ascii_case(target));
+        if owns_notice {
+            wait.notified = true;
+            write(root, &wait)?;
+        }
     }
     Ok(())
 }

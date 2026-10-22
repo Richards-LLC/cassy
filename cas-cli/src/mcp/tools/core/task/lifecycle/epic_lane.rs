@@ -39,6 +39,15 @@ pub(crate) fn explicit_base_note(target_branch: Option<&str>, lane: &str) -> Str
     }
 }
 
+/// Retain the originating host with the lane, not its host-local path or
+/// current owner (which may already have moved to a peer supervisor).
+pub(crate) fn branch_origin(branch: &str) -> Option<cas_types::EpicBranchOrigin> {
+    crate::cloud::device::DeviceConfig::hostname().map(|host| cas_types::EpicBranchOrigin {
+        branch: branch.to_string(),
+        host,
+    })
+}
+
 fn push_enabled() -> bool {
     std::env::var("CAS_PUSH_EPIC_BRANCH")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "on"))

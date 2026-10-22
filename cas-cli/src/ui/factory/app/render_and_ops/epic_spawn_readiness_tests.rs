@@ -142,7 +142,8 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
         with_fixture(|f| {
             let core = crate::mcp::CasCore::with_daemon(f.root.clone(), None, None);
             crate::store::known_repos::ensure_host_schema().unwrap();
-            core.register_agent("peer-lane-creator".into(), "peer-lane-creator".into(), None).unwrap();
+            core.register_agent("peer-lane-creator".into(), "peer-lane-creator".into(), None)
+                .unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "title": "Peer-only epic", "task_type": "epic", "risk": "none"
             }))
@@ -152,7 +153,11 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .block_on(core.cas_task_create_with_target(
                     request,
                     if adopted { f.repo.to_str() } else { None },
-                    if adopted { Some("epic/peer-only") } else { None },
+                    if adopted {
+                        Some("epic/peer-only")
+                    } else {
+                        None
+                    },
                     true,
                 ))
                 .unwrap();
@@ -219,8 +224,33 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 "{error}"
             );
             assert!(!error.contains("deleted epic lane"), "{error}");
+            for repo in [&peer, &f.origin] {
+                assert!(
+                    git(
+                        repo,
+                        &[
+                            "for-each-ref",
+                            "--format=%(refname)",
+                            &format!("refs/heads/{branch}")
+                        ]
+                    )
+                    .is_empty(),
+                    "refusal changed a ref"
+                );
+            }
+            // pin: the terminal fixture is the actual spawn diagnostic after
+            // normalizing host/ref identity, not a separately authored renderer.
+            assert_eq!(
+                format!(
+                    "{}\n",
+                    error
+                        .replace(&host, "soundwave")
+                        .replace(branch, "epic/peer")
+                ),
+                include_str!("../../../../../../docs/design/cli/epic-peer-publication.capture.txt")
+            );
             let command = error
-                .split("Publish on ")
+                .split("publish on ")
                 .nth(1)
                 .unwrap()
                 .split('`')
@@ -240,7 +270,10 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let prep = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
                 .expect("published remedy must make peer spawn ready");
             assert_eq!(
-                git(&prep.worktree_info.unwrap().worktree_path, &["rev-parse", "HEAD"]),
+                git(
+                    &prep.worktree_info.unwrap().worktree_path,
+                    &["rev-parse", "HEAD"]
+                ),
                 tip
             );
             assert_eq!(git(&f.repo, &["rev-parse", branch]), tip);
@@ -574,7 +607,7 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
             .to_string();
         assert!(
             error.contains("spawn base 'epic/round2' doesn't resolve")
-                && error.contains("refusing to recreate a deleted epic lane from trunk"),
+                && error.contains("no lane was recreated"),
             "{error}"
         );
         assert!(

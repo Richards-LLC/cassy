@@ -198,7 +198,7 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
         git(repo, &["branch", "-D", "epic/unpublished"]);
         let receipt = focus(root);
         assert!(
-            receipt.contains("refusing to recreate a deleted epic lane"),
+            receipt.contains("no lane was recreated"),
             "{receipt}"
         );
         for path in [repo, origin] {

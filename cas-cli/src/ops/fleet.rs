@@ -466,7 +466,7 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
         .as_ref()
         .map(|target| target.target_branch.trim())
         .filter(|base| !base.is_empty() && *base != branch);
-    match git.ensure_epic_published(branch, base) {
+    match git.ensure_epic_published(branch, base, epic.deliverables.epic_branch_origin.as_ref()) {
         Ok(readiness) => match readiness.notice {
             Some(receipt) => format!("\n{receipt}"),
             None => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),

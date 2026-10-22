@@ -273,7 +273,16 @@ mod tests {
     use super::*;
     use cas_store::{HistoryStore, SqliteHistoryStore, SupervisorQueueStore};
 
-    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Agent) {
+    struct DaemonChild(std::process::Child);
+
+    impl Drop for DaemonChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Agent, DaemonChild) {
         let dir = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let mut worker =
@@ -283,18 +292,21 @@ mod tests {
         crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
         let store = open_agent_store(&root).unwrap();
         store.register(&worker).unwrap();
+        let child = DaemonChild(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        assert_ne!(worker.pid, Some(child.0.id()));
         let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
+        epoch.pid = Some(child.0.id().into());
         epoch.version = Some("9.99.1".into());
         SqliteHistoryStore::open(&root)
             .unwrap()
             .record_epoch(&epoch)
             .unwrap();
-        (dir, root, worker)
+        (dir, root, worker, child)
     }
 
     #[test]
     fn worker_status_flags_live_old_mcp_against_installed_binary() {
-        let (_dir, root, worker) = fixture();
+        let (_dir, root, worker, _child) = fixture();
         let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         let status = render(&snapshot, Some("factory-release"));
         assert!(status.contains("installed 9.99.2"), "{status}");
@@ -316,7 +328,7 @@ mod tests {
 
     #[test]
     fn post_install_sends_one_supervisor_notice_with_stale_session_names() {
-        let (_dir, root, _worker) = fixture();
+        let (_dir, root, _worker, _child) = fixture();
         let mut supervisor = Agent::new_with_role(
             "supervisor-old".into(),
             "release-supervisor".into(),

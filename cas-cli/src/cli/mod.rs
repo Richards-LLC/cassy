@@ -583,6 +583,40 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("{error:#}"))
 }
 
+/// Keep every init diagnostic readable, including forced retries of an
+/// existing store that do not carry the incomplete-initialization context.
+/// Reserve eight cells for the widest error mark. As with other presence
+/// prose, indivisible tokens stay whole on their own line.
+pub fn human_init_error_message(error: &anyhow::Error) -> String {
+    let mut message = String::new();
+    for cause in error.chain() {
+        let detail = cause.to_string();
+        // CasError variants can already display their source. Keep outer
+        // context, but do not append that embedded source a second time.
+        if message.ends_with(&detail) {
+            continue;
+        }
+        if !message.is_empty() {
+            message.push_str(": ");
+        }
+        message.push_str(&detail);
+    }
+    let (heading, body) = match message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        Some(cause) => (Some(init::INCOMPLETE_INIT_RECOVERY), cause),
+        None => (None, message.as_str()),
+    };
+    // Wrap the body once: re-wrapping its individual lines strips the
+    // hanging indent that wrap_line gives continuation rows.
+    let body = crate::cloud::presence::wrap_line(body);
+    match heading {
+        Some(heading) => format!("{heading}\n{}", body.trim_end()),
+        None => body.trim_end().to_owned(),
+    }
+}
+
 /// Render the diagnostic for a person while leaving [`json_error_message`]
 /// as the stable machine-readable representation.
 pub fn human_error_message(error: &anyhow::Error) -> String {

@@ -59,9 +59,7 @@ class Announce(unittest.TestCase):
         adapter = Mock()
         client = adapter.McpClient.return_value
         client.call.return_value = {"tools": [{"name": "violet_read"}, {"name": "violet_post"}]}
-        adapter.message_receipt.side_effect = lambda envelope, name: (
-            envelope["message_id"], "https://slack.test/" + envelope["message_id"]
-        )
+        adapter.message_receipt.side_effect = announce.load_report_adapter().message_receipt
         writes = []
         self.reads = []
 
@@ -72,7 +70,11 @@ class Announce(unittest.TestCase):
                     read_effect()
                 return {"ok": True}
             writes.append(arguments)
-            return {"message_id": str(len(writes))}
+            message_id = str(len(writes))
+            message = {"message_id": message_id, "permalink": "https://slack.test/" + message_id}
+            if len(writes) in getattr(self, "split_replies", {}):
+                message["part_ids"] = self.split_replies[len(writes)]
+            return {"message": message}
 
         client.tool.side_effect = tool
         return adapter, writes
@@ -211,18 +213,57 @@ class Announce(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_post_sends_validated_bodies_and_preserves_threads_and_receipts(self):
-        self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
-        self.assertEqual(self.validate().returncode, 0)
-        adapter, writes = self.adapter()
-        self.post(adapter)
-        self.assertEqual([item["text"] for item in writes], list(BODIES))
-        self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
-        values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
-        self.assertEqual(values["DEV_REPLY_ID"], "4")
-        # The membership read is lean: no channel directory, no file bytes.
-        self.assertEqual(len(self.reads), 1)
-        self.assertIs(self.reads[0]["include_channels"], False)
-        self.assertIs(self.reads[0]["include_files"], False)
+        for split_replies in ({}, {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]}):
+            with self.subTest(split_replies=split_replies):
+                self.split_replies = split_replies
+                self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
+                self.assertEqual(self.validate().returncode, 0)
+                adapter, writes = self.adapter()
+                self.post(adapter)
+                self.assertEqual([item["text"] for item in writes], list(BODIES))
+                self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
+                values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
+                self.assertEqual(values["DEV_REPLY_ID"], "4")
+                # Render the real saved-draft receipt, including every transport part.
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; run_dir="$2"; worktree="$2"; '
+                     'release_train_announce_append_posted "$3"', "receipt-test",
+                     str(SCRIPT.parent / "release-train.d/announce.sh"), str(self.root), str(self.draft)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                (self.root / "release-report.receipt").write_text(
+                    "PDF_MESSAGE_ID=pdf-upload\nPDF_FILE_ID=F-report\n"
+                    "PDF_MESSAGE_PERMALINK=https://slack.test/pdf-upload\n")
+                # Refresh twice: a later report must enter POSTED without duplicating it.
+                for _ in range(2):
+                    subprocess.run(result.args, check=True, capture_output=True, text=True)
+                posted = self.draft.read_text().split("## POSTED", 1)[1]
+                self.assertEqual(posted.count("message_id=pdf-upload"), 1)
+                self.assertIn("file_id=F-report", posted)
+                self.assertIn("https://slack.test/pdf-upload", posted)
+                for number, prefix in enumerate(("USER_TOP_LEVEL", "USER_REPLY", "DEV_TOP_LEVEL", "DEV_REPLY"), 1):
+                    expected = split_replies.get(number, [str(number)])
+                    self.assertEqual(json.loads(values[f"{prefix}_PART_IDS"]), expected)
+                    self.assertIn("part_ids=" + values[f"{prefix}_PART_IDS"], posted)
+                # The membership read is lean: no channel directory, no file bytes.
+                self.assertEqual(len(self.reads), 1)
+                self.assertIs(self.reads[0]["include_channels"], False)
+                self.assertIs(self.reads[0]["include_files"], False)
+                # An old singular-only receipt cannot prove a complete reply.
+                self.receipt.write_text("\n".join(
+                    line for line in self.receipt.read_text().splitlines()
+                    if not line.startswith("USER_REPLY_PART_IDS=")
+                ) + "\n")
+                incomplete = subprocess.run(
+                    ["bash", "-c", 'source "$1"; run_dir="$2"; worktree="$2"; '
+                     'version=9.99.8; CAS_RELEASE_TRAIN_DRAFT="$3"; release_train_announce',
+                     "partial-receipt-test", str(SCRIPT.parent / "release-train.d/announce.sh"),
+                     str(self.root), str(self.draft)], capture_output=True, text=True,
+                )
+                self.assertNotEqual(incomplete.returncode, 0)
+                self.assertIn("partial receipt", incomplete.stderr)
+                self.assertIn("refusing to retry writes", incomplete.stderr)
 
 
 class TokenPreflight(unittest.TestCase):

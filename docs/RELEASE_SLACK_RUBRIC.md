@@ -95,10 +95,12 @@ must state the measured time and whether it exceeded the recorded budget.
    `docs/release-reports/`. Verify source fidelity and PDF pagination before
    either top-level message is sent. These local artifacts precede the later
    upload/link receipt, which needs existing parent messages.
-2. Post the four messages through Violet in order: User top-level, User
-   reply, Dev top-level, Dev reply. Save every returned message ID and permalink,
-   including the two parent IDs needed for report delivery.
-3. After the four messages, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
+2. Submit the four reviewed bodies through Violet in order: User top-level,
+   User logical reply, Dev top-level, Dev logical reply. A logical reply is one
+   body submitted once; Violet may split it into multiple Slack messages under
+   the same parent. Save every returned part ID in order, the singular message
+   ID and returned permalink, including both parent IDs for report delivery.
+3. After all parts of those four bodies, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
    `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
    `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
    to the existing User thread through Violet `violet_post` with `kind: file`
@@ -106,7 +108,8 @@ must state the measured time and whether it exceeded the recorded budget.
    download, decode, page-count and source-hash checks before accepting delivery.
    Preserve the returned file permalink, User/Dev thread receipts, local PDF
    SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
-   both file IDs and the local page count in `release-report.receipt` in the run
+   both file IDs, the PDF upload's message ID and message permalink, and the
+   local page count in `release-report.receipt` in the run
    directory. The adapter must download the returned explicit `download_url`, or
    re-read the uploaded file by its returned ID through authenticated `violet_read`
    when the current hub receipt omits a download URL, and compare the bytes and
@@ -242,7 +245,8 @@ publish one thread in **#cas-internal** (`C0B44GUKDK2`):
 
 1. **One top-level parent** — summarize the cross-harness sweep and lead with why
    the changes matter to Cassy users and maintainers.
-2. **Exactly three threaded replies**, in this order:
+2. **Exactly three logical threaded replies**, in this order (Violet may split
+   each body into several messages under the same parent):
    1. **Grok**
    2. **Claude**
    3. **Codex**
@@ -261,7 +265,7 @@ always presents one complete harness snapshot.
 
 - A merge containing both a runtime release and a harness-diary update requires
   **both workflows**: the two runtime-release top-level posts and the separate diary
-  parent with exactly three replies.
+  parent with exactly three logical replies.
 - A diary-only merge uses only the diary thread. Do **not** fabricate a release,
   tag, shipped runtime behavior, or user/dev release announcement.
 
@@ -276,8 +280,29 @@ always presents one complete harness snapshot.
 
 Immediately after posting, before ending the task or turn, annotate the saved
 release-note draft with a `## POSTED` block containing the Eastern 12-hour posting time (for example `9:45 AM ET`),
-channel, and a permalink for every post and reply. This makes both runtime and
-diary announcements searchable and verifiable.
+channel, and the returned message ID and permalink for every post and logical
+reply. For each split reply, include every `message.part_ids` entry in returned
+order; keep the singular `message_id` and returned permalink alongside that
+list. A single ID is not a complete split-reply receipt, and a part ID does not
+license inventing a permalink.
+
+`announce.receipt` retains `*_ID` and `*_PERMALINK` and adds JSON arrays
+`USER_TOP_LEVEL_PART_IDS`, `USER_REPLY_PART_IDS`, `DEV_TOP_LEVEL_PART_IDS` and
+`DEV_REPLY_PART_IDS`. An unsplit message has a one-element list containing its
+returned ID. Each generated `## POSTED` row includes `message_id=…`,
+`part_ids=[…]` and the returned permalink. The same ordered-list requirement
+applies to diary replies recorded manually.
+
+`release-report.receipt` must additionally retain `PDF_MESSAGE_ID` and
+`PDF_MESSAGE_PERMALINK`, separate from `PDF_FILE_ID` and `PDF_FILE_PERMALINK`.
+The report is incomplete without its upload message identity. The receipts
+stage refreshes `## POSTED` from the saved receipts, adding the PDF upload's
+message ID, message permalink and file ID after report delivery. Report uploads
+and links are separate from the four announcement bodies.
+
+Preserve incomplete receipts and reconcile missing IDs through a bounded
+Violet read; do not repeat publication to repair evidence. These rules make
+both runtime and diary announcements searchable and verifiable.
 
 ## Why
 
@@ -310,19 +335,21 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] The PDF is attached to the User thread, the HTML is linked from the Dev
   thread, and `release-report.receipt` records both paths, local PDF
   SHA-256/size, verified remote PDF SHA-256/size/page count, HTML SHA-256, both
-  file ids, the User/Dev thread timestamps, file permalink and local PDF page
-  count.
+  file ids, PDF upload message ID/permalink, the User/Dev thread timestamps,
+  file permalink and local PDF page count.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration
-- [ ] Draft has a `## POSTED` receipt with the Eastern 12-hour posting time, channel, and every permalink
+- [ ] Draft has a `## POSTED` receipt with Eastern 12-hour posting time,
+  channel, every returned permalink and all split part IDs
 
 ### Harness-diary update
 
 - [ ] One top-level parent in `C0B44GUKDK2` explains the cross-harness impact
-- [ ] Exactly three replies, ordered Grok → Claude → Codex
+- [ ] Exactly three logical replies, ordered Grok → Claude → Codex; all split part IDs recorded
 - [ ] Each reply includes version range, Cassy touchpoints, verdict/action, and source gaps
 - [ ] Parent and replies contain zero ticket IDs and zero factory narration
-- [ ] Draft has a `## POSTED` receipt with the Eastern 12-hour posting time, channel, and every permalink
+- [ ] Draft has a `## POSTED` receipt with Eastern 12-hour posting time,
+  channel, every returned permalink and all split part IDs
 - [ ] If runtime code also shipped, complete the runtime-release checklist too
 - [ ] If the merge is diary-only, make no runtime-release claim

@@ -161,7 +161,8 @@ class Report(Fixture):
                       PDF_SIZE_BYTES=len(pdf), PDF_REMOTE_SHA256=pdf_sha, PDF_REMOTE_SIZE_BYTES=len(pdf),
                       PDF_REMOTE_PAGE_COUNT=1, HTML_SHA256=hashlib.sha256(html).hexdigest(),
                       PAGE_COUNT=1, PDF_FILE_PERMALINK='https://example.invalid/fixture',
-                      PDF_FILE_ID='pdf-fixture', HTML_FILE_ID='html-fixture', USER_THREAD_TS='1.2', DEV_THREAD_TS='3.4')
+                      PDF_FILE_ID='pdf-fixture', PDF_MESSAGE_ID='pdf-message',
+                      PDF_MESSAGE_PERMALINK='https://example.invalid/pdf-message', HTML_FILE_ID='html-fixture', USER_THREAD_TS='1.2', DEV_THREAD_TS='3.4')
         (self.run / 'release-report.receipt').write_text(''.join(f'{k}={v}\n' for k, v in fields.items()))
         # Exercise receipt routing without rendering or posting a PDF.
         self.executable(self.bin / 'pdfinfo', '#!/bin/sh\necho "Pages: 1"\n')

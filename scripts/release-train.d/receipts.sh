@@ -42,7 +42,8 @@ release_train_receipts() {
     fi
     for key in POSTED_AT CHANNEL USER_TOP_LEVEL_ID USER_TOP_LEVEL_PERMALINK \
         USER_REPLY_ID USER_REPLY_PERMALINK DEV_TOP_LEVEL_ID DEV_TOP_LEVEL_PERMALINK \
-        DEV_REPLY_ID DEV_REPLY_PERMALINK; do
+        DEV_REPLY_ID DEV_REPLY_PERMALINK \
+        USER_TOP_LEVEL_PART_IDS USER_REPLY_PART_IDS DEV_TOP_LEVEL_PART_IDS DEV_REPLY_PART_IDS; do
         if ! release_train_announce_receipt_field "$key" | grep -q '[^[:space:]]'; then
             printf 'ERROR receipts announcement: missing %s in %s\n' "$key" "$receipt" >&2
             return 1
@@ -68,11 +69,9 @@ release_train_receipts() {
         printf 'ERROR receipts branch: origin is required to publish the release-branch commit\n' >&2
         return 1
     fi
-    if ! grep -q '^## POSTED$' "$draft"; then
-        if ! release_train_announce_append_posted "$draft"; then
-            printf 'ERROR receipts draft: could not append POSTED block to %s\n' "$draft" >&2
-            return 1
-        fi
+    if ! release_train_announce_append_posted "$draft"; then
+        printf 'ERROR receipts draft: could not append POSTED block to %s\n' "$draft" >&2
+        return 1
     fi
     report_dir="$worktree/docs/release-reports"
     for artifact in "$report_dir/v$version"*; do

@@ -37,7 +37,11 @@ harness-diary merge additionally follows the parent + three-reply workflow there
 
 ## What to post
 
-Two threads. Each thread = one punchy top-level message + **exactly one** threaded reply.
+Two threads. Each thread has one punchy top-level message and **exactly one
+logical threaded reply**: one reviewed reply body submitted once. Violet may
+split that body into several Slack messages. Keep all parts in returned order
+under the same parent; do not shorten the release notes to avoid a split.
+Report uploads and report links are separate deliveries in those threads.
 
 ### 1. User thread
 
@@ -79,5 +83,18 @@ Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`
 
 Immediately after posting, before ending the task or turn, annotate that saved
 draft with a `## POSTED` block containing the Eastern 12-hour posting time (for example `9:45 AM ET`), channel, and a
-permalink for every top-level post and reply. This is the searchable receipt
-that the announcement happened.
+returned message ID and permalink for every top-level post and logical reply.
+For a split reply, record **every** returned `message.part_ids` entry, in order,
+alongside the returned `message_id` and opaque permalink; the singular ID does
+not represent all parts. If Violet returns no `part_ids`, record the singular
+ID as the one-element list. Do not invent individual part permalinks.
+
+The release train saves these lists as JSON arrays in
+`USER_TOP_LEVEL_PART_IDS`, `USER_REPLY_PART_IDS`, `DEV_TOP_LEVEL_PART_IDS` and
+`DEV_REPLY_PART_IDS` in `announce.receipt`, retaining the existing `*_ID` and
+`*_PERMALINK` fields. Its `## POSTED` rows contain `message_id=…`,
+`part_ids=[…]` and the returned permalink. Record file uploads with their
+**message ID and message permalink as well as file ID**. A missing part or
+upload message ID is an incomplete receipt: preserve it and reconcile through
+a bounded Violet read before completion; never repost to repair a receipt.
+This is the searchable evidence that the announcement happened.

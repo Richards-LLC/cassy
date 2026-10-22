@@ -52,8 +52,9 @@ HTTP output. Record statuses, tool names and redacted failures only.
    A reply's own ID is never its parent. Diary-only updates retain their
    separate parent + Grok, Claude, Codex replies in that order.
 4. Upload and verify the report as below after its parent exists.
-5. Append `## POSTED` with UTC timestamp, channel, every returned message ID
-   and permalink. Require `ok: true`; preserve `message.thread_id` to prove
+5. Append `## POSTED` with Eastern 12-hour posting time, channel, every returned
+   message ID and permalink. Preserve every `message.part_ids` entry in order
+   when Violet splits a logical reply; retain the singular ID too. Require `ok: true`; preserve `message.thread_id` to prove
    replies belong to their parents. Treat permalinks as opaque. A server
    listing, successful exit or missing receipt cannot establish publication.
 
@@ -76,7 +77,7 @@ Save `release-report.receipt` under the release-train run directory with
 `TAG`, `PDF_PATH`, `HTML_PATH`, `PDF_SHA256`, `PDF_SIZE_BYTES`,
 `PDF_REMOTE_SHA256`, `PDF_REMOTE_SIZE_BYTES`, `PDF_REMOTE_PAGE_COUNT`,
 `HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`,
-`HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
+`PDF_MESSAGE_ID`, `PDF_MESSAGE_PERMALINK`, `HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
 thread permalinks. The remote PDF fields are written only after the adapter
 downloads the transport-returned explicit `download_url`, or re-reads the
 uploaded file by its returned ID through authenticated `violet_read` when the

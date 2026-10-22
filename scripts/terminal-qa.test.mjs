@@ -277,7 +277,7 @@ test("report.md opens with the receipt line and the receipt is the last stdout l
 test("the built-in CLI craft runner accepts literal progress ellipses through a symlinked skills directory", (t) => {
   const linkedScript = symlinkedBuiltinScript(t);
   const out = tmpOut(t);
-  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("Reconfiguring Cassy...")'], { encoding: "utf8" });
+  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("Installing dependencies...")'], { encoding: "utf8" });
   assert.equal(cli.status, 0, cli.stderr + cli.stdout);
   assert.match(cli.stdout, /^terminal-qa: PASS symlinked-runner · 4 runs · 0 fail · 0 warn · 0 allowed · .*report\.json/m);
   const report = JSON.parse(fs.readFileSync(path.join(out, "report.json"), "utf8"));

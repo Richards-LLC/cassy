@@ -6520,12 +6520,8 @@ impl CasService {
         use cas_types::WorktreeStatus;
         use std::path::Path;
 
-        if req.limit == Some(0) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "gc_report limit must be positive",
-            ));
-        }
+        let view = GcReportView::from_request(&req)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
 
         let stale_after = req.older_than_secs.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
@@ -6858,7 +6854,7 @@ impl CasService {
         out.push_str(&self.db_branch_gc_section());
 
         Ok(Self::success(render_gc_report_response(
-            &out, req.limit, req.offset,
+            &out, view,
         )))
     }
 
@@ -7619,31 +7615,88 @@ const GC_REPORT_PAGE_MAX: usize = 100;
 const GC_REPORT_PAGE_MAX_BYTES: usize = 32 * 1024;
 const GC_REPORT_SAMPLE_ITEMS: usize = 3;
 const GC_REPORT_SAMPLE_CHARS: usize = 180;
-const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 512;
-const GC_REPORT_MACHINE_STATUS_MAX_BYTES: usize = 8 * 1024;
+const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 60;
+const GC_REPORT_HUMAN_WIDTH: usize = 79;
+
+#[derive(Clone, Copy)]
+enum GcReportView {
+    Summary,
+    Page { limit: usize, offset: usize },
+    Full,
+    Json,
+}
+
+impl GcReportView {
+    fn from_request(req: &FactoryRequest) -> Result<Self, &'static str> {
+        if req.limit == Some(0) {
+            return Err("gc_report limit must be positive");
+        }
+        let json = req.json.unwrap_or(false);
+        let full = req.full.unwrap_or(false);
+        let paging = req.limit.is_some() || req.offset.is_some();
+        if (json || full) && paging {
+            return Err("gc_report: use full/json or limit/offset separately");
+        }
+        Ok(if json {
+            Self::Json
+        } else if full {
+            Self::Full
+        } else if paging {
+            Self::Page {
+                limit: req.limit.unwrap_or(GC_REPORT_PAGE_SIZE),
+                offset: req.offset.unwrap_or(0),
+            }
+        } else {
+            Self::Summary
+        })
+    }
+}
 
 /// Keep the default tool result compact while preserving every original line
 /// behind explicit, zero-based `limit`/`offset` pages.
-fn render_gc_report_response(
-    full_report: &str,
-    limit: Option<usize>,
-    offset: Option<usize>,
-) -> String {
+fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
     const HEADER: &str = "Factory GC Report\n=================\n";
     let detail = full_report
         .strip_prefix(HEADER)
         .unwrap_or(full_report)
         .trim_start_matches('\n');
 
-    if limit.is_some() || offset.is_some() {
+    if let GcReportView::Page { limit, offset } = view {
         let lines = detail.lines().collect::<Vec<_>>();
-        let requested_limit = limit.unwrap_or(GC_REPORT_PAGE_SIZE);
-        let page_size = requested_limit.min(GC_REPORT_PAGE_MAX);
-        let start = offset.unwrap_or(0).min(lines.len());
-        return render_gc_report_page(&lines, start, page_size, requested_limit);
+        let page_size = limit.min(GC_REPORT_PAGE_MAX);
+        let start = offset.min(lines.len());
+        return render_gc_report_page(&lines, start, page_size, limit);
     }
-
-    summarize_gc_report(full_report, detail)
+    match view {
+        GcReportView::Full => full_report.to_owned(),
+        GcReportView::Json => {
+            // These are existing machine wire payloads, before any human
+            // projection. Keep malformed producer output explicit as well.
+            let machine_status: serde_json::Map<String, serde_json::Value> = full_report
+                .lines()
+                .filter(|line| gc_report_is_machine_status_line(line))
+                .filter_map(|line| line.split_once('='))
+                .map(|(key, raw)| {
+                    (
+                        key.to_owned(),
+                        serde_json::from_str(raw).unwrap_or_else(
+                            |error| serde_json::json!({"raw": raw, "error": error.to_string()}),
+                        ),
+                    )
+                })
+                .collect();
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "report_text": summarize_gc_report(full_report, detail),
+                    "full_report": full_report,
+                    "machine_status": machine_status,
+                })
+            )
+        }
+        _ => summarize_gc_report(full_report, detail),
+    }
 }
 
 fn summarize_gc_report(full_report: &str, detail: &str) -> String {
@@ -7652,17 +7705,12 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         .map(|section| section.trim_matches('\n'))
         .filter(|section| !section.trim().is_empty());
     let metrics = sections.next().unwrap_or_default();
+    let category_count = sections.clone().filter(|section| {
+        !section.lines().next().is_some_and(gc_report_is_machine_status_line)
+    }).count();
     let mut summary = format!(
-        "Factory GC Report\n=================\nFull report: {} bytes; detail pages contain at most {} zero-based lines and {} bytes. Use `factory action=gc_report limit={} offset=0` for full detail.\n\n",
-        full_report.len(),
-        GC_REPORT_PAGE_MAX,
-        GC_REPORT_PAGE_MAX_BYTES,
-        GC_REPORT_PAGE_SIZE,
+        "[INFO] GC review: {category_count} inventory categories\nPreview cleanup: cas factory gc cleanup\n\n"
     );
-    let machine_status_lines = detail
-        .lines()
-        .filter(|line| gc_report_is_machine_status_line(line))
-        .collect::<Vec<_>>();
     if !metrics.is_empty() {
         for line in metrics.lines() {
             if !gc_report_is_machine_status_line(line) {
@@ -7671,7 +7719,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             }
         }
         summary.push_str(
-            "\n\nInventory summary (category counts/bytes; first up to 3 items per category):\n",
+            "\nInventory (first up to 3 items per category):\n",
         );
     }
 
@@ -7696,13 +7744,8 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
         let item_count = item_lines.len();
-        let section_bytes = lines
-            .iter()
-            .filter(|line| !gc_report_is_machine_status_line(line))
-            .map(|line| line.len().saturating_add(1))
-            .sum::<usize>();
         summary.push_str(&format!(
-            "- {label}: {item_count} items, {section_bytes} bytes\n"
+            "- {label}: {item_count} items\n"
         ));
 
         if let Some(context) = detail_lines
@@ -7719,14 +7762,70 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
         }
     }
-    if !machine_status_lines.is_empty() {
-        summary.push_str("\nMachine-readable status:\n");
-        for line in machine_status_lines {
-            summary.push_str(&gc_report_bounded_machine_status_line(line));
-            summary.push('\n');
+    summary.push_str(&format!(
+        "\nDetails: cas factory gc report --full\nJSON: cas factory gc report --json\nMCP pages: factory action=gc_report limit=100 offset=0\nReport: {} bytes; full text and status are opt-in.\n",
+        full_report.len(),
+    ));
+    gc_report_fit_human(&summary)
+}
+
+/// A shared, destination-independent preview: printable ASCII, hanging
+/// indents and whole tokens. Full/JSON views retain every original value.
+fn gc_report_ascii(text: &str) -> String {
+    let mut ascii = String::new();
+    for character in text.chars() {
+        if character.is_ascii() && !character.is_control() {
+            ascii.push(character);
+        } else {
+            ascii.extend(character.escape_default());
         }
     }
-    summary
+    ascii
+}
+
+fn gc_report_shorten_token(word: &str, width: usize) -> String {
+    if word.len() <= width {
+        return word.to_owned();
+    }
+    let keep = width.saturating_sub(3);
+    let head = keep / 3;
+    format!(
+        "{}...{}",
+        &word[..head],
+        &word[word.len() - (keep - head)..]
+    )
+}
+
+fn gc_report_fit_human(text: &str) -> String {
+    let mut output = String::new();
+    for original in text.lines() {
+        let ascii = gc_report_ascii(original);
+        let (prefix, body) = ["  Context: ", "  Sample: "]
+            .into_iter()
+            .find_map(|prefix| ascii.strip_prefix(prefix).map(|body| (prefix, body)))
+            .unwrap_or(("", ascii.as_str()));
+        let indent = if prefix.is_empty() { 2 } else { prefix.len() };
+        let mut line = prefix.to_owned();
+        let mut has_word = false;
+        for word in body.split_whitespace() {
+            let word = gc_report_shorten_token(word, GC_REPORT_HUMAN_WIDTH - indent);
+            let needed = word.len() + usize::from(has_word);
+            if has_word && line.len() + needed > GC_REPORT_HUMAN_WIDTH {
+                output.push_str(line.trim_end());
+                output.push('\n');
+                line = " ".repeat(indent);
+                has_word = false;
+            }
+            if has_word {
+                line.push(' ');
+            }
+            line.push_str(&word);
+            has_word = true;
+        }
+        output.push_str(line.trim_end());
+        output.push('\n');
+    }
+    output
 }
 
 fn render_gc_report_page(
@@ -7791,15 +7890,12 @@ fn gc_report_page_text(
 }
 
 fn gc_report_category_label(heading: &str) -> String {
-    let heading = heading.trim().trim_end_matches(':').trim();
-    let chars = heading.chars().collect::<Vec<_>>();
-    if chars.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
-        return heading.to_string();
+    let heading = gc_report_ascii(heading.trim().trim_end_matches(':').trim());
+    if heading.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
+        heading
+    } else {
+        format!("{}...", &heading[..GC_REPORT_CATEGORY_HEADING_MAX_CHARS - 3])
     }
-    let half = GC_REPORT_CATEGORY_HEADING_MAX_CHARS / 2;
-    let start = chars[..half].iter().collect::<String>();
-    let end = chars[chars.len() - half..].iter().collect::<String>();
-    format!("{start}…{end}")
 }
 
 fn gc_report_is_inventory_item(line: &str) -> bool {
@@ -7820,109 +7916,11 @@ fn gc_report_is_machine_status_line(line: &str) -> bool {
 }
 
 fn gc_report_short_line(line: &str) -> String {
-    let mut chars = line.chars();
-    let short = chars.by_ref().take(GC_REPORT_SAMPLE_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{short}…")
+    let line = gc_report_ascii(line);
+    if line.len() <= GC_REPORT_SAMPLE_CHARS {
+        line
     } else {
-        short
-    }
-}
-
-fn gc_report_bounded_machine_status_line(line: &str) -> String {
-    if line.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
-        return line.to_string();
-    }
-
-    let Some((key, raw_json)) = line.split_once('=') else {
-        return line.chars().take(GC_REPORT_MACHINE_STATUS_MAX_BYTES).collect();
-    };
-    let original_bytes = line.len();
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw_json) else {
-        return format!(
-            "{key}={{\"summary_truncated\":true,\"summary_original_bytes\":{original_bytes}}}"
-        );
-    };
-    let original_counts = ["caches", "lane_previews"]
-        .into_iter()
-        .map(|field| {
-            (
-                field,
-                value
-                    .get(field)
-                    .and_then(serde_json::Value::as_array)
-                    .map_or(0, Vec::len),
-            )
-        })
-        .collect::<Vec<_>>();
-    for (field, count) in &original_counts {
-        if let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut) {
-            items.truncate(GC_REPORT_SAMPLE_ITEMS);
-        }
-        let omitted = count.saturating_sub(GC_REPORT_SAMPLE_ITEMS);
-        if omitted > 0
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert(format!("{field}_omitted"), serde_json::json!(omitted));
-        }
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.insert("summary_truncated".into(), serde_json::Value::Bool(true));
-        object.insert(
-            "summary_original_bytes".into(),
-            serde_json::json!(original_bytes),
-        );
-    }
-
-    loop {
-        let encoded = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-        let candidate = format!("{key}={encoded}");
-        if candidate.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
-            return candidate;
-        }
-
-        let mut removed = false;
-        for field in ["caches", "lane_previews"] {
-            let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut)
-            else {
-                continue;
-            };
-            if items.pop().is_none() {
-                continue;
-            }
-            let omitted_key = format!("{field}_omitted");
-            let omitted = value
-                .get(&omitted_key)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                .saturating_add(1);
-            if let Some(object) = value.as_object_mut() {
-                object.insert(omitted_key, serde_json::json!(omitted));
-            }
-            removed = true;
-            break;
-        }
-        if !removed {
-            let count_for = |field: &str| {
-                original_counts
-                    .iter()
-                    .find(|(name, _)| *name == field)
-                    .map_or(0, |(_, count)| *count)
-            };
-            let compact = serde_json::json!({
-                "schema_version": value.get("schema_version"),
-                "filesystem": value.get("filesystem"),
-                "candidate_bytes": value.get("candidate_bytes"),
-                "selected_bytes": value.get("selected_bytes"),
-                "reclaimed_bytes": value.get("reclaimed_bytes"),
-                "dry_run": value.get("dry_run"),
-                "cache_count": count_for("caches"),
-                "lane_preview_count": count_for("lane_previews"),
-                "summary_truncated": true,
-                "summary_original_bytes": original_bytes,
-            });
-            return format!("{key}={compact}");
-        }
+        format!("{}...", &line[..GC_REPORT_SAMPLE_CHARS - 3])
     }
 }
 
@@ -7957,35 +7955,55 @@ mod gc_report_render_tests {
             "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
         );
 
-        let summary = render_gc_report_response(&report, None, None);
-        let line = summary
-            .lines()
-            .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))
-            .expect("bounded machine-readable status line");
-        assert!(line.len() <= 8 * 1024, "{} bytes", line.len());
-        let value: serde_json::Value = serde_json::from_str(
-            line.strip_prefix("TARGET_CACHE_STATUS_JSON=").unwrap(),
-        )
-        .expect("status remains valid JSON");
-        assert_eq!(value["summary_truncated"], true);
-        assert_eq!(value["caches"].as_array().unwrap().len(), 3);
-        assert_eq!(value["caches_omitted"], 997);
-        let category = summary
-            .lines()
-            .find(|line| line.starts_with("- Cargo target cache pressure:"))
-            .unwrap();
-        assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
-        let category_bytes = category
-            .split(" items, ")
-            .nth(1)
-            .unwrap()
-            .split(" bytes")
-            .next()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        assert!(category_bytes < 1_000, "{category}");
-        assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
+        let report = format!("{report}\nPaths \u{00e9}:\n  - /{}\n", "a".repeat(200));
+        let summary = render_gc_report_response(&report, GcReportView::Summary);
+        assert!(
+            summary.is_ascii(),
+            "shared human output has an ASCII fallback"
+        );
+        assert!(
+            summary.lines().all(|line| line.len() <= 79),
+            "human report overflows an 80-column terminal: {summary}"
+        );
+        assert!(
+            !summary
+                .lines()
+                .any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")),
+            "raw status belongs behind the explicit machine/full view"
+        );
+        assert!(summary.starts_with("[INFO] GC review: 2 inventory categories\nPreview cleanup: cas factory gc cleanup\n"), "verdict and preview come first: {summary}");
+        assert!(summary.contains("- Cargo target cache pressure: 1 items"));
+        assert!(summary.contains("--full"));
+        assert_eq!(
+            render_gc_report_response(&report, GcReportView::Full),
+            report
+        );
+        let machine: serde_json::Value =
+            serde_json::from_str(&render_gc_report_response(&report, GcReportView::Json)).unwrap();
+        assert_eq!(machine["report_text"], summary);
+        assert_eq!(machine["full_report"], report);
+        assert_eq!(
+            machine["machine_status"]["TARGET_CACHE_STATUS_JSON"],
+            status
+        );
+        assert_eq!(
+            machine["machine_status"]["TARGET_CACHE_STATUS_JSON"]["caches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1_000
+        );
+        for (flags, valid) in [
+            (serde_json::json!({"json": true, "full": true}), true),
+            (serde_json::json!({"json": true, "offset": 0}), false),
+            (serde_json::json!({"full": true, "limit": 1}), false),
+            (serde_json::json!({"limit": 0}), false),
+        ] {
+            let mut request = flags;
+            request["action"] = serde_json::json!("gc_report");
+            let request = serde_json::from_value(request).unwrap();
+            assert_eq!(GcReportView::from_request(&request).is_ok(), valid);
+        }
     }
 }
 

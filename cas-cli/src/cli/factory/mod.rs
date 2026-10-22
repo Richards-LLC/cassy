@@ -316,10 +316,8 @@ pub struct FactoryArgs {
     #[arg(long = "worker-spec", value_name = "JSON")]
     pub worker_spec: Vec<String>,
 
-    /// Resolve workers through the embedded lane registry.
-    ///
-    /// A lane is mutually exclusive with explicit worker CLI/model/effort
-    /// recipe controls; names and account metadata may still be supplied.
+    /// Use a named lane instead of explicit CLI/model/effort controls.
+    // Names and account metadata may still be supplied with a lane.
     #[arg(long, global = true)]
     pub lane: Option<String>,
 
@@ -332,13 +330,8 @@ pub struct FactoryArgs {
     #[arg(long = "supervisor-spec", value_name = "JSON")]
     pub supervisor_spec: Option<String>,
 
-    /// Refuse to silently fall back when a resolved worker/supervisor spec
-    /// requests Codex but Codex is unavailable (binary missing, or missing
-    /// `~/.codex/auth.json` login) — bail with an actionable error instead
-    /// of rewriting the spec to Claude (cas-7199 / cas-a487). OR'd with
-    /// `[factory] strict_cli` in `.cas/config.toml`; either being true
-    /// enables strict mode. Default (this flag absent): fall back to
-    /// Claude with a loud warning — see `apply_codex_fallback`.
+    /// Refuse unavailable Codex instead of falling back to Claude.
+    // OR'd with factory.strict_cli; Codex availability includes its auth.json.
     #[arg(long = "strict-cli", global = true)]
     pub strict_cli: bool,
 
@@ -1262,7 +1255,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
-            FactoryCommands::Gc { command } => gc::execute(command, cas_root),
+            FactoryCommands::Gc { command } => gc::execute(command, cli, cas_root),
             FactoryCommands::Daemon {
                 session,
                 cwd,

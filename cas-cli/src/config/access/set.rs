@@ -1,5 +1,47 @@
 use crate::config::*;
 
+/// Only allow secure webhook destinations, except HTTP services bound to
+/// localhost/loopback for development.
+pub(crate) fn validate_notification_webhook_url(
+    value: &str,
+) -> Result<Option<url::Url>, MemError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value
+        .chars()
+        .any(|character| {
+            character == '\\' || character.is_whitespace() || character.is_control()
+        })
+    {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must not contain backslashes or whitespace".into(),
+        ));
+    }
+
+    let url = url::Url::parse(value).map_err(|_| {
+        MemError::Parse(
+            "notifications.webhook_url must be a valid HTTPS URL or an HTTP localhost URL"
+                .into(),
+        )
+    })?;
+    let is_https = url.scheme() == "https" && url.host().is_some();
+    let is_loopback_http = url.scheme() == "http"
+        && match url.host() {
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+    if !is_https && !is_loopback_http {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must use HTTPS; HTTP is allowed only for localhost"
+                .into(),
+        ));
+    }
+    Ok(Some(url))
+}
+
 impl Config {
     /// GH #1182: replace `[factory] write_roots`. Only the operator CLI path
     /// (`cas config set factory.write_roots`) calls this, after resolving
@@ -39,7 +81,19 @@ impl Config {
                 ""
             } else {
                 meta.validate(value).map_err(MemError::Parse)?;
-                value
+                if meta.value_type == ConfigType::Bool {
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "1" => "true",
+                        "false" | "no" | "0" => "false",
+                        _ => {
+                            return Err(MemError::Parse(format!(
+                                "Invalid boolean value for {key}: {value}"
+                            )));
+                        }
+                    }
+                } else {
+                    value
+                }
             }
         } else {
             value
@@ -571,6 +625,36 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "hooks.stop.duplicate_detection_enabled"
+            | "hooks.stop.learning_review_enabled"
+            | "hooks.stop.rule_review_enabled" => {
+                let enabled = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for {key}: {value}"))
+                })?;
+                let stop = &mut self.hooks.get_or_insert_with(HookConfig::default).stop;
+                match key {
+                    "hooks.stop.duplicate_detection_enabled" => {
+                        stop.duplicate_detection_enabled = enabled;
+                    }
+                    "hooks.stop.learning_review_enabled" => stop.learning_review_enabled = enabled,
+                    _ => stop.rule_review_enabled = enabled,
+                }
+            }
+            "hooks.stop.duplicate_detection_threshold"
+            | "hooks.stop.learning_review_threshold"
+            | "hooks.stop.rule_review_threshold" => {
+                let threshold: usize = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for {key}: {value}"))
+                })?;
+                let stop = &mut self.hooks.get_or_insert_with(HookConfig::default).stop;
+                match key {
+                    "hooks.stop.duplicate_detection_threshold" => {
+                        stop.duplicate_detection_threshold = threshold;
+                    }
+                    "hooks.stop.learning_review_threshold" => stop.learning_review_threshold = threshold,
+                    _ => stop.rule_review_threshold = threshold,
+                }
+            }
             // Hooks.plan_mode section
             "hooks.plan_mode.enabled" => {
                 let hooks = self.hooks.get_or_insert_with(HookConfig::default);
@@ -1099,6 +1183,30 @@ impl Config {
                 notifications.max_visible = value
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            "notifications.on_permission_prompt"
+            | "notifications.on_idle_prompt"
+            | "notifications.on_auth_success" => {
+                let enabled = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for {key}: {value}"))
+                })?;
+                let notifications = self
+                    .notifications
+                    .get_or_insert_with(NotificationConfig::default);
+                match key {
+                    "notifications.on_permission_prompt" => {
+                        notifications.on_permission_prompt = enabled;
+                    }
+                    "notifications.on_idle_prompt" => notifications.on_idle_prompt = enabled,
+                    _ => notifications.on_auth_success = enabled,
+                }
+            }
+            "notifications.webhook_url" => {
+                let url = validate_notification_webhook_url(value)?;
+                let notifications = self
+                    .notifications
+                    .get_or_insert_with(NotificationConfig::default);
+                notifications.webhook_url = url.map(|url| url.to_string());
             }
             // Notifications.tasks section
             "notifications.tasks.on_created" => {

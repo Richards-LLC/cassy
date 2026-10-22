@@ -557,6 +557,12 @@ fn test_coordination_maps_target_cache_dry_run_to_factory_request() {
         r#"{"action":"gc_cleanup","force":true,"dry_run":false,"reclaim_unknown_target":"/repo/.cas/old/target"}"#,
     ).unwrap();
     assert_eq!(req.to_factory_request().reclaim_unknown_target.as_deref(), Some("/repo/.cas/old/target"));
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"gc_report","json":true,"full":true}"#,
+    ).unwrap();
+    let factory = req.to_factory_request();
+    assert_eq!(factory.json, Some(true));
+    assert_eq!(factory.full, Some(true));
 }
 
 #[test]

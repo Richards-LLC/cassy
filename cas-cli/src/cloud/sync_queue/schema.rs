@@ -45,6 +45,28 @@ CREATE TABLE IF NOT EXISTS task_sync_intents (
 CREATE INDEX IF NOT EXISTS idx_task_sync_intents_entity
     ON task_sync_intents(entity_id);
 
+-- A blocked intent stays in task_sync_intents as the canonical mutation
+-- evidence. This companion ledger records the first ambiguous observation and
+-- any supervisor quarantine decision without rewriting or deleting it.
+CREATE TABLE IF NOT EXISTS task_sync_intent_recovery (
+    mutation_id TEXT PRIMARY KEY,
+    intent_id INTEGER NOT NULL,
+    entity_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    previous_revision INTEGER NOT NULL,
+    blocked_at TEXT NOT NULL,
+    blocked_reason TEXT NOT NULL,
+    blocked_evidence TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,
+    resolution TEXT,
+    resolution_reason TEXT,
+    resolution_evidence TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_sync_intent_recovery_quarantine
+    ON task_sync_intent_recovery(resolved_at);
+
 CREATE TABLE IF NOT EXISTS task_sync_routes (
     entity_id TEXT PRIMARY KEY,
     team_id TEXT,

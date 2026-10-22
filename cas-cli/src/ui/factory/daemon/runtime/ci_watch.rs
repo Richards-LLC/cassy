@@ -130,6 +130,14 @@ pub(crate) trait CiTransport {
     fn runs_for_sha(&self, _sha: &str) -> Result<Vec<CiRun>, CiWatchError> {
         Ok(Vec::new())
     }
+    /// cas-e845: the commit's check-runs (`check_runs` objects), or `None`
+    /// when this transport cannot read them.
+    fn check_runs_for_sha(
+        &self,
+        _sha: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
+        Ok(None)
+    }
     /// cas-e369: the run's first failed job and, when known, its failed step.
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
         Ok(self.failing_job(run_id)?.map(|name| FailedJob { name, step: None }))
@@ -179,7 +187,30 @@ pub(crate) fn ci_completed_runs(
         })
         .collect();
     let done = !runs.is_empty() && runs.iter().all(|run| run.status == "completed");
-    Ok(done.then_some(runs))
+    if !done {
+        return Ok(None);
+    }
+    // cas-e845: a run reports completed/success while one of its jobs is still
+    // in_progress. Gate on merge admission's check-run rules, limited to these
+    // runs' check suites so scheduled or unrelated workflows never hold the
+    // wake. cas-ae6a: a failed check, or one cancelled with no rerun, settles.
+    // Runs without a suite id keep run status.
+    let suites: Option<Vec<u64>> = runs.iter().map(|run| run.check_suite_id).collect();
+    if let (Some(suites), Some(checks)) = (suites, transport.check_runs_for_sha(&condition.sha)?) {
+        let ours: Vec<serde_json::Value> = checks
+            .into_iter()
+            .filter(|check| {
+                check
+                    .pointer("/check_suite/id")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|suite| suites.contains(&suite))
+            })
+            .collect();
+        if crate::mcp::tools::core::workflow::check_runs_still_running(&ours) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(runs))
 }
 
 /// Probe each pending `ci_completed` reminder once; a failed read leaves
@@ -204,6 +235,21 @@ pub(crate) fn collect_ci_wakes(
     candidates.iter().filter_map(wake).collect()
 }
 
+/// The wake's overall verdict over its completed runs: `success`, `cancelled`
+/// when nothing failed but a run was cancelled (cas-ae6a), else `failure`.
+pub(crate) fn ci_outcome(runs: &[CiRun]) -> &'static str {
+    let passed =
+        |run: &CiRun| matches!(run.conclusion.as_deref(), Some("success" | "skipped" | "neutral"));
+    let cancelled = |run: &CiRun| run.conclusion.as_deref() == Some("cancelled");
+    if runs.iter().all(passed) {
+        "success"
+    } else if runs.iter().all(|run| passed(run) || cancelled(run)) {
+        "cancelled"
+    } else {
+        "failure"
+    }
+}
+
 /// A `ci_completed` reminder whose runs have all completed.
 #[derive(Debug, Clone)]
 pub(crate) struct CiWake {
@@ -214,13 +260,10 @@ pub(crate) struct CiWake {
 
 impl CiWake {
     pub(crate) fn to_json(&self) -> serde_json::Value {
-        let passed = |run: &CiRun| {
-            matches!(run.conclusion.as_deref(), Some("success" | "skipped" | "neutral"))
-        };
         serde_json::json!({
             "sha": self.condition.sha,
             "workflow": self.condition.workflow,
-            "outcome": if self.runs.iter().all(passed) { "success" } else { "failure" },
+            "outcome": ci_outcome(&self.runs),
             "runs": self.runs.iter().map(|run| serde_json::json!({
                 "name": run.name, "conclusion": run.conclusion, "url": run.html_url,
             })).collect::<Vec<_>>(),
@@ -249,6 +292,9 @@ pub(crate) struct CiRun {
     pub conclusion: Option<String>,
     #[serde(default)]
     pub event: String,
+    /// The run's check suite; its jobs are the check-runs that carry this id.
+    #[serde(default)]
+    pub check_suite_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -962,6 +1008,28 @@ impl CiTransport for GhCiTransport {
         Ok(response.workflow_runs)
     }
 
+    fn check_runs_for_sha(
+        &self,
+        sha: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, CiWatchError> {
+        let response: serde_json::Value = self.gh_json(&[
+            "api".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            format!("repos/{}/commits/{sha}/check-runs", self.repo),
+            "-f".to_string(),
+            "per_page=100".to_string(),
+        ])?;
+        response
+            .get("check_runs")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                CiWatchError::Malformed("check-runs response omitted check_runs".to_string())
+            })
+    }
+
     fn failed_job_detail(&self, run_id: u64) -> Result<Option<FailedJob>, CiWatchError> {
         let response: JobsResponse = self.gh_json(&[
             "api".to_string(),
@@ -1565,6 +1633,86 @@ mod tests {
         assert!(runs.iter().any(|run| run.event == "merge_group"));
     }
 
+    /// cas-e845 / cas-ae6a: `ci_completed` waits only while a check-run of the
+    /// selected runs is still running. A check cancelled with no rerun at the
+    /// SHA, or any failed check, settles the wake. Driven through the real
+    /// gh transport (runs + check-runs) with check_suite ids in the fixtures.
+    #[test]
+    fn ci_completed_settles_on_check_runs_through_gh_cas_ae6a() {
+        let sha = "39612776866aaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let check = |id: u64, name: &str, suite: u64, status: &str, conclusion: Option<&str>| {
+            serde_json::json!({"id": id, "name": name, "status": status,
+                "conclusion": conclusion, "check_suite": {"id": suite}})
+        };
+        // A queued job of an unselected suite never holds the wake.
+        let other_suite = check(90, "watchdog", 999, "queued", None);
+        let rows: [(&str, &str, Vec<serde_json::Value>, Option<&str>); 4] = [
+            (
+                "a completed run with an in_progress job still waits (cas-e845)",
+                "success",
+                vec![
+                    check(1, "Classify CI diff", 7, "completed", Some("success")),
+                    check(2, "Scoped Validation (fast)", 7, "in_progress", None),
+                ],
+                None,
+            ),
+            (
+                "a run cancelled with no rerun wakes as cancelled",
+                "cancelled",
+                vec![
+                    check(1, "Classify CI diff", 7, "completed", Some("cancelled")),
+                    check(2, "Scoped Validation (fast)", 7, "completed", Some("cancelled")),
+                ],
+                Some("cancelled"),
+            ),
+            (
+                "one failed and one cancelled check wakes as failure",
+                "failure",
+                vec![
+                    check(1, "Scoped Validation (fast)", 7, "completed", Some("failure")),
+                    check(2, "Docs Lint", 7, "completed", Some("cancelled")),
+                ],
+                Some("failure"),
+            ),
+            (
+                "a cancelled check whose rerun is running still waits",
+                "success",
+                vec![
+                    check(1, "Scoped Validation (fast)", 7, "completed", Some("cancelled")),
+                    check(5, "Scoped Validation (fast)", 7, "in_progress", None),
+                ],
+                None,
+            ),
+        ];
+        for (name, run_conclusion, mut checks, expected) in rows {
+            checks.push(other_suite.clone());
+            let temp = tempfile::TempDir::new().unwrap();
+            let runs = serde_json::json!({"workflow_runs": [{"id": 39612776866_u64, "name": "CI",
+                "head_branch": "factory/x", "head_sha": sha,
+                "html_url": "https://github.test/runs/39612776866", "status": "completed",
+                "conclusion": run_conclusion, "event": "push", "check_suite_id": 7}]});
+            std::fs::write(temp.path().join("runs.json"), runs.to_string()).unwrap();
+            let checks = serde_json::json!({"check_runs": checks});
+            std::fs::write(temp.path().join("checks.json"), checks.to_string()).unwrap();
+            let gh = temp.path().join("gh");
+            crate::test_paths::warm_stub(
+                &gh,
+                &format!(
+                    "#!/bin/sh\ncase \"$4\" in\nrepos/org/repo/actions/runs) cat '{dir}/runs.json' ;;\nrepos/org/repo/commits/{sha}/check-runs) cat '{dir}/checks.json' ;;\n*) exit 97 ;;\nesac\n",
+                    dir = temp.path().display(),
+                ),
+            );
+            let transport = GhCiTransport {
+                repo: "org/repo".to_string(),
+                cwd: temp.path().to_path_buf(),
+                gh_binary: gh,
+            };
+            let condition = CiCompleted { sha: sha.to_string(), workflow: Some("CI".to_string()) };
+            let runs = ci_completed_runs(&transport, &condition).unwrap();
+            assert_eq!(runs.as_deref().map(ci_outcome), expected, "{name}");
+        }
+    }
+
     #[test]
     fn ci_completed_carries_a_failure_conclusion() {
         let failed = recorded_runs("completed", Some("failure"));
@@ -1579,11 +1727,12 @@ mod tests {
     }
 
     /// One watcher interval plus one daemon refresh tick plus the bounded
-    /// origin and run-list `gh` calls stay inside the 60 s contract.
+    /// origin, run-list and (cas-e845) check-runs `gh` calls stay inside the
+    /// 60 s contract.
     #[test]
     fn ci_completed_wakes_within_a_minute() {
         let tick = super::super::lifecycle::DAEMON_REFRESH_INTERVAL;
-        let worst = CI_WAKE_INTERVAL + tick + 2 * GH_CALL_TIMEOUT;
+        let worst = CI_WAKE_INTERVAL + tick + 3 * GH_CALL_TIMEOUT;
         assert!(worst <= Duration::from_secs(60), "{worst:?}");
     }
 
@@ -1601,6 +1750,7 @@ mod tests {
             status: "completed".to_string(),
             conclusion: conclusion.map(str::to_string),
             event: "push".to_string(),
+            check_suite_id: None,
         }
     }
 

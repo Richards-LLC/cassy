@@ -525,9 +525,34 @@ pub struct SplitTakeoverAuthorization {
     pub reason: String,
 }
 
+/// Server-captured graph boundary for a worker starting a task on a reused
+/// lane. The base belongs to the preceding work, never to this task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryBranchStart {
+    pub work_target: WorkTarget,
+    pub assignee: String,
+    pub branch: String,
+    pub base_sha: String,
+}
+
+/// Host where a recorded epic lane was bound to its task. Diagnostic provenance
+/// only: current publication is always observed from Git, never from this row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpicBranchOrigin {
+    pub branch: String,
+    pub host: String,
+    /// Stable source identity; legacy records fall back to their host label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    /// Sync-safe origin for an unpublished lane; no host-local checkout path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_branch_origin: Option<EpicBranchOrigin>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_takeover: Option<SplitTakeoverAuthorization>,
 
@@ -606,6 +631,12 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
 
+    /// Recorded after start reconciles the lane, preserved across resumes.
+    /// Descendants establish task identity without commit-message conventions;
+    /// close still rejects explicit foreign work after this boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory_branch_start: Option<FactoryBranchStart>,
+
     /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
     /// merge proof, but the declined commits remain this task's work and must
@@ -676,6 +707,8 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    epic_branch_origin: Option<EpicBranchOrigin>,
+    #[serde(default)]
     split_takeover: Option<SplitTakeoverAuthorization>,
     #[serde(default)]
     integration_batch: Option<IntegrationBatchEvidence>,
@@ -706,6 +739,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_anchor: Option<String>,
     #[serde(default)]
+    factory_branch_start: Option<FactoryBranchStart>,
+    #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
@@ -724,6 +759,7 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            epic_branch_origin: value.epic_branch_origin,
             split_takeover: value.split_takeover,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
@@ -739,6 +775,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             delivery_pr_merged_at: value.delivery_pr_merged_at,
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
+            factory_branch_start: value.factory_branch_start,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             parked_branch: value.parked_branch,
@@ -1100,7 +1137,8 @@ impl TaskDeliverables {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.split_takeover.is_none()
+        self.epic_branch_origin.is_none()
+            && self.split_takeover.is_none()
             && self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
@@ -1113,6 +1151,7 @@ impl TaskDeliverables {
             && self.delivery_pr_merged_at.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
+            && self.factory_branch_start.is_none()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
@@ -1579,6 +1618,7 @@ mod tests {
     #[test]
     fn legacy_deliverables_json_defaults_to_no_work_target() {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(deliverables.epic_branch_origin.is_none());
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
     }
@@ -1611,6 +1651,21 @@ mod tests {
         encoded["deliverables"] = serde_json::json!({"split_takeover": authorization});
         let task: Task = serde_json::from_value(encoded).unwrap();
         assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["split_takeover"], authorization);
+
+        // Origin may be the only deliverable and must survive object and
+        // legacy string transport without a machine-local checkout path.
+        for origin in [
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave"}),
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave", "device_id": "source-device"}),
+        ] {
+        for value in [serde_json::json!({"epic_branch_origin": origin}),
+            serde_json::json!(serde_json::json!({"epic_branch_origin": origin}).to_string())] {
+            let mut encoded = serde_json::to_value(Task::new("cas-peer".into(), "peer".into())).unwrap();
+            encoded["deliverables"] = value;
+            let task: Task = serde_json::from_value(encoded).unwrap();
+            assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["epic_branch_origin"], origin);
+        }
+        }
     }
 
     #[test]
@@ -1618,6 +1673,19 @@ mod tests {
         let mut task = Task::new(
             "cas-historical-anchor".to_string(),
             "Retain declined delivery identity".to_string(),
+        );
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget {
+                repo_selector: "project:test".into(),
+                target_branch: "main".into(),
+            },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: "b".repeat(40),
+        });
+        assert!(
+            !task.deliverables.is_empty(),
+            "start evidence alone must persist"
         );
         task.deliverables
             .historical_factory_branch_anchors
@@ -1633,8 +1701,13 @@ mod tests {
             vec!["a".repeat(40)]
         );
 
+        assert_eq!(
+            decoded.deliverables.factory_branch_start,
+            task.deliverables.factory_branch_start
+        );
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.historical_factory_branch_anchors.is_empty());
+        assert!(legacy.factory_branch_start.is_none());
     }
 
     #[test]

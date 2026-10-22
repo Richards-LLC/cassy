@@ -29,6 +29,7 @@ pub mod device;
 pub mod code_embeddings;
 pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
+pub mod file_leases;
 pub mod peers;
 pub mod peers_detail;
 pub(crate) mod activation;
@@ -126,7 +127,7 @@ pub use sync_queue::{
 };
 pub(crate) use sync_queue::{
     DependencyEndpointState, TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent,
-    TaskSyncPayload,
+    TaskSyncPayload, TaskSyncRecoveryRecord,
 };
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

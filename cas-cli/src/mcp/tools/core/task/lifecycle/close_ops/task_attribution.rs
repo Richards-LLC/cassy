@@ -13,6 +13,150 @@ struct DeliveryRange {
 
 use crate::git_evidence::git_text;
 
+pub(super) struct StartedDelivery {
+    pub branch: String,
+    pub commits: Vec<String>,
+}
+
+/// cas-ead0: only the graph after the server's start boundary belongs to
+/// this cycle. Old subjects before it cannot claim the new task's lane.
+/// Bound all probes to immutable SHAs and refuse foreign descendants before
+/// any anchor/commit-subject shortcut can grant delivery identity.
+pub(super) fn started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+        return Ok(None);
+    };
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            repo,
+            &start.work_target.repo_selector,
+        )
+    {
+        return Ok(None);
+    }
+    let refuse = |reason: &str| {
+        format!(
+            "DELIVERY BRANCH UNRESOLVED: task {} started on {} at {}, but {reason}. \
+         Restore this task's lane from that base and remove foreign work before retrying close.",
+            task.id, start.branch, start.base_sha,
+        )
+    };
+    if !is_safe_git_refname(&start.branch)
+        || !matches!(start.base_sha.len(), 40 | 64)
+        || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(refuse("the recorded start boundary is invalid"));
+    }
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{}", start.branch)) {
+        start.branch.clone()
+    } else if git_ref_exists(repo, &format!("refs/remotes/origin/{}", start.branch)) {
+        format!("origin/{}", start.branch)
+    } else {
+        return Ok(None);
+    };
+    let mut tip = resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
+        .ok_or_else(|| refuse("the delivery tip cannot be read"))?;
+    // Once parked, later tasks may reuse the lane. Its immutable anchor ends
+    // this delivery; current in-progress commit-hook anchors do not truncate WIP.
+    if matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Closed)
+        && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+        && git_commit_is_ancestor(repo, anchor, &tip)
+    {
+        tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+            .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+    }
+    if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
+        return Err(refuse("the base is no longer an ancestor of the delivery"));
+    }
+    let range = format!("{}..{tip}", start.base_sha);
+    let target = preferred_diff_target_ref_for_delivery(
+        repo,
+        &start.work_target.target_branch,
+        task.delivery_mode,
+    );
+    // Rebasing onto the target puts integrated ordinary commits on the lane
+    // after the start base. They belong to the target, not this delivery.
+    let lane_history = git_text(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &range,
+            &format!("^{target}"),
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the lane history cannot be read"))?;
+    // Inspect side-parent work too, excluding integrated target history so a
+    // large target sync does not consume this task's attribution budget.
+    let side_history = git_text(
+        repo,
+        &[
+            "log",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &tip,
+            &format!("^{}", start.base_sha),
+            &format!("^{target}"),
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the off-target history cannot be read"))?;
+    let mut records = Vec::new();
+    for (on_lane, history) in [(true, &lane_history), (false, &side_history)] {
+        let range: Vec<_> = history
+            .split('\u{1e}')
+            .map(str::trim)
+            .filter(|record| !record.is_empty())
+            .collect();
+        if range.len() > 200 {
+            return Err(refuse("the start-to-delivery range exceeds 200 commits"));
+        }
+        records.extend(range.into_iter().map(|record| (on_lane, record)));
+    }
+    let mut seen = HashSet::new();
+    let identity = task_commit_identity(task, None);
+    let mut commits = Vec::new();
+    for (on_lane, record) in records {
+        let (metadata, message) = record
+            .split_once('\u{1f}')
+            .ok_or_else(|| refuse("the commit metadata cannot be read"))?;
+        let mut metadata = metadata.split_whitespace();
+        let sha = metadata
+            .next()
+            .ok_or_else(|| refuse("a commit id cannot be read"))?;
+        if !seen.insert(sha) {
+            continue;
+        }
+        let parents: Vec<String> = metadata.map(str::to_owned).collect();
+        let merged = parents.get(1..).unwrap_or_default();
+        if is_target_sync_merge(repo, merged, &target) {
+            continue;
+        }
+        if subject_claims_another_task(message, &identity) {
+            let subject = message.trim().lines().next().unwrap_or("");
+            return Err(refuse(&format!(
+                "foreign commit {sha} ({subject}) follows the base"
+            )));
+        }
+        if on_lane
+            && (merged.is_empty()
+                || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+        {
+            commits.push(sha.to_string());
+        }
+    }
+    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+}
+
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
@@ -249,6 +393,17 @@ fn task_delivery_ranges(
     task_delivery_selection(repo, parent, window, tip, true).map(|selection| selection.ranges)
 }
 
+/// A no-delivery declaration requires no attributed commits, including
+/// empty commits and changes later reverted to the original tree.
+pub(super) fn has_delivery_commits(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<bool> {
+    task_delivery_ranges(repo, target, window, Some(tip)).map(|ranges| !ranges.is_empty())
+}
+
 /// The selected delivery ranges, plus whether a target-sync merge that would
 /// otherwise have been selected was excluded (cas-2664 defect 7), or a merge
 /// that brought another task's work (cas-f2eb). Empty
@@ -398,6 +553,7 @@ fn task_delivery_selection(
         while j > 0 {
             let previous = &commits[j - 1];
             if previous.parent.is_empty()
+                || window.identity.start_base.as_deref() == Some(previous.sha.as_str())
                 || previous.foreign
                 || previous.merge
                 || (!historical_receipt && previous.epoch < floor)
@@ -1695,6 +1851,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-taskb".into()),
                 known_commits: vec![],
             },
@@ -2925,6 +3082,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            start_base: None,
             task_id: Some("cas-taskb".into()),
             known_commits: vec![tip.clone()],
         };
@@ -3322,8 +3480,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn receipt_upper_boundary_excludes_later_sibling_commit() {
+    #[tokio::test]
+    async fn receipt_upper_boundary_excludes_later_sibling_commit() {
+        use crate::mcp::CasService;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = fixture();
         let p = dir.path();
         commit(p, "first.md", "first\n", "first part");
@@ -3334,6 +3495,59 @@ mod tests {
             stat.contains("first.md") && stat.contains("second.md") && !stat.contains("sibling.rs"),
             "{stat}"
         );
+
+        // cas-7b88: close a parked delivery after its worker starts another
+        // task. The report must use the implicit parked receipt, just as the
+        // close gates do, rather than the unrelated checkout's current HEAD.
+        git(p, &["reset", "--hard", &receipt]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-m", "merge delivered task", "factory/worker"]);
+        git(p, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(p, &["update-ref", "refs/remotes/origin/factory/worker", &receipt]);
+        std::fs::write(p.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let root = crate::store::init_cas_dir(p).unwrap();
+        std::fs::write(root.join("config.toml"), "[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+        env.set("CAS_ROOT", &root);
+        let wt = root.join("worktrees/worker");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(p, &["worktree", "add", "-q", "-b", "factory/worker-cas-next", wt.to_str().unwrap(), "main"]);
+        let next_tip = commit(&wt, "next.md", "unrelated work\n", "follow-up on another task");
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-taskb".into(), "Delivered task".into());
+        task.created_at = window().task_floor;
+        task.depth = cas_types::TaskDepth::Light;
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.add(&task).unwrap();
+        let mut next = Task::new("cas-next".into(), "Active next task".into());
+        next.status = TaskStatus::InProgress;
+        next.assignee = Some("worker".into());
+        next.deliverables.factory_branch_anchor = Some(next_tip.clone());
+        next.deliverables.parked_branch = Some("factory/worker-cas-next".into());
+        store.add(&next).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "worker".into(), "worker".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("worker".into());
+        let service = CasService::new(core, None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "delivery already merged",
+        })).unwrap();
+        let result = service.task(Parameters(request)).await.unwrap();
+        let text = result.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Closed task:"), "{text}");
+        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
+        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);
     }
 
     #[test]

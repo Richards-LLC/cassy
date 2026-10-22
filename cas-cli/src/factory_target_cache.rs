@@ -1521,6 +1521,29 @@ fn process_block_at(
     }
 }
 
+/// Private review directories use the same native process probe as retired
+/// worker output. Positive evidence and unavailable process inventory retain it.
+pub(crate) fn review_output_in_use(path: &Path, lease: &fs::File) -> bool {
+    #[cfg(unix)]
+    let descriptors = {
+        use std::os::fd::AsRawFd;
+        vec![lease.as_raw_fd()]
+    };
+    #[cfg(not(unix))]
+    let descriptors = {
+        let _ = lease;
+        Vec::new()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        process_probe::linux_uses_many_owned(Path::new("/proc"), path, path, &descriptors, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        process_uses_many(path, path, &descriptors)
+    }
+}
+
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
     process_uses(worktree, cache, None)
 }

@@ -49,7 +49,7 @@ impl TaskLifecycleGateError {
 }
 
 pub(crate) mod close_ops;
-mod epic_lane;
+pub(crate) mod epic_lane;
 mod epic_overlap;
 pub(crate) mod merge_close;
 #[cfg(test)]
@@ -175,6 +175,7 @@ pub(crate) fn initial_factory_branch_reset_target(
 ) -> Option<&cas_types::WorkTarget> {
     if status != TaskStatus::Open
         || task.deliverables.factory_branch_anchor.is_some()
+        || task.deliverables.factory_branch_start.is_some()
         || !task.deliverables.historical_factory_branch_anchors.is_empty()
     {
         return None;
@@ -188,6 +189,7 @@ pub(crate) fn initial_factory_branch_reset_target(
 /// tip is refused with the first commit whose ownership could not be established.
 fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
+    worker_name: &str,
     expected_branch: &str,
     target_branch: &str,
     task_identity: Option<&close_ops::TaskCommitIdentity>,
@@ -204,6 +206,27 @@ fn reconcile_reused_factory_branch(
     let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
+
+    // cas-09cf: a matching target alone does not prove this is a resume.
+    // Recorded anchors, or named work already on the target before first
+    // park, distinguish this task's continuation from a fresh assignment.
+    // cas-32fa: only anchors on this worker's branch count. A task
+    // transferred from another worker carries that worker's anchors, and
+    // this worker's leftover edits are not its prior work.
+    let has_prior_task_work = || {
+        task_identity.is_some_and(|identity| {
+            identity
+                .known_commits
+                .iter()
+                .any(|anchor| git.is_ancestor(anchor, &factory_tip))
+                || close_ops::task_attribution::branch_task_claims(
+                    worktree_path,
+                    &factory_tip,
+                    identity,
+                )
+                .is_some_and(|(own, _)| own.is_some())
+        })
+    };
 
     // Fresh tasks must not inherit another task's edits; resets must not
     // discard edits. Proven task continuations may retain their own dirty
@@ -223,6 +246,15 @@ fn reconcile_reused_factory_branch(
             ));
         }
         if !status.stdout.is_empty() {
+            // cas-32fa: a fresh start's edits belong to earlier work. A
+            // commit here would later be refused as unattributed, so stash.
+            if !has_prior_task_work() {
+                return Err(format!(
+                    "Cannot start task: {expected_branch} has uncommitted changes from earlier work, \
+                     not this task. Stash them with `git stash push -u -m \"<tag>\"` before starting; \
+                     committing them on this branch would later be refused as unattributed work."
+                ));
+            }
             return Err(format!(
                 "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before starting."
             ));
@@ -239,21 +271,6 @@ fn reconcile_reused_factory_branch(
     let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
-
-    // cas-09cf: a matching target alone does not prove this is a resume.
-    // Recorded anchors, or named work already on the target before first
-    // park, distinguish this task's continuation from a fresh assignment.
-    let has_prior_task_work = || {
-        task_identity.is_some_and(|identity| {
-            !identity.known_commits.is_empty()
-                || close_ops::task_attribution::branch_task_claims(
-                    worktree_path,
-                    &factory_tip,
-                    identity,
-                )
-                .is_some_and(|(own, _)| own.is_some())
-        })
-    };
 
     if target_tip == factory_tip {
         if !has_prior_task_work() {
@@ -353,6 +370,13 @@ fn reconcile_reused_factory_branch(
     // it under a local name and start the new task from its own target.
     // Nothing is pushed, so origin keeps the parked tip for its reviewer.
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        // A per-task branch already is the parked delivery's stable ref.
+        // Only the reusable base lane may move after preserving its old tip.
+        if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some() {
+            return Err(format!(
+                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` before starting."
+            ));
+        }
         require_clean_tracked_tree()?;
         let keep = format!("parked/{task_id}");
         let kept = std::process::Command::new("git")
@@ -428,7 +452,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -452,7 +476,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
         assert!(error.contains(&worker_tip), "{error}");
@@ -466,7 +490,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -485,7 +509,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
@@ -507,7 +531,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -544,7 +568,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -1476,6 +1500,31 @@ impl CasCore {
             delivery_mode,
         };
 
+        // Validate before the atomic create or assignment enqueue: refusing
+        // the whole create leaves neither a task nor a misleading worker prompt.
+        let mut assignee_warnings = Vec::new();
+        task.assignee = task.assignee.as_deref()
+            .and_then(super::update::normalize_assignee_update_value)
+            .map(|assignee| {
+                self.validate_task_assignee(
+                    task_store.as_ref(), &task, &assignee, task.status, &mut assignee_warnings,
+                )
+            })
+            .transpose()
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Task not created: {message}")),
+                data: None,
+            })?;
+        let assignee_receipt = task.assignee.as_deref()
+            .map(|assignee| format!("\nAssignee: {assignee}"))
+            .unwrap_or_default();
+        let assignee_receipt = if assignee_warnings.is_empty() {
+            assignee_receipt
+        } else {
+            format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
+        };
+
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -1531,7 +1580,24 @@ impl CasCore {
         // "prior context" and turn an otherwise clean create receipt noisy.
         // cas-3e41 (GH #993): every task create, not only an epic, pushes the
         // domain-matched rules and memories back to the creating supervisor.
+        // cas-1630: a follow-up citing commits its epic's branch lacks.
+        let cited_commit_warning = epic_id
+            .as_deref()
+            .and_then(|epic| {
+                let store = self.open_task_store().ok()?;
+                let epic = store.get(epic).ok()?;
+                let repo = self.cas_root.parent()?.to_path_buf();
+                let text = format!(
+                    "{}\n{}\n{}",
+                    task.title,
+                    task.description,
+                    task.acceptance_criteria
+                );
+                Some(epic_lane::cited_commit_warning(&repo, store.as_ref(), &epic, &text))
+            })
+            .unwrap_or_default();
         let related_context = sibling_warning
+            + &cited_commit_warning
             + &self
                 .related_recall(&task_recall_query(
                     &task.title,
@@ -1562,10 +1628,11 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-            let receipt = epic_lane::ensure_adopted_lane(&context.repo_root, lane);
+            let (receipt, origin) = epic_lane::ensure_adopted_lane(&context.repo_root, lane);
             let task_store = self.open_task_store()?;
             if let Ok(mut updated_task) = task_store.get(&id) {
                 updated_task.branch = Some(lane.to_string());
+                updated_task.deliverables.epic_branch_origin = origin;
                 let _ = task_store.update(&updated_task);
             }
             Some(receipt)
@@ -1616,10 +1683,11 @@ impl CasCore {
                                 "Warning: Failed to resolve a fresh epic base '{trunk}': {error}"
                             );
                             return Ok(Self::success(format!(
-                                "Created task: {} - {} (P{}){}{}{}",
+                                "Created task: {} - {} (P{}){}{}{}{}",
                                 id,
                                 task.title,
                                 task.priority.0,
+                                assignee_receipt,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
                                 assignment_warning,
@@ -1637,6 +1705,39 @@ impl CasCore {
                     } else {
                         resolved.sha.clone()
                     };
+                    // cas-1630: an epic created blocked_by an open epic is its
+                    // successor. Cut it from the predecessor's fresh tip, so
+                    // follow-ups on that unreleased code can start; its
+                    // delivery target is unchanged.
+                    let predecessor = self
+                        .open_task_store()
+                        .ok()
+                        .and_then(|store| epic_lane::open_predecessor_epic(store.as_ref(), &blocked_by_ids))
+                        .and_then(|(id, branch)| {
+                            // resolve_fresh_base reports success with an empty
+                            // SHA for a branch that exists neither locally nor
+                            // on origin (another repo, or deleted). Stack only
+                            // on a tip that resolves to a commit here, falling
+                            // back to a local-only lane, else to trunk.
+                            let resolves = |sha: &str| {
+                                !sha.is_empty()
+                                    && git_ops.ref_sha(&format!("{sha}^{{commit}}")).is_ok()
+                            };
+                            match git_ops.resolve_fresh_base(&branch) {
+                                Ok(fresh) if resolves(&fresh.sha) => {
+                                    Some((id, branch, fresh.branch_ref, fresh.sha))
+                                }
+                                _ => git_ops
+                                    .ref_sha(&branch)
+                                    .ok()
+                                    .filter(|sha| resolves(sha))
+                                    .map(|sha| (id, branch.clone(), branch, sha)),
+                            }
+                        });
+                    let (base_ref, base_sha) = match &predecessor {
+                        Some((_, _, predecessor_ref, sha)) => (predecessor_ref.clone(), sha.clone()),
+                        None => (base_ref, base_sha),
+                    };
                     let sha_preview = &base_sha[..base_sha.len().min(8)];
                     match git_ops.create_branch_from(&branch_name, &base_sha) {
                         Ok(created) => {
@@ -1645,6 +1746,7 @@ impl CasCore {
                             if let Ok(mut updated_task) = task_store.get(&id) {
                                 if updated_task.branch.as_deref().unwrap_or("").is_empty() {
                                     updated_task.branch = Some(branch_name.clone());
+                                    updated_task.deliverables.epic_branch_origin = epic_lane::branch_origin(&branch_name);
                                 }
                                 // A newly-created epic owns its coordination
                                 // branch. Persist that same canonical ref as
@@ -1697,12 +1799,18 @@ impl CasCore {
                                 )
                             };
 
-                            let divergence = base_choice
-                                .notice
-                                .as_deref()
-                                .map(|notice| format!("\n   {notice}"))
-                                .unwrap_or_default();
-                            let freshness = (!base_choice.used_head
+                            let divergence = match &predecessor {
+                                Some((id, branch, _, _)) => format!(
+                                    "\n   STACKED ON PREDECESSOR: {id} ({branch}) is open, so this epic starts from its tip. Merge {branch} into {branch_name} again until {id} lands on '{trunk}'."
+                                ),
+                                None => base_choice
+                                    .notice
+                                    .as_deref()
+                                    .map(|notice| format!("\n   {notice}"))
+                                    .unwrap_or_default(),
+                            };
+                            let freshness = (predecessor.is_none()
+                                && !base_choice.used_head
                                 && resolved.behind_count > 0)
                                 .then(|| {
                                     if resolved.used_remote {
@@ -1741,10 +1849,11 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}",
             id,
             task.title,
             task.priority.0,
+            assignee_receipt,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
             assignment_warning,
@@ -2053,10 +2162,8 @@ impl CasCore {
 
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
-        let reused_factory_branch_reset = if is_worker
-            && task.status == TaskStatus::Open
-            && task.deliverables.work_target.is_some()
-        {
+        let mut factory_branch_start = None;
+        let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
                 // not guess from the worker's incidental checkout when legacy
@@ -2077,54 +2184,105 @@ impl CasCore {
                                 format!("Cannot inspect worker checkout before task start: {error}"),
                             )
                         })?;
-                    if !super::repo_context::repo_answers_to(
-                        &worker_repo_root,
-                        &context.repo_selector,
-                    ) {
+                    if !super::repo_context::repo_answers_to(&worker_repo_root, &context.repo_selector)
+                    {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
                             "Cannot start task: worker checkout belongs to another repository",
                         ));
                     }
-                    let worker_branch =
-                        crate::factory_isolation::expected_worker_branch(&worker.name);
-                    match reconcile_reused_factory_branch(
-                        worker_checkout,
-                        &worker_branch,
-                        &target_branch,
-                        Some(&close_ops::task_commit_identity(&task, None)),
-                        |tip| {
-                            crate::mcp::tools::parked_delivery_at_tip(
-                                task_store.as_ref(),
+                    // A completed per-task lane is owned just like the base
+                    // lane. Reconcile the branch actually checked out so an
+                    // accepted clean-idle assignment also starts on fresh code.
+                    let worker_branch = crate::factory_isolation::branch_at(worker_checkout)
+                        .filter(|branch| {
+                            crate::factory_isolation::classify_worker_binding(
                                 &worker.name,
+                                Some(branch),
+                            ) == crate::factory_isolation::WorkerBinding::Own
+                        })
+                        .unwrap_or_else(|| {
+                            crate::factory_isolation::expected_worker_branch(&worker.name)
+                        });
+                    // A proof-scope correction can reopen the same task while
+                    // its delivery branch remains checked out. That branch is
+                    // the task's own history, not a reusable worker lane to
+                    // reconcile against a temporarily missing retarget.
+                    let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
+                        &worker.name,
+                        &worker_branch,
+                    ) == Some(task.id.as_str());
+                    let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
+                        let identity =
+                            close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
+                                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        match reconcile_reused_factory_branch(
+                            worker_checkout,
+                            &worker.name,
+                            &worker_branch,
+                            &target_branch,
+                            Some(&identity),
+                            |tip| {
+                                crate::mcp::tools::parked_delivery_at_tip(
+                                    task_store.as_ref(),
+                                    &worker.name,
+                                    tip,
+                                )
+                                .filter(|parked| parked.task_id != task.id)
+                                .map(|parked| parked.task_id)
+                            },
+                        ) {
+                            Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
+                                "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
+                            )),
+                            Ok(ReusedFactoryBranchStart::MovedFromParked {
+                                task_id,
                                 tip,
-                            )
-                            .filter(|parked| parked.task_id != task.id)
-                            .map(|parked| parked.task_id)
-                        },
-                    ) {
-                        Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
-                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
-                        )),
-                        Ok(ReusedFactoryBranchStart::MovedFromParked {
-                            task_id,
-                            tip,
-                            delivery_branch,
-                        }) => Some(format!(
-                            "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
-                             {worker_branch} was reset to `{target_branch}` for this task. \
-                             Don't force-push {worker_branch} while a PR is open on it.{}",
-                            publish_parked_delivery_branch(
-                                worker_checkout,
-                                &task_id,
-                                delivery_branch.as_deref(),
-                            ),
-                        )),
-                        Ok(ReusedFactoryBranchStart::Unchanged) => None,
-                        Err(message) => {
-                            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                                delivery_branch,
+                            }) => Some(format!(
+                                "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
+                                 {worker_branch} was reset to `{target_branch}` for this task. \
+                                 Don't force-push {worker_branch} while a PR is open on it.{}",
+                                publish_parked_delivery_branch(
+                                    worker_checkout,
+                                    &task_id,
+                                    delivery_branch.as_deref(),
+                                ),
+                            )),
+                            Ok(ReusedFactoryBranchStart::Unchanged) => None,
+                            Err(message) => {
+                                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                            }
                         }
+                    } else {
+                        None
+                    };
+                    // Persist only with the successful InProgress transition
+                    // below. Repeated starts must never advance this boundary.
+                    if task.deliverables.factory_branch_start.is_none()
+                        && crate::factory_isolation::branch_at(worker_checkout).as_deref()
+                            == Some(worker_branch.as_str())
+                    {
+                        let base_sha = GitOperations::new(worker_repo_root)
+                            .ref_sha(&worker_branch)
+                            .map_err(|error| {
+                                Self::error(
+                                    ErrorCode::INVALID_PARAMS,
+                                    format!("Cannot record task start base: {error}"),
+                                )
+                            })?;
+                        factory_branch_start = Some(cas_types::FactoryBranchStart {
+                            work_target: task
+                                .deliverables
+                                .work_target
+                                .clone()
+                                .expect("declared target"),
+                            assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
+                            branch: worker_branch,
+                            base_sha,
+                        });
                     }
+                    reset_note
                 } else {
                     None
                 }
@@ -2379,6 +2537,7 @@ impl CasCore {
         let mut peer_notes = elsewhere_note;
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
+        let mut peer_claim_fence = None;
         // cas-0078: another agent of this database holds the cloud claim. It
         // moves here only if this start wins the local lease below.
         let mut cloud_local_holder: Option<String> = None;
@@ -2390,7 +2549,7 @@ impl CasCore {
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};
             let kind = task_claim_kind;
-            let answer = {
+            let (answer, fence) = {
                 let (claims, id, agent, name, local) = (
                     claims.clone(),
                     req.id.clone(),
@@ -2398,15 +2557,17 @@ impl CasCore {
                     agent_name.clone(),
                     std::sync::Arc::clone(&local_agents),
                 );
+                let cas_root = self.cas_root.clone();
                 peer_budget
                     .run(move || {
-                        claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                        claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                             local.contains(holder)
                         })
                     })
                     .await
-                    .unwrap_or_else(Acquire::Unavailable)
+                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
             };
+            peer_claim_fence = fence;
             match answer {
                 Acquire::Claimed => cloud_claimed = true,
                 Acquire::LocalHolder(holder) => cloud_local_holder = Some(holder),
@@ -2452,58 +2613,65 @@ impl CasCore {
             }
         }
 
+        let local_claim =
+            agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started"));
+        let won = match &local_claim {
+            Ok(ClaimResult::Success(_)) => true,
+            Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by == &agent_id,
+            _ => false,
+        };
+        if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
+            // A refusal or failed local write leaves no newly acquired claim
+            // behind. Never release a claim retained by another local agent.
+            let (id, agent) = (req.id.clone(), agent_id.clone());
+            let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+        }
+
         let mut start_lease_epoch = None;
-        let claim_info =
-            match agent_store.try_claim(&req.id, &agent_id, lease_duration, Some("Task started")) {
-                Ok(ClaimResult::Success(lease)) => {
-                    start_lease_epoch = Some(lease.epoch);
-                    Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
-                }
-                Ok(ClaimResult::AlreadyClaimed {
-                    held_by,
-                    expires_at,
-                    ..
-                }) => {
-                    if held_by == agent_id {
-                        Some(format!(
-                            " (already claimed by you until {})",
+        let claim_info = match local_claim {
+            Ok(ClaimResult::Success(lease)) => {
+                start_lease_epoch = Some(lease.epoch);
+                Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
+            }
+            Ok(ClaimResult::AlreadyClaimed {
+                held_by,
+                expires_at,
+                ..
+            }) => {
+                if held_by == agent_id {
+                    Some(format!(
+                        " (already claimed by you until {})",
+                        expires_at.format("%H:%M")
+                    ))
+                } else {
+                    // Resolve UUID → friendly name so the supervisor can
+                    // identify the worker without cross-referencing worker_status.
+                    let holder_display = agent_store
+                        .get(&held_by)
+                        .map(|a| format!("{} ({})", a.name, held_by))
+                        .unwrap_or_else(|_| held_by.clone());
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Task is locked by {} until {}",
+                            holder_display,
                             expires_at.format("%H:%M")
-                        ))
-                    } else {
-                        // Resolve UUID → friendly name so the supervisor can
-                        // identify the worker without cross-referencing worker_status.
-                        let holder_display = agent_store
-                            .get(&held_by)
-                            .map(|a| format!("{} ({})", a.name, held_by))
-                            .unwrap_or_else(|_| held_by.clone());
-                        if cloud_claimed && let Some(claims) = peer_claims.clone() {
-                            // The local lease refused; leave no claim of this
-                            // agent's behind. A claim another agent holds was
-                            // never touched (cas-0078).
-                            let (id, agent) = (req.id.clone(), agent_id.clone());
-                            let _ = peer_budget
-                                .run(move || claims.release_own(&id, &agent))
-                                .await;
-                        }
-                        return Err(Self::error(
-                            ErrorCode::INVALID_PARAMS,
-                            format!(
-                                "Task is locked by {} until {}",
-                                holder_display,
-                                expires_at.format("%H:%M")
-                            ),
-                        ));
-                    }
+                        ),
+                    ));
                 }
-                Ok(refused) => return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("Cannot start task: local lease refused: {refused:?}"),
-                )),
-                Err(error) => return Err(Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to claim task before start: {error}"),
-                )),
-            };
+            }
+            Ok(refused) => return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("Cannot start task: local lease refused: {refused:?}"),
+            )),
+            Err(error) => return Err(Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to claim task before start: {error}"),
+            )),
+        };
+        // A delayed synchronous release now sees this lease under the same
+        // fence. Never expose the Cloud-first/local-later publication gap.
+        drop(peer_claim_fence);
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
@@ -2703,6 +2871,9 @@ impl CasCore {
             task.notes.push_str(&split_note);
         }
         task.deliverables.split_takeover = None;
+        if let Some(start) = factory_branch_start {
+            task.deliverables.factory_branch_start = Some(start);
+        }
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store

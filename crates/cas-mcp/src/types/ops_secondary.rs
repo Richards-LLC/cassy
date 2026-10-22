@@ -653,6 +653,16 @@ pub struct FactoryRequest {
     )]
     pub action: String,
 
+    /// Return complete GC inventory as one JSON document.
+    #[schemars(description = "gc_report: one JSON document with report_text, full_report and complete machine_status")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub json: Option<bool>,
+
+    /// Return the original unabridged GC report.
+    #[schemars(description = "gc_report: original full report including raw status; incompatible with limit/offset")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
+
     /// Generic id field used by entity-targeted actions. For
     /// `shutdown_workers`, this accepts either the worker's registered id or
     /// exact display name.
@@ -997,10 +1007,15 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub peer: Option<String>,
 
-    /// Machine-readable peer report with untruncated values.
-    #[schemars(description = "peers only: return one JSON document with untruncated values")]
+    /// Machine-readable peer or GC report with untruncated values.
+    #[schemars(description = "peers/gc_report: one JSON document, untruncated")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
+
+    /// Original GC report including complete machine-status lines.
+    #[schemars(description = "gc_report: unabridged; not with limit/offset")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
 
     /// cas-2a5a: `all` lists every supervisor of the caller's own account.
     #[schemars(description = "peers only: `all` lists your account's supervisors in every project")]
@@ -1061,7 +1076,7 @@ pub struct CoordinationRequest {
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. loop_start/worktree_create: the loop's or worktree's task. spawn_workers: pre-assign to the one spawned worker; an open task_id also authorizes a spawn without an active EPIC. server_start: owning task; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
+        description = "Task ID. loop_start/worktree_create: its task. spawn_workers: pre-assign the one spawned worker (an open task_id authorizes a spawn without an active EPIC). server_start: owner; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message merge_request=true: the parked delivery."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -1161,7 +1176,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never trunk (allow_trunk). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
@@ -1170,7 +1185,7 @@ pub struct CoordinationRequest {
     /// task WorkTarget is declared (cas-0b32/cas-84df). Independent of `force`
     /// so authorizing trunk never bypasses dirty-worktree protection.
     #[schemars(
-        description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared WorkTarget never needs it). Refusals name the trunk destination first; trunk pushes warn loudly. Separate from force= (dirty worktree)."
+        description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared one never needs it). Refusals name the trunk first; trunk pushes warn. Separate from force=."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub allow_trunk: Option<bool>,
@@ -1286,8 +1301,8 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub event_type: Option<String>,
 
-    /// Payload (for queue_notify)
-    #[schemars(description = "JSON payload containing event details")]
+    /// Event details or exact-tip supervisor test evidence.
+    #[schemars(description = "queue_notify: event JSON. record_test_receipt (supervisor, with task_id): {head: full SHA, repo, cargo_args: nextest argv, log_path: one-run log, exit_code: 0}; both checkouts clean at head; never runs Cargo.")]
     #[serde(default)]
     pub payload: Option<String>,
 
@@ -1335,7 +1350,7 @@ pub struct CoordinationRequest {
 
     /// Whether workers need isolated git worktrees
     #[schemars(
-        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout and risks contamination: HEAD can switch between tool calls, commits can land on another worker's branch, HEAD:<mine> pushes can graft foreign commits, skill files can change mid-session. Such spawn receipts warn."
+        description = "Give each worker its own git worktree; prefer true. false or omitted shares one mutable checkout: HEAD can switch between calls, commits can land on another worker's branch, HEAD:<mine> pushes can graft foreign commits, skill files can change mid-session. Such spawns warn."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub isolate: Option<bool>,
@@ -1612,6 +1627,8 @@ impl CoordinationRequest {
     pub fn to_factory_request(&self) -> super::FactoryRequest {
         super::FactoryRequest {
             action: self.action.clone(),
+            json: self.json,
+            full: self.full,
             id: self.id.clone(),
             name: self.name.clone(),
             count: self.count,

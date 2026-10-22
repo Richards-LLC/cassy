@@ -10,6 +10,8 @@ pub mod operator_ops;
 mod read_ops;
 mod util;
 
+pub(super) use read_ops::{config_key_has_override, reset_config_value};
+
 use std::path::Path;
 
 use clap::{Parser, Subcommand};

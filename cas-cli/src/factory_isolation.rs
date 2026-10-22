@@ -47,6 +47,7 @@ pub fn worker_task_branch(worker_name: &str, task_id: &str) -> String {
 /// worker's branch; the next holder's commit or park binds its own. Returns
 /// the retired branch.
 pub fn retire_branch_binding(deliverables: &mut cas_types::TaskDeliverables) -> Option<String> {
+    deliverables.factory_branch_start = None;
     let branch = deliverables.parked_branch.take();
     if let Some(branch) = branch.as_deref() {
         deliverables.record_handoff_branch(branch);

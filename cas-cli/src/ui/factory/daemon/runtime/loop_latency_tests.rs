@@ -480,9 +480,14 @@ async fn flv2_external_reminders_never_on_lane() {
             .unwrap();
     }
 
-    // A time reminder whose owner has shut down falls back to this
-    // factory's supervisor, so it has a recipient without a director read.
-    let mut gone = cas_types::Agent::new("gone".into(), "gone-worker".into());
+    // Only a retired supervisor can hand its reminder to a successor;
+    // worker targets stay pending (CONTRIBUTING, reminder routing policy).
+    // This gives the scan a recipient without reading the director.
+    let mut gone = cas_types::Agent::new_with_role(
+        "gone".into(),
+        "previous-supervisor".into(),
+        cas_types::AgentRole::Supervisor,
+    );
     agents.register(&gone).unwrap();
     gone.status = cas_types::AgentStatus::Shutdown;
     agents.update(&gone).unwrap();
@@ -538,6 +543,11 @@ async fn flv2_external_reminders_never_on_lane() {
         assert!(Instant::now() < deadline, "the due reminder never fired");
         std::thread::sleep(Duration::from_millis(10));
     }
+
+    assert!(
+        reminders.list_recently_fired(60).unwrap().iter().any(|r| r.id == due),
+        "the due time reminder must fire, not merely expire"
+    );
 
     // The scan ran off the loop: every branch was fetched, failed, and is
     // now backing off. No condition was true, so nothing fired.

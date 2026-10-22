@@ -71,6 +71,19 @@ fn test_validate_bool() {
     assert!(reg.validate("sync.enabled", "false").is_ok());
     assert!(reg.validate("sync.enabled", "yes").is_ok());
     assert!(reg.validate("sync.enabled", "invalid").is_err());
+    for (value, expected) in [
+        ("yes", "true"),
+        ("no", "false"),
+        ("1", "true"),
+        ("0", "false"),
+    ] {
+        assert!(reg.validate("sync.enabled", value).is_ok());
+        let mut config = crate::config::Config::default();
+        config
+            .set("sync.enabled", value)
+            .unwrap_or_else(|error| panic!("registry-approved boolean {value} was rejected: {error}"));
+        assert_eq!(config.get("sync.enabled").as_deref(), Some(expected), "{value}");
+    }
     assert!(reg.validate("sync.promotion_threshold", "2").is_ok());
     assert!(reg.validate("sync.promotion_threshold", "1").is_err());
     assert!(reg.validate("sync.demotion_threshold", "2").is_ok());

@@ -31,7 +31,17 @@ pub(crate) fn execute_edit_line_based(
     cli: &Cli,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
-    use std::io::{self, BufRead, Write};
+    let stdin = std::io::stdin();
+    execute_edit_line_based_with_input(args, cli, cas_root, &mut stdin.lock())
+}
+
+fn execute_edit_line_based_with_input(
+    args: &ConfigEditArgs,
+    cli: &Cli,
+    cas_root: &Path,
+    reader: &mut impl std::io::BufRead,
+) -> anyhow::Result<()> {
+    use std::io::Write;
 
     let mut config = Config::load(cas_root)?;
     let original = config.clone();
@@ -87,9 +97,9 @@ pub(crate) fn execute_edit_line_based(
     fmt.key_hint("q", "skip remaining")?;
     fmt.newline()?;
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let mut stdout = std::io::stdout();
     let mut changes_made = 0;
+    let mut pending_resets = Vec::new();
 
     for meta in configs_to_edit {
         let current_value = items
@@ -124,7 +134,7 @@ pub(crate) fn execute_edit_line_based(
 
         // Read input
         let mut input = String::new();
-        stdin.lock().read_line(&mut input)?;
+        reader.read_line(&mut input)?;
         let input = input.trim();
 
         match input {
@@ -140,9 +150,11 @@ pub(crate) fn execute_edit_line_based(
                 break;
             }
             "d" | "D" => {
-                // Reset to default
-                if current_value != meta.default {
+                let has_override =
+                    crate::cli::config::config_key_has_override(meta.key, cas_root)?;
+                if current_value != meta.default || has_override {
                     config.set(meta.key, meta.default)?;
+                    pending_resets.push(meta.key.to_owned());
                     changes_made += 1;
                     fmt.success(&format!("   Reset to: {}", meta.default))?;
                 } else {
@@ -186,6 +198,9 @@ pub(crate) fn execute_edit_line_based(
             crate::config::operator_policy::InvocationContext::from_process,
         )?;
         config.save(cas_root)?;
+        for key in pending_resets {
+            crate::cli::config::reset_config_value(&key, cas_root)?;
+        }
         fmt.success(&format!("Saved {changes_made} change(s)"))?;
     } else {
         fmt.write_muted("No changes made")?;
@@ -197,4 +212,87 @@ pub(crate) fn execute_edit_line_based(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn line_editor_d_removes_override_and_restores_hub_fallback() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
+        )
+        .unwrap();
+
+        let registry = registry();
+        let mut answers = String::new();
+        'sections: for section in registry.sections() {
+            if !section.starts_with("hub") {
+                continue;
+            }
+            for meta in registry.configs_in_section(section) {
+                if meta.key == "hub.transport_mode" {
+                    answers.push_str("d\nq\n");
+                    break 'sections;
+                }
+                answers.push('\n');
+            }
+        }
+        let args = ConfigEditArgs {
+            section: Some("hub".into()),
+            modified: false,
+            all: true,
+        };
+        let cli = Cli::parse_from(["cas", "--json"]);
+        execute_edit_line_based_with_input(&args, &cli, &root, &mut std::io::Cursor::new(answers))
+            .unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["hub"].get("transport_mode").is_none(), "{saved}");
+        assert_eq!(
+            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
+            crate::config::HubTransportMode::Loopback
+        );
+    }
+
+    #[test]
+    fn line_editor_d_on_absent_default_preserves_config_file() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = "# keep this comment\n";
+        std::fs::write(root.join("config.toml"), original).unwrap();
+
+        let registry = registry();
+        let mut answers = String::new();
+        'sections: for section in registry.sections() {
+            if !section.starts_with("hub") {
+                continue;
+            }
+            for meta in registry.configs_in_section(section) {
+                if meta.key == "hub.transport_mode" {
+                    answers.push_str("d\nq\n");
+                    break 'sections;
+                }
+                answers.push('\n');
+            }
+        }
+        let args = ConfigEditArgs {
+            section: Some("hub".into()),
+            modified: false,
+            all: true,
+        };
+        let cli = Cli::parse_from(["cas", "--json"]);
+        execute_edit_line_based_with_input(&args, &cli, &root, &mut std::io::Cursor::new(answers))
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
+    }
 }

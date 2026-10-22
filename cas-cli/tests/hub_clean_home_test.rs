@@ -2377,6 +2377,96 @@ fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
 fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
     use cas::hub::HubRuntimePaths;
 
+    // cas-036b: a stop can acquire the machine lock between the launcher
+    // releasing it and the new foreground hub acquiring it. Force a real
+    // failed first acquisition, then either finish cleanup or hold it through
+    // the bounded startup wait so the caller receives the specific failure.
+    for cleanup_finishes in [true, false] {
+        let home = private_home();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let barrier = home.path().join("startup-lock-barrier");
+        fs::create_dir(&barrier).unwrap();
+        let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let mut command = cas_process_command(home.path(), bin.as_os_str());
+        let mut start = command
+            .env("CAS_TEST_HUB_LAUNCH_BARRIER", &barrier)
+            .env("CAS_TEST_HUB_STARTUP_LOCK_BARRIER", &barrier)
+            .args([
+                "--json", "hub", "--no-tailscale-serve", "start", "--port", "0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start hub at lock handoff barrier");
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        let launcher = loop {
+            let launcher = fs::read_dir(&barrier).unwrap().filter_map(Result::ok)
+                .find_map(|entry| entry.file_name().to_string_lossy()
+                    .strip_prefix("launcher-").and_then(|pid| pid.parse::<u32>().ok()));
+            if launcher.is_some() || Instant::now() >= deadline {
+                break launcher;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if launcher.is_none() {
+            let _ = fs::write(barrier.join("release-launchers"), b"release\n");
+            let _ = fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = fs::write(barrier.join("release-startup-lock"), b"release\n");
+            let output = start.wait_with_output().unwrap();
+            panic!("launcher did not reach lock handoff: {output:?}");
+        }
+        let launcher = launcher.unwrap();
+        let mut cleanup_lock = paths.acquire_instance_lock().unwrap();
+        cleanup_lock.set_phase("stopping").unwrap();
+        let unrelated_error = paths.root().join(".launcher-unrelated.error");
+        fs::write(&unrelated_error, b"another launch's diagnostic").unwrap();
+        fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
+        let contention = barrier.join(format!("startup-lock-waiter-{launcher}"));
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        while !contention.exists() && start.try_wait().unwrap().is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cleanup_lock = Some(cleanup_lock);
+        let held_lock = if cleanup_finishes {
+            drop(cleanup_lock);
+            None
+        } else {
+            cleanup_lock
+        };
+        fs::write(barrier.join("release-startup-lock"), b"release\n").unwrap();
+        fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+        let output = start.wait_with_output().unwrap();
+        assert!(contention.exists(), "hub did not attempt the contended lock: {output:?}");
+        let errors = fs::read_dir(paths.root()).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".error"))
+            .map(|entry| entry.path()).collect::<Vec<_>>();
+        assert_eq!(errors, vec![unrelated_error.clone()], "launch leaked its diagnostic file");
+        assert_eq!(fs::read(&unrelated_error).unwrap(), b"another launch's diagnostic");
+        if !cleanup_finishes {
+            assert!(!output.status.success(), "hub ignored the held machine lock: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("machine lock remained held"),
+                "startup timeout lost its specific diagnostic: {stderr}");
+            assert!(!paths.root().join("process.json").exists(), "timed-out hub published a record");
+            drop(held_lock);
+            continue;
+        }
+        assert!(output.status.success(), "hub abandoned a transient cleanup lock: {output:?}");
+        let started: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(started["pid"], launcher);
+        let status = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "status"]).output().unwrap();
+        let running: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(running["running"], true, "{running}");
+        assert_eq!(running["record"]["pid"], launcher, "{running}");
+        let stop = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "stop"]).output().unwrap();
+        assert!(stop.status.success());
+    }
+
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
@@ -2492,6 +2582,199 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             .acquire_instance_lock()
             .is_ok()
     );
+
+    // The two `hub start`/`hub restart` races above cover competing launchers.
+    // Also pin two restarts that both began stopping the same generation:
+    // hold the old hub after it removes its record, wait until both restart
+    // processes have entered the stop waiter, then release the old lock.
+    // Worker mode gives each detached hub its shared-server cgroup, so stale
+    // cleanup must not kill the replacement that joined a later generation.
+    let race_home = private_home();
+    let barrier = race_home.path().join("concurrent-restart-barrier");
+    fs::create_dir(&barrier).unwrap();
+    let session = format!("cas-3dc8-test-{}", std::process::id());
+    let initial = cas_command(race_home.path(), bin.as_os_str())
+        .env("CAS_AGENT_ROLE", "worker")
+        .env("CAS_FACTORY_SESSION", &session)
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "start",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("start worker hub for concurrent restart race");
+    assert!(
+        initial.status.success(),
+        "worker hub start failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+
+    let spawn_restart = |name: &str| {
+        let stdout_path = race_home.path().join(format!("{name}.stdout"));
+        let stderr_path = race_home.path().join(format!("{name}.stderr"));
+        let mut command = cas_process_command(race_home.path(), bin.as_os_str());
+        command
+            .env("CAS_AGENT_ROLE", "worker")
+            .env("CAS_FACTORY_SESSION", &session)
+            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+            .args([
+                "--json",
+                "hub",
+                "--no-tailscale-serve",
+                "restart",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()));
+        let child = command.spawn().expect("spawn concurrent restart");
+        (child, stdout_path, stderr_path)
+    };
+    let (mut first, first_stdout, first_stderr) = spawn_restart("restart-a");
+    let old_hub_waiting = barrier.join("record-removed-lock-held");
+    let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    while !old_hub_waiting.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !old_hub_waiting.exists() {
+        let _ = fs::write(barrier.join("release"), b"release\n");
+        let _ = first.wait_with_output();
+        panic!("old hub did not reach the deterministic lock-release barrier");
+    }
+    let (mut second, second_stdout, second_stderr) = spawn_restart("restart-b");
+    let waiter_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    loop {
+        let waiters = fs::read_dir(&barrier)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("restart-stop-waiter-")
+            })
+            .count();
+        if waiters >= 2 || Instant::now() >= waiter_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let waiter_count = fs::read_dir(&barrier)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("restart-stop-waiter-")
+        })
+        .count();
+    let _ = fs::write(barrier.join("release"), b"release\n");
+    let first_status = first.wait().expect("wait first concurrent restart");
+    let second_status = second.wait().expect("wait second concurrent restart");
+    let first = std::process::Output {
+        status: first_status,
+        stdout: fs::read(first_stdout).unwrap(),
+        stderr: fs::read(first_stderr).unwrap(),
+    };
+    let second = std::process::Output {
+        status: second_status,
+        stdout: fs::read(second_stdout).unwrap(),
+        stderr: fs::read(second_stderr).unwrap(),
+    };
+
+    let status = cas_command(race_home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("read hub after concurrent restarts");
+    let running = serde_json::from_slice::<Value>(&status.stdout).ok();
+    let running_pid = running
+        .as_ref()
+        .and_then(|status| status["record"]["pid"].as_u64());
+    let cleanup = cas_command(race_home.path(), bin.as_os_str())
+        .env("CAS_AGENT_ROLE", "worker")
+        .env("CAS_FACTORY_SESSION", &session)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop concurrent restart fixture");
+
+    let labelled = [("restart-a", &first), ("restart-b", &second)];
+    let detail = labelled
+        .iter()
+        .map(|(name, output)| {
+            format!(
+                "{name}: exit={}, stdout={}, stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert_eq!(waiter_count, 2, "both restarts must reach the stop wait: {detail}");
+    assert!(status.status.success(), "hub status failed: {detail}");
+    assert_eq!(running.as_ref().unwrap()["running"], true, "{detail}");
+    let running_pid = running_pid.expect("running hub PID");
+    assert_ne!(running_pid, initial["pid"].as_u64().unwrap(), "{detail}");
+    assert!(
+        cleanup.status.success(),
+        "fixture cleanup failed: {}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+
+    let mut launched_pids = Vec::new();
+    let mut satisfied_pids = Vec::new();
+    for (name, output) in labelled {
+        let value: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{name} did not emit one JSON value ({error}): {detail}"));
+        if output.status.success() {
+            let pid = value["start"]["pid"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{name} success has no hub PID: {value}"));
+            match value["start"]["already_satisfied"].as_bool() {
+                Some(false) => launched_pids.push(pid),
+                Some(true) => satisfied_pids.push(pid),
+                None => panic!("{name} success has no start disposition: {value}; {detail}"),
+            }
+            if value["start"]["already_satisfied"] == true
+                || value["stop"]["already_satisfied"] == true
+            {
+                assert_eq!(
+                    pid, running_pid,
+                    "{name} already-satisfied stop must return the running hub: {value}; {detail}"
+                );
+            }
+            assert_eq!(pid, running_pid, "{name} must report the running hub: {value}; {detail}");
+        } else {
+            let message = value["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("another cas hub instance won the machine lock")
+                    && message.contains(&format!("pid {running_pid}")),
+                "{name} reported an error inconsistent with the running winner: {value}; {detail}"
+            );
+        }
+    }
+    assert_eq!(
+        launched_pids,
+        vec![running_pid],
+        "exactly one restart may report that it launched the running hub: {detail}"
+    );
+    assert!(
+        satisfied_pids.iter().all(|pid| *pid == running_pid),
+        "a peer-satisfied restart must identify the running hub: {detail}"
+    );
+    if let Some(old_cgroup) = initial["cgroup"].as_str() {
+        assert_ne!(
+            running.as_ref().unwrap()["record"]["cgroup"].as_str(),
+            Some(old_cgroup),
+            "a replacement must not share a cgroup with the generation its stop cleans up"
+        );
+    }
 }
 
 #[path = "../../crates/cas-core/src/test_child.rs"]

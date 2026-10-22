@@ -18,6 +18,45 @@ WebSocket connection, or a device's first history-page request resets that retry
 schedule. Each scheduled retry logs its next delay; intervening daemon passes
 neither rebroadcast the reply nor stamp it selected again.
 
+## Supervisor succession and committed-work recovery
+
+Supervisor retirement keeps a project/host-scoped handoff before clearing registry
+ownership. The next local supervisor receives its tasks, worker registrations,
+parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in
+`.cas/supervisor-handoffs/`. Later successors retain fresh task/worker rows for
+unadopted inherited lane IDs and references to earlier receipts. Receiving evidence preserves live worker leases;
+explicitly adopt the listed epics before dispatching more work. `worker_status`
+and text `coordination action=peers` show recent session-end reasons locally.
+Harness reasons are retained verbatim; pane exits include code/signal, MCP ends
+name transport EOF or the parent watchdog, and unobserved causes stay `unknown`.
+
+A live registered successor can recover a dead worker's committed, unpushed work
+with one authenticated action:
+
+```text
+factory action=recover_branch task_id=cas-1234 payload='{"branch":"factory/old-worker-cas-1234","head":"<full-40-character-SHA>","expected_remote":""}'
+```
+
+The CLI equivalent is `cas factory recover-branch --task-id cas-1234 --request
+recovery.json` (global `--json` prints the full receipt). The JSON file contains
+the same `branch`, `head` and `expected_remote` fields. Empty `expected_remote`
+requires the successor's destination ref to be absent; otherwise supply its
+observed full SHA. The source must belong to the task's recorded worker, whose
+registration or retirement evidence must exist and whose process/heartbeat must
+be dead. Live task leases, moved source tips, unrelated refs, changed remote tips
+and divergent successor branches refuse recovery. A destination already at the
+requested SHA is an idempotent replay.
+
+Recovery publishes on `factory/<successor>-<task>` through the ordinary private
+push guard, records intent and result on the task, and rebinds its assignee and
+anchor after verifying the push. A bounded temporary task lease prevents another
+worker from acquiring the task during recovery; only that exact lease generation
+is released afterward. It preserves the original worker checkout and
+ref. A failure retains source work and records the incomplete attempt; a push
+that succeeded before a concurrent task edit can be retried with the same exact
+source SHA after reviewing its intent. Dirty/uncommitted worker files still
+require an explicit separate recovery; this operation only copies commits.
+
 ## Coordination messages and reminders
 
 Authenticated messages directed to a supervisor wake its idle pane, including
@@ -189,8 +228,21 @@ Fired reminders use the same path and pane/tool/composer vetoes; a recent
 completed checkpoint plus continuing heartbeats does not postpone an idle
 supervisor's reminder. Self reminders that exhaust a wake budget stay readable
 and retry after the existing park interval, without inter-agent abandonment or
-unread escalation. Replacement supervisors retain self-addressing for those
-reminders; original owner and target IDs stay in the durable reminder record.
+unread escalation. Only a retired supervisor target can transfer its reminder to
+a replacement supervisor. A missing or retired worker target leaves its reminder pending until
+that exact target is available; a worker reminder reaches a supervisor only when
+the worker selected that target. Delegated reminders retain the issuing worker
+as sender. Supervisor self-reminders retain self-addressing on takeover; original
+owner and target IDs stay in the durable reminder record.
+
+A worker's undelivered typed status/ready messages coalesce into one pending
+wake, carrying earlier bodies with their original notification ids and summaries.
+The fold is bounded at 8,000 bytes. An earlier row that does not fit stays pending
+independently and can be delivered after a newer row; delivery order is not a
+chronological guarantee. Use each body's original label to identify it. A fold
+keeps the strongest wake intent among its messages, including absorbed identical
+bodies; a fold containing only acknowledgements or explicit quiet messages waits
+for the next turn.
 
 Recipient drains revalidate typed lifecycle relays against the task's current
 terminal state before recording surfacing or spending the hook body budget.
@@ -297,6 +349,20 @@ disabled, the launch record says so.
 The session's `daemon.log` captures daemon stderr and can be empty or sparse
 while runtime tracing is active. Preflight diagnostics live in `launch.log`;
 an empty `daemon.log` does not indicate that preflight passed or tracing stopped.
+
+## Epic lanes shared across hosts
+
+With `CAS_PUSH_EPIC_BRANCH` disabled, epic creation keeps the Git lane local;
+sharing the task through Cloud does not transfer its ref. Task deliverables
+retain the originating host and branch so a peer's missing-lane spawn refusal
+names that host and prints `git push origin <epic-branch>` to run there before
+retrying. First focus or spawn on the source host still publishes the lane.
+The peer never reconstructs the lane from trunk. On the originating host, a
+missing lane gets known-tip recovery advice instead of an impossible push.
+Commands occupy their own plain line; synced host labels have control characters
+removed. Adopting an existing published lane does not invent an origin host. Missing legacy provenance
+produces a neutral unavailable-lane message; failed origin verification and
+previously published refs retain their separate refusal paths.
 
 ## Factory cloud client (disabled by default)
 
@@ -1068,6 +1134,17 @@ Task creation excludes common planning words and prose such as `NOT` and
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
+### Assignment on task creation
+
+In factory mode, `task action=create assignee=<worker>` uses the same worker
+identity normalization and freshness policy as `task action=update assignee=`.
+A refused assignment rejects the entire create before saving a task or queuing
+a worker prompt. Successful creates show the stored assignee, including any
+normalization or freshness warnings. `task action=show` always shows the stored
+assignee or `(unassigned)`. Parked-delivery and clean-idle reset exemptions,
+warning-only configuration, and assignments to workers not yet registered retain
+the update policy.
+
 ### Task start cancellation
 
 `task action=start` commits its local lease and InProgress status before awaiting
@@ -1077,6 +1154,63 @@ COMMITTED, including when notification and sync wrappers are disabled. Re-query
 the task before retrying. A failed lease acquisition leaves status unchanged;
 a failed status write releases only the lease generation acquired by that start.
 A sync-publication error after the local commit keeps the matching lease.
+
+Cloud acquisition and local lease publication share one per-task claim fence.
+Synchronous release and pending-release retry take that fence before inspecting
+a local lease or releasing its Cloud mirror. Operations needing both locks
+take the per-task fence before the global pending-records lock; the global lock
+never spans a network call. Settled fences release their OS lock but retain
+`.cas/claim-release-locks/<task-hash>.lock`: one small file per encountered task.
+Do not unlink, replace or truncate these files during normal operation.
+
+Only unreleased v57 development builds deleted settled fence files; released
+3.71.0 has no per-task claim fence. In those development builds, a generation
+check protected only callers that used it. An older development process could
+open a file before settlement deleted it, then lock that detached inode while
+another process held a replacement. Keeping the same inode prevents that split;
+generation checks cannot repair an already detached old handle. Retire every
+unlinking development process to end that existing window.
+
+**3.71 → 3.72 rollout:** after installing 3.72, restart every `cas serve`, hub
+and worker session on the host, including harness-owned MCP servers and pinned
+sessions. A still-running 3.71 process takes no per-task fence and can race a
+3.72 process on the same task. This restart requirement applies to released
+3.71 installations as well as unreleased v57 development builds.
+
+`cas update` replaces the binary and can restart the managed hub; it does not
+restart harness-owned stdio `cas serve` processes or worker sessions, or verify
+that every running process has loaded 3.72. Binary replacement and a hub restart
+alone do not complete this rollout. End the old sessions and relaunch them with
+the installed 3.72 binary before resuming task claims.
+
+Fence-file removal belongs only to offline GC after explicit quiescence.
+Prevent every operation from holding or reopening these files throughout
+collection. Verify that no live process uses an older fence protocol, or reload
+every `cas serve`, hub and pinned session on the persistent-fence build before
+collecting. Prevent older executables from starting again during collection.
+Age, an idle agent row or a file version marker is not proof. There is no
+automatic online fence-file GC; retained files are intentional compatibility
+state.
+
+Windows claim fencing has not been exercised and remains an implementation
+limitation. The generation recheck in `lock_task_claim_release_with` reads the
+path through a second handle after taking the exclusive whole-file lock.
+Windows mandatory locking can reject that read even without an old process or
+external cleanup. Persistent files and restarting sessions do not resolve this
+second-handle problem. A Windows fix must preserve path-identity validation as
+well as read through the locked handle; reading that handle alone would miss a
+replaced path. No Windows asset is built by the release workflow today.
+
+On a fence acquisition error, acquisition reports PEERS NOT CHECKED and continues
+with the local lease, synchronous release preserves the Cloud claim, and a
+pending release stays queued for retry. Windows cross-process claim exclusion
+is therefore **not verified**; do not rely on this advisory fallback for it.
+
+If the peer budget expires just after start cancels a pending release, Cloud
+acquisition can still be unavailable. Start reports PEERS NOT CHECKED and takes
+the local lease; normal claim renewal reacquires the missing Cloud mirror. The
+cancellation protects the new local holder from the old release and is retained
+in this advisory fallback.
 
 ### Task lease release
 
@@ -1311,6 +1445,36 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+When worker admission is unavailable but a supervisor has already run the
+selection in a scratch checkout, a **live registered supervisor** may record
+that run without executing it again. Use `factory action=record_test_receipt
+ task_id=<task> payload=<JSON>` (MCP), or `cas factory record-test-receipt
+--task-id <task> --request <evidence.json>` (CLI). The JSON is:
+
+```json
+{
+  "head": "<full tested commit SHA>",
+  "repo": "/absolute/supervisor-tested-checkout",
+  "cargo_args": ["nextest", "run", "-p", "cas", "--lib", "-E", "test(module::name)"],
+  "log_path": "/absolute/selected-nextest-run.log",
+  "exit_code": 0
+}
+```
+
+This is an explicit supervisor attestation of the recorded process exit code.
+The task must be assigned to a registered worker; its checkout and the tested
+checkout must both still be clean at `head`. The command must satisfy the same
+single-package, named-test and explicit-harness rules as a worker run. The
+non-empty UTF-8 log (at most 25 MiB) must contain exactly one nextest summary,
+with a nonzero selection and every executed test passed. Supply the selected
+run's log, without separate guard-run summaries. A failed recorded retry removes
+that exact command's previous receipt. An active worker run refuses recording.
+The action writes the normal worker-check receipt key and adds
+`supervisor-recorded` provenance to both its displayed receipt and task audit
+note, including the issuer, tested checkout, command and log SHA-256. Park reads
+it through the existing receipt contract; the recording action runs no Cargo
+command and changes no worker admission guard.
+
 Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
 `some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
 Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
@@ -1354,6 +1518,20 @@ fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply
 Invalid hand-edited thresholds use defaults. A denied worker command prints
 `Waiting for build admission` with its measured reason and asks for the same
 capped command to be retried; it does not hold a builder slot while waiting.
+Registered workers retain their InProgress task and lease during capacity
+waiting. Each refusal updates one durable worker/task/lease-generation episode,
+with its original start, current cause and next retry (120 seconds). worker_status
+shows that episode once; the background reminder scan queues at most one capacity
+notice after 20 minutes. Its wake request follows normal supervisor readiness
+policy and retains the task's active state. A delivered explicit assistance
+message consumes that episode's automatic notice even after a gap longer than
+four minutes between retries. A stale retry stops reserving queue position;
+the live task lease still preserves its original wait age and notice state.
+Workers cannot change priority on any non-terminal task, including Open and
+AwaitingMerge; reopening does not grant permission to promote it. Priority
+updates refuse when caller authority cannot be read. Successful admission clears
+the wait, and a changed task/lease invalidates it. Capacity waiting never changes task
+status; genuine blocked/yielded tasks retain their existing semantics.
 `force=true` only overrides the existing spawn-time soft check, never capped
 worker slot locks.
 
@@ -1370,6 +1548,48 @@ switch on systemd older than 254, whose scopes already pass arguments literally.
 Daemon startup also tries to give its inherited interactive cgroup (including
 the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
 settings. Missing controllers or user-manager permissions leave startup working.
+
+Task verifiers use the same budget. Run `cas factory verifier-test
+--cas-root <root> --task-id <task-id> --dispatch-id <dispatch-id>
+--head <bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>]
+-E 'test(name)'`. Omit `--dispatch-id` when no dispatch exists. The helper
+creates a managed detached checkout, resolves Zig, seeds a private Cargo target
+and runs through the existing counted builder slot, PSI and capacity checks.
+
+For a supervisor walk or source review, create the same disposable checkout:
+
+```bash
+cas factory scratch-checkout --cas-root <root> --task-id <task-id> --head <full SHA>
+```
+
+Use the printed absolute path as the review directory. Add `--dispatch-id` when
+reviewing a dispatch. With `factory.scratch_root` configured, the managed home
+is `<scratch_root>/<project-key>/verify/<task-id>/<run>/repo`; otherwise it is
+`<root>/review-scratch/<task-id>/<run>/repo`. Each run has a private ownership
+record and exclusive lease; retries reuse the same task/dispatch/full-head
+checkout, so admission refusals cannot multiply source trees. Changed source
+or ownership refuses reuse; no existing ad-hoc directory is adopted.
+Publish durable proof outside that disposable home, in the task artifact root.
+
+`gc_report` includes managed review checkout status and flags unmanaged scratch
+root siblings of at least 1 GiB (apparent file bytes) as review-only. The
+unmanaged scan stops at that threshold and reports a lower bound, not a full
+recursive total.
+`gc_cleanup force=true dry_run=false` reclaims owned checkouts idle for at least
+two hours when the task is Closed/Cancelled or the exact dispatch is resolved.
+Successful checkout reuse refreshes `last_used_at`; older records without that
+field use creation time. It
+checks leases and native process evidence (open files, cwd, mappings and argv),
+rechecks terminal ownership, and retains any checkout with edited tracked files
+or untracked files, even if local Git configuration hides untracked status.
+Existing checkouts use non-force `git worktree remove`, which also refuses
+concurrent source edits; ignored build output is disposable. Force is permitted
+only to remove a registration whose checkout directory is already gone. It then
+deletes the disposable home. Unknown/malformed ownership,
+changed heads, another repository's registration, live or unverifiable users,
+and younger checkouts are retained. Force alone remains a preview for this tier.
+These rules make interrupted verifier/supervisor output collectable without
+relying on an agent remembering to remove a large checkout.
 
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create
@@ -1390,6 +1610,21 @@ An omitted target selects `--lib`; `--test` must name one explicit harness from
 positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
 Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
 environment prefixes, compound commands, repeated packages and broader flags.
+For a credential-free CI reproduction, first create a private config directory.
+The hook also accepts this complete fixed profile before a named nextest command
+(use an existing, literal absolute path without shell expansion):
+
+```bash
+env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+```
+
+The hook carries this as runner metadata, including detached execution. The
+runner removes those six credentials and sets XDG only on the final Cargo/test
+child, after Cassy credential bootstrap and normal builder admission. Parent
+identity, private targets, memory limits and clean-tip receipts remain in force.
+Other environment wrappers, partial profiles, identity/build overrides and shell
+substitutions remain refused; this profile is for targeted tests, not checks.
+
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
@@ -1439,7 +1674,11 @@ exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
 Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
 pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
-writes a PASS receipt for the pushed tip; a missing tool fails the push. With
+writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
+attempts print a retained log directory under the Git common directory's
+`cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
+Each attempt has its own directory so a later push preserves the original failure.
+With
 the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
 and no broad Rust tests for factory pushes; unset (the default) the lanes run as
 before, so the switch waits for a runtime with these guards. Park reads, and
@@ -1972,9 +2211,11 @@ registrations are rechecked. Other registered remaps and their bases stay
 intact; only dead owned bases' `suite.tar.zst`, `extract`, `tmp`, `cargo-home`
 and `bin` siblings may be reclaimed. The operator's main checkout stays
 registered and intact.
-`gc_report` includes paths, reclaimed/reclaimable and retained bytes in
-`RELEASE_SCRATCH_STATUS_JSON`; scratch `gc_cleanup` requires both `force=true`
-and `dry_run=false`. Reports never create locks or owner records.
+`gc_report` summarizes release-scratch inventory by default. Its explicit
+`--full` view (MCP `full=true`) includes paths, reclaimed/reclaimable and retained
+bytes in `RELEASE_SCRATCH_STATUS_JSON`; `--json` (MCP `json=true`) exposes the
+same records in typed `machine_status`. Scratch `gc_cleanup` requires both
+`force=true` and `dry_run=false`. Reports never create locks or owner records.
 
 Verified dead owners are swept on the next start, including fresh SIGKILL
 leftovers; age only protects unknown provenance. A surviving descendant's
@@ -2044,8 +2285,10 @@ Explicit `gc_cleanup force=true dry_run=false` removes stale owned detached prev
 including their Git registration, after revalidating ownership, process liveness
 and `factory.target_cache_min_idle_secs`. Recent or live previews survive;
 previews created before provenance was recorded remain inventory-only. The
-`TARGET_CACHE_STATUS_JSON` report includes preview target sizes and
-`lane_previews` dispositions. The existing high/low watermark configuration
+explicit `gc_report --full` view (MCP `full=true`) includes preview target sizes
+and `lane_previews` dispositions in `TARGET_CACHE_STATUS_JSON`; `--json` (MCP
+`json=true`) includes the typed record in `machine_status`. The default summary
+omits raw status records. The existing high/low watermark configuration
 controls cache pressure warnings; preview cleanup does not need disk pressure.
 On macOS, liveness uses NUL-delimited `lsof` field output and fails closed if
 that probe is unavailable or reports errors. Only the evictor's held Cargo-lock
@@ -2378,6 +2621,17 @@ task still needs evidence linking it to this delivery.
 A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
+An undeclared helper that never delivered code may instead close with
+`no_delivery=true reason="<completed helper outcome>"`. This declaration is
+required on every attempt and audited with the registered caller, repository,
+target SHA and measured refs. Cassy requires readable Git and task attribution,
+no recorded delivery or binding QA round, and no task commits or unmerged work
+on any local/origin candidate lane or closing HEAD. Empty diffs alone grant no
+exception. The declaration skips QA and factory-branch delivery gates while
+preserving verification and uncommitted-work checks; it sets no methodology,
+external reference or delivery anchor. It cannot be combined with other close
+receipts, dispositions or overrides. The unified MCP and per-action close
+requests expose this flag; there is no separate CLI task-close command.
 A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.
@@ -2472,6 +2726,13 @@ blob comparison in the review. Do not manufacture a corrective commit or edit
 task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 64d1740bd7bb065049dea3b9c7eee2e712738e68 as its reviewed-drop receipt; anchor
 6ff3c4d6e and target held app.js blob 5bde1a1d1bf2b077538c054ee758bc8ffcdd4006.
+
+Epic status reports `anchor superseded by <sha> (<task>)` as information when
+an ordinary later commit retires still-owned anchor lines and its subject names
+another task, or it is that closed child's recorded delivery. Body references
+and path touches alone grant no authority. A merge-resolution loss remains
+`content dropped`; later task edits cannot revive ownership already lost there.
+This epic accounting rule does not relax the individual task close proof.
 
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and

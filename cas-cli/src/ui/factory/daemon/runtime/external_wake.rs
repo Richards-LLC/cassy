@@ -204,63 +204,102 @@ fn session_gone(
     }
 }
 
-/// Expire pending external reminders (`branch_contained_in`, `tag_exists`,
-/// `ci_completed`) whose owner and target sessions are both gone (see
-/// [`session_gone`]). These rows
-/// are durable by design, so without this a dead session's wake is re-probed
-/// forever, including one already satisfied whose target can never receive
-/// it. Returns the number expired.
+/// Pending reminders whose owner and target sessions are both gone (see
+/// [`session_gone`]), and whether each would otherwise never end: an
+/// external wake (`branch_contained_in`, `tag_exists`, `ci_completed`), or
+/// (cas-c634) an internal-event wake set never to expire.
+fn orphaned_reminders(
+    cas_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+) -> Option<(std::sync::Arc<dyn cas_store::ReminderStore>, Vec<(cas_store::Reminder, bool)>)> {
+    let (Ok(reminders), Ok(agents)) = (
+        crate::store::open_reminder_store(cas_dir),
+        crate::store::open_agent_store(cas_dir),
+    ) else {
+        return None;
+    };
+    let pending = reminders.list_all_pending().ok()?;
+    let orphaned = pending
+        .into_iter()
+        .filter(|reminder| {
+            let gone = |agent_id: &str| {
+                session_gone(agents.as_ref(), agent_id, reminder.created_at, now, process_alive)
+            };
+            gone(&reminder.owner_id)
+                && (reminder.target_id == reminder.owner_id || gone(&reminder.target_id))
+        })
+        .map(|reminder| {
+            let external = matches!(
+                reminder.trigger_event.as_deref(),
+                Some(EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT)
+            );
+            let never_ends = external
+                || (reminder.trigger_type == cas_store::ReminderTriggerType::Event
+                    && reminder.ttl_secs == 0);
+            (reminder, never_ends)
+        })
+        .collect();
+    Some((reminders, orphaned))
+}
+
+/// Expire pending reminders that would otherwise never end once their owner
+/// and target sessions are both gone: external wakes, durable by design and
+/// otherwise re-probed forever (GH #1208), and (cas-c634) never-expiring
+/// internal-event wakes, such as a retired worker's own `task_completed`
+/// wait, which the TTL pass skips. Other orphans keep their TTL and are
+/// logged. Returns the number expired.
 pub(crate) fn expire_dead_session_reminders(
     cas_dir: &Path,
     now: chrono::DateTime<chrono::Utc>,
     process_alive: &dyn Fn(&cas_types::Agent) -> bool,
 ) -> usize {
-    let (Ok(reminders), Ok(agents)) = (
-        crate::store::open_reminder_store(cas_dir),
-        crate::store::open_agent_store(cas_dir),
-    ) else {
+    let Some((reminders, orphaned)) = orphaned_reminders(cas_dir, now, process_alive) else {
         return 0;
     };
     let mut expired = 0;
-    for event_type in [
-        EXTERNAL_BRANCH_CONTAINED_EVENT,
-        EXTERNAL_TAG_EXISTS_EVENT,
-        EXTERNAL_CI_COMPLETED_EVENT,
-    ] {
-        let Ok(pending) = reminders.get_event_reminders(event_type) else {
+    let mut left_to_ttl = 0;
+    for (reminder, never_ends) in orphaned {
+        if !never_ends {
+            left_to_ttl += 1;
             continue;
-        };
-        for reminder in pending {
-            let gone = |agent_id: &str| {
-                session_gone(agents.as_ref(), agent_id, reminder.created_at, now, process_alive)
-            };
-            let owner_gone = gone(&reminder.owner_id);
-            let target_gone = owner_gone
-                && (reminder.target_id == reminder.owner_id || gone(&reminder.target_id));
-            if !target_gone {
-                continue;
-            }
-            match reminders.expire(reminder.id) {
-                Ok(true) => {
-                    expired += 1;
-                    tracing::info!(
-                        reminder_id = reminder.id,
-                        event_type,
-                        owner = %reminder.owner_id,
-                        target = %reminder.target_id,
-                        "expired external reminder whose owning session is gone"
-                    );
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
+        }
+        match reminders.expire(reminder.id) {
+            Ok(true) => {
+                expired += 1;
+                tracing::info!(
                     reminder_id = reminder.id,
-                    %error,
-                    "failed to expire dead-session external reminder"
-                ),
+                    event_type = reminder.trigger_event.as_deref().unwrap_or("time"),
+                    owner = %reminder.owner_id,
+                    target = %reminder.target_id,
+                    "expired reminder whose issuing and receiving sessions are gone"
+                );
             }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                reminder_id = reminder.id,
+                %error,
+                "failed to expire dead-session reminder"
+            ),
         }
     }
+    if left_to_ttl > 0 {
+        tracing::info!(
+            count = left_to_ttl,
+            "pending reminders whose issuer and recipient are both gone; they end at their TTL"
+        );
+    }
     expired
+}
+
+/// cas-c634: pending reminders whose issuer and recipient are both gone
+/// (see [`session_gone`]). No live agent sees them otherwise.
+pub(crate) fn orphaned_reminder_count(
+    cas_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+) -> usize {
+    orphaned_reminders(cas_dir, now, process_alive).map_or(0, |(_, orphaned)| orphaned.len())
 }
 
 /// One complete scan; runs on the scanner thread, never the daemon loop.
@@ -626,8 +665,16 @@ mod tests {
         let live_target = create("dead", "live", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let process_backed = create("zombie", "zombie", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let director_event = create("pruned", "pruned", "task_completed");
+        // cas-c634: a retired worker's reminder to itself that also expires
+        // on its own TTL is left to that TTL, but counted as orphaned.
+        let director_with_ttl = reminders
+            .create_with_scope(
+                "pruned", Some("pruned"), "wake", cas_store::ReminderTriggerType::Event, None,
+                Some("task_blocked"), None, 86_400 * 30, Some("old-factory"), None, true, None,
+            )
+            .unwrap();
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [missing_old, dead_ci, director_event] {
+        for id in [missing_old, dead_ci, director_event, director_with_ttl] {
             conn.execute(
                 "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
                 rusqlite::params![(now - chrono::Duration::hours(25)).to_rfc3339(), id],
@@ -636,8 +683,15 @@ mod tests {
         }
 
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 3);
+        // cas-c634: the never-expiring internal-event reminder of a retired
+        // worker (director_event) is expired with the external ones.
+        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 4);
         assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 0);
+        assert_eq!(
+            orphaned_reminder_count(&cas_dir, now, &process_alive),
+            1,
+            "the TTL'd internal reminder of a retired worker is counted"
+        );
 
         let mut pending: Vec<i64> = reminders
             .list_all_pending()
@@ -648,9 +702,9 @@ mod tests {
         pending.sort_unstable();
         assert_eq!(
             pending,
-            vec![restarted, live, recent, live_target, process_backed, director_event]
+            vec![restarted, live, recent, live_target, process_backed, director_with_ttl]
         );
-        for expired in [dead_self, missing_old, dead_ci] {
+        for expired in [dead_self, missing_old, dead_ci, director_event] {
             assert!(!pending.contains(&expired));
         }
     }

@@ -67,6 +67,7 @@ fn epic() -> Task {
 
 fn req() -> TaskCloseRequest {
     TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: "cas-epic".into(),
         reason: None,

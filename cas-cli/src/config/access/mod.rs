@@ -7,6 +7,8 @@ mod notices;
 mod retirement;
 mod set;
 
+pub(crate) use set::validate_notification_webhook_url;
+
 pub(crate) use retirement::{ConfigRetirement, retire_config};
 pub(crate) use notices::{RetiredConfigNotice, RetiredNoticeScope, represented_retired_config};
 

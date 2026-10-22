@@ -885,8 +885,14 @@ fn prefer_fresher_base_ref_observed(
                 command, std::time::Duration::from_secs(10),
             ).is_ok_and(|output| output.status.code() == Some(2));
             if absent {
+                let [push] = match crate::worktree::GitOperations::git_remedies([
+                    &["push", "origin", branch],
+                ]) {
+                    Ok(commands) => commands,
+                    Err(refusal) => return refusal,
+                };
                 format!(
-                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; publish before retrying:\n{push}",
                     observed_state(),
                 )
             } else {
@@ -982,8 +988,16 @@ fn ensure_local_spawn_parent(
     }
     let remote = format!("origin/{local}");
     let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
+        let parent_label = crate::worktree::GitOperations::visible_git_label(parent);
+        let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
+        let [fetch] = match crate::worktree::GitOperations::git_remedies([
+            &["fetch", "origin", local],
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return refusal,
+        };
         format!(
-            "spawn base '{parent}' does not resolve locally or as '{remote}' after fetch{}; run `git fetch origin {local}` and create a local branch from '{remote}' before retrying",
+            "spawn base '{parent_label}' does not resolve locally or as '{remote_label}' after fetch{}; fetch and create a local branch from '{remote_label}' before retrying:\n{fetch}",
             fetch_error
                 .map(|error| format!(" ({error})"))
                 .unwrap_or_default()
@@ -992,8 +1006,10 @@ fn ensure_local_spawn_parent(
     git.create_branch_from(local, &remote).map_err(|error| {
         format!("could not create local spawn base '{local}' from '{remote}': {error}")
     })?;
+    let local_label = crate::worktree::GitOperations::visible_git_label(local);
+    let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
     Ok(Some(format!(
-        "SPAWN BASE MATERIALIZED: local '{local}' created from '{remote}' ({}) for worker checkout and merge-back.",
+        "SPAWN BASE MATERIALIZED: local '{local_label}' created from '{remote_label}' ({}) for worker checkout and merge-back.",
         &remote_sha[..remote_sha.len().min(12)]
     )))
 }
@@ -1158,19 +1174,16 @@ fn epic_reconcile_command(repo: &std::path::Path, epic: &str, parent: &str) -> R
         .into_iter()
         .find(|checkout| checkout.branch.as_deref() == Some(branch));
     if let Some(checkout) = checkout {
-        return Ok(format!(
-            "git -C {} merge {}",
-            shell_words::quote(&checkout.path.to_string_lossy()),
-            shell_words::quote(parent)
-        ));
+        let [merge] = crate::worktree::GitOperations::git_remedies([
+            &["-C", &checkout.path.to_string_lossy(), "merge", parent],
+        ])?;
+        return Ok(merge);
     }
-    Ok(format!(
-        "git -C {} switch {} && git -C {} merge {}",
-        shell_words::quote(&repo.to_string_lossy()),
-        shell_words::quote(epic),
-        shell_words::quote(&repo.to_string_lossy()),
-        shell_words::quote(parent)
-    ))
+    let [switch, merge] = crate::worktree::GitOperations::git_remedies([
+        &["-C", &repo.to_string_lossy(), "switch", epic],
+        &["-C", &repo.to_string_lossy(), "merge", parent],
+    ])?;
+    Ok(format!("{switch} && {merge}"))
 }
 
 /// Fast-forward an epic's local base ref from the parent branch it recorded
@@ -1813,23 +1826,30 @@ pub(crate) fn settle_retired_worker_bindings_reporting(
 
 /// The brief a recycled worker receives so its fresh conversation resumes its
 /// assigned work (cas-a622). `None` when it holds no nonterminal task.
-pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str) -> Option<String> {
+pub(crate) fn recycle_resume_brief(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    factory_session: &str,
+) -> Option<String> {
     let task_store = open_task_store_cached(cas_dir).ok()?;
-    let mut held: Vec<cas_types::Task> = task_store
-        .list(None)
-        .ok()?
-        .into_iter()
+    let all_tasks = task_store.list(None).ok()?;
+    let mut held: Vec<cas_types::Task> = all_tasks
+        .iter()
         .filter(|task| task.assignee.as_deref() == Some(worker_name) && !task.is_terminal())
+        .cloned()
         .collect();
     if held.is_empty() {
         return None;
     }
     held.sort_by(|a, b| a.id.cmp(&b.id));
     let mut brief =
-        "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
+        "Your context was reset; your worktree and every task binding were kept.\n"
             .to_string();
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
-    for task in held.iter().filter(|task| task.status == cas_types::TaskStatus::InProgress) {
+    for task in held
+        .iter()
+        .filter(|task| task.status == cas_types::TaskStatus::InProgress)
+    {
         brief.push_str(&format!(
             "{}\n  Resume it: run `task action=start id={}` to re-take its lease, read its notes with \
              `task action=notes id={}`, then continue from the last checkpoint.\n",
@@ -1865,7 +1885,118 @@ pub(crate) fn recycle_resume_brief(cas_dir: &std::path::Path, worker_name: &str)
             other.join("\n")
         ));
     }
+    append_recycle_received_messages(
+        cas_dir,
+        worker_name,
+        factory_session,
+        &held,
+        &all_tasks,
+        &mut brief,
+    );
     Some(brief)
+}
+
+/// Notes have minute precision. Include that whole minute to avoid losing an
+/// answer received after a note in the same minute. Lifecycle `updated_at` is
+/// not a checkpoint: a reclaim/start may have just advanced it.
+fn recycle_task_checkpoint(task: &cas_types::Task) -> chrono::DateTime<chrono::Utc> {
+    task.notes
+        .lines()
+        .filter_map(|line| {
+            let (timestamp, _) = line.strip_prefix('[')?.split_once(']')?;
+            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
+                .ok()
+                .map(|at| at.and_utc())
+        })
+        .max()
+        .unwrap_or(task.created_at)
+}
+
+fn append_recycle_received_messages(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    factory_session: &str,
+    held: &[cas_types::Task],
+    all_tasks: &[cas_types::Task],
+    brief: &mut String,
+) {
+    let checkpoints: Vec<_> = held
+        .iter()
+        .map(|task| (task.id.as_str(), recycle_task_checkpoint(task)))
+        .collect();
+    let Some(since) = checkpoints.iter().map(|(_, at)| *at).min() else {
+        return;
+    };
+    let known_tasks: std::collections::HashSet<_> =
+        all_tasks.iter().map(|task| task.id.as_str()).collect();
+    let history = cas_store::SqlitePromptQueueStore::open_read_only(cas_dir).and_then(|queue| {
+        queue.received_supervisor_messages_since_matching(
+            worker_name,
+            factory_session,
+            since,
+            8,
+            |row, received_at| {
+                // Assignment envelopes bind even unknown tasks. Generic replies
+                // use this worker's checkpoint window; known task mentions use
+                // only the corresponding bound-task windows.
+                let assignment =
+                    crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt);
+                let tokens: std::collections::HashSet<_> = row
+                    .prompt
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                    .collect();
+                let mentions_task = tokens.iter().any(|token| known_tasks.contains(token));
+                checkpoints
+                    .iter()
+                    .filter(|(id, _)| {
+                        if let Some(assignment) = assignment.as_deref() {
+                            *id == assignment
+                        } else {
+                            !mentions_task || tokens.contains(id)
+                        }
+                    })
+                    .map(|(_, at)| *at)
+                    .min()
+                    .is_some_and(|cutoff| received_at >= cutoff)
+            },
+        )
+    });
+    let history = match history {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(worker = worker_name, %error, "recycle message history unavailable");
+            brief.push_str("Recent supervisor message history could not be read; check `coordination action=inbox_poll` and task notes before asking again.\n");
+            return;
+        }
+    };
+    let intro = "Recent received supervisor messages (newest first; up to 8). These answers survived the reset; read them before repeating a question.\n";
+    let mut included = 0;
+    let mut remaining = 12_000usize - intro.len();
+    for (row, received_at) in history {
+        let header = format!(
+            "#{} from {} (received {}):\n",
+            row.id,
+            row.source,
+            received_at.to_rfc3339()
+        );
+        let body = if header.len() + row.prompt.len() + 1 <= remaining {
+            format!("{header}{}\n", row.prompt)
+        } else {
+            format!(
+                "#{}: message exceeds remaining brief budget; read the complete answer with `coordination action=inbox_poll notification_id={}`.\n",
+                row.id, row.id
+            )
+        };
+        if body.len() > remaining {
+            break;
+        }
+        if included == 0 {
+            brief.push_str(intro);
+        }
+        remaining -= body.len();
+        brief.push_str(&body);
+        included += 1;
+    }
 }
 
 /// Queue [`recycle_resume_brief`] to the recycled worker. Returns the prompt
@@ -1876,7 +2007,21 @@ pub(crate) fn enqueue_recycle_resume_brief(
     factory_session: &str,
     worker_name: &str,
 ) -> anyhow::Result<Option<i64>> {
-    let Some(brief) = recycle_resume_brief(cas_dir, worker_name) else {
+    enqueue_context_resume_brief(cas_dir, supervisor_name, Some(factory_session), worker_name)
+}
+
+/// Shared by daemon recycle completion and a confirmed in-place context reset.
+/// Legacy callers without a factory session still receive their task brief;
+/// received-message history requires an authenticated session.
+pub(crate) fn enqueue_context_resume_brief(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: Option<&str>,
+    worker_name: &str,
+) -> anyhow::Result<Option<i64>> {
+    let Some(brief) =
+        recycle_resume_brief(cas_dir, worker_name, factory_session.unwrap_or_default())
+    else {
         return Ok(None);
     };
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
@@ -1884,8 +2029,8 @@ pub(crate) fn enqueue_recycle_resume_brief(
         supervisor_name,
         worker_name,
         &brief,
-        Some(factory_session),
-        Some("Recycled: resume your assigned work"),
+        factory_session,
+        Some("Context reset: resume your assigned work"),
     )?;
     Ok(Some(id))
 }
@@ -2214,6 +2359,8 @@ impl WorkerSpawnContext {
                         .filter(|parent| !parent.is_empty() && *parent != parent_branch);
                     let observation = spawn_git.observe_epic_publication(&parent_branch, refresh_parent);
                     let existing_remote = matches!(observation.remote, Ok(Some(true)));
+                    let lane_origin = recorded_epic.as_ref()
+                        .and_then(|epic| epic.deliverables.epic_branch_origin.as_ref());
                     if !ref_exists(&repo_root, &parent_branch) && !existing_remote {
                         if let Err(error) = &observation.remote {
                             anyhow::bail!(
@@ -2221,14 +2368,16 @@ impl WorkerSpawnContext {
                             );
                         }
                         anyhow::bail!(
-                            "spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk"
+                            "{}", crate::worktree::GitOperations::missing_epic_branch_message(
+                                &parent_branch, lane_origin, observation.previous_remote,
+                            )
                         );
                     }
                     // Reconcile a verified existing epic once before preparing from
                     // its parent, so a stale local copy cannot omit origin's work.
                     let preserve = if existing_remote {
                         let readiness = spawn_git
-                            .ensure_epic_published_observed(&parent_branch, refresh_parent, &observation)
+                            .ensure_epic_published_observed(&parent_branch, refresh_parent, &observation, lane_origin)
                             .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
                         if let Some(notice) = readiness.notice {
                             notices.push(notice);
@@ -2287,6 +2436,7 @@ impl WorkerSpawnContext {
                             &parent_branch,
                             refresh_parent,
                             &observation,
+                            lane_origin,
                         ) {
                             Ok(readiness) => {
                                 if let Some(notice) = readiness.notice {
@@ -4497,6 +4647,33 @@ mod spawn_base_tests {
         let error = ensure_local_spawn_parent(&repo, "epic/missing").unwrap_err();
         assert!(error.contains("git fetch origin epic/missing"), "{error}");
         assert!(full_sha(&repo, "epic/missing").is_none());
+        let mut failures = Vec::new();
+        for branch in ["epic/{a,b}", "epic/a!e", "epic/$(touch${IFS}SUBSTITUTED)", "epic/a b", "epic/a'quote", "epic/control\u{85}label"] {
+            let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+            if branch.chars().any(char::is_control) {
+                // pin: no shell command may be printed for a control-bearing ref.
+                if !error.contains("contains control characters") || !error.contains("\\u{85}")
+                    || error.lines().any(|line| line.starts_with("git "))
+                    || error.contains('`') || error.chars().any(|c| c.is_control() && c != '\n')
+                {
+                    failures.push(format!("unsafe control-ref advice: {error:?}"));
+                }
+                continue;
+            }
+            let standalone = error.lines().find(|line| line.starts_with("git fetch "));
+            if standalone.is_none() {
+                failures.push(format!("fetch remedy is not a standalone line: {error}"));
+            }
+            let command = standalone.or_else(|| error.split('`').nth(1)).unwrap();
+            let output = super::spawn_readiness_tests::run_bash_remedy(
+                &repo, command, "git() { printf '%s\\0' \"$@\"; }");
+            let args = output.stdout.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect::<Vec<_>>();
+            if !output.status.success() || args != [b"fetch".as_slice(), b"origin".as_slice(), branch.as_bytes()] {
+                failures.push(format!("bash altered fetch arguments for {branch:?}: {output:?}"));
+            }
+        }
+        assert!(!repo.join("SUBSTITUTED").exists(), "remedy executed branch substitution");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while
@@ -6662,6 +6839,199 @@ mod tests {
         let (_temp, cas_dir) = seeded_cas_dir();
         seed_wise_raven_tasks(&cas_dir);
 
+        // cas-a02a: receipt history survives draining/acknowledgement. The
+        // checkpoint is deliberately older than task.updated_at (start/reclaim
+        // mutates that field without saving conversation context).
+        let tasks = open_task_store_cached(&cas_dir).unwrap();
+        for task_id in ["cas-e0be", "cas-7cb3", "cas-ed87", "cas-96c0"] {
+            tasks
+                .append_note(task_id, "[2026-10-20 12:00] 📝 PROGRESS Saved checkpoint")
+                .unwrap();
+        }
+        tasks
+            .append_note(
+                "cas-96c0",
+                "[2026-10-20 12:20] 📝 PROGRESS Later checkpoint",
+            )
+            .unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-a02a".into(),
+            "zen-condor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("session-a622".into());
+        agents.register(&supervisor).unwrap();
+        let mut peer = cas_types::Agent::new_with_role(
+            "peer-a02a".into(),
+            "peer".into(),
+            cas_types::AgentRole::Worker,
+        );
+        peer.factory_session = Some("session-a622".into());
+        agents.register(&peer).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let mut received = Vec::new();
+        for (body, target, session, origin, surfaced, at) in [
+            (
+                "PRE_CHECKPOINT",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T11:59:00Z",
+            ),
+            (
+                "OTHER_WORKER",
+                "peer",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:01:00Z",
+            ),
+            (
+                "OTHER_SESSION",
+                "wise-raven",
+                "other-session",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:02:00Z",
+            ),
+            (
+                "UNRECEIVED",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                false,
+                "2026-10-20T12:03:00Z",
+            ),
+            (
+                "SPOOFED_SUPERVISOR",
+                "wise-raven",
+                "session-a622",
+                "peer-a02a",
+                true,
+                "2026-10-20T12:04:00Z",
+            ),
+            (
+                "<cas-assignment task_id=\"cas-peer\"/> UNBOUND_TASK",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:05:00Z",
+            ),
+            (
+                "cas-96c0 STALE_FOR_BOUND_TASK",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:15:00Z",
+            ),
+            (
+                "TRANSPORT_ONLY",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:16:00Z",
+            ),
+            (
+                "OLDEST_OVER_LIMIT",
+                "wise-raven",
+                "session-a622",
+                "supervisor-a02a",
+                true,
+                "2026-10-20T12:06:00Z",
+            ),
+        ] {
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    target,
+                    body,
+                    Some(session),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: origin.into(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            if surfaced {
+                if body == "TRANSPORT_ONLY" {
+                    queue
+                        .record_recipient_transport_delivered(id, target)
+                        .unwrap();
+                } else {
+                    queue
+                        .record_recipient_surfaced(
+                            id,
+                            target,
+                            cas_store::SurfacingSource::InboxPoll,
+                        )
+                        .unwrap();
+                    queue.ack(id).unwrap();
+                }
+                queue.mark_processed(id).unwrap();
+                conn.execute(
+                    "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                    rusqlite::params![at, id],
+                )
+                .unwrap();
+            }
+        }
+        for index in 0..10 {
+            let body = if index == 9 {
+                "Yes — use the supplied candidate; that answers your question.".to_string()
+            } else if index == 7 {
+                format!("OVERSIZED_ANSWER{}", "λ".repeat(9000))
+            } else {
+                format!("Decision {index} for cas-e0be: continue with the agreed candidate.")
+            };
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    "wise-raven",
+                    &body,
+                    Some("session-a622"),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll)
+                .unwrap();
+            queue.mark_processed(id).unwrap();
+            queue.ack(id).unwrap();
+            // Enqueued before the checkpoint, actually received afterwards.
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = '2026-10-20 11:00:00' WHERE id = ?",
+                [id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                rusqlite::params![
+                    format!(
+                        "2026-10-20T12:10:{:02}Z",
+                        if index == 8 { 11 } else { index }
+                    ),
+                    id
+                ],
+            )
+            .unwrap();
+            received.push((id, body));
+        }
+
         let id = enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "wise-raven")
             .unwrap()
             .expect("a worker holding tasks gets a resume brief");
@@ -6685,13 +7055,132 @@ mod tests {
             assert!(brief.contains(id), "{id} is named: {brief}");
         }
         for id in ["cas-done", "cas-peer"] {
-            assert!(!brief.contains(id), "{id} is not this worker's open work: {brief}");
+            assert!(
+                !brief.contains(id),
+                "{id} is not this worker's open work: {brief}"
+            );
         }
+        let newest = &received[8];
+        let previous = &received[9];
+        assert!(
+            brief.contains(&received[9].1),
+            "received answer survives recycle: {brief}"
+        );
+        assert!(
+            brief.contains(&format!("#{}", newest.0)),
+            "retain the original notification id"
+        );
+        assert!(
+            brief.find(&newest.1).unwrap() < brief.find(&previous.1).unwrap(),
+            "newest received decision first"
+        );
+        assert!(!brief.contains(&received[0].1), "history is bounded");
+        for excluded in [
+            "PRE_CHECKPOINT",
+            "OTHER_WORKER",
+            "OTHER_SESSION",
+            "UNRECEIVED",
+            "SPOOFED_SUPERVISOR",
+            "UNBOUND_TASK",
+            "STALE_FOR_BOUND_TASK",
+            "TRANSPORT_ONLY",
+            "OLDEST_OVER_LIMIT",
+        ] {
+            assert!(!brief.contains(excluded), "exclude {excluded}: {brief}");
+        }
+        assert!(!brief.contains("OVERSIZED_ANSWER"));
+        assert!(
+            brief.contains(&format!("notification_id={}", received[7].0)),
+            "oversized answers retain an exact retrieval reference"
+        );
+        assert!(
+            brief.len() < 16_000,
+            "the resume brief has a bounded history"
+        );
+        // pin: the original unread body must remain available to the ordinary inbox drain.
+        assert!(
+            queue
+                .peek_unseen_for_recipient("wise-raven", Some("session-a622"), 100)
+                .unwrap()
+                .iter()
+                .any(|row| row.prompt == "UNRECEIVED"),
+            "building a brief never consumes pending mail"
+        );
+        // Charge the section intro as well as entries. This payload fits the
+        // old entry-only cap, but not the whole history section.
+        let receive = |body: &str, at: &str| {
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    "wise-raven",
+                    body,
+                    Some("session-a622"),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll)
+                .unwrap();
+            queue.mark_processed(id).unwrap();
+            queue.ack(id).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
+            id
+        };
+        receive(&"λ".repeat(5950), "2026-10-20T12:40:00Z");
+        let capped = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        let history_bytes =
+            capped.len() - capped.find("Recent received supervisor messages").unwrap();
+        // More than a raw query page of newer, ineligible replies must not
+        // hide an older answer. Cover both task and per-task checkpoint filters.
+        for index in 0..65 {
+            let (body, at) = if index % 2 == 0 {
+                (
+                    format!("<cas-assignment task_id=\"cas-peer\"/> FILTERED_{index}"),
+                    "2026-10-20T12:50:00Z",
+                )
+            } else {
+                (
+                    format!("cas-96c0 FILTERED_STALE_{index}"),
+                    "2026-10-20T12:19:00Z",
+                )
+            };
+            receive(&body, at);
+        }
+        let filtered = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        assert_eq!(
+            (history_bytes <= 12_000, filtered.contains(&received[9].1)),
+            (true, true),
+            "history bytes including intro={history_bytes}; eligible answer must survive >64 filtered rows"
+        );
+        assert!(!filtered.contains("FILTERED_"));
     }
 
     #[test]
     fn a_worker_with_no_open_work_gets_no_resume_brief_cas_a622() {
         let (_temp, cas_dir) = seeded_cas_dir();
+        let mut untouched = "existing brief".to_string();
+        append_recycle_received_messages(
+            &cas_dir,
+            "idle-worker",
+            "session-a622",
+            &[],
+            &[],
+            &mut untouched,
+        );
+        assert_eq!(
+            untouched, "existing brief",
+            "empty held-task history is a no-op"
+        );
         assert_eq!(
             enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "idle-worker")
                 .unwrap(),

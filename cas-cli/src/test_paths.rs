@@ -243,6 +243,22 @@ mod tests {
         assert_eq!(find_workspace_root(&member).as_deref(), Some(temp.path()));
     }
 
+    /// cas-3fc8: a fixture parent never follows another test's entered
+    /// directory, so a fixture cannot land inside it and be deleted with it.
+    #[test]
+    fn fixture_parent_ignores_a_directory_another_test_entered_cas_3fc8() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let entered = tempdir().unwrap();
+        let _env = env.enter_dir(entered.path());
+        let parent = super::runtime_fixture_parent();
+        assert!(
+            !parent.starts_with(entered.path().canonicalize().unwrap()) && !parent.starts_with(entered.path()),
+            "{} is inside the entered {}",
+            parent.display(),
+            entered.path().display()
+        );
+    }
+
     #[test]
     fn current_runtime_has_a_workspace_root() {
         assert!(runtime_workspace_root().is_some());

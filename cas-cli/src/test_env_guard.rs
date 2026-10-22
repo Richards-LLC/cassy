@@ -375,6 +375,22 @@ impl Drop for TestEnvGuard {
 #[cfg(test)]
 mod ambient_scrub_tests {
     use super::*;
+    /// cas-3fc8: leaving an entered directory whose saved parent is already
+    /// gone (a failing test deleted it) must not panic; a panic during the
+    /// unwind of that failing test aborts the whole test binary.
+    #[test]
+    fn leaving_a_directory_whose_saved_parent_is_gone_does_not_panic_cas_3fc8() {
+        let mut env = TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let inner = tempfile::tempdir().unwrap();
+        let mut env = env.enter_dir(outer.path());
+        let entered = env.enter_dir(inner.path());
+        std::fs::remove_dir(outer.path()).unwrap();
+        let left = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(entered)));
+        assert!(left.is_ok(), "restoring a deleted saved directory must not panic");
+        drop(env);
+    }
+
     #[test]
     fn repository_local_git_environment_is_scrubbed_cas_ea62() {
         // Keep the in-process guard in sync with the shell suite boundary's

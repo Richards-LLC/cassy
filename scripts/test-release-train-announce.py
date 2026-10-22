@@ -74,6 +74,8 @@ class Announce(unittest.TestCase):
             message = {"message_id": message_id, "permalink": "https://slack.test/" + message_id}
             if len(writes) in getattr(self, "split_replies", {}):
                 message["part_ids"] = self.split_replies[len(writes)]
+            if len(writes) in getattr(self, "root_threads", {}):
+                message["thread_id"] = self.root_threads[len(writes)]
             return {"message": message}
 
         client.tool.side_effect = tool
@@ -213,15 +215,34 @@ class Announce(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_post_sends_validated_bodies_and_preserves_threads_and_receipts(self):
-        for split_replies in ({}, {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]}):
+        report = announce.load_report_adapter()
+        # The PDF file and upload message are separate public receipt identities.
+        for file_block in (None, {}, {"file_id": ""}, {"file_id": "pdf-message"}):
+            with self.subTest(file_block=file_block):
+                envelope = {
+                    "message": {"message_id": "pdf-message", "permalink": "https://slack.test/pdf-message"},
+                    "download_url": "https://files.test/report.pdf",
+                }
+                if file_block is not None:
+                    envelope["file"] = file_block
+                with self.assertRaisesRegex(report.AdapterError, "file id"):
+                    report.file_receipt(envelope)
+        for split_replies in (
+            {},
+            {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]},
+            {1: ["1.0", "1"], 2: ["2.0", "2"], 3: ["3.0", "3"], 4: ["4.0", "4"]},
+        ):
             with self.subTest(split_replies=split_replies):
                 self.split_replies = split_replies
+                self.root_threads = {index: parts[0] for index, parts in split_replies.items() if index in (1, 3)}
                 self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
                 self.assertEqual(self.validate().returncode, 0)
                 adapter, writes = self.adapter()
                 self.post(adapter)
                 self.assertEqual([item["text"] for item in writes], list(BODIES))
-                self.assertEqual([item.get("reply_to") for item in writes], [None, "1", None, "3"])
+                self.assertEqual([item.get("reply_to") for item in writes], [
+                    None, self.root_threads.get(1, "1"), None, self.root_threads.get(3, "3"),
+                ])
                 values = dict(line.split("=", 1) for line in self.receipt.read_text().splitlines())
                 self.assertEqual(values["DEV_REPLY_ID"], "4")
                 # Render the real saved-draft receipt, including every transport part.

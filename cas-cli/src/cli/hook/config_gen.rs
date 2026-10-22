@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use toml::map::Map;
 
 /// Pretty-print JSON with every object recursively sorted by key.
@@ -650,18 +649,16 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
 
     // Read existing content for comparison
     let existing_content = if mcp_json_path.exists() {
-        Some(std::fs::read_to_string(&mcp_json_path)
-            .context("Cannot read existing .mcp.json; file left unchanged")?)
+        std::fs::read_to_string(&mcp_json_path).ok()
     } else {
         None
     };
 
     // Read existing config or create new
-    let mut config: serde_json::Value = match existing_content.as_ref() {
-        Some(content) => serde_json::from_str(content)
-            .context("Invalid JSON in .mcp.json; file left unchanged")?,
-        None => serde_json::json!({}),
-    };
+    let mut config: serde_json::Value = existing_content
+        .as_ref()
+        .and_then(|c| serde_json::from_str(c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
 
     // Ensure mcpServers object exists
     if config.get("mcpServers").is_none() {

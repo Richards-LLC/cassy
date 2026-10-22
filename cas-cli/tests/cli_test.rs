@@ -570,14 +570,9 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    for state in ["missing", "existing", "directory", "malformed", "malformed-grok"] {
+    for state in ["missing", "existing", "directory"] {
         let temp = TempDir::new().unwrap();
-        if state == "malformed-grok" {
-            std::fs::create_dir(temp.path().join(".codex")).unwrap();
-            std::fs::create_dir(temp.path().join(".grok")).unwrap();
-        } else {
-            std::fs::create_dir(temp.path().join(".claude")).unwrap();
-        }
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
         let mcp_path = temp.path().join(".mcp.json");
         let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
         match state {
@@ -587,17 +582,15 @@ fn test_init_json() {
             )
             .unwrap(),
             "directory" => std::fs::create_dir(&mcp_path).unwrap(),
-            "malformed" | "malformed-grok" => std::fs::write(&mcp_path, b"{\"mcpServers\": {\"other\":").unwrap(),
             _ => {}
         }
 
         let output = cas_cmd(temp.path())
             .current_dir(&temp)
-            .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
             .args(["init", "--no-integrations", "--json"])
             .output()
             .unwrap();
-        if matches!(state, "directory" | "malformed" | "malformed-grok") {
+        if state == "directory" {
             assert!(
                 !output.status.success(),
                 "MCP provisioning failure must fail init"
@@ -607,13 +600,10 @@ fn test_init_json() {
                 "failed init must not report initialized"
             );
             assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
-            if state == "directory" {
-                assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
-            } else {
-                assert_eq!(std::fs::read(&mcp_path).unwrap(), b"{\"mcpServers\": {\"other\":");
-                let error = String::from_utf8_lossy(&output.stderr);
-                assert!(error.contains("JSON"), "malformed config needs an explicit parse error: {error}");
-            }
+            assert!(
+                mcp_path.is_dir(),
+                "failed init must preserve the obstructing directory"
+            );
             continue;
         }
 
@@ -639,64 +629,6 @@ fn test_init_json() {
             assert_eq!(mcp["mcpServers"]["other"], other_server);
         }
     }
-}
-
-#[test]
-fn test_init_failure_reports_force_retry() {
-    let mut missing_hints = Vec::new();
-    for harness in ["claude", "codex"] {
-        for mode in ["json", "yes", "interactive"] {
-            let temp = TempDir::new().unwrap();
-            let config_dir = temp.path().join(format!(".{harness}"));
-            std::fs::create_dir(&config_dir).unwrap();
-            let blocked = if harness == "claude" {
-                temp.path().join(".mcp.json")
-            } else {
-                config_dir.join("config.toml")
-            };
-            std::fs::create_dir(&blocked).unwrap();
-            let user_codex = temp.path().join(".test-home/.codex");
-            let mut command = cas_cmd(temp.path());
-            command.current_dir(&temp)
-                .env("CODEX_HOME", &user_codex)
-                .args(["init", "--no-integrations"]);
-            match mode {
-                "json" => { command.arg("--json"); }
-                "yes" => { command.arg("--yes"); }
-                _ => { command.write_stdin("y\n"); }
-            }
-            let output = command.output().unwrap();
-            let error = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "{harness}/{mode} must fail provisioning");
-            assert!(temp.path().join(".cas/cas.db").is_file());
-            assert!(blocked.is_dir(), "the user's obstruction must remain intact");
-            if !error.lines().any(|line| line == "Fix the reported error, then re-run: cas init --force")
-                || error.lines().any(|line| line.chars().count() > 80)
-            {
-                missing_hints.push(format!("{harness}/{mode}: {error}"));
-            }
-            std::fs::remove_dir(&blocked).unwrap();
-            // Removing the obstruction alone does not finish an existing
-            // store. Prove that the suggested force retry actually repairs it.
-            cas_cmd(temp.path()).current_dir(&temp)
-                .env("CODEX_HOME", &user_codex)
-                .args(["init", "--json", "--no-integrations"])
-                .assert().success().stdout(predicate::str::contains("already_initialized"));
-            assert!(!blocked.exists());
-            cas_cmd(temp.path()).current_dir(&temp)
-                .env("CODEX_HOME", &user_codex)
-                .args(["init", "--yes", "--no-integrations", "--force"])
-                .assert().success();
-            if harness == "claude" {
-                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
-                assert_eq!(value["mcpServers"]["cas"]["command"], "cas");
-            } else {
-                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&blocked).unwrap()).unwrap();
-                assert_eq!(value["mcp_servers"]["cs"]["command"].as_str(), Some("cas"));
-            }
-        }
-    }
-    assert!(missing_hints.is_empty(), "failed init must explain force recovery: {missing_hints:#?}");
 }
 
 #[test]

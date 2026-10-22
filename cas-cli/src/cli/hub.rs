@@ -3083,6 +3083,12 @@ fn stop_with_output_before(
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STOP_WAIT_BARRIER",
+            "stop-wait",
+            "release-stop-wait",
+            std::process::id(),
+        )?;
         wait_for_stop_or_satisfying_hub(
             &paths,
             Some(record.pid),

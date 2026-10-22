@@ -67,11 +67,13 @@ pub(crate) fn snapshot_with_installed(
     installed: &str,
     now: DateTime<Utc>,
 ) -> Result<Snapshot, String> {
-    let agents = open_agent_store(cas_root)
-        .and_then(|store| store.list(None))
+    let agent_store = open_agent_store(cas_root).map_err(|e| format!("agent roster: {e}"))?;
+    let agents = agent_store
+        .list(None)
         .map_err(|e| format!("agent roster: {e}"))?;
-    let epochs = SqliteHistoryStore::open(cas_root)
-        .and_then(|store| store.list_epochs(None, 4096))
+    let history = SqliteHistoryStore::open(cas_root).map_err(|e| format!("binary epochs: {e}"))?;
+    let epochs = history
+        .list_epochs(None, 4096)
         .map_err(|e| format!("binary epochs: {e}"))?;
     let local_machine = Agent::get_or_generate_machine_id();
     let mut latest = BTreeMap::new();
@@ -182,8 +184,9 @@ pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Optio
 /// and factory session; a retry cannot spam the supervisor.
 pub(crate) fn notify_after_install(cas_root: &Path, installed: &str) -> Result<usize, String> {
     let snapshot = snapshot_with_installed(cas_root, installed, Utc::now())?;
-    let agents = open_agent_store(cas_root)
-        .and_then(|store| store.list(None))
+    let agent_store = open_agent_store(cas_root).map_err(|e| format!("agent roster: {e}"))?;
+    let agents = agent_store
+        .list(None)
         .map_err(|e| format!("agent roster: {e}"))?;
     let sessions: BTreeSet<_> = snapshot
         .servers

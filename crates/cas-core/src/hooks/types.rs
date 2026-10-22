@@ -844,6 +844,35 @@ impl HookOutput {
 mod tests {
     use crate::hooks::types::*;
 
+    /// cas-8dbe: an advisory joins an allowed or empty PreToolUse response,
+    /// never a deny, and never a Codex response.
+    #[test]
+    fn append_pre_tool_context_keeps_decisions_and_skips_denies() {
+        let mut empty = HookOutput::default();
+        assert!(empty.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "shared file"));
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["additionalContext"], "shared file");
+        assert!(json["hookSpecificOutput"].get("permissionDecision").is_none());
+
+        let mut allow = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode, "allow", "ok", Some("first"),
+        );
+        assert!(allow.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "second"));
+        let json = serde_json::to_value(&allow).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(json["hookSpecificOutput"]["additionalContext"], "first\n\nsecond");
+
+        let mut deny = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode, "deny", "no", None,
+        );
+        assert!(!deny.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "x"));
+        assert!(serde_json::to_value(&deny).unwrap()["hookSpecificOutput"].get("additionalContext").is_none());
+
+        let mut codex = HookOutput::default();
+        assert!(!codex.append_pre_tool_context_for_harness(PreToolUseHarness::Codex, "x"));
+        assert!(codex.hook_specific_output.is_none());
+    }
+
     #[test]
     fn test_parse_session_start_input() {
         let json = r#"{

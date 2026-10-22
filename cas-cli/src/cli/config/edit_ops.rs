@@ -222,30 +222,35 @@ mod tests {
     #[test]
     fn line_editor_d_removes_override_and_restores_hub_fallback() {
         let env = crate::test_support::TestEnvGuard::temp_home();
-        let root = env.home().join(".cas");
-        std::fs::create_dir_all(&root).unwrap();
+        let host_root = crate::config::host_config_dir();
+        std::fs::create_dir_all(&host_root).unwrap();
+        std::fs::write(
+            host_root.join("config.toml"),
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"auto\"\n",
+        )
+        .unwrap();
+        let project = env.home().join("projects/config-editor");
+        let root = crate::store::init_cas_dir(&project).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            "[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
+            "# preserve project comment\n[sync]\nenabled = true\n",
         )
         .unwrap();
 
         let registry = registry();
         let mut answers = String::new();
-        'sections: for section in registry.sections() {
-            if !section.starts_with("hub") {
-                continue;
-            }
+        for section in registry.sections() {
             for meta in registry.configs_in_section(section) {
-                if meta.key == "hub.transport_mode" {
-                    answers.push_str("d\nq\n");
-                    break 'sections;
-                }
-                answers.push('\n');
+                let answer = match meta.key {
+                    "hub.transport_mode" => "d\n",
+                    "sync.enabled" => "false\n",
+                    _ => "\n",
+                };
+                answers.push_str(answer);
             }
         }
         let args = ConfigEditArgs {
-            section: Some("hub".into()),
+            section: None,
             modified: false,
             all: true,
         };
@@ -255,9 +260,15 @@ mod tests {
 
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
-        assert!(document["hub"].get("transport_mode").is_none(), "{saved}");
+        assert_eq!(document["sync"]["enabled"], false, "{saved}");
+        assert!(saved.contains("# preserve project comment"), "{saved}");
+        assert!(document.get("hub").and_then(|hub| hub.get("transport_mode")).is_none(), "{saved}");
+        let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
+        let host_document: toml::Value = toml::from_str(&host_saved).unwrap();
+        assert!(host_saved.contains("# preserve host comment"), "{host_saved}");
+        assert!(host_document["hub"].get("transport_mode").is_none(), "{host_saved}");
         assert_eq!(
-            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
+            Config::load(&host_root).unwrap().hub.unwrap().transport_mode(),
             crate::config::HubTransportMode::Loopback
         );
     }

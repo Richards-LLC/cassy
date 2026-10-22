@@ -3198,9 +3198,9 @@ mod tests {
 
     /// cas-692a: Chromium prints a relative link as a file:// URL into the
     /// generating checkout, so a report names its source and print edition
-    /// by their GitHub URLs at the release tag.
+    /// by their GitHub URLs on main, where the post-release report is committed.
     #[test]
-    fn report_links_name_the_tagged_github_files_not_the_checkout_cas_692a() {
+    fn report_links_name_the_main_github_files_not_the_checkout_cas_692a() {
         let (source, pdf) = report_link_hrefs(
             Some("o/r"),
             "v9.99.1",
@@ -3208,8 +3208,8 @@ mod tests {
             "docs/release-reports/v9.99.1.pdf",
         );
         // pin: the exact URL is the link a reader of the published PDF follows.
-        assert_eq!(source, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.md");
-        assert_eq!(pdf, "https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.pdf");
+        assert_eq!(source, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.md");
+        assert_eq!(pdf, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.pdf");
     }
 
     /// cas-7860: issues are closed by hand minutes after the release PR

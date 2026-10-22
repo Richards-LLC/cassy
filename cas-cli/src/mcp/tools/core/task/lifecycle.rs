@@ -2615,8 +2615,16 @@ impl CasCore {
         if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
             // A refusal or failed local write leaves no newly acquired claim
             // behind. Never release a claim retained by another local agent.
-            let (id, agent) = (req.id.clone(), agent_id.clone());
-            let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+            // cas-da31: the release holds the claim fence until it really
+            // ends, even past this call's budget, so a same-agent restart
+            // cannot claim first and then lose that claim to this release.
+            let (id, agent, fence) = (req.id.clone(), agent_id.clone(), peer_claim_fence.take());
+            let _ = peer_budget
+                .run(move || {
+                    let _fence = fence;
+                    claims.release_own(&id, &agent)
+                })
+                .await;
         }
 
         let mut start_lease_epoch = None;

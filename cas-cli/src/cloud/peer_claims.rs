@@ -1380,6 +1380,14 @@ fn release_pending_task_claims_with(
     }
 }
 
+/// cas-da31: [`release_task_claim`] on the blocking pool, awaited, so a
+/// handler freeing a task's claim never blocks the async runtime on the
+/// Cloud.
+pub async fn release_task_claim_off_runtime(cas_root: &Path, task_id: &str) {
+    let (root, id) = (cas_root.to_path_buf(), task_id.to_string());
+    let _ = tokio::task::spawn_blocking(move || release_task_claim(&root, &id)).await;
+}
+
 /// What a spawn learns about peers before it queues anything (cas-0078).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpawnPeerCheck {

@@ -3,7 +3,7 @@
 `scripts/visual-qa.mjs --strict` run per variant per viewport on 2026-09-18. The
 flag `--viewport` replaces the viewport list rather than appending, so 1280×800
 and 390×844 are separate runs. Each run covers light and dark. Receipts:
-`/home/pippenz/.cas/artifacts/cas-bdc0/visual-qa/<variant>-<viewport>/`.
+`<artifacts>/cas-bdc0/visual-qa/<variant>-<viewport>/`.
 
 | Render | Viewport | Result | Findings | Informational | Allowlisted |
 | --- | --- | --- | --- | --- | --- |

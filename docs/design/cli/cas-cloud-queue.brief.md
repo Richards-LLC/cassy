@@ -18,7 +18,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-cloud-queue-parked · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-998a/terminal-qa/cas-cloud-queue-parked-after/report.json
+terminal-qa: PASS cas-cloud-queue-parked · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-998a/terminal-qa/cas-cloud-queue-parked-after/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

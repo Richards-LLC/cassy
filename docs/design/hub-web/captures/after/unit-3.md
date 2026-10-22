@@ -24,8 +24,8 @@ Strict command, repeated for each scheme and viewport:
 
 ```sh
 node scripts/visual-qa.mjs --strict --scheme light --viewport 390x844 \
-  --allowlist /home/pippenz/.cas/artifacts/cas-0a8e/allowlist.json \
-  --artifact-dir /home/pippenz/.cas/artifacts/cas-0a8e/correction-qa-light-390x844 \
+  --allowlist <artifacts>/cas-0a8e/allowlist.json \
+  --artifact-dir <artifacts>/cas-0a8e/correction-qa-light-390x844 \
   http://127.0.0.1:4186/commander/ \
   http://127.0.0.1:4186/commander/fleet-proof.html \
   'http://127.0.0.1:4186/commander/fleet-proof.html?count=8'
@@ -37,7 +37,7 @@ class: Commander needs JavaScript for pairing/live state/terminals, and its nosc
 There are no contrast, clipping, overlap, viewport or print exceptions.
 
 After rebasing onto epic 8dc1b283 (including Units 2, 4 and 6), `npm run visual-qa --
---artifact-dir /home/pippenz/.cas/artifacts/cas-0a8e/correction-fixture-final` exits 0:
+--artifact-dir <artifacts>/cas-0a8e/correction-fixture-final` exits 0:
 `PASS 9 fixtures x 2 schemes x 2 viewports`. The report contains 36 captures, zero findings,
 and eight existing plan allowances (four JavaScript dependency, two collapsed-pane overflow,
 two terminal clipping). No new allowlist entry was added. Unit 7 owns the assembled critique.
@@ -81,7 +81,7 @@ light/dark desktop/phone captures. This supersedes the earlier craft score, whic
 and hairline collisions. Scope is Unit 3; Unit 7 owns the whole-app critique.
 
 Durable JSON, logs, runnable proof sources and the four strict reports:
-`/home/pippenz/.cas/artifacts/cas-0a8e/` (`correction-qa-*`, `correction-geometry.*`,
+`<artifacts>/cas-0a8e/` (`correction-qa-*`, `correction-geometry.*`,
 `correction-interactions.log`, `correction-fixture-final/`, `correction-tests.log`,
 `correction-typecheck.log`, `correction-build.log`, `fleet-proof.*`, `build-proof.mjs`).
 Preview servers are stopped at delivery.

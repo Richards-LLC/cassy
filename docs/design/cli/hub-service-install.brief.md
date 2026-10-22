@@ -12,7 +12,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas hub service install --dry-run · 12 runs · 0 fail · 0 warn · 0 allowed · /Users/pippenz/.cas/artifacts/cassy-ee10031b42e3c2024023c076dfb2edd8118e39b8baee6f0832367b9e8ef4c205/cas-0051/terminal-qa/after/report.json
+terminal-qa: PASS cas hub service install --dry-run · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-0051/terminal-qa/after/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |

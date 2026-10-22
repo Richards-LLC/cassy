@@ -16,7 +16,7 @@ legacy log output, outside this additive change's rendering scope.
 
 `terminal-qa: PASS release-gate-timing · 11 runs · 0 fail · 0 warn · 17 allowed`
 
-Receipt: `/home/pippenz/.cas/artifacts/cas-d136/resume/terminal-qa/report.json`.
+Receipt: `<artifacts>/cas-d136/resume/terminal-qa/report.json`.
 The five allowlist rules cover unchanged command descriptions, absolute paths,
 and the legacy em-dash separator. No new timing line requires an exception.
 

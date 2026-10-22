@@ -19,7 +19,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-280c-cloud-sync · 11 runs · 0 fail · 0 warn · 17 allowed · /home/pippenz/.cas/artifacts/cas-280c/terminal-qa/report.json
+terminal-qa: PASS cas-280c-cloud-sync · 11 runs · 0 fail · 0 warn · 17 allowed · <artifacts>/cas-280c/terminal-qa/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -29,4 +29,4 @@ terminal-qa: PASS cas-280c-cloud-sync · 11 runs · 0 fail · 0 warn · 17 allow
 | Theme safety | 5 | The new muted rows are readable without color; the receipt allowlists 17 pre-existing spinner/verdict findings outside this task. |
 | Machine contract | 5 | `--json` is unchanged and the human-only rows are not part of the sync receipt. |
 
-Scored by the worker on 2026-09-08; floor holds. Allowlist: `/home/pippenz/.cas/artifacts/cas-280c/cas-cloud-sync-allowlist.json`.
+Scored by the worker on 2026-09-08; floor holds. Allowlist: `<artifacts>/cas-280c/cas-cloud-sync-allowlist.json`.

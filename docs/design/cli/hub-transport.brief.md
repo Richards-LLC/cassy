@@ -39,7 +39,7 @@ bootstrap job before stopping any remaining process.
 
 ## Critique
 
-terminal-qa: PASS hub-restart-auto-fallback · 7 runs · 0 fail · 0 warn · 0 allowed · /Users/pippenz/.cas/artifacts/cassy-ee10031b42e3c2024023c076dfb2edd8118e39b8baee6f0832367b9e8ef4c205/cas-4c14/terminal-qa/hub-restart-auto-fallback/report.json
+terminal-qa: PASS hub-restart-auto-fallback · 7 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4c14/terminal-qa/hub-restart-auto-fallback/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |

@@ -10,7 +10,7 @@
 
 ## Critique
 
-terminal-qa: PASS cas-config-history-4f2d-fixed · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-4f2d/terminal-qa/cas-config-history-fixed/report.json
+terminal-qa: PASS cas-config-history-4f2d-fixed · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4f2d/terminal-qa/cas-config-history-fixed/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

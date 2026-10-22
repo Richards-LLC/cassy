@@ -3,7 +3,7 @@
 `scripts/visual-qa.mjs --strict` run per page per viewport on 2026-09-18, each
 run covering light and dark. `--viewport` replaces the viewport list rather
 than appending, so 1280×800 and 390×844 are separate invocations. Receipts:
-`/home/pippenz/.cas/artifacts/cas-9f69/visual-qa/<page>-<viewport>/`.
+`<artifacts>/cas-9f69/visual-qa/<page>-<viewport>/`.
 
 **PAPER is the primary palette.** It is the hub token palette from
 `hub-web/src/tokens.css` and the only scheme that keeps a light and a dark

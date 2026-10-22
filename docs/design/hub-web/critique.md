@@ -11,8 +11,8 @@ below; none is a product defect on the assembled tree, so none holds the gate �
 and runner corrections owned by Unit 6, one is a hardening item for Unit 5.
 
 Scored by watchful-jaguar-3 on 2026-09-07 from the strict run at
-`/home/pippenz/.cas/artifacts/cas-b296/visual-qa/` (generated 14:11:26Z) and the geometry
-probes under `/home/pippenz/.cas/artifacts/cas-b296/probe/`.
+`<artifacts>/cas-b296/visual-qa/` (generated 14:11:26Z) and the geometry
+probes under `<artifacts>/cas-b296/probe/`.
 
 ## Before / after
 
@@ -57,11 +57,11 @@ Command, run once on the integrated tip from `hub-web/` after `npm ci`:
 
 ```sh
 git rev-parse HEAD            # 698dbaba — Merge branch 'factory/noble-phoenix-11' into HEAD
-npm run visual-qa -- --artifact-dir /home/pippenz/.cas/artifacts/cas-b296/visual-qa
+npm run visual-qa -- --artifact-dir <artifacts>/cas-b296/visual-qa
 # PASS 9 fixtures x 2 schemes x 2 viewports   (exit 0)
 ```
 
-Receipt: `/home/pippenz/.cas/artifacts/cas-b296/visual-qa/visual-qa.md` and `visual-qa.json`
+Receipt: `<artifacts>/cas-b296/visual-qa/visual-qa.md` and `visual-qa.json`
 (36 screenshots); the small `visual-qa.md` is committed at
 [visual-qa/visual-qa.md](visual-qa/visual-qa.md). One line per fixture × scheme × viewport,
 each linked to its capture under [captures/after/gate/](captures/after/gate/):
@@ -155,7 +155,7 @@ toast and no such entry was needed.
 | `transcript` | [light](captures/after/gate/transcript.1280.light.png) · [dark](captures/after/gate/transcript.1280.dark.png) | [light](captures/after/gate/transcript.390.light.png) · [dark](captures/after/gate/transcript.390.dark.png) | 15/22 mono at a 68ch measure with hanging indents; wraps at 390 with no horizontal scroll; unfamiliar output preserved literally. |
 | `attention-12` | [light](captures/after/gate/attention-12.1280.light.png) · [dark](captures/after/gate/attention-12.1280.dark.png) | [light](captures/after/gate/attention-12.390.light.png) · [dark](captures/after/gate/attention-12.390.dark.png) | Annotated timeline: `line-strong` spine, mono elapsed labels on the spine, the critical event marked in `verdict` colour, Retry / Dismiss / Details as visible text; the long codename wraps in the group header instead of `gabber-st…`. |
 | `attention-0` | [light](captures/after/gate/attention-0.1280.light.png) · [dark](captures/after/gate/attention-0.1280.dark.png) | [light](captures/after/gate/attention-0.390.light.png) · [dark](captures/after/gate/attention-0.390.dark.png) | "All clear" with one line of context; no empty box. |
-| `connection-failed-retry` | [light](captures/after/gate/connection-failed-retry.1280.light.png) · [dark](captures/after/gate/connection-failed-retry.1280.dark.png) | [light](captures/after/gate/connection-failed-retry.390.light.png) · [dark](captures/after/gate/connection-failed-retry.390.dark.png) | **Stand-in.** The fixture hand-builds `.empty-title` + two `.terminal-connecting-step` lines ("Attempt 3 · 12s elapsed · reconnecting in 8s") + "Try again / Connection log" — the sans title and amber step line the brief retired — rather than the production `.terminal-connecting-title` serif verdict and `ol.connection-timeline` (`hub-web/src/main.ts:995–1030`). The production surface passed strict in Unit 5's own render ([1280 light](captures/after/unit5-connection-light-1280.png), `/home/pippenz/.cas/artifacts/cas-408e/`). Send-back 1. |
+| `connection-failed-retry` | [light](captures/after/gate/connection-failed-retry.1280.light.png) · [dark](captures/after/gate/connection-failed-retry.1280.dark.png) | [light](captures/after/gate/connection-failed-retry.390.light.png) · [dark](captures/after/gate/connection-failed-retry.390.dark.png) | **Stand-in.** The fixture hand-builds `.empty-title` + two `.terminal-connecting-step` lines ("Attempt 3 · 12s elapsed · reconnecting in 8s") + "Try again / Connection log" — the sans title and amber step line the brief retired — rather than the production `.terminal-connecting-title` serif verdict and `ol.connection-timeline` (`hub-web/src/main.ts:995–1030`). The production surface passed strict in Unit 5's own render ([1280 light](captures/after/unit5-connection-light-1280.png), `<artifacts>/cas-408e/`). Send-back 1. |
 | `pairing-step-1` | [light](captures/after/gate/pairing-step-1.1280.light.png) · [dark](captures/after/gate/pairing-step-1.1280.dark.png) | [light](captures/after/gate/pairing-step-1.390.light.png) · [dark](captures/after/gate/pairing-step-1.390.dark.png) | Hero number over a 3 px rule, term/value ledger with hairlines, status row, Cancel + one primary. Two fixture artifacts: the dialog is `open` in flow (not `showModal()`), so it renders below the shell at y = 800 and appears only in the full-page capture; and the 13-character code scrolls inside `.pair-flow`. Send-backs 2 and 4. |
 | `pairing-cleanup` | [light](captures/after/gate/pairing-cleanup.1280.light.png) · [dark](captures/after/gate/pairing-cleanup.1280.dark.png) | [light](captures/after/gate/pairing-cleanup.390.light.png) · [dark](captures/after/gate/pairing-cleanup.390.dark.png) | Copy and step order unchanged (cas-8051 / cas-7d55); surfaces restyled; live status row present. Same in-flow dialog artifact as above. |
 

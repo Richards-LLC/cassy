@@ -184,13 +184,13 @@ Before (build `eda3dfd1`): `terminal-qa: FAIL cas-update-check · 12 runs · 33 
 
 After: `terminal-qa: PASS cas-update-check · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-update-check/report.md`
 
-Post-swap failure review: `terminal-qa: PASS cas-update · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-a461/terminal-qa/report.json`; the plain-mode
+Post-swap failure review: `terminal-qa: PASS cas-update · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-a461/terminal-qa/report.json`; the plain-mode
 failure test keeps the first line actionable by naming the failed project and the one rerun command.
 
 Service-refresh receipt review: `cas-cli` scoped update tests pass 41/41, including the
 old-to-new version transition and `via: service` contract; the real-build terminal capture
 for the adjacent doctor/service warning is recorded under
-`/home/pippenz/.cas/artifacts/cas-47f9/terminal-qa/`.
+`<artifacts>/cas-47f9/terminal-qa/`.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -213,9 +213,9 @@ the transcript's defects as rendered: `→ [1/2] Updating Cassy binaryChecking t
 cut names (`Petrastella/gabber-…`), raw errors in details blocks, and a final
 `✗ one or more projects were not fully refreshed`.
 
-After: `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-0aa5/terminal-qa-history/after/cas-update-partial-refresh/report.json`
+After: `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-0aa5/terminal-qa-history/after/cas-update-partial-refresh/report.json`
 
-After: `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-0aa5/terminal-qa-history/after/cas-update-success/report.json`
+After: `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-0aa5/terminal-qa-history/after/cas-update-success/report.json`
 
 `--json` for the partial fixture prints the same two documents before and after, byte for byte
 once parsed, and exits 1 both times.
@@ -238,15 +238,15 @@ update renderer files are identical to the merged `dc1665877`.
 
 The committed `after` captures for these three fixtures are these runs:
 
-- `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-partial-refresh/report.json`
-- `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-success/report.json`
-- `terminal-qa: PASS cas-update-mixed-failure · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-mixed-failure/report.json`
+- `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-partial-refresh/report.json`
+- `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-success/report.json`
+- `terminal-qa: PASS cas-update-mixed-failure · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-mixed-failure/report.json`
 
 The native interactive captures are the approved cells of independent QA round 2 of cas-70a8.
 They come from the same `4cedda1` binary, run by the supervisor with factory identity preserved,
 and cover accept with a deliberate extraction failure, a slow download, HTTP 500, decline, `-y`,
 pipe, C locale, `NO_COLOR` and colour. Their ledger:
-`/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-70a8/independent-qa/round-2/LEDGER.md`.
+`<artifacts>/cas-70a8/independent-qa/round-2/LEDGER.md`.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

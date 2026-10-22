@@ -25,9 +25,9 @@ It shares the production SQL, and negative controls must reject each breach.
 
 ## Critique
 
-terminal-qa: PASS communication-slos-pass · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-7e24/terminal-qa/pass/report.json
+terminal-qa: PASS communication-slos-pass · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-7e24/terminal-qa/pass/report.json
 
-terminal-qa: PASS communication-slos-breach · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-7e24/terminal-qa/breach/report.json
+terminal-qa: PASS communication-slos-breach · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-7e24/terminal-qa/breach/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -42,3 +42,5 @@ Scored by proud-phoenix-82 on 2026-10-16 against the actual binary built from
 initialized by that binary. The existing host/index/issue-repository findings
 remain visible; the communication row adds one warning only on BREACH/UNKNOWN.
 Captures above use the actual output; checked-in copies redact the sandbox path.
+
+Published evidence: `art-bfb60782` (`cas-7e24`).

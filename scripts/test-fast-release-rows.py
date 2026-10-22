@@ -114,7 +114,7 @@ class FastRows(unittest.TestCase):
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
-                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
+                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
@@ -131,6 +131,7 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
         self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
@@ -201,7 +202,7 @@ class FastRows(unittest.TestCase):
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(proof['rows']), 22)
+        self.assertEqual(len(proof['rows']), 23)
         self.assertEqual(proof['rows']['communication-slos'], 'PASS')
         self.assertTrue(all(status == 'PASS' for status in proof['rows'].values()), proof)
 

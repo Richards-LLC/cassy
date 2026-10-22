@@ -25,9 +25,9 @@ existing transport object stable.
 
 ## Critique
 
-terminal-qa: PASS cas-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-4c4b/terminal-qa/cas-hub-status/report.json
+terminal-qa: PASS cas-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4c4b/terminal-qa/cas-hub-status/report.json
 
-terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-4c4b/terminal-qa/cas-doctor-hub-transport/report.json
+terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4c4b/terminal-qa/cas-doctor-hub-transport/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -53,9 +53,9 @@ Tailscale app-bundle binary and the status/doctor surfaces retain one compact
 warning with `cas hub restart --tailscale-serve`. Update-origin relaunches now
 surface Serve publication failure as an error while retaining the underlying
 cause. The Prowl real-build capture is recorded at
-`/Users/pippenz/.cas/artifacts/cas-5722/terminal-qa-hub-status/report.json`.
+`<artifacts>/cas-5722/terminal-qa-hub-status/report.json`.
 
-terminal-qa: PASS cas-5722-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · `/Users/pippenz/.cas/artifacts/cas-5722/terminal-qa-hub-status/report.json`
+terminal-qa: PASS cas-5722-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · `<artifacts>/cas-5722/terminal-qa-hub-status/report.json`
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -69,11 +69,11 @@ Scored by the worker on 2026-09-11; floor holds.
 
 ### Wedged-holder recovery rendering
 
-terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-be89/terminal-qa/report.json
+terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-be89/terminal-qa/report.json
 
-terminal-qa: PASS cas-be89-doctor-hub-transport-allowlisted · 12 runs · 0 fail · 0 warn · 12 allowed · /home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor-allowlisted/report.json
+terminal-qa: PASS cas-be89-doctor-hub-transport-allowlisted · 12 runs · 0 fail · 0 warn · 12 allowed · <artifacts>/cas-be89/terminal-qa-doctor-allowlisted/report.json
 
-The doctor receipt has a raw companion failure at `/home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor/report.json`; its 12 findings are pre-existing truncations in unrelated stale-registration and cloud-purge diagnostics, each explicitly allowlisted in `/home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor-allowlist.json`. The hub transport row remains one compact `✓ hub transport` check in the captured doctor output, and the status surface retains a three-line verdict/owner/transport hierarchy.
+The doctor receipt has a raw companion failure at `<artifacts>/cas-be89/terminal-qa-doctor/report.json`; its 12 findings are pre-existing truncations in unrelated stale-registration and cloud-purge diagnostics, each explicitly allowlisted in `<artifacts>/cas-be89/terminal-qa-doctor-allowlist.json`. The hub transport row remains one compact `✓ hub transport` check in the captured doctor output, and the status surface retains a three-line verdict/owner/transport hierarchy.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -89,9 +89,9 @@ Scored by the worker on 2026-09-10; floor holds.
 
 The healthy route now renders `Tailscale Serve: OK - route targets the live hub shim at …`,
 while the unavailable and no-route messages retain their warning and compact loopback forms.
-The updated terminal capture is stored under `/home/pippenz/.cas/artifacts/cas-5b1b/terminal-qa/`.
+The updated terminal capture is stored under `<artifacts>/cas-5b1b/terminal-qa/`.
 
-terminal-qa: PASS cas-hub-status-cas-5b1b · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-5b1b/terminal-qa/cas-hub-status/report.json
+terminal-qa: PASS cas-hub-status-cas-5b1b · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-5b1b/terminal-qa/cas-hub-status/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

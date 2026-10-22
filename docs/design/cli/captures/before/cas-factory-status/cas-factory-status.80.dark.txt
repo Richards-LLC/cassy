@@ -1,5 +1,5 @@
 ═══ Status for session: cas-src-lively-panther-31 ═══
-                Project: /home/pippenz/Petrastella/cas-src
+                Project: <home>/Petrastella/cas-src
         Pending prompts: 0
             Ready tasks: 98
       In-progress tasks: 10

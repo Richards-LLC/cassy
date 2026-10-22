@@ -184,13 +184,39 @@ pub async fn post_pack(
     summary: &str,
     options: &PostOptions,
 ) -> Result<Vec<PostReceipt>, PostError> {
+    let posted = post_pack_each(violet, bundle, summary, options).await;
+    match posted.failed {
+        None => Ok(posted.receipts),
+        Some((_, error)) => Err(error),
+    }
+}
+
+/// How far a bundle post got: the receipts in bundle order, and the file
+/// that failed with its error. Once `receipts` is non-empty the top-level
+/// message exists, so retrying from the start would post it again.
+#[derive(Debug)]
+pub struct PackPost {
+    pub receipts: Vec<PostReceipt>,
+    pub failed: Option<(String, PostError)>,
+}
+
+/// [`post_pack`], stopping at the first failure but keeping what was posted.
+pub async fn post_pack_each(
+    violet: &(impl VioletPoster + Sync),
+    bundle: &Bundle,
+    summary: &str,
+    options: &PostOptions,
+) -> PackPost {
     let mut receipts: Vec<PostReceipt> = Vec::new();
     for (index, file) in bundle.files.iter().enumerate() {
-        let bytes = std::fs::read(&file.path)
-            .map_err(|e| PostError::new("pack_media_unreadable", format!("{}: {e}", file.source)))?;
+        let fail = |error: PostError, receipts: Vec<PostReceipt>| PackPost { receipts, failed: Some((file.source.clone(), error)) };
+        let bytes = match std::fs::read(&file.path) {
+            Ok(bytes) => bytes,
+            Err(e) => return fail(PostError::new("pack_media_unreadable", format!("{}: {e}", file.source)), receipts),
+        };
         let actual = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
         if actual != file.sha256 || bytes.len() as u64 != file.bytes {
-            return Err(PostError::new("pack_media_changed", format!("{} differs from the pack digest", file.source)));
+            return fail(PostError::new("pack_media_changed", format!("{} differs from the pack digest", file.source)), receipts);
         }
         let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("media");
         let mut options = options.clone();
@@ -207,9 +233,12 @@ pub async fn post_pack(
             options.title = Some(file.source.clone());
         }
         let upload = UploadFile { id: &file.source, name, size_bytes: file.bytes, sha256: &file.sha256 };
-        receipts.push(post_bytes(violet, upload, bytes, &options).await?);
+        match post_bytes(violet, upload, bytes, &options).await {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => return fail(error, receipts),
+        }
     }
-    Ok(receipts)
+    PackPost { receipts, failed: None }
 }
 
 /// Deletes media files older than `retention_days` (by modification time)

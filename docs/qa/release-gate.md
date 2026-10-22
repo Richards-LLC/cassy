@@ -234,6 +234,10 @@ generation once.
   flight on a later tick (the process died mid-post) is never retried,
   because it may have reached Slack. A post whose record then fails to save
   is not reposted by that process.
+- **Final once posted:** once the top-level message is posted, the
+  generation is final. If a later file fails, it is recorded as `partial`
+  with the permalink and the missing files, noted once, and never retried.
+  Only failures before the top-level message retry.
 - **Backoff:** only throttling and unavailability retry, with a persisted
   backoff of 30 s doubling to a 30-minute cap. Any other refusal (policy,
   audience, channel, a changed pack) stops posting for that generation. Run

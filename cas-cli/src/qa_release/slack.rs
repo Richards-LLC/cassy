@@ -13,7 +13,7 @@
 //! Violet's post tool, only to the configured channel, and every call is
 //! audit-logged with the pack sha256 and channel.
 use super::ReleaseConfig;
-use super::media::{Ffmpeg, post_pack, slack_bundle};
+use super::media::{Ffmpeg, post_pack_each, slack_bundle};
 use super::pack::{PACK_FILE, Pack, write_atomic};
 use super::printable;
 use crate::artifacts::slack::{PostError, PostOptions, VioletPoster};
@@ -136,6 +136,13 @@ pub struct Posted {
     pub permalink: String,
     pub files: usize,
     pub posted_at: DateTime<Utc>,
+    /// The top-level message posted but a later file failed. Still final:
+    /// retrying would post the top-level message again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+    /// Bundle files a partial post never uploaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 /// One pack's unfinished posting: its persisted backoff, and whether it
@@ -269,6 +276,8 @@ pub(crate) fn channel_since(cas_root: &Path, channel: &str, now: DateTime<Utc>) 
 /// - throttling and unavailability retry with a persisted 30 s doubling
 ///   backoff capped at 30 min; any other refusal stops;
 /// - a post whose record then fails to save is never reposted by this process.
+/// - once the top-level message is posted the generation is final: a later
+///   file failing records a `partial` post (permalink, missing files), never retried.
 ///
 /// Returns run notes: the permalink, or (once per pack and cause) why not.
 pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path, now: DateTime<Utc>, since: DateTime<Utc>) -> Vec<String> {
@@ -351,43 +360,61 @@ pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path, now: DateTime<Utc>
             );
             let violet = DriverViolet { transport, channel: channel.into(), pack_sha256: pack_sha256.clone() };
             let options = PostOptions { channel: channel.into(), ..PostOptions::default() };
-            let receipts = runtime.block_on(post_pack(&violet, &bundle, &summary, &options))?;
-            Ok((receipts, bundle.files.len()))
+            Ok((runtime.block_on(post_pack_each(&violet, &bundle, &summary, &options)), bundle))
         });
-    match outcome {
-        Ok((receipts, files)) => {
-            let permalink = receipts.first().map(|r| r.permalink.clone()).unwrap_or_default();
-            ledger.attempts.retain(|a| a.pack_sha256 != pack_sha256);
-            ledger.posted.push(Posted {
-                pack_sha256: pack_sha256.clone(),
-                agent_id: DRIVER_AGENT.into(),
-                channel: channel.into(),
-                permalink: permalink.clone(),
-                files,
-                posted_at: now,
-            });
-            notes.push(format!(
-                "Slack: posted pack {} ({files} files) to {channel} as {DRIVER_AGENT}: {permalink}",
-                &pack_sha256[..12]
-            ));
-            if let Err(error) = save(dir, &ledger) {
-                posted_unrecorded().lock().unwrap_or_else(|e| e.into_inner()).insert(pack_sha256);
-                notes.push(format!("Slack post not recorded in {SLACK_FILE} ({}); this process will not repost it", printable(&error)));
-            }
-            notes
-        }
-        Err(error) => {
-            attempt.in_flight = false;
-            attempt.last_error = format!("{}: {}", error.code, error.message);
-            attempt.stopped = !transient(&error.code);
-            record(&mut ledger, &attempt);
-            // If this write fails, the in-flight attempt stops the pack next tick.
-            let _ = save(dir, &ledger);
-            let next = if attempt.stopped { "not retrying" } else { "retrying with backoff" };
-            notes.extend(once(&pack_sha256, format!("Slack post failed ({next}): {}", printable(&attempt.last_error))));
-            notes
-        }
+    let (posted, bundle) = match outcome {
+        Ok(done) => done,
+        Err(error) => (super::media::PackPost { receipts: Vec::new(), failed: Some((PACK_FILE.into(), error)) }, Default::default()),
+    };
+    // Before the top-level message: nothing reached Slack, so retry or stop.
+    if posted.receipts.is_empty() {
+        let error = posted.failed.map(|(_, error)| error).unwrap_or_else(|| PostError::new("pack_empty", "the bundle has no files"));
+        attempt.in_flight = false;
+        attempt.last_error = format!("{}: {}", error.code, error.message);
+        attempt.stopped = !transient(&error.code);
+        record(&mut ledger, &attempt);
+        // If this write fails, the in-flight attempt stops the pack next tick.
+        let _ = save(dir, &ledger);
+        let next = if attempt.stopped { "not retrying" } else { "retrying with backoff" };
+        notes.extend(once(&pack_sha256, format!("Slack post failed ({next}): {}", printable(&attempt.last_error))));
+        return notes;
     }
+    // The top-level message exists: the generation is final, complete or not.
+    let permalink = posted.receipts[0].permalink.clone();
+    let files = posted.receipts.len();
+    let missing: Vec<String> = bundle.files.iter().skip(files).map(|f| f.source.clone()).collect();
+    ledger.attempts.retain(|a| a.pack_sha256 != pack_sha256);
+    ledger.posted.push(Posted {
+        pack_sha256: pack_sha256.clone(),
+        agent_id: DRIVER_AGENT.into(),
+        channel: channel.into(),
+        permalink: permalink.clone(),
+        files,
+        posted_at: now,
+        partial: posted.failed.is_some(),
+        missing: missing.clone(),
+    });
+    match &posted.failed {
+        None => notes.push(format!(
+            "Slack: posted pack {} ({files} files) to {channel} as {DRIVER_AGENT}: {permalink}",
+            &pack_sha256[..12]
+        )),
+        Some((_, error)) => notes.extend(once(
+            &pack_sha256,
+            format!(
+                "Slack: partial post of pack {} to {channel} ({permalink}); not retried, missing {}: {}: {}",
+                &pack_sha256[..12],
+                missing.join(", "),
+                error.code,
+                printable(&error.message)
+            ),
+        )),
+    }
+    if let Err(error) = save(dir, &ledger) {
+        posted_unrecorded().lock().unwrap_or_else(|e| e.into_inner()).insert(pack_sha256);
+        notes.push(format!("Slack post not recorded in {SLACK_FILE} ({}); this process will not repost it", printable(&error)));
+    }
+    notes
 }
 
 #[cfg(test)]

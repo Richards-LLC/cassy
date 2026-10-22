@@ -418,6 +418,16 @@ impl PeerClaims {
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
+    /// Task-start seam: acquire before the local lease is taken.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn acquire_for_start(
+        &self, _cas_root: &Path, task_id: &str, kind: ClaimKind,
+        agent_id: &str, agent_name: &str, duration_secs: u32,
+        is_local: &dyn Fn(&str) -> bool,
+    ) -> Acquire {
+        self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local)
+    }
+
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
     /// within `budget`. `None` when the lock or its reason cannot be read.
     pub fn recorded_holder(&self, id: &str, reader: &str, budget: Duration) -> Option<ClaimHolder> {
@@ -1198,6 +1208,12 @@ pub(crate) fn release_task_claim_in_background_with(
 /// so its claim is the new holder's and the record is dropped unreleased;
 /// so is one older than a lease's lifetime, whose claim has run out.
 pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) {
+    release_pending_task_claims_with(claims, cas_root, |_| {});
+}
+
+fn release_pending_task_claims_with(
+    claims: &PeerClaims, cas_root: &Path, before_release: impl Fn(&str),
+) {
     let pending = read_pending_claim_releases(cas_root);
     if pending.is_empty() {
         return;
@@ -1216,6 +1232,7 @@ pub(crate) fn release_pending_task_claims(claims: &PeerClaims, cas_root: &Path) 
             .flatten()
             .is_some_and(|lease| lease.is_valid());
         let done = restarted || now - asked >= lifetime || {
+            before_release(&task_id);
             let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
             match budgeted.release_local(&task_id, &is_local) {
                 Ok(_) => true,
@@ -1389,6 +1406,159 @@ pub fn lease_duration_secs(cas_root: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod pending_release_tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const TASK: &str = "cas-af26";
+        const AGENT: &str = "release-worker";
+
+        async fn fixture(fail_release: bool) -> (
+            MockServer, tempfile::TempDir, PeerClaims, Arc<Mutex<Option<serde_json::Value>>>,
+        ) {
+            let server = MockServer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let agents = crate::store::open_agent_store(dir.path()).unwrap();
+            agents.register(&crate::types::Agent::new(AGENT.into(), "worker".into())).unwrap();
+            let project = "github.com/acme/retry-race";
+            let key = claim_key(project, TASK);
+            let old = TaskLease::new(key.clone(), AGENT.into(), 600);
+            let mut lock = serde_json::to_value(old).unwrap();
+            lock["id"] = serde_json::json!("old-lock");
+            let held = Arc::new(Mutex::new(Some(lock)));
+            let read = held.clone();
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "lock": read.lock().unwrap().clone(),
+                    }))
+                }).mount(&server).await;
+            let release = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if fail_release {
+                        return ResponseTemplate::new(503);
+                    }
+                    *release.lock().unwrap() = None;
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"success"}))
+                }).mount(&server).await;
+            let claimed = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let mut fresh = serde_json::to_value(TaskLease::new(key.clone(), AGENT.into(), 600)).unwrap();
+                    fresh["id"] = serde_json::json!("fresh-lock");
+                    fresh["epoch"] = serde_json::json!(2);
+                    *claimed.lock().unwrap() = Some(fresh.clone());
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "status":"success", "result":"claimed", "lock":fresh,
+                    }))
+                }).mount(&server).await;
+            let claims = PeerClaims {
+                config: CloudConfig {
+                    endpoint: server.uri(), token: Some("sandbox-token".into()),
+                    ..Default::default()
+                },
+                project: project.into(), label: "local".into(),
+                retired_local: HashMap::new(), budget: None,
+            };
+            update_pending_claim_releases(dir.path(), |pending| {
+                pending.insert(TASK.into(), Utc::now().timestamp());
+            });
+            (server, dir, claims, held)
+        }
+
+        #[tokio::test]
+        async fn restarting_between_lease_check_and_cloud_read_keeps_fresh_claim_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                release_pending_task_claims_with(&claims, dir.path(), |task| {
+                    // The real task-start order: Cloud first, local lease later.
+                    assert!(crate::store::open_agent_store(dir.path()).unwrap().get_lease(task).unwrap().is_none());
+                    assert!(matches!(claims.acquire_for_start(
+                        dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    ), Acquire::Claimed));
+                    // Deliberately leave the local lease absent until retry ends.
+                });
+                assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT),
+                    "the old release retry removed the restart's fresh Cloud claim");
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert_eq!(held.lock().unwrap().as_ref().unwrap()["id"], "fresh-lock");
+            assert!(server.received_requests().await.unwrap().iter().all(|r| !r.url.path().ends_with("/release")));
+        }
+
+        #[tokio::test]
+        async fn restarted_local_lease_drops_pending_record_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                let agents = crate::store::open_agent_store(dir.path()).unwrap();
+                assert!(matches!(agents.try_claim(TASK, AGENT, 600, Some("restart")), Ok(ClaimResult::Success(_))));
+                release_pending_task_claims(&claims, dir.path());
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn failed_cloud_release_keeps_pending_record_cas_af26() {
+            let (_server, dir, claims, held) = fixture(true).await;
+            tokio::task::spawn_blocking(move || {
+                let before = read_pending_claim_releases(dir.path());
+                release_pending_task_claims(&claims, dir.path());
+                assert_eq!(read_pending_claim_releases(dir.path()), before);
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+        }
+
+        #[tokio::test]
+        async fn expired_release_drops_pending_record_cas_af26() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                update_pending_claim_releases(dir.path(), |pending| {
+                    pending.insert(TASK.into(), Utc::now().timestamp() - i64::from(lease_duration_secs(dir.path())));
+                });
+                release_pending_task_claims(&claims, dir.path());
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(held.lock().unwrap().is_some());
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[test]
+        fn unavailable_record_lock_logs_and_never_updates_unlocked_cas_af26() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = pending_claim_releases_path(dir.path());
+            let original = serde_json::json!({TASK: Utc::now().timestamp()}).to_string();
+            std::fs::write(&path, &original).unwrap();
+            std::fs::create_dir(path.with_extension("lock")).unwrap();
+            let log = tempfile::tempfile().unwrap();
+            let capture = log.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_writer(move || capture.try_clone().unwrap()).finish();
+            let mut changed = false;
+            tracing::subscriber::with_default(subscriber, || {
+                update_pending_claim_releases(dir.path(), |pending| {
+                    changed = true;
+                    pending.clear();
+                });
+            });
+            assert!(!changed, "never run the update after failing to acquire its lock");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            use std::io::{Read, Seek};
+            let mut log = log;
+            log.rewind().unwrap();
+            let mut text = String::new();
+            log.read_to_string(&mut text).unwrap();
+            assert!(text.contains("pending claim releases") && text.contains("lock"), "{text}");
+        }
+    }
 
     #[tokio::test]
     async fn cas_8ea7_team_conflict_names_account_and_never_recovers_foreign_lock() {

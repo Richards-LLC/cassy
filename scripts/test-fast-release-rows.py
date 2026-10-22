@@ -193,11 +193,14 @@ class FastRows(unittest.TestCase):
     def test_design_docs_reject_absolute_home_paths(self):
         self.write("docs/design/example.brief.md",
                    "# Example\n\nEvidence: /home/alice/.cas/artifacts/cas-1234/report.json\n"
-                   "and /Users/bob/.cas/artifacts/cas-1234/report.json\n")
+                   "and /Users/bob/.cas/artifacts/cas-1234/report.json\n"
+                   "and /root/.cas/artifacts/cas-1234/report.json\n")
         result = self.fast()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FAIL design-doc-paths", result.stdout)
         self.assertIn("docs/design/example.brief.md:3", result.stdout)
+        self.assertIn("docs/design/example.brief.md:4", result.stdout)
+        self.assertIn("docs/design/example.brief.md:5", result.stdout)
 
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()

@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import sys
 
-HOME = re.compile(r"(?<![\w.-])/(?:home|Users)/|[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]")
+HOME = re.compile(r"(?<![\w.-])/(?:home|Users|root)/|[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]")
 
 
 def check(root):

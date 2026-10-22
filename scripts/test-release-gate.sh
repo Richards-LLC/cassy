@@ -857,6 +857,9 @@ run_scenario() {
 }
 
 section_release_binary_isa() {
+# Default-target assertions must not inherit the factory worker build cache.
+# The custom-target scenario below supplies its own explicit override.
+unset CARGO_TARGET_DIR CAS_RELEASE_BINARY_TARGET_DIR
 # The new row must audit the staged executable, including code introduced by
 # dependencies, before the train can authorize pr-body/pipeline.
 repo="$(new_fixture release-binary-isa)"

@@ -3672,6 +3672,7 @@ pub(crate) fn render_sync_summary(
             }
         }
         SyncSummaryKind::Push => {
+            let separator = format!(" {} ", Icons::separator_dot(fmt.unicode()));
             let team_pending = summary.team_backlog_pending;
             let team_failed = summary.team_backlog_failed;
             let push_complete = summary.push_complete();
@@ -3694,7 +3695,7 @@ pub(crate) fn render_sync_summary(
                     if !team_counts.is_empty() {
                         parts.push(format!("team {}", team_counts.join(", ")));
                     }
-                    fmt.success(&format!("Push complete · {}", parts.join(" · ")))?;
+                    fmt.success(&format!("Push complete{separator}{}", parts.join(&separator)))?;
                 } else {
                     let reasons = rejection_reason_labels(summary);
                     let rejected = rejected_total(summary);
@@ -3758,11 +3759,11 @@ pub(crate) fn render_sync_summary(
                     {
                         parts.push("run cas cloud queue --retry".to_string());
                     }
-                    fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
+                    fmt.warning(&format!("Push incomplete{separator}{}", parts.join(&separator)))?;
                 }
                 // cas-25c1: never let a clean team receipt stand alone over a
                 // personal queue of parked or rejected rows.
-                if let Some((true, line)) = held_personal_line(summary) {
+                if let Some((true, line)) = held_personal_line(summary, &separator) {
                     fmt.warning(&line)?;
                 }
             } else {
@@ -3779,7 +3780,7 @@ pub(crate) fn render_sync_summary(
                     summary.failed + team_failed
                 ))?;
                 fmt.newline()?;
-                if let Some((_, line)) = held_personal_line(summary) {
+                if let Some((_, line)) = held_personal_line(summary, &separator) {
                     fmt.write_raw(&format!("    {line}"))?;
                     fmt.newline()?;
                 }
@@ -4645,7 +4646,7 @@ pub(crate) fn refresh_team_linked_backlog(
 }
 
 /// The held-personal line of a push receipt, and whether it needs attention.
-fn held_personal_line(summary: &SyncSummary) -> Option<(bool, String)> {
+fn held_personal_line(summary: &SyncSummary, separator: &str) -> Option<(bool, String)> {
     let held = summary.held_personal_pending + summary.held_personal_failed;
     if held == 0 && summary.team_only_mismatch == 0 {
         return None;
@@ -4665,12 +4666,12 @@ fn held_personal_line(summary: &SyncSummary) -> Option<(bool, String)> {
     }
     if summary.team_only_mismatch > 0 {
         text.push_str(&format!(
-            " \u{b7} cloud.team_only is off but {} row(s) were rejected as team_owned_project: {}",
+            "{separator}cloud.team_only is off but {} row(s) were rejected as team_owned_project: {}",
             summary.team_only_mismatch,
             crate::cloud::push_reason_hint("team_owned_project")
         ));
     } else if summary.held_personal_failed > 0 {
-        text.push_str(" \u{b7} see `cas cloud queue`");
+        text.push_str(&format!("{separator}see `cas cloud queue`"));
     }
     Some((
         summary.held_personal_failed > 0 || summary.team_only_mismatch > 0,

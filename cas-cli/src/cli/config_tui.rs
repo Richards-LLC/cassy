@@ -637,22 +637,13 @@ mod tests {
         let (message, is_error) = app.status_message.clone().unwrap();
         assert!(is_error && message.contains("operator"), "{message}");
         let saved = Config::load(&root).unwrap();
-        assert_eq!(
-            saved.get("qa.evidence_gate"),
-            app.original_config.get("qa.evidence_gate")
-        );
+        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("sync.min_helpful", "5").unwrap();
         app.save_config_with(agent).unwrap();
         assert!(!app.has_unsaved);
-        assert_eq!(
-            Config::load(&root)
-                .unwrap()
-                .get("sync.min_helpful")
-                .as_deref(),
-            Some("5")
-        );
+        assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
     }
 
     #[test]
@@ -672,8 +663,7 @@ mod tests {
         app.option_state.select(Some(0));
         app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
         app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
-        app.save_config_with(|| InvocationContext::default())
-            .unwrap();
+        app.save_config_with(|| InvocationContext::default()).unwrap();
 
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();

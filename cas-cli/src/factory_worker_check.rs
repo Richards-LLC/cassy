@@ -1211,21 +1211,167 @@ pub(crate) fn record_passing_test_for_tests(
 
 // Shared with parked-cache eviction: a cache cannot be evicted while its
 // capped builder owns the lane, even between process inspection and spawn.
-pub(crate) struct LaneLock(File);
+pub(crate) struct LaneLock {
+    file: File,
+    stale_holder: Option<LaneLockHolder>,
+}
 impl Drop for LaneLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        // The file itself remains as the stable flock inode, but owner details
+        // should survive only a crashed holder, not a clean release.
+        let _ = self.file.set_len(0);
+        let _ = FileExt::unlock(&self.file);
     }
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+struct LaneLockHolder {
+    pid: u32,
+    command: String,
+    started_at: String,
+}
+
 pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
+    try_lock_lane_with_command(cas_root, repo, "factory lane operation")
+}
+
+fn try_lock_lane_with_command(
+    cas_root: &Path,
+    repo: &Path,
+    command: &str,
+) -> std::io::Result<Option<LaneLock>> {
     let slots = cas_root.join("worker-check-slots");
     std::fs::create_dir_all(&slots)?;
-    let lock = lock_file(&lane_lock_path(cas_root, repo)?).map_err(std::io::Error::other)?;
+    let mut lock = lock_file(&lane_lock_path(cas_root, repo)?).map_err(std::io::Error::other)?;
     match lock.try_lock_exclusive() {
-        Ok(()) => Ok(Some(LaneLock(lock))),
+        Ok(()) => {
+            use std::io::{Read, Seek, SeekFrom, Write};
+            lock.seek(SeekFrom::Start(0))?;
+            let mut old_contents = String::new();
+            lock.read_to_string(&mut old_contents)?;
+            let stale_holder = serde_json::from_str::<LaneLockHolder>(&old_contents)
+                .ok()
+                .filter(|holder| lane_holder_is_alive(holder.pid) == Some(false));
+            let holder = LaneLockHolder {
+                pid: std::process::id(),
+                command: sanitize_lane_command(command),
+                started_at: chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            };
+            lock.set_len(0)?;
+            lock.seek(SeekFrom::Start(0))?;
+            serde_json::to_writer(&mut lock, &holder).map_err(std::io::Error::other)?;
+            lock.flush()?;
+            Ok(Some(LaneLock {
+                file: lock,
+                stale_holder,
+            }))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn sanitize_lane_command(command: &str) -> String {
+    command
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .take(240)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn worker_check_command(args: &[String]) -> String {
+    let suffix = args.join(" ");
+    // The executable is stable even when a private Cargo path is used for
+    // isolated tests; the suffix is exactly the admitted worker command.
+    let command = if suffix.is_empty() {
+        "cargo".to_string()
+    } else {
+        format!("cargo {suffix}")
+    };
+    sanitize_lane_command(&command)
+}
+
+fn lane_lock_refusal(path: &Path) -> anyhow::Error {
+    let details = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<LaneLockHolder>(&contents).ok())
+        .map(|holder| lane_holder_description(&holder, chrono::Utc::now()))
+        .unwrap_or_else(|| {
+            "holder details are unavailable; wait for it or retry later".to_string()
+        });
+    anyhow::anyhow!("This worktree already has a worker check; {details}")
+}
+
+fn stale_lane_holder_notice(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    let age = lane_holder_age(holder, now);
+    let command = sanitize_lane_command(&holder.command);
+    format!(
+        "worker-check lane: stale previous holder metadata for pid {} ({command}), started {age} ago; continuing with the lane",
+        holder.pid
+    )
+}
+
+fn lane_holder_description(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    let age = lane_holder_age(holder, now);
+    let start = sanitize_lane_command(&holder.started_at);
+    let command = sanitize_lane_command(&holder.command);
+    let when = format!("started {age} ago ({start})");
+    match lane_holder_is_alive(holder.pid) {
+        Some(true) => format!(
+            "held by pid {} ({command}), {when}; wait for it or stop that check",
+            holder.pid
+        ),
+        Some(false) => format!(
+            "stale holder metadata for pid {} ({command}), {when}; an OS lock is still held, so inspect its owner",
+            holder.pid
+        ),
+        None => format!(
+            "holder pid {} ({command}) has unknown liveness, {when}; wait for it or retry later",
+            holder.pid
+        ),
+    }
+}
+
+fn lane_holder_age(holder: &LaneLockHolder, now: chrono::DateTime<chrono::Utc>) -> String {
+    chrono::DateTime::parse_from_rfc3339(&holder.started_at)
+        .ok()
+        .map(|started| {
+            let seconds = (now - started.with_timezone(&chrono::Utc)).num_seconds().max(0);
+            if seconds >= 3600 {
+                format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+            } else if seconds >= 60 {
+                format!("{}m", seconds / 60)
+            } else {
+                format!("{seconds}s")
+            }
+        })
+        .unwrap_or_else(|| "an unknown time".to_string())
+}
+
+#[cfg(unix)]
+fn lane_holder_is_alive(pid: u32) -> Option<bool> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Some(false);
+    }
+    // SAFETY: signal zero only checks whether this recorded PID exists.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        Some(true)
+    } else {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Some(false),
+            Some(libc::EPERM) => Some(true),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn lane_holder_is_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn lane_lock_path(cas_root: &Path, repo: &Path) -> std::io::Result<PathBuf> {
@@ -1508,8 +1654,12 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
     // same commit from overwriting one another.
     let lane_key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let _lane = try_lock_lane(&cas_root, &repo)?
-        .context("This worktree already has a worker check; retry later")?;
+    let lane_path = lane_lock_path(&cas_root, &repo)?;
+    let _lane = try_lock_lane_with_command(&cas_root, &repo, &worker_check_command(args))?
+        .ok_or_else(|| lane_lock_refusal(&lane_path))?;
+    if let Some(stale) = &_lane.stale_holder {
+        eprintln!("{}", stale_lane_holder_notice(stale, chrono::Utc::now()));
+    }
     crate::factory_target_cache::parked::resume(&cas_root, &repo)?;
     let receipt = match &test {
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
@@ -1801,6 +1951,83 @@ mod tests {
                      2: -> FLOCK  ADVISORY  WRITE 4343 00:2f:555 0 EOF\n";
         assert!(super::flock_held_on_inode(locks, 918_273));
         assert!(!super::flock_held_on_inode(locks, 555), "a waiter does not hold the lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_check_lane_refusal_reports_live_and_stale_owner() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders=1\n",
+        )
+        .unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(waiting)"]
+            .map(str::to_string);
+
+        let path = lane_lock_path(&root, &repo).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lock = lock_file(&path).unwrap();
+        lock.lock_exclusive().unwrap();
+        let started = chrono::Utc::now() - chrono::Duration::seconds(210);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "command": "cargo nextest run -p cas --lib -E test(waiting)",
+                "started_at": started.to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let live = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(live.contains(&format!("pid {}", std::process::id())), "{live}");
+        assert!(
+            live.contains("cargo nextest run -p cas --lib -E test(waiting)"),
+            "{live}"
+        );
+        assert!(live.contains("started 3m ago"), "{live}");
+
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "pid": u32::MAX,
+                "command": "cargo nextest run -p cas --lib -E test(waiting)",
+                "started_at": started.to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stale = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(stale.contains("stale"), "{stale}");
+        assert!(
+            stale.contains("cargo nextest run -p cas --lib -E test(waiting)"),
+            "{stale}"
+        );
+        FileExt::unlock(&lock).unwrap();
+        let acquired = try_lock_lane_with_command(
+            &root,
+            &repo,
+            "cargo nextest run -p cas --lib -E test(waiting)",
+        )
+        .unwrap()
+        .unwrap();
+        let stale = acquired.stale_holder.as_ref().unwrap();
+        assert_eq!(stale.pid, u32::MAX);
+        assert!(stale_lane_holder_notice(stale, chrono::Utc::now()).contains("stale previous holder"));
+        drop(acquired);
+        drop(lock);
     }
 
     /// cas-3d04: Codex SIGKILLs the calling shell's process group when an

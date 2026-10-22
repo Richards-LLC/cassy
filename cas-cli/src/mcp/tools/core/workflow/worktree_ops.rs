@@ -5124,16 +5124,18 @@ impl CasCore {
             );
         }
 
-        // cas-eda0: a parked delivery merged here with green CI (no override)
-        // and published is closed by Cassy, not by a worker re-close. The
-        // close keeps every gate; a verdict still owed is dispatched by it.
+        // A parked delivery merged and published without a CI override is
+        // closed by Cassy, including when CI was advisory. The ordinary close
+        // keeps every gate and dispatches a verdict still owed.
         let auto_close_expected = transactional_delivery.is_none()
             && !ci_override
-            && matches!(branch_ci_state, BranchCiState::Green { .. })
             && push_outcome.is_published();
+        let ci_confirmed = matches!(branch_ci_state, BranchCiState::Green { .. });
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha)) if auto_close_expected => {
-                let outcome = self.close_after_green_merge(task_id, merge_sha).await;
+                let outcome = self
+                    .close_after_published_merge(task_id, merge_sha, ci_confirmed)
+                    .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 format!("{push_note}{}", outcome.receipt(task_id))
             }
@@ -5143,9 +5145,8 @@ impl CasCore {
         if let Some((task_id, source_branch, target_branch, source_tip, _)) =
             pending_observation.as_ref()
         {
-            // Advisory/override merges have no automatic close follow-up.
-            // Their durable observation is terminal; only a green auto-close
-            // that still owes a close/dispatch must retain its recovery intent.
+            // Override merges have no automatic close follow-up. Other
+            // published merges retain recovery intent until close or dispatch.
             let followup_complete = if auto_close_expected {
                 let task_closed = self
                     .open_task_store()

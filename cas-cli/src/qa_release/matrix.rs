@@ -123,12 +123,19 @@ impl Coverage {
     }
 }
 
+/// One golden journey's planned rows: `(row id, cell label)`.
+pub struct Planned<'a> {
+    pub journey: &'a Journey,
+    pub rows: Vec<(String, String)>,
+}
+
 /// Rejects duplicate and unidentified runs within each cell of a journey with
 /// an `independence_key` (the later duplicate becomes NOT_EXERCISED, so the
-/// cell stays OWED), then reports cells × runs coverage per golden journey.
-pub fn settle(rows: &mut [Row], journeys: &[&Journey]) -> Vec<Coverage> {
+/// cell stays OWED), then reports cells × runs coverage per golden journey
+/// against its planned rows; a planned row with no verdict is missing.
+pub fn settle(rows: &mut [Row], golden: &[Planned<'_>]) -> Vec<Coverage> {
     let mut coverage = Vec::new();
-    for journey in journeys.iter().filter(|j| j.is_golden_set()) {
+    for Planned { journey, rows: planned } in golden {
         let runs = journey.runs.unwrap_or(1).max(1);
         if let Some(key) = &journey.independence_key {
             let mut by_cell: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -160,16 +167,18 @@ pub fn settle(rows: &mut [Row], journeys: &[&Journey]) -> Vec<Coverage> {
                 }
             }
         }
-        let mine: Vec<&Row> = rows.iter().filter(|r| r.journey == journey.id).collect();
-        let cells = mine.iter().filter_map(|r| r.cell.as_deref()).collect::<std::collections::BTreeSet<_>>().len().max(1);
-        let counting = |row: &Row| matches!(row.verdict, RowVerdict::Pass | RowVerdict::Fail { .. });
+        let counts = |id: &str| {
+            rows.iter().any(|r| r.id == id && matches!(r.verdict, RowVerdict::Pass | RowVerdict::Fail { .. }))
+        };
+        let cells = planned.iter().map(|(_, cell)| cell).collect::<std::collections::BTreeSet<_>>().len();
+        let missing: Vec<String> = planned.iter().filter(|(id, _)| !counts(id)).map(|(id, _)| id.clone()).collect();
         coverage.push(Coverage {
             journey: journey.id.clone(),
             cells: cells as u32,
             runs,
-            required: cells as u32 * runs,
-            counted: mine.iter().filter(|r| counting(r)).count() as u32,
-            missing: mine.iter().filter(|r| !counting(r)).map(|r| r.id.clone()).collect(),
+            required: planned.len() as u32,
+            counted: (planned.len() - missing.len()) as u32,
+            missing,
         });
     }
     coverage

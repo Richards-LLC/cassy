@@ -1066,10 +1066,18 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
                 row.run = planned.run;
             }
         }
-        let golden: Vec<&Journey> = registry
+        let golden: Vec<super::matrix::Planned<'_>> = registry
             .journeys
             .iter()
-            .filter(|j| run.plan.iter().any(|p| p.journey == j.id && p.cell.is_some()))
+            .filter_map(|journey| {
+                let rows: Vec<(String, String)> = run
+                    .plan
+                    .iter()
+                    .filter(|p| p.journey == journey.id)
+                    .filter_map(|p| Some((p.id.clone(), p.cell.as_ref()?.label())))
+                    .collect();
+                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows })
+            })
             .collect();
         pack.matrix = super::matrix::settle(&mut pack.rows, &golden);
         for row in &pack.rows {

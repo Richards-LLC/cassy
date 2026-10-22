@@ -5,7 +5,7 @@
 //! Violet receives exactly the bytes the pack names. Video over the limit is
 //! re-encoded through a [`Transcoder`]; if that fails or is still too large,
 //! the video stays local-only and the row's frames carry the evidence.
-use super::pack::{MEDIA_DIR, Media, PACK_FILE, Pack, PackError, digest, media_path};
+use super::pack::{MEDIA_DIR, Media, PACK_FILE, Pack, PackError, Pruned, digest, media_path, pruned, record_pruned};
 use crate::artifacts::slack::{PostError, PostOptions, PostReceipt, UploadFile, VioletPoster, post_bytes};
 use chrono::{DateTime, Duration, Utc};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,13 @@ use std::path::{Path, PathBuf};
 /// Transcoded copies live here, inside the pack's media directory.
 const SLACK_DIR: &str = ".slack";
 const VIDEO: &[&str] = &["mp4", "webm", "mov", "mkv"];
+/// Only images and video are uploaded; traces, logs and archives can carry
+/// credentials, so the Slack post links them by local path instead.
+const IMAGE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+fn extension_in(path: &str, list: &[&str]) -> bool {
+    Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| list.contains(&e.to_ascii_lowercase().as_str()))
+}
 
 /// Re-encodes a video so it fits `max_bytes`. The production implementation
 /// is [`Ffmpeg`]; tests use a fake.
@@ -74,9 +81,14 @@ pub struct Bundle {
     pub files: Vec<BundleFile>,
     /// Media that stay local: still over the limit after transcoding.
     pub local_only: Vec<Media>,
+    /// Media that are not image or video: never uploaded, named by local path.
+    pub linked: Vec<Media>,
+    /// Media retention already removed.
+    pub pruned: Vec<Media>,
 }
 
-/// Plans the Slack copy of the sealed pack in `dir`, verifying it first. Each file is at most
+/// Plans the Slack copy of the sealed pack in `dir`, verifying it first.
+/// Only `pack.json` (secret-scanned at seal), images and video are uploaded. Each file is at most
 /// `limit` bytes (Violet's artifact limit is [`cas_types::ARTIFACT_MAX_BYTES`]).
 pub fn slack_bundle(dir: &Path, limit: u64, transcoder: &impl Transcoder) -> Result<Bundle, PackError> {
     let pack = Pack::load(dir)?;
@@ -87,7 +99,16 @@ pub fn slack_bundle(dir: &Path, limit: u64, transcoder: &impl Transcoder) -> Res
         return Err(PackError::Media(format!("{PACK_FILE} is {bytes} bytes, over the {limit}-byte post limit")));
     }
     bundle.files.push(BundleFile { path: index, source: PACK_FILE.into(), sha256, bytes });
+    let pruned = pruned(dir)?;
     for media in &pack.media {
+        if pruned.iter().any(|p| p.path == media.path) && std::fs::symlink_metadata(dir.join(&media.path)).is_err() {
+            bundle.pruned.push(media.clone());
+            continue;
+        }
+        if !extension_in(&media.path, IMAGE) && !extension_in(&media.path, VIDEO) {
+            bundle.linked.push(media.clone());
+            continue;
+        }
         let path = media_path(dir, &media.path)?;
         if media.bytes <= limit {
             bundle.files.push(BundleFile {
@@ -98,7 +119,7 @@ pub fn slack_bundle(dir: &Path, limit: u64, transcoder: &impl Transcoder) -> Res
             });
             continue;
         }
-        let video = path.extension().and_then(|e| e.to_str()).is_some_and(|e| VIDEO.contains(&e.to_ascii_lowercase().as_str()));
+        let video = extension_in(&media.path, VIDEO);
         let copy = transcoded_path(dir, media)?;
         let fits = video
             && transcoder.transcode(&path, &copy, limit).is_ok()
@@ -128,8 +149,9 @@ fn transcoded_path(dir: &Path, media: &Media) -> Result<PathBuf, PackError> {
     Ok(slack.join(format!("{}.mp4", &key[..16])))
 }
 
-/// Posts a bundle: `pack.json` with `summary` as its comment, then each file
-/// in that message's thread. Bytes are re-hashed before each upload.
+/// Posts a bundle: `pack.json` with `summary` as its comment (naming media
+/// kept local), then each file in that message's thread. Bytes are re-hashed
+/// before each upload.
 pub async fn post_pack(
     violet: &(impl VioletPoster + Sync),
     bundle: &Bundle,
@@ -147,7 +169,13 @@ pub async fn post_pack(
         let name = file.path.file_name().and_then(|n| n.to_str()).unwrap_or("media");
         let mut options = options.clone();
         if index == 0 {
-            options.initial_comment = Some(summary.into());
+            let local: Vec<&str> =
+                bundle.linked.iter().chain(&bundle.local_only).map(|m| m.path.as_str()).collect();
+            options.initial_comment = Some(if local.is_empty() {
+                summary.into()
+            } else {
+                format!("{summary}\nKept local (not uploaded): {}", local.join(", "))
+            });
         } else {
             options.reply_to = receipts[0].message_id.clone().or(options.reply_to);
             options.title = Some(file.source.clone());
@@ -161,8 +189,10 @@ pub async fn post_pack(
 /// Deletes media files older than `retention_days` (by modification time)
 /// under each pack's own `media/` directory in `release_root`
 /// (`<artifacts_root>/<project>/release`). Links are never followed or
-/// deleted, and nothing outside a pack's `media/` is touched; `pack.json`
-/// stays as the record. Returns the deleted paths.
+/// deleted, and nothing outside a pack's `media/` is deleted. Each deleted
+/// pack entry is first recorded in the pack's `pruned.json`, so `pack.json`
+/// (whose bytes never change) stays loadable as the record. A pack whose
+/// `pack.json` exists but does not parse is left alone. Returns the deleted paths.
 pub fn prune_media(release_root: &Path, retention_days: u32, now: DateTime<Utc>) -> Vec<PathBuf> {
     let cutoff = now - Duration::days(i64::from(retention_days));
     let mut deleted = Vec::new();
@@ -170,17 +200,52 @@ pub fn prune_media(release_root: &Path, retention_days: u32, now: DateTime<Utc>)
         return deleted;
     };
     for pack in packs.flatten() {
-        let media = pack.path().join(MEDIA_DIR);
+        let dir = pack.path();
+        let media = dir.join(MEDIA_DIR);
         if !std::fs::symlink_metadata(&media).is_ok_and(|m| m.file_type().is_dir())
             || !pack.file_type().is_ok_and(|t| t.is_dir())
         {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&media).follow_links(false).into_iter().flatten() {
-            let Ok(meta) = entry.path().symlink_metadata() else { continue };
-            let old = meta.modified().is_ok_and(|m| DateTime::<Utc>::from(m) < cutoff);
-            if meta.file_type().is_file() && old && std::fs::remove_file(entry.path()).is_ok() {
-                deleted.push(entry.path().to_path_buf());
+        let listed: Vec<Media> = match std::fs::read_to_string(dir.join(PACK_FILE)) {
+            Ok(text) => match serde_json::from_str::<Pack>(&text) {
+                Ok(sealed) => sealed.media,
+                Err(_) => continue,
+            },
+            Err(_) => Vec::new(),
+        };
+        let old: Vec<PathBuf> = walkdir::WalkDir::new(&media)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+            .filter(|entry| {
+                entry.path().symlink_metadata().is_ok_and(|meta| {
+                    meta.file_type().is_file() && meta.modified().is_ok_and(|m| DateTime::<Utc>::from(m) < cutoff)
+                })
+            })
+            .map(|entry| entry.path().to_path_buf())
+            .collect();
+        // A pack entry is pruned only while its bytes still match: a changed
+        // file stays, so loading keeps refusing it rather than forgetting it.
+        let mut old = old;
+        let mut records = Vec::new();
+        for media in &listed {
+            let path = dir.join(&media.path);
+            if !old.contains(&path) {
+                continue;
+            }
+            if digest(&path).is_ok_and(|(sha256, bytes)| sha256 == media.sha256 && bytes == media.bytes) {
+                records.push(Pruned { path: media.path.clone(), sha256: media.sha256.clone(), bytes: media.bytes, pruned_at: now });
+            } else {
+                old.retain(|p| p != &path);
+            }
+        }
+        if !records.is_empty() && record_pruned(&dir, &records).is_err() {
+            continue;
+        }
+        for path in old {
+            if std::fs::remove_file(&path).is_ok() {
+                deleted.push(path);
             }
         }
     }

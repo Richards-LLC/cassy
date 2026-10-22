@@ -888,8 +888,25 @@ fn open_task_similarity(
             .collect(),
         None => std::collections::HashSet::new(),
     };
+    let tasks = task_store.list(None).map_err(|error| error.to_string())?;
+    let sibling_descriptions: Vec<_> = tasks.iter()
+        .filter(|task| siblings.contains(&task.id)
+            && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
+        .map(|task| task.description.as_str())
+        .collect();
+    let epic_description = tasks.iter().find(|task| epic_id == Some(task.id.as_str()))
+        .map(|task| task.description.as_str()).unwrap_or_default();
+    let common_blocks: std::collections::HashSet<String> = description.split("\n\n")
+        .map(str::trim)
+        .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
+            && (epic_description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
+                || sibling_descriptions.iter().all(|description| {
+                    description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
+                })))
+        .map(str::to_string)
+        .collect();
     let mut overlap = OpenTaskOverlap::default();
-    for task in task_store.list(None).map_err(|error| error.to_string())? {
+    for task in tasks {
         if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
             || epic_id == Some(task.id.as_str())
             || (exclude_epics && task.task_type == TaskType::Epic)
@@ -897,20 +914,16 @@ fn open_task_similarity(
             continue;
         }
         // Siblings often repeat one mandatory safety/build block. Discount
-        // identical multiline paragraphs only when both briefs retain scope
-        // outside them. Single-line scope statements and identical full briefs
-        // still participate, as do titles and every non-sibling comparison.
+        // multiline paragraphs shared by every open sibling or declared by the
+        // epic, only when both briefs retain scope outside them. A block shared
+        // by just a pair remains scope, as do identical full briefs and titles.
         let (candidate_scope, existing_scope) = if siblings.contains(&task.id) {
             let candidate_blocks: Vec<_> = description.split("\n\n").map(str::trim).collect();
             let existing_blocks: Vec<_> = task.description.split("\n\n").map(str::trim).collect();
-            let common: std::collections::HashSet<_> = candidate_blocks.iter().copied()
-                .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
-                    && existing_blocks.contains(block))
-                .collect();
             let candidate = candidate_blocks.into_iter()
-                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
             let existing = existing_blocks.into_iter()
-                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
             if !candidate.trim().is_empty() && !existing.trim().is_empty() {
                 (candidate, existing)
             } else {
@@ -956,7 +969,6 @@ fn recent_other_epic_planner(
     task_store: &dyn cas_store::TaskStore,
     epic_id: &str,
     creator: &str,
-    creator_session: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>, String> {
     let recent = task_store
@@ -970,7 +982,6 @@ fn recent_other_epic_planner(
             // that a different supervisor planned these children.
             (planner != "mcp"
                 && planner != creator
-                && Some(planner.as_str()) != creator_session
                 && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
@@ -1308,15 +1319,10 @@ impl CasCore {
                 }
             }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
-                // Dependencies written by another transport may identify this
-                // same registered agent by its harness session instead.
-                let creator_session = self.open_agent_store()?.get(creator).ok()
-                    .and_then(|agent| agent.cc_session_id);
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
                     epic,
                     creator,
-                    creator_session.as_deref(),
                     chrono::Utc::now(),
                 )
                 .map_err(|error| McpError {
@@ -3612,7 +3618,7 @@ mod related_recall_response_tests {
             let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
             assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
         }
-        let mut duplicate = child_request("Inspect payment journey", epic.id);
+        let mut duplicate = child_request("Inspect payment journey", epic.id.clone());
         duplicate.description = Some(format!(
             "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
         ));
@@ -3620,6 +3626,22 @@ mod related_recall_response_tests {
         assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
         assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
         assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+
+        // Shared scope in just a pair is not epic-wide boilerplate, even
+        // when the two briefs also repeat the real safety block.
+        let settlement = "Read ledgerStore in src/ledger.ts.\nRepair settlementReader in src/settlement.ts.";
+        for (title, scope, should_warn) in [
+            ("Inspect settlement storage", "Unique extraction scope.", false),
+            ("Repair settlement history", "Unique history scope.", true),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{settlement}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert_eq!(receipt.contains("SIBLING OVERLAP"), should_warn, "{title}: {receipt}");
+            if should_warn {
+                assert!(receipt.contains("ledgerStore"), "pair-only scope stays visible: {receipt}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -5346,21 +5368,10 @@ mod related_recall_response_tests {
         first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
             .await.expect("anonymous historical metadata is not evidence of another planner");
 
-        // Parallel MCP instances and CLI writes may record either the stable
-        // registration or its harness session; neither is another planner.
+        // A parallel MCP instance resolves the same registered caller.
         let parallel = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         parallel.cas_task_create(Parameters(child_request("Own parallel child", epic_id.clone())))
             .await.expect("the same supervisor's other MCP instance is not a competitor");
-        let agents = first.open_agent_store().unwrap();
-        let mut agent = agents.get("planning-supervisor-one").unwrap();
-        agent.cc_session_id = Some("planning-harness-session".into());
-        agents.update(&agent).unwrap();
-        store.add(&Task::new("cas-own-session".into(), "Session-authored child".into())).unwrap();
-        let mut own_session = Dependency::new("cas-own-session".into(), epic_id.clone(), DependencyType::ParentChild);
-        own_session.created_by = agent.cc_session_id.clone();
-        store.add_dependency(&own_session).unwrap();
-        first.cas_task_create(Parameters(child_request("Own session followup", epic_id.clone())))
-            .await.expect("the caller's harness session alias must not trigger a planning race");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");

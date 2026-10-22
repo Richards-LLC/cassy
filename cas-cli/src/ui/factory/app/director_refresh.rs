@@ -547,11 +547,23 @@ pub(crate) struct DeliverabilityRequest {
 }
 
 impl DeliverabilityRequest {
-    /// Whether each prompt is still deliverable. Runs on any thread. Always a
+    /// Final merge-signal builder check, executed on the external release lane.
+    pub(crate) fn refresh_merge_prompt(&self, prompt: &mut Prompt) -> bool {
+        if prompt.merge_alert.is_none() {
+            return self.read(None, std::slice::from_mut(prompt)) == [true];
+        }
+        let Ok(data) = DirectorData::load_with_stores_for_project(
+            &self.cas_dir, self.worktree_root.as_deref(), false, None, self.project_id.as_deref(),
+        ) else { return false; };
+        crate::ui::factory::director::refresh_ci_merge_signal(prompt, &data, &self.cas_dir, &self.repo_root)
+    }
+
+    /// Refresh each prompt's body and return whether it is deliverable.
+    /// Runs on any thread. Always a
     /// fresh read: a failed read is uncertainty, and an uncertain prompt is
     /// delivered. Never retract a legitimate notification from cached data
     /// (app/mod.rs, `prompt_is_still_deliverable`).
-    pub(crate) fn read(&self, stores: Option<&DirectorStores>, prompts: &[Prompt]) -> Vec<bool> {
+    pub(crate) fn read(&self, stores: Option<&DirectorStores>, prompts: &mut [Prompt]) -> Vec<bool> {
         if !prompts.iter().any(prompt_needs_fresh_recheck) {
             return vec![true; prompts.len()];
         }
@@ -563,10 +575,15 @@ impl DeliverabilityRequest {
             self.project_id.as_deref(),
         );
         prompts
-            .iter()
+            .iter_mut()
             .map(|prompt| {
                 !prompt_needs_fresh_recheck(prompt)
                     || fresh.as_ref().map_or(true, |data| {
+                        if prompt.merge_alert.is_some() {
+                            return crate::ui::factory::director::refresh_ci_merge_signal(
+                                prompt, data, &self.cas_dir, &self.repo_root,
+                            );
+                        }
                         crate::ui::factory::director::prompt_is_still_deliverable(
                             prompt,
                             data,

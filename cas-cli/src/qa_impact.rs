@@ -141,6 +141,17 @@ pub fn impact_for_changes(
     changes: &[Change],
     codemap: &str,
 ) -> Impact {
+    impact_for_selected_changes(registry, qa, changes, codemap, None)
+}
+
+/// Selection never grants ownership. Some(empty) authoritatively selects none.
+fn impact_for_selected_changes(
+    registry: Option<&crate::qa_registry::Registry>,
+    qa: &QaConfig,
+    changes: &[Change],
+    codemap: &str,
+    selected: Option<&std::collections::BTreeSet<String>>,
+) -> Impact {
     use crate::qa_registry::matches_path;
     use std::collections::{BTreeMap, BTreeSet};
     let mut report = Impact {
@@ -213,7 +224,7 @@ pub fn impact_for_changes(
                     }
                 }
             }
-            if matches.is_empty() {
+            if selected.map_or(matches.is_empty(), |ids| !ids.contains(&journey.id)) {
                 continue;
             }
             let invariants = journey

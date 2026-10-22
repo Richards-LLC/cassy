@@ -40,9 +40,24 @@ fn tracked(root: &Path) -> Result<Vec<String>> {
 
 pub fn status(root: &Path, qa: &QaConfig) -> Result<Status> {
     let path = root.join(&qa.registry.path);
+    let registry = path.try_exists()?.then(|| qa_registry::load(&path));
+    let files = if registry.as_ref().is_some_and(|registry| registry.is_ok()) {
+        tracked(root)?
+    } else {
+        vec![]
+    };
+    Ok(status_with_registry(qa, registry, &files))
+}
+
+/// Shared coverage calculation for checkout and immutable integration snapshots.
+pub(crate) fn status_with_registry(
+    qa: &QaConfig,
+    registry: Option<Result<Registry>>,
+    files: &[String],
+) -> Status {
     let mut status = Status {
         path: qa.registry.path.clone(),
-        present: path.try_exists()?,
+        present: registry.is_some(),
         valid: false,
         journeys: 0,
         seeded: 0,
@@ -51,29 +66,26 @@ pub fn status(root: &Path, qa: &QaConfig) -> Result<Status> {
         problems: vec![],
         added: 0,
     };
-    if !status.present {
-        return Ok(status);
-    }
-    let registry = match qa_registry::load(&path) {
-        Ok(registry) => registry,
-        Err(error) => {
+    let registry = match registry {
+        None => return status,
+        Some(Ok(registry)) => registry,
+        Some(Err(error)) => {
             status.problems.push(Problem {
                 code: "registry_read".into(),
                 subject: qa.registry.path.clone(),
                 message: format!("{error:#}"),
             });
-            return Ok(status);
+            return status;
         }
     };
-    let files = tracked(root)?;
-    let report = registry.validate(&files);
+    let report = registry.validate(files);
     status.valid = report.problems.is_empty();
     status.journeys = registry.journeys.len();
     status.seeded = registry.journeys.iter().filter(|j| j.seeded).count();
     status.debt_count = report.debt.len();
     status.problems = report.problems;
     status.unowned_surfaces = files
-        .into_iter()
+        .iter()
         .filter(|file| {
             qa_registry::matches_path(registry.effective_surfaces(qa), file)
                 && !qa_registry::matches_path(registry.ignore.iter().map(String::as_str), file)
@@ -82,8 +94,9 @@ pub fn status(root: &Path, qa: &QaConfig) -> Result<Status> {
                     .iter()
                     .any(|j| qa_registry::matches_path(registry.owner_globs(j), file))
         })
+        .cloned()
         .collect();
-    Ok(status)
+    status
 }
 
 fn slug(text: &str) -> String {

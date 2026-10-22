@@ -350,11 +350,15 @@ pub fn handle_session_start(
         );
     }
 
+    let docs_measurement = crate::hooks::handlers::handlers_events::docs_freshness::Measurement::at(
+        Path::new(&input.cwd), cas_root,
+    );
     if let Some(staleness) =
-        crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
+        crate::hooks::handlers::handlers_events::codemap::evaluate_codemap_at(&docs_measurement)
+            .and_then(|evaluation| evaluation.staleness)
     {
-        let full = staleness.format_injection(is_supervisor);
-        let compact = staleness.format_injection_compact(is_supervisor);
+        let full = docs_measurement.annotate(staleness.format_injection(is_supervisor));
+        let compact = docs_measurement.annotate(staleness.format_injection_compact(is_supervisor));
         if staleness.is_high_severity(is_supervisor) {
             assembler.prepend_degradable_with_priority(
                 "Codemap freshness",
@@ -372,15 +376,12 @@ pub fn handle_session_start(
         }
     }
 
-    if let Some(repo_root) = cas_root.parent() {
-        match crate::hooks::handlers::handlers_events::project_overview::check_freshness(
-            repo_root,
-            agent_role.as_deref(),
-        ) {
+    {
+        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(&docs_measurement) {
             // Always append so codemap retains the preview top slot when both
             // modules report high severity.
             Ok(Some(staleness)) => {
-                assembler.append_protected(staleness.format_injection(is_supervisor))
+                assembler.append_protected(docs_measurement.annotate(staleness.format_injection(is_supervisor)))
             }
             Ok(None) => {}
             Err(e) => eprintln!("cas: project-overview freshness check failed: {e}"),

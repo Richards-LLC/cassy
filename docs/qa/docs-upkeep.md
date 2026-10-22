@@ -12,9 +12,14 @@ an unrelated delivery.
 
 A new file inside an existing directory is advisory for CODEMAP. A missing
 CODEMAP or overview disables its own gate. Malformed, unrelated registry content
-warns and leaves the independent path checks active. Watch targets come from the
-delivered `.cas/config.toml` `[project_overview]` section, with the existing
-`domain_paths` and `watch_dirs` defaults when absent.
+warns and leaves the independent path checks active. Watch targets resolve per key: a
+`[project_overview]` section in the delivered `.cas/config.toml` (or, when
+`.cas/` is not tracked, the local project config), then the tracked
+`<!-- cas:project-overview ... -->` TOML block in the delivered overview, then
+targets derived from tracked paths (`schema.prisma` files and existing
+pages/routes/components directories). When nothing is declared or derived, park
+passes with `UPKEEP WARNING G6: no product paths are watched` and `cas qa impact`
+repeats it.
 
 Update the named document in the delivery, or record one decision with a reason:
 

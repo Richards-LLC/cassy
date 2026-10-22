@@ -173,10 +173,7 @@ fn main() -> ExitCode {
                 Err(e) => (e, false),
             };
             if json_refusal && !already_reported {
-                let message = e
-                    .downcast_ref::<error::CasError>()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| format!("{e:#}"));
+                let message = cli::json_error_message(&e);
                 println!("{}", serde_json::json!({"status": "error", "message": message}));
             }
             {

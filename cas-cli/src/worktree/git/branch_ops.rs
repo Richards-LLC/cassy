@@ -132,6 +132,11 @@ pub(crate) fn classify_push_rejection(
     let non_fast_forward = lowered.contains("non-fast-forward")
         || lowered.contains("fetch first")
         || lowered.contains("the remote contains work that you do")
+        // The remote advertised its old tip before pre-push ran; a peer can
+        // move it while that hook runs, so receive-pack rejects its CAS.
+        || (lowered.contains("[remote rejected]")
+            && (lowered.contains("incorrect old value provided")
+                || (lowered.contains("cannot lock ref") && lowered.contains("but expected"))))
         || (lowered.contains("[rejected]") && lowered.contains("failed to push"));
 
     let reason = reason
@@ -821,7 +826,7 @@ impl GitOperations {
         }
         let local_before = self.resolve_commit(target);
 
-        if let Err(error) = self.fetch_branch_bounded(target, timeout) {
+        if let Err(error) = self.fetch_merge_target_bounded(target, timeout) {
             // Offline, auth-broken or unreachable: a merge must still be
             // possible. The caller reports the degradation rather than
             // pretending the target was verified against origin.
@@ -898,6 +903,57 @@ impl GitOperations {
             to: remote,
             commits_gained: behind,
         }
+    }
+
+    /// Read origin authority without advancing the local integration branch.
+    /// CI refusal must still leave that branch untouched.
+    pub(crate) fn fetch_merge_target(&self, target: &str) -> Result<Option<String>> {
+        if !self.has_origin_remote() { return Ok(None); }
+        self.fetch_merge_target_bounded(target, FETCH_TIMEOUT).map(Some)
+    }
+
+    /// A target refresh must update its exact origin ref even when the
+    /// repository's configured fetch refspec only tracks another branch.
+    fn fetch_merge_target_bounded(&self, target: &str, timeout: Duration) -> Result<String> {
+        let remote = format!("refs/remotes/origin/{target}");
+        let mut command = Command::new("git");
+        command.args(["fetch", "--no-write-fetch-head", "origin",
+            &format!("+refs/heads/{target}:{remote}")])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(&self.repo_root);
+        let output = Self::run_command_bounded(command, timeout)?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(first_line(&String::from_utf8_lossy(&output.stderr))));
+        }
+        self.resolve_commit(&remote).ok_or_else(|| GitError::BranchNotFound(remote))
+    }
+
+    /// Only ordinary merge publication may reconcile a peer's concurrent
+    /// update. Transactional delivery pins a reviewed target and keeps its
+    /// separate strict publication contract. The caller holds the target lock.
+    pub(crate) fn publish_merge_target_with_retry(&self, branch: &str) -> TargetPushOutcome {
+        let first = self.publish_branch_to_origin(branch);
+        let TargetPushOutcome::NonFastForward { sha, reason, .. } = &first else { return first };
+        let reconcile = (|| -> Result<()> {
+            let remote = self.fetch_merge_target_bounded(branch, FETCH_TIMEOUT)?;
+            if self.resolve_commit(branch).as_deref() != Some(sha.as_str()) {
+                return Err(GitError::CommandFailed("local target moved during publication; automatic retry refused".into()));
+            }
+            // Isolated merge/CAS preserves the peer and the local delivery,
+            // refuses real conflicts, and protects dirty linked checkouts.
+            self.merge_branch_via_temp_worktree(branch, &remote, true)?;
+            Ok(())
+        })();
+        if let Err(error) = reconcile {
+            return TargetPushOutcome::NonFastForward {
+                sha: self.resolve_commit(branch).unwrap_or_else(|| sha.clone()),
+                remote_sha: self.resolve_commit(&format!("origin/{branch}")),
+                reason: format!("{reason}; automatic fetch/merge retry refused: {error}"),
+            };
+        }
+        // Exactly one non-force retry; another peer move stays an honest
+        // failure receipt, rather than an unbounded publication loop.
+        self.publish_branch_to_origin(branch)
     }
 
     /// Whether the repository root currently has `branch` checked out.

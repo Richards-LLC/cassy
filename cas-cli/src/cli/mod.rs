@@ -204,7 +204,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Include full content in JSON output or a dry-run service definition
+    /// Show full JSON content, service paths, or dry-run service definitions
     #[arg(long, global = true)]
     pub full: bool,
 
@@ -565,6 +565,14 @@ impl std::fmt::Display for JsonReportedFailure {
 }
 
 impl std::error::Error for JsonReportedFailure {}
+
+/// Format the machine-readable message and human stderr diagnostic alike.
+pub fn json_error_message(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<crate::error::CasError>()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{error:#}"))
+}
 
 /// Run the CLI with the given arguments
 pub fn run(cli: Cli) -> anyhow::Result<()> {
@@ -1018,6 +1026,42 @@ mod tests {
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+    }
+
+    #[test]
+    fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
+        let details = [
+            "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
+            "Render a PDF with Playwright after rendering the HTML",
+            "Re-fetch sources and replace the Markdown source, including a manual source",
+            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside ~/.cas/artifacts/release",
+        ];
+
+        for width in [80, 120] {
+            let mut command = Cli::command();
+            let mut report = command
+                .find_subcommand_mut("release")
+                .expect("release subcommand")
+                .find_subcommand_mut("report")
+                .expect("report subcommand")
+                .clone()
+                .term_width(width);
+            let mut help = Vec::new();
+            report.write_long_help(&mut help).expect("render report help");
+            let help = String::from_utf8(help).expect("help is UTF-8");
+
+            for line in help.lines() {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width}-column help line is {} cells wide: {line}",
+                    line.chars().count()
+                );
+            }
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for detail in details {
+                assert!(normalized.contains(detail), "help omitted `{detail}`: {help}");
+            }
+        }
     }
 
     #[test]

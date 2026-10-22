@@ -524,7 +524,7 @@ fn fit_path(text: &str, cells: usize, unicode: bool) -> (String, bool) {
 }
 
 /// A path under the home directory, written from `~`.
-fn home_relative(path: &Path) -> String {
+pub(crate) fn home_relative(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),

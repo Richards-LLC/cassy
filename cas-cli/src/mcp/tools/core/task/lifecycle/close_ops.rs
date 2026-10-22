@@ -6337,7 +6337,7 @@ impl CasCore {
                 &target,
             )
         } else {
-            self.rebased_tip_supersedes_anchor(task_store, task, repo_path, recorded, &tip, &target)
+            self.rebased_tip_supersedes_anchor(task_store, task, repo_path, &tip, &target)
         };
         if !advance {
             return parking;
@@ -6361,25 +6361,22 @@ impl CasCore {
         parking
     }
 
-    /// cas-4171: a rebase is no commit, so the commit-time anchor still names
-    /// the pre-rebase commit, which the rebased tip no longer contains. The
-    /// tip supersedes it when every commit only the anchor has survives in the
-    /// tip as a patch-equivalent, every commit the tip adds over the target
-    /// names this task (a plain lane's next task does not), the tip is not
-    /// already on the target, and no other open task's anchor lies between.
+    /// A fresh park binds the current task delivery, including a rebase whose
+    /// conflict resolution changed an earlier patch (cas-4fcb). Patch equality
+    /// with a commit-time snapshot is not required: request_changes may ask for
+    /// different content. Every commit above the target must still name this
+    /// task without a foreign task claim in its subject. The tip must be
+    /// unmerged, and no other open task may own an anchor
+    /// in that range. Already-parked retries retain their immutable-anchor rules.
     fn rebased_tip_supersedes_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
         repo_path: &std::path::Path,
-        recorded: &str,
         tip: &str,
         target: &str,
     ) -> bool {
-        if !is_safe_git_refname(recorded)
-            || !is_safe_git_refname(target)
-            || git_commit_is_ancestor(repo_path, tip, target)
-        {
+        if !is_safe_git_refname(target) || git_commit_is_ancestor(repo_path, tip, target) {
             return false;
         }
         let git = |args: &[&str]| {
@@ -6391,13 +6388,6 @@ impl CasCore {
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
         };
-        let Some(cherry) = git(&["cherry", tip, recorded]) else {
-            return false;
-        };
-        let mut unique = cherry.lines().filter(|line| !line.trim().is_empty()).peekable();
-        if unique.peek().is_none() || !unique.all(|line| line.starts_with("- ")) {
-            return false;
-        }
         let Some(base) = git(&["merge-base", target, tip]).map(|base| base.trim().to_string())
         else {
             return false;
@@ -6407,7 +6397,11 @@ impl CasCore {
         };
         let mut messages = log.split('\u{1e}').map(str::trim).filter(|m| !m.is_empty()).peekable();
         if messages.peek().is_none()
-            || !messages.all(|message| message_references_task(message, &task.id))
+            || !messages.all(|message| {
+                let subject = message.lines().next().unwrap_or("");
+                message_references_task(message, &task.id)
+                    && !message_claims_other_task(subject, Some(&task.id))
+            })
         {
             return false;
         }
@@ -26803,10 +26797,11 @@ mod merge_state_gate_tests {
         let mut task = worker_task("worker");
         task.task_type = TaskType::Chore;
         task.risk = vec![TaskRisk::None];
+        task.deliverables.files_changed = vec!["product.rs".into()];
         store.add(&task).unwrap();
 
-        // Missing code evidence must leave the task active, without parking
-        // a nonexistent branch or attempting merge-tree preflight.
+        // Recorded code with missing delivery evidence must leave the task
+        // active, without parking a nonexistent branch or merge-tree preflight.
         let request = serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "reason": "Delivery claimed"
         }))
@@ -26840,6 +26835,7 @@ mod merge_state_gate_tests {
 
         // Reproduce the supervisor's real correction of stale code scope.
         task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.files_changed.clear();
         task.execution_note = Some("no-code".into());
         task.external_ref = Some("https://example.test/cloud/pull/123".into());
         task.deliverables.work_target = Some(WorkTarget {

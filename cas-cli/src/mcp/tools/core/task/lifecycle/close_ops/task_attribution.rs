@@ -110,7 +110,7 @@ pub(super) fn lane_commits_all_claim_other_tasks(
 /// and the newest commit claiming only another task (its subject line), if
 /// any, among the last 50 non-merge first-parent commits. `None` when Git
 /// cannot read the branch.
-pub(super) fn branch_task_claims(
+pub(in crate::mcp::tools::core::task) fn branch_task_claims(
     repo: &Path,
     branch: &str,
     identity: &TaskCommitIdentity,

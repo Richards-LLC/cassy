@@ -831,58 +831,112 @@ fn stale_spawn_base_notice(
 /// at b4f87100 — the fetch had landed, the local ref had simply never been
 /// updated. The worker was cut from the past with no warning.
 ///
-/// Behaviour, returned as `(checkout_ref_override, notice)`:
+/// Successful selection returns `(checkout_ref_override, notice)`:
 /// - no `origin/<base>` (or identical tips) → `(None, None)`: cut from the
 ///   local branch exactly as before;
 /// - local strictly behind origin (fast-forwardable) → the override is
 ///   origin's **commit id**, plus a notice naming both SHAs and the gap;
-/// - the two have diverged → no override (a divergent remote is not
-///   automatically the right history) but the split is reported with both SHAs;
+/// - configured origin fetch fails or the two diverge → refuse before creating
+///   a worker, naming the observed refs and counts (cas-02ae);
+/// - managed epic observations retain their existing unpublished/local policy;
 /// - local ahead → `(None, None)`.
 ///
 /// The override is a raw commit id, not `origin/<base>`: the branch name the
 /// worktree records as its parent must stay a *local* branch (it is the
 /// merge-back target), and cutting from a commit id avoids silently setting the
 /// worker branch's upstream to someone else's branch.
+#[cfg(test)]
 fn prefer_fresher_base_ref(
     repo_root: &std::path::Path,
     base: &str,
 ) -> (Option<String>, Option<String>) {
-    prefer_fresher_base_ref_observed(repo_root, base, true)
+    prefer_fresher_base_ref_observed(repo_root, base, true).expect("verified spawn base")
 }
 
 fn prefer_fresher_base_ref_observed(
     repo_root: &std::path::Path, base: &str, fetch: bool,
-) -> (Option<String>, Option<String>) {
-    // Already an explicit remote-tracking ref: nothing to compare against.
-    if base.starts_with("origin/") {
-        return (None, None);
+) -> Result<(Option<String>, Option<String>), String> {
+    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let branch = base.strip_prefix("origin/").unwrap_or(base);
+    let remote = format!("origin/{branch}");
+    let verify_origin = fetch && git.has_origin_remote();
+    let observed_state = || {
+        let local_sha = full_sha(repo_root, base).unwrap_or_else(|| "unresolved".into());
+        let remote_sha = full_sha(repo_root, &remote).unwrap_or_else(|| "unresolved".into());
+        let ahead = commits_behind(repo_root, &remote, base)
+            .map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+        let behind = commits_behind(repo_root, base, &remote)
+            .map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+        format!("local '{base}' ({local_sha}), '{remote}' ({remote_sha}); {ahead} local-only, {behind} remote-only commit(s)")
+    };
+    // A configured remote must answer successfully. Cached tracking refs cannot
+    // prove freshness after a failed fetch. Managed epics own their observation
+    // and publication policy, so they deliberately arrive with fetch=false.
+    if verify_origin {
+        git.fetch_branch(branch).map_err(|error| {
+            // A failed fetch alone cannot distinguish missing publication from
+            // transport failure. Git's exit 2 means a reachable origin has no
+            // matching head; stderr and cached refs are not absence evidence.
+            let mut command = std::process::Command::new("git");
+            command.args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .current_dir(repo_root);
+            let absent = crate::worktree::GitOperations::run_command_bounded(
+                command, std::time::Duration::from_secs(10),
+            ).is_ok_and(|output| output.status.code() == Some(2));
+            if absent {
+                format!(
+                    "SPAWN BASE NOT PUBLISHED: 'origin/{branch}' is not published; {}. No worker was created; push the branch with `git push origin {branch}` before retrying.",
+                    observed_state(),
+                )
+            } else {
+                format!(
+                    "SPAWN BASE UNVERIFIED: fetch from origin for '{branch}' failed: {error}; {}. No worker was created; restore origin access before retrying.",
+                    observed_state(),
+                )
+            }
+        })?;
     }
-    // A remote-tracking ref is only evidence of the last fetch. Refresh it
-    // before comparing so a long-running supervisor does not keep cutting
-    // workers from an origin/main snapshot that is stale too.
-    if fetch { let _ = crate::worktree::GitOperations::new(repo_root.to_path_buf()).fetch_branch(base); }
-    let remote = format!("origin/{base}");
-    if !ref_exists(repo_root, base) || !ref_exists(repo_root, &remote) {
-        return (None, None);
+    if base.starts_with("origin/") {
+        return Ok((None, None));
     }
     let (Some(local_sha), Some(remote_sha)) = (full_sha(repo_root, base), full_sha(repo_root, &remote)) else {
-        return (None, None);
+        if verify_origin {
+            return Err(format!("SPAWN BASE UNVERIFIED: refs did not resolve after fetch; {}. No worker was created; repair the origin tracking ref before retrying.", observed_state()));
+        }
+        return Ok((None, None));
     };
     if local_sha == remote_sha {
-        return (None, None);
+        return Ok((None, None));
     }
 
-    let behind = commits_behind(repo_root, base, &remote).unwrap_or(0);
-    let ahead = commits_behind(repo_root, &remote, base).unwrap_or(0);
+    let behind = commits_behind(repo_root, base, &remote);
+    let ahead = commits_behind(repo_root, &remote, base);
+    if verify_origin && (behind.is_none() || ahead.is_none()) {
+        return Err(format!("SPAWN BASE UNVERIFIED: ancestry comparison failed; {}. No worker was created; repair repository history before retrying.", observed_state()));
+    }
+    let behind = behind.unwrap_or(0);
+    let ahead = ahead.unwrap_or(0);
+    if verify_origin && behind > 0 && ahead > 0 {
+        return Err(format!(
+            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.",
+            observed_state(),
+        ));
+    }
 
-    match (behind, ahead) {
+    Ok(match (behind, ahead) {
         (0, _) => (None, None),
         (behind, 0) => {
             let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
             let advance = if base.starts_with("epic/") {
                 git.advance_local_branch(base, &local_sha, &remote_sha)
             } else { Ok(()) };
+            if verify_origin && let Err(error) = &advance {
+                return Err(format!(
+                    "SPAWN BASE UNVERIFIED: local base could not fast-forward: {error}; {}. No worker was created; reconcile its checkout before retrying.",
+                    observed_state(),
+                ));
+            }
             let state = match advance {
                 Ok(()) if base.starts_with("epic/") => "The local epic branch was fast-forwarded to the fetched tip.".to_string(),
                 Ok(()) => "The local integration branch was left unchanged.".to_string(),
@@ -905,7 +959,7 @@ fn prefer_fresher_base_ref_observed(
                  (cas-d897 / GH #146)."
             )),
         ),
-    }
+    })
 }
 
 /// A spawn's logical parent must be a local branch so worktree_merge can use
@@ -923,6 +977,9 @@ fn ensure_local_spawn_parent(
     }
     let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
     let fetch_error = git.fetch_branch(local).err();
+    if git.has_origin_remote() && let Some(error) = &fetch_error {
+        return Err(format!("SPAWN BASE UNVERIFIED: fetch from origin for '{local}' failed: {error}; no local spawn parent was created. Restore origin access before retrying."));
+    }
     let remote = format!("origin/{local}");
     let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
         format!(
@@ -943,22 +1000,22 @@ fn ensure_local_spawn_parent(
 
 /// Resolve the immutable commit a worker will be checked out from, preserving
 /// the logical parent branch used for merge-back. A declared WorkTarget is
-/// fetched before selection: it uses `origin/<branch>` when that is the
-/// fresher tip, but retains a local-only tip when an epic-base refresh could
-/// not be published. That keeps the checkout consistent with the refresh
-/// notice instead of silently reverting to a stale remote-tracking ref.
+/// fetched before selection: configured-origin fetch failures and divergence
+/// refuse before worker creation. Managed epics retain a local-only tip when
+/// an epic-base refresh could not be published (GH #450).
+#[cfg(test)]
 fn checkout_ref_for_spawn_base(
     repo_root: &std::path::Path,
     parent_branch: &str,
     source: &SpawnBaseSource,
-) -> (Option<String>, Option<String>, String) {
+) -> Result<(Option<String>, Option<String>, String), String> {
     checkout_ref_for_spawn_base_observed(repo_root, parent_branch, source, true)
 }
 
 fn checkout_ref_for_spawn_base_observed(
     repo_root: &std::path::Path, parent_branch: &str, source: &SpawnBaseSource, fetch: bool,
-) -> (Option<String>, Option<String>, String) {
-    let (mut base_ref, freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch);
+) -> Result<(Option<String>, Option<String>, String), String> {
+    let (mut base_ref, mut freshness_notice) = prefer_fresher_base_ref_observed(repo_root, parent_branch, fetch)?;
     let mut checkout_ref = parent_branch.to_string();
     if matches!(source, SpawnBaseSource::WorkTarget { .. }) {
         let remote = format!("origin/{parent_branch}");
@@ -967,9 +1024,9 @@ fn checkout_ref_for_spawn_base_observed(
             full_sha(repo_root, &remote),
         ) {
             // `prefer_fresher_base_ref` selected the remote only when it is
-            // strictly ahead of local. Otherwise local is equal, ahead, or
-            // divergent. Pin the equal case to the fetched object, but retain
-            // the local object in the other two cases: an unpublished
+            // strictly ahead of local. Pin the equal case to the fetched
+            // object; local-only ahead or managed divergent histories retain
+            // the local object. An unpublished
             // fast-forward leaves local ahead while origin is necessarily
             // stale (GH #450).
             if local_sha == remote_sha || base_ref.as_deref() == Some(remote_sha.as_str()) {
@@ -980,7 +1037,18 @@ fn checkout_ref_for_spawn_base_observed(
             }
         }
     }
-    (base_ref, freshness_notice, checkout_ref)
+    if fetch && !crate::worktree::GitOperations::new(repo_root.to_path_buf()).has_origin_remote() {
+        let selected = base_ref.as_deref().unwrap_or(parent_branch);
+        let sha = full_sha(repo_root, selected).unwrap_or_else(|| "unresolved".into());
+        let remote = format!("origin/{parent_branch}");
+        if base_ref.is_some() && full_sha(repo_root, &remote).as_deref() == Some(sha.as_str()) {
+            checkout_ref = remote;
+        }
+        freshness_notice = Some(format!(
+            "SPAWN BASE LOCAL-ONLY: origin is not configured; checkout '{checkout_ref}' ({sha})."
+        ));
+    }
+    Ok((base_ref, freshness_notice, checkout_ref))
 }
 
 #[derive(Clone, Copy)]
@@ -1394,14 +1462,21 @@ pub fn crash_cleanup_io(cleanup: &CrashCleanup) -> CrashCleanupOutcome {
     let Ok(agent_store) = open_agent_store(&cleanup.cas_dir) else {
         return CrashCleanupOutcome { worktree: None };
     };
-    let Some(agent_id) = agent_store
+    let Some(agent) = agent_store
         .list(None)
         .ok()
-        .and_then(|agents| agents.into_iter().find(|a| a.name == name).map(|a| a.id))
+        .and_then(|agents| agents.into_iter().find(|a| a.name == name))
     else {
         return CrashCleanupOutcome { worktree: None };
     };
-    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) {
+    let agent_id = agent.id.clone();
+    if worker_has_open_tasks(&cleanup.cas_dir, &agent_id) || worker_has_open_tasks(&cleanup.cas_dir, name) {
+        return CrashCleanupOutcome { worktree: None };
+    }
+    // Never orphan relocated output by deleting its checkout/provenance first.
+    if crate::factory_scratch::worker_target_dir(&plan.worktree.path).exists()
+        && !crate::factory_target_cache::retirement::retire_worker(&cleanup.cas_dir, &agent).unwrap_or(false)
+    {
         return CrashCleanupOutcome { worktree: None };
     }
     let outcome = crate::worktree::remove_worker_worktree_io(plan);
@@ -2230,7 +2305,8 @@ impl WorkerSpawnContext {
                     notices.push(notice);
                 }
                 let (base_ref, freshness_notice, checkout_ref) =
-                    checkout_ref_for_spawn_base_observed(&repo_root, &parent_branch, &base_source, !managed_epic);
+                    checkout_ref_for_spawn_base_observed(&repo_root, &parent_branch, &base_source, !managed_epic)
+                        .map_err(anyhow::Error::msg)?;
                 if let Some(notice) = freshness_notice {
                     notices.push(notice);
                 }
@@ -2887,6 +2963,18 @@ impl FactoryApp {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }
 
+        // Reclaim safe terminal/parked output for shutdown AND replacement.
+        // Check before settling bindings: that step can clear task assignees.
+        // Retirement checks the configured scratch path and preserves evidence
+        // before deleting; no absent in-tree target can stand in for success.
+        let target_retired = match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
+            Ok(complete) => complete,
+            Err(error) => {
+                tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
+                false
+            }
+        };
+
         // Only after the process is actually gone: a shutdown parks and
         // releases what the worker held; a recycle keeps it (cas-a622).
         let (_, released_task_ids) = settle_retired_worker_bindings_reporting(
@@ -2917,21 +3005,6 @@ impl FactoryApp {
 
         // Ensure selected tab is still valid
         self.clamp_selected_worker_tab();
-
-        // Evidence becomes durable even when a checkout stays parked. Recycle
-        // keeps its warm target; a shutdown attempts complete target retirement.
-        let target_retired = if preserve_worktree {
-            false
-        } else {
-            match crate::factory_target_cache::retirement::retire_worker(&cas_dir, agent) {
-                Ok(removed) => removed || agent.metadata.get("clone_path")
-                    .is_some_and(|path| !std::path::Path::new(path).join("target").exists()),
-                Err(error) => {
-                    tracing::warn!(%error, worker = name, "retired target evidence/reclamation deferred; checkout retained");
-                    false
-                }
-            }
-        };
 
         // Teardown the worker's worktree when it's safe. "Safe" means all of its
         // tasks are Closed AND the tree is clean — we never destroy in-progress
@@ -4406,7 +4479,7 @@ mod spawn_base_tests {
             .expect("materialization notice");
         assert!(notice.contains("SPAWN BASE MATERIALIZED"), "{notice}");
         assert_eq!(full_sha(&repo, branch), full_sha(&repo, &format!("origin/{branch}")));
-        let (base_ref, _, _) = checkout_ref_for_spawn_base(&repo, branch, &SpawnBaseSource::PinnedFocus);
+        let (base_ref, _, _) = checkout_ref_for_spawn_base(&repo, branch, &SpawnBaseSource::PinnedFocus).unwrap();
         let worker_path = tmp.path().join("worker");
         crate::worktree::GitOperations::new(repo.clone())
             .create_worktree(&worker_path, "factory/magic-worker", base_ref.as_deref().or(Some(branch)))
@@ -4559,7 +4632,7 @@ mod spawn_base_tests {
             owner: WorkTargetOwner::Task,
         };
         let (base_ref, notice, checkout_ref) =
-            checkout_ref_for_spawn_base(&repo, "staging", &source);
+            checkout_ref_for_spawn_base(&repo, "staging", &source).unwrap();
         let base_ref = base_ref.expect("WorkTarget must check out an immutable fetched tip");
         assert_eq!(checkout_ref, "origin/staging");
         assert_eq!(short_sha(&repo, &base_ref), remote_sha);
@@ -4636,10 +4709,10 @@ mod spawn_base_tests {
         );
     }
 
-    /// Diverged local/remote: keep the local ref (the remote is not
-    /// automatically right) but say so, naming both SHAs.
+    /// cas-02ae: a diverged integration branch must refuse the real spawn
+    /// before a worker can test obsolete code, preserving both histories.
     #[test]
-    fn diverged_base_keeps_local_and_warns_with_both_shas_cas_d897() {
+    fn diverged_base_refuses_spawn_with_both_shas_cas_02ae() {
         let tmp = TempDir::new().unwrap();
         let origin = tmp.path().join("origin");
         std::fs::create_dir(&origin).unwrap();
@@ -4675,15 +4748,61 @@ mod spawn_base_tests {
 
         let local_sha = short_sha(&repo, "main");
         let remote_sha = short_sha(&repo, "origin/main");
-        let (base_ref, notice) = prefer_fresher_base_ref(&repo, "main");
-        assert_eq!(
-            base_ref, None,
-            "a diverged remote must not silently replace the local base"
-        );
-        let notice = notice.expect("divergence must be reported");
-        assert!(notice.contains(&local_sha), "{notice}");
-        assert!(notice.contains(&remote_sha), "{notice}");
-        assert!(notice.contains("DIVERGED"), "{notice}");
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"test\"\n").unwrap();
+        let mut task = cas_types::Task::new("cas-diverged".into(), "Diverged staging".into());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:test".into(),
+            target_branch: "main".into(),
+        });
+        open_task_store_cached(&cas_dir).unwrap().add(&task).unwrap();
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
+            .err().expect("a diverged base must refuse worker creation").to_string();
+        assert!(error.contains(&local_sha), "{error}");
+        assert!(error.contains(&remote_sha), "{error}");
+        assert!(error.contains("DIVERGED"), "{error}");
+        assert!(error.contains("local-only") && error.contains("remote-only"), "{error}");
+        assert_eq!(short_sha(&repo, "main"), local_sha);
+        assert_eq!(short_sha(&repo, "origin/main"), remote_sha);
+        assert!(!repo.join(".cas/worktrees/legacy-path-worker").exists());
+        assert!(!ref_exists(&repo, "factory/legacy-path-worker"));
+    }
+
+    #[test]
+    fn configured_origin_fetch_failure_refuses_unmanaged_spawn_cas_02ae() {
+        super::spawn_readiness_tests::with_fixture(|f| {
+            let mut task = cas_types::Task::new("cas-offline".into(), "Offline integration".into());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:bfa1-round2".into(),
+                target_branch: "main".into(),
+            });
+            open_task_store_cached(&f.root).unwrap().add(&task).unwrap();
+            // cas-cd99: reachable origin lacks this local-only branch; the
+            // operator needs publication guidance, not an access repair.
+            super::spawn_readiness_tests::git(&f.repo, &["branch", "feature/unpublished"]);
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "feature/unpublished".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("unpublished branch must name the publication requirement").to_string();
+            assert!(error.contains("origin/feature/unpublished") && error.contains("not published"), "{error}");
+            assert!(error.contains("git push origin feature/unpublished"), "{error}");
+            assert!(!error.contains("restore origin access"), "{error}");
+            assert_eq!(full_sha(&f.repo, "feature/unpublished").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+            task.deliverables.work_target.as_mut().unwrap().target_branch = "main".into();
+            open_task_store_cached(&f.root).unwrap().update(&task).unwrap();
+            f.offline();
+            let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
+                .err().expect("cached equal refs cannot prove a configured origin is current").to_string();
+            assert!(error.contains("fetch") && error.contains("failed"), "{error}");
+            assert!(error.contains(&f.old), "{error}");
+            assert!(error.contains("0 local-only, 0 remote-only"), "{error}");
+            assert_eq!(full_sha(&f.repo, "main").as_deref(), Some(f.old.as_str()));
+            assert_eq!(full_sha(&f.repo, "origin/main").as_deref(), Some(f.old.as_str()));
+            assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
+            assert!(!f.repo.join(".cas/worktrees/legacy-path-worker").exists());
+        });
     }
 
     /// No `origin/<base>` at all (fresh local-only repo): nothing to compare,
@@ -4695,6 +4814,23 @@ mod spawn_base_tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
         assert_eq!(prefer_fresher_base_ref(&repo, "main"), (None, None));
+        let (_, notice, _) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
+        assert!(notice.unwrap().contains("LOCAL-ONLY"));
+
+        // cas-cd99: an origin-less repo can retain a tracking ref from a
+        // previous fetch. The notice must name that actual checkout source.
+        let local = full_sha(&repo, "main").unwrap();
+        commit_file(&repo, "cached-only.txt", "cached origin content");
+        let cached = full_sha(&repo, "main").unwrap();
+        super::spawn_readiness_tests::git(&repo, &["update-ref", "refs/remotes/origin/main", &cached]);
+        super::spawn_readiness_tests::git(&repo, &["reset", "--hard", &local]);
+        let (base_ref, notice, checkout_ref) = checkout_ref_for_spawn_base(&repo, "main", &SpawnBaseSource::Trunk).unwrap();
+        assert_eq!(base_ref.as_deref(), Some(cached.as_str()));
+        assert_eq!(checkout_ref, "origin/main");
+        let notice = notice.unwrap();
+        assert!(notice.contains("LOCAL-ONLY") && notice.contains("origin/main"), "{notice}");
+        assert!(notice.contains(&cached), "{notice}");
+        assert_eq!(full_sha(&repo, "main").as_deref(), Some(local.as_str()));
     }
 
     #[test]
@@ -5438,7 +5574,7 @@ mod spawn_base_tests {
             owner: WorkTargetOwner::Task,
         };
         let (base_ref, freshness_notice, checkout_ref) =
-            checkout_ref_for_spawn_base(&repo, "epic/behind", &source);
+            checkout_ref_for_spawn_base(&repo, "epic/behind", &source).unwrap();
         let base_ref = base_ref.expect("WorkTarget spawn must pin its checkout commit");
         assert_eq!(
             base_ref, parent_tip,

@@ -2219,6 +2219,103 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     run_git(&["merge-base", "--is-ancestor", &anchor, "origin/epic/parked"], &repo.root);
 }
 
+/// Race two real handler calls and a separate peer clone against one origin.
+#[cfg(unix)]
+#[test]
+fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&root);
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["branch", "epic/race"], &repo.root);
+    run_git(&["push", "origin", "epic/race"], &repo.root);
+    let (epic, _) = create_epic_and_worker_task(&root, "epic/race", Some("alice"));
+    let tasks = open_task_store(&root).unwrap();
+    let mut tips = Vec::new();
+    for name in ["alice", "bob", "charlie"] {
+        if name != "alice" {
+            let mut task = Task::new(format!("task-{name}"), "Race delivery".into());
+            task.assignee = Some(name.into());
+            tasks.create_atomic(&task, &[], Some(&epic), None).unwrap();
+        }
+        let worker = root.join("worktrees").join(name);
+        repo.add_worktree(&worker, &format!("factory/{name}"));
+        std::fs::write(worker.join(format!("{name}.txt")), name).unwrap();
+        run_git(&["add", "."], &worker);
+        run_git(&["commit", "-m", name], &worker);
+        tips.push(git_stdout(&worker, &["rev-parse", "HEAD"]));
+    }
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+    env.set_current_dir(&repo.root);
+    // The peer's commit lands after the handler fetched and before its push.
+    // A real pre-push hook provides ordering without sleeps or a Git mock.
+    let peer = remote.path().join("peer");
+    run_git(&["clone", "-b", "epic/race", remote.path().to_str().unwrap(), peer.to_str().unwrap()], &repo.root);
+    run_git(&["config", "user.name", "Peer"], &peer);
+    run_git(&["config", "user.email", "peer@example.test"], &peer);
+    std::fs::write(peer.join("peer.txt"), "peer delivery").unwrap();
+    run_git(&["add", "."], &peer);
+    run_git(&["commit", "-m", "peer delivery"], &peer);
+    let peer_tip = git_stdout(&peer, &["rev-parse", "HEAD"]);
+    let hooks = repo.root.join(".git/hooks");
+    let hook = hooks.join("pre-push");
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+    std::fs::write(&hook, format!(
+        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n git -C {} push origin refs/heads/epic/race:refs/heads/epic/race || exit 1\nfi\n",
+        quote(&hooks.join("peer-pushed")), quote(&peer)
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = |name: &str| {
+        let mut request = coord_req("worktree_merge");
+        request.id = Some(format!("factory/{name}"));
+        request.cleanup = Some(false);
+        request
+    };
+    let start = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["alice", "bob"].into_iter().map(|name| {
+            let root = &root;
+            let start = &start;
+            let req = request(name);
+            scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let service = make_service(root.clone());
+                start.wait();
+                runtime.block_on(service.coordination(Parameters(req)))
+                    .map(|result| get_text(&result)).map_err(|error| error.to_string())
+            })
+        }).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+    });
+    let origin_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
+    for tip in [&tips[0], &tips[1], &peer_tip] {
+        let contained = Command::new("git").args(["merge-base", "--is-ancestor", tip, &origin_tip])
+            .current_dir(&repo.root).status().unwrap().success();
+        assert!(contained, "both local merges and peer must land on origin; missing {tip}; receipts={results:#?}");
+    }
+    assert!(results.iter().all(|result| result.as_ref().is_ok_and(|text| !text.contains("NOT PUSHED"))), "{results:#?}");
+
+    // A different push failure leaves a local-only merge. Retrying must not
+    // claim containment from that local ref while origin lacks the source.
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let service = make_service(root.clone());
+    let req = request("charlie");
+    let rejected = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
+    let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
+    std::fs::remove_file(&hook).unwrap();
+    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
+    assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
+    let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
+    run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
+}
+
 #[tokio::test]
 async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved() {
     let mut env = test_env();
@@ -5843,18 +5940,35 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
     }
 }
 
-/// cas-c85e (GH #997) fixture: a repo whose selector is
-/// `remote:github.com/org/c85e-target`, a live `epic/c85e` lane, and alice's
-/// committed worktree. Returns the repo, env guard, and CAS root.
-fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
+/// cas-c85e (GH #997) fixture: a pinned project with a real local origin,
+/// a published `epic/c85e` lane, and alice's committed worktree. A repeated
+/// merge may claim containment only after origin actually holds the delivery.
+fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf, TempDir) {
     let repo = GitRepo::new();
     let mut env = test_env();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     run_git(
-        &["remote", "add", "origin", "git@github.com:org/c85e-target.git"],
+        &["init", "--bare", remote.path().to_str().unwrap()],
+        &repo.root,
+    );
+    let origin = "git@github.com:org/c85e-target.git";
+    run_git(&["remote", "add", "origin", origin], &repo.root);
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", remote.path().display()),
+            origin,
+        ],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
+    let project_config = "\n[project]\ncanonical_id = \"github.com/org/c85e-target\"\n";
+    let config = cas_root.join("config.toml");
+    let mut body = std::fs::read_to_string(&config).unwrap();
+    body.push_str(project_config);
+    std::fs::write(config, body).unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
     run_git(&["branch", "epic/c85e"], &repo.root);
 
     let wt_path = cas_root.join("worktrees").join("alice");
@@ -5862,11 +5976,17 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
     std::fs::write(wt_path.join("c85e-work.txt"), "moved task work").unwrap();
     run_git(&["add", "c85e-work.txt"], &wt_path);
     run_git(&["commit", "-m", "moved task work"], &wt_path);
+    std::fs::create_dir_all(wt_path.join(".cas")).unwrap();
+    std::fs::write(wt_path.join(".cas/config.toml"), project_config).unwrap();
+    run_git(
+        &["push", "origin", "main", "epic/c85e", "factory/alice"],
+        &repo.root,
+    );
     env.set_current_dir(&repo.root);
-    (repo, env, cas_root, wt_path)
+    (repo, env, cas_root, wt_path, remote)
 }
 
-const C85E_SELECTOR: &str = "remote:github.com/org/c85e-target";
+const C85E_SELECTOR: &str = "project:github.com/org/c85e-target";
 
 fn c85e_trunk_target() -> WorkTarget {
     WorkTarget {
@@ -5881,7 +6001,7 @@ fn c85e_trunk_target() -> WorkTarget {
 /// the epic lane — never on main — and says so.
 #[tokio::test]
 async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
-    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let (repo, _env, cas_root, _wt, origin) = c85e_repo_with_alice_work();
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
@@ -5922,6 +6042,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
         (None, "to epic/c85e"),
         (Some(task.id.clone()), "already in epic/c85e"),
     ] {
+        let epic_before = git_stdout(&repo.root, &["rev-parse", "epic/c85e"]);
         let mut req = coord_req("worktree_merge");
         req.id = Some("factory/alice".to_string());
         req.task_id = task_id.clone();
@@ -5939,7 +6060,24 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
             !text.contains("to main") && !text.contains("epic branch main"),
             "must never land on or label trunk (task_id={task_id:?}):\n{text}"
         );
+        if task_id.is_some() {
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+                epic_before,
+                "a published contained delivery must not create another merge"
+            );
+        }
     }
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/epic/c85e"]),
+        git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+        "the epic delivery must be published"
+    );
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
+        main_before,
+        "origin main must not move"
+    );
     assert!(
         git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "epic/c85e"])
             .contains("c85e-work.txt"),
@@ -5959,7 +6097,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
 /// receipted as trunk, never as "epic branch main".
 #[tokio::test]
 async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
-    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let (repo, _env, cas_root, _wt, _origin) = c85e_repo_with_alice_work();
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");

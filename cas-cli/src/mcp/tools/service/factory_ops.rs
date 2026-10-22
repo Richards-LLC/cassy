@@ -892,7 +892,7 @@ fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: boo
 /// pushed, so safety is whether its tip is reachable from the repository's
 /// target branch. A repository without any remote has the same local contract
 /// even for legacy push-branch task rows.
-fn shutdown_worktree_safety(
+pub(crate) fn shutdown_worktree_safety(
     path: &std::path::Path,
     local_merge_delivery: bool,
     target_branches: &[String],
@@ -6747,7 +6747,9 @@ impl CasService {
         match target_cache_report {
             Ok(report) => {
                 out.push_str(&format!(
-                    "\nCargo target cache pressure:\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    report.filesystem_path.display(),
+                    report.reserved_builders,
                     report.filesystem.used_percent,
                     report.filesystem.high_watermark_percent,
                     report.filesystem.low_watermark_percent,
@@ -6757,10 +6759,11 @@ impl CasService {
                 ));
                 for cache in &report.caches {
                     out.push_str(&format!(
-                        "  - {} bytes={} scan_ms={} state={:?} reason={}\n",
+                        "  - {} bytes={} scan_ms={} owner={} state={:?} reason={}\n",
                         cache.path.display(),
                         cache.bytes,
                         cache.scan_elapsed_ms,
+                        cache.worktree.display(),
                         cache.disposition,
                         cache.reason,
                     ));
@@ -7517,7 +7520,7 @@ fn render_target_cache_report(report: &crate::factory_target_cache::TargetCacheR
         output.push_str(&format!("\n  - {} bytes={} scan_ms={} state={:?} reason={}",
             cache.path.display(), cache.bytes, cache.scan_elapsed_ms, cache.disposition, cache.reason));
     }
-    output.push_str(&format!("\n{}\nTARGET_CACHE_STATUS_JSON={}", report.remediation, report.machine_json()));
+    output.push_str(&format!("\nFilesystem: {} ({}% used; pressure={}; reserved builders={})\n{}\nTARGET_CACHE_STATUS_JSON={}", report.filesystem_path.display(), report.filesystem.used_percent, report.filesystem.pressure, report.reserved_builders, report.remediation, report.machine_json()));
     output
 }
 
@@ -8457,6 +8460,9 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
+        }
         if agent.status != cas_types::AgentStatus::Shutdown {
             // cas-b06f: requested, so reported by the shutdown receipt.
             super::orphan_recovery::recover_worker_retired_on_request(
@@ -8466,9 +8472,6 @@ pub(crate) fn retire_dead_worker_for_shutdown(
                 &held_task_ids,
                 "dead worker retired by shutdown request",
             );
-        }
-        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
-            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         recipients.insert(agent.id.clone());
         if let Some(session_id) = &agent.cc_session_id {

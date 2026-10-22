@@ -117,6 +117,10 @@ pub struct FilesystemCapacity {
 pub struct TargetCacheReport {
     pub schema_version: u32,
     pub filesystem: FilesystemCapacity,
+    #[serde(default)]
+    pub filesystem_path: PathBuf,
+    #[serde(default)]
+    pub reserved_builders: usize,
     pub candidate_bytes: u64,
     pub selected_bytes: u64,
     pub reclaimed_bytes: u64,
@@ -198,15 +202,68 @@ pub fn inspect(
     live_worktree_roots: &[PathBuf],
     dry_run: bool,
 ) -> io::Result<TargetCacheReport> {
+    inspect_with_probe(
+        cas_root,
+        policy,
+        known_worktree_roots,
+        live_worktree_roots,
+        dry_run,
+        capacity_status,
+    )
+}
+
+fn inspect_with_probe(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    known_worktree_roots: &[PathBuf],
+    live_worktree_roots: &[PathBuf],
+    dry_run: bool,
+    probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+) -> io::Result<TargetCacheReport> {
+    inspect_scoped_with_probe(
+        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe,
+    )
+}
+
+/// Admission reclaims only verified relocated worker targets. Keep full factory
+/// GC (previews, in-tree caches, traces and artifacts) an explicit operation.
+pub(crate) fn reclaim_scratch_for_admission(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+) -> io::Result<TargetCacheReport> {
+    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, probe)?;
+    cleanup_selected(cas_root, &mut report, policy, &[])?;
+    Ok(report)
+}
+
+fn inspect_scoped_with_probe(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    known_worktree_roots: &[PathBuf],
+    live_worktree_roots: &[PathBuf],
+    dry_run: bool,
+    scratch_only: bool,
+    probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+) -> io::Result<TargetCacheReport> {
     let repo_root = cas_root.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "Cassy root has no repository parent",
         )
     })?;
-    let capacity = capacity_status(repo_root, policy)?;
+    let config = crate::config::Config::load(cas_root)
+        .map_err(io::Error::other)?
+        .factory();
+    let filesystem_path = crate::factory_scratch::build_filesystem(cas_root, &config);
+    let mut capacity = probe(&filesystem_path, policy)?;
+    let reserved_builders = config.max_concurrent_builders;
+    capacity.pressure = crate::factory_build_guard::disk_pressure(&capacity, reserved_builders);
     let now = SystemTime::now();
     let mut scanned = discover_caches(repo_root, cas_root, known_worktree_roots);
+    if scratch_only {
+        scanned.retain(|cache| relocated_target(&cache.worktree, &cache.path));
+    }
     let canonical_live_roots: HashSet<PathBuf> = live_worktree_roots
         .iter()
         .filter_map(|path| path.canonicalize().ok())
@@ -223,7 +280,11 @@ pub fn inspect(
         } else if cache.ownership == CacheOwnership::Unknown {
             (
                 CacheDisposition::OwnershipUncertain,
-                "unknown owner; review-only. Remediation: manual review, then gc_cleanup reclaim_unknown_target=<exact absolute cache path> force=true dry_run=false; positive quiet window and native/build guards remain mandatory; no ownership adoption".into(),
+                if relocated_target(&cache.worktree, &cache.path) {
+                    "scratch target has no verifiable checkout owner; review-only, no automatic adoption or named reclaim".into()
+                } else {
+                    "unknown owner; review-only. Remediation: manual review, then gc_cleanup reclaim_unknown_target=<exact absolute cache path> force=true dry_run=false; positive quiet window and native/build guards remain mandatory; no ownership adoption".into()
+                },
             )
         } else if let Err((disposition, reason)) = cache_admission(
             cas_root,
@@ -260,6 +321,7 @@ pub fn inspect(
         let release_warm_on_pressure = capacity.pressure
             && disposition == CacheDisposition::Eligible
             && legacy::lane_target(cas_root, &cache.worktree, &cache.path)
+            && !relocated_target(&cache.worktree, &cache.path)
             && legacy::terminal_dead_owner(cas_root, &cache.worktree);
         records.push(TargetCacheRecord {
             path: cache.path,
@@ -278,9 +340,45 @@ pub fn inspect(
         });
     }
 
-    plan_records(&mut records, &capacity, policy);
+    // Never credit deletion on /home against pressure on a scratch mount.
+    // Each device gets its own watermark and warm-cache retention decision.
+    let main_device = crate::factory_scratch::filesystem_id(&filesystem_path)?;
+    let mut devices: HashMap<u64, Vec<TargetCacheRecord>> = HashMap::new();
+    for mut record in records {
+        match crate::factory_scratch::filesystem_id(&record.path) {
+            Ok(device) => devices.entry(device).or_default().push(record),
+            Err(error) => {
+                record.disposition = CacheDisposition::Indeterminate;
+                record.reason = format!("filesystem identity unavailable: {error}");
+                devices.entry(main_device).or_default().push(record);
+            }
+        }
+    }
+    let mut records = Vec::new();
+    for (device, mut group) in devices {
+        let status = if device == main_device {
+            Ok(capacity.clone())
+        } else {
+            probe(&group[0].path, policy)
+        };
+        match status {
+            Ok(status) => plan_records(&mut group, &status, policy),
+            Err(error) => {
+                for record in &mut group {
+                    record.disposition = CacheDisposition::Indeterminate;
+                    record.reason = format!("filesystem capacity unavailable: {error}");
+                }
+            }
+        }
+        records.extend(group);
+    }
+    records.sort_by(|a, b| a.path.cmp(&b.path));
     let candidate_bytes = records.iter().map(|record| record.bytes).sum();
-    let lane_previews = lane::inspect(cas_root, policy, live_worktree_roots);
+    let lane_previews = if scratch_only {
+        Vec::new()
+    } else {
+        lane::inspect(cas_root, policy, live_worktree_roots)
+    };
     let selected_bytes = records
         .iter()
         .filter(|record| record.disposition == CacheDisposition::Selected)
@@ -296,6 +394,8 @@ pub fn inspect(
     Ok(TargetCacheReport {
         schema_version: 1,
         filesystem: capacity,
+        filesystem_path,
+        reserved_builders,
         candidate_bytes,
         selected_bytes,
         reclaimed_bytes: 0,
@@ -513,10 +613,22 @@ fn cleanup_selected_using(
         let quarantine = if record.interrupted_cleanup {
             record.path.clone()
         } else {
-            let path = record.worktree.join(format!(
-                "{QUARANTINE_PREFIX}{}-{ordinal}",
-                std::process::id()
-            ));
+            let path = if relocated_target(&record.worktree, &record.path) {
+                record.path.with_file_name(format!(
+                    "{QUARANTINE_PREFIX}{}--{}",
+                    record
+                        .worktree
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    uuid::Uuid::new_v4()
+                ))
+            } else {
+                record.worktree.join(format!(
+                    "{QUARANTINE_PREFIX}{}-{ordinal}",
+                    std::process::id()
+                ))
+            };
             if let Err(error) = fs::rename(&record.path, &path) {
                 record.disposition = CacheDisposition::CleanupError;
                 record.reason = format!("atomic quarantine rename failed: {error}");
@@ -648,7 +760,6 @@ fn plan_records(
     }
 }
 
-
 fn discover_caches(
     repo_root: &Path,
     cas_root: &Path,
@@ -701,6 +812,7 @@ fn discover_caches(
     for (checkout, _) in missing_gitdir_checkouts(cas_root) {
         roots.insert(checkout, CacheOwnership::Unknown);
     }
+    let scratch_owners = roots.clone();
     let mut roots: Vec<_> = roots.into_iter().collect();
     roots.sort_by(|left, right| left.0.cmp(&right.0));
     let mut caches = Vec::new();
@@ -741,6 +853,45 @@ fn discover_caches(
                     caches.push(cache);
                 }
             }
+        }
+    }
+    if let Some(scratch) = crate::factory_scratch::configured_scratch_root(cas_root) {
+        let targets =
+            cas_types::factory_scratch::project_scratch_dir(&scratch, cas_root).join("targets");
+        for entry in fs::read_dir(&targets).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let interrupted = name.starts_with(QUARANTINE_PREFIX);
+            let worker = if interrupted {
+                let Some((worker, suffix)) = name
+                    .strip_prefix(QUARANTINE_PREFIX)
+                    .and_then(|name| name.rsplit_once("--"))
+                else {
+                    continue;
+                };
+                if uuid::Uuid::parse_str(suffix).is_err() {
+                    continue;
+                }
+                worker
+            } else {
+                &name
+            };
+            let worktree = cas_root.join("worktrees").join(worker);
+            let ownership = scratch_owners
+                .get(&worktree)
+                .copied()
+                .unwrap_or(CacheOwnership::Unknown);
+            let mut cache = scan_cache(&worktree, &path, interrupted).unwrap_or_else(|error| {
+                scan_error_record(worktree.clone(), path, interrupted, error)
+            });
+            cache.ownership = ownership;
+            if let Some(identity) = git_identities.get(&worktree) {
+                cache.git_admin_dir = identity.git_admin_dir.clone();
+                cache.git_branch = identity.branch.clone();
+                cache.git_commit = identity.commit.clone();
+            }
+            caches.push(cache);
         }
     }
     let retired = cas_root.join("merge-sweeps/assembly-target");
@@ -997,10 +1148,43 @@ fn scan_error_record(
     }
 }
 
+/// Only the configured project namespace and exact worker name are managed.
+/// Quarantines encode their worker and a UUID and stay beside the target.
+fn relocated_target(worktree: &Path, path: &Path) -> bool {
+    if cas_types::factory_scratch::managed_worktree_store(worktree).is_none() {
+        return false;
+    }
+    let target = crate::factory_scratch::worker_target_dir(worktree);
+    if target == worktree.join("target") || path.parent() != target.parent() {
+        return false;
+    }
+    if path == target {
+        return true;
+    }
+    let Some(worker) = worktree.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(&format!("{QUARANTINE_PREFIX}{worker}--")))
+        .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
+}
+
 fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Result<ScannedCache> {
     let started = Instant::now();
-    let worktree_metadata = fs::symlink_metadata(worktree)?;
-    if worktree_metadata.file_type().is_symlink() || !worktree_metadata.is_dir() {
+    let relocated = relocated_target(worktree, path);
+    let worktree_metadata = fs::symlink_metadata(worktree);
+    let missing_scratch_owner = relocated
+        && worktree_metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+    if !missing_scratch_owner && worktree_metadata.as_ref().is_err() {
+        return Err(worktree_metadata.unwrap_err());
+    }
+    if worktree_metadata
+        .as_ref()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
         return Ok(ScannedCache {
             path: path.to_path_buf(),
             worktree: worktree.to_path_buf(),
@@ -1033,12 +1217,18 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             git_commit: None,
         });
     }
-    let canonical_worktree = worktree.canonicalize()?;
+    let canonical_worktree = if missing_scratch_owner {
+        worktree.to_path_buf()
+    } else {
+        worktree.canonicalize()?
+    };
     let canonical_path = path.canonicalize()?;
     let allowed_name = path.file_name().is_some_and(|name| {
         name == "target" || name == "assembly-target" || name.to_string_lossy().starts_with(QUARANTINE_PREFIX)
     });
-    if !allowed_name || canonical_path.parent() != Some(canonical_worktree.as_path()) {
+    if !(relocated && canonical_path == path)
+        && (!allowed_name || canonical_path.parent() != Some(canonical_worktree.as_path()))
+    {
         return Ok(ScannedCache {
             path: path.to_path_buf(),
             worktree: canonical_worktree,
@@ -1055,6 +1245,9 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
         });
     }
 
+    if relocated && canonical_path != path {
+        return Err(io::Error::other("scratch target has a symlinked ancestor"));
+    }
     let mut snapshot = legacy::Snapshot::new();
     let mut bytes = 0u64;
     let mut newest_write = metadata.modified().ok();
@@ -1093,7 +1286,16 @@ fn cache_admission(
     snapshot: Option<&legacy::Snapshot>,
     lock: bool,
 ) -> Result<Option<legacy::Guard>, (CacheDisposition, String)> {
-    cache_admission_at(cas_root, worktree, cache, live, snapshot, lock, Path::new("/proc"), false)
+    cache_admission_at(
+        cas_root,
+        worktree,
+        cache,
+        live,
+        snapshot,
+        lock,
+        Path::new("/proc"),
+        false,
+    )
 }
 
 fn cache_admission_at(
@@ -1127,16 +1329,69 @@ fn cache_admission_at(
         }
         return Ok(Some(guard));
     }
-    #[cfg(target_os = "linux")]
-    {
-        linux_cache_admission_scanned(
-            cas_root,
+    // Relocated output uses the same lane/Cargo guards on every Unix host.
+    // A marked target must also prove its durable generation/lifetime lease.
+    #[cfg(unix)]
+    if relocated_target(worktree, cache) {
+        legacy::owner_gate(cas_root, worktree)?;
+        let snapshot = snapshot
+            .filter(|snapshot| snapshot.admissible())
+            .ok_or_else(|| {
+                (
+                    CacheDisposition::UnsafePath,
+                    "unsafe scratch target snapshot".into(),
+                )
+            })?;
+        if !lock && cache.join(owner::MARKER).exists() {
+            let _lease = owner::for_gc(cas_root, worktree, cache)
+                .and_then(|lease| {
+                    lease.ok_or_else(|| io::Error::other("missing scratch target provenance"))
+                })
+                .map_err(|error| {
+                    (
+                        if error.kind() == io::ErrorKind::WouldBlock {
+                            CacheDisposition::LiveProcess
+                        } else {
+                            CacheDisposition::Indeterminate
+                        },
+                        error.to_string(),
+                    )
+                })?;
+        }
+        if let Some(disposition) =
+            process_block_at(worktree, cache, &[], cfg!(target_os = "linux"), proc_root)
+        {
+            return Err((
+                disposition,
+                "scratch target process evidence does not establish idle".into(),
+            ));
+        }
+        if !lock {
+            return Ok(None);
+        }
+        let guard = legacy::acquire(cas_root, worktree, cache, snapshot).map_err(|error| {
+            (
+                CacheDisposition::Indeterminate,
+                format!("scratch target build guard refused: {error}"),
+            )
+        })?;
+        if let Some(disposition) = process_block_at(
             worktree,
             cache,
+            &guard.descriptors(),
+            cfg!(target_os = "linux"),
             proc_root,
-            snapshot,
-            lock,
-        )
+        ) {
+            return Err((
+                disposition,
+                "process evidence changed under scratch target build guards".into(),
+            ));
+        }
+        return Ok(Some(guard));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_cache_admission_scanned(cas_root, worktree, cache, proc_root, snapshot, lock)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1308,8 +1563,13 @@ fn process_uses_many(worktree: &Path, cache: &Path, own_lock_fds: &[i32]) -> boo
     // A build may name a target in argv before opening any file in it.
     // Keep this in the existing native probe, matching Linux cmdline checks.
     let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="]).output() else { return true };
-    !output.status.success() || !output.stderr.is_empty()
+        .args(["-axo", "pid=,command="])
+        .output()
+    else {
+        return true;
+    };
+    !output.status.success()
+        || !output.stderr.is_empty()
         || process_arguments_use(&output.stdout, worktree, cache)
 }
 
@@ -1318,9 +1578,19 @@ fn process_arguments_use(output: &[u8], worktree: &Path, cache: &Path) -> bool {
     let mut seen = false;
     for line in output.split(|byte| *byte == b'\n').filter(|line| !line.iter().all(u8::is_ascii_whitespace)) {
         let line = line.trim_ascii_start();
-        let split = line.iter().position(u8::is_ascii_whitespace).unwrap_or(line.len());
-        if split == line.len() || line[split..].iter().all(u8::is_ascii_whitespace) { return true; }
-        let Some(pid) = std::str::from_utf8(&line[..split]).ok().and_then(|pid| pid.parse::<u32>().ok()) else { return true };
+        let split = line
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(line.len());
+        if split == line.len() || line[split..].iter().all(u8::is_ascii_whitespace) {
+            return true;
+        }
+        let Some(pid) = std::str::from_utf8(&line[..split])
+            .ok()
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            return true;
+        };
         seen = true;
         // The invoking GC's argv may carry the explicit path itself. Its
         // handles, mappings and cwd are still checked above, without waiver.
@@ -1487,6 +1757,119 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scratch_root_gc_inventories_and_reclaims_dead_targets_cas_9725() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        let cas = repo.join(".cas");
+        let scratch = env.home().join("separate-scratch");
+        fs::create_dir_all(cas.join("worktrees")).unwrap();
+        fs::write(
+            cas.join("config.toml"),
+            format!(
+                "[factory]\nmax_concurrent_builders = 4\nscratch_root = {:?}\n",
+                scratch.display().to_string()
+            ),
+        )
+        .unwrap();
+        let mut targets = Vec::new();
+        for (name, age) in [("old", 300), ("warm", 200), ("live", 100)] {
+            let worker = cas.join("worktrees").join(name);
+            fs::create_dir_all(&worker).unwrap();
+            fs::write(worker.join("source.txt"), "keep source").unwrap();
+            drop(owner::acquire(&cas, &worker).unwrap().unwrap());
+            let target = crate::factory_scratch::worker_target_dir(&worker);
+            fs::create_dir_all(target.join("debug")).unwrap();
+            fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+            fs::write(target.join("debug/output"), vec![0u8; 32]).unwrap();
+            let time = filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(age));
+            for entry in WalkDir::new(&target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), time).unwrap();
+            }
+            targets.push((worker, target));
+        }
+        // A held lifetime lease protects output even without a registry row.
+        let _live_lease = owner::acquire(&cas, &targets[2].0).unwrap().unwrap();
+        let live = Vec::new();
+        let orphan = targets[0].1.parent().unwrap().join("missing-checkout");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("output"), vec![0u8; 32]).unwrap();
+        let unmanaged = scratch.join("verify-leftover");
+        fs::create_dir_all(&unmanaged).unwrap();
+        fs::write(unmanaged.join("evidence"), "review only").unwrap();
+        let policy = TargetCachePolicy {
+            high_watermark_percent: 85,
+            low_watermark_percent: 75,
+            min_idle_secs: 60,
+            retention_count: 1,
+        };
+        // Below the watermark, but four builders cannot reserve 40 GiB.
+        let probe = |path: &Path, policy| {
+            assert_eq!(path, scratch, "GC must probe the admission filesystem");
+            Ok(capacity_from_bytes(
+                100 * 1024u64.pow(3),
+                16 * 1024u64.pow(3),
+                policy,
+            ))
+        };
+        let mut report = inspect_with_probe(&cas, policy, &[], &live, false, probe).unwrap();
+        assert_eq!(report.filesystem_path, scratch);
+        assert_eq!(report.filesystem.used_percent, 84);
+        assert!(
+            report.filesystem.pressure,
+            "projected admission pressure must trigger GC"
+        );
+        let dispositions: Vec<_> = targets
+            .iter()
+            .map(|(_, path)| {
+                report
+                    .caches
+                    .iter()
+                    .find(|record| record.path == *path)
+                    .unwrap_or_else(|| {
+                        panic!("scratch target missing from inventory: {}", path.display())
+                    })
+                    .disposition
+            })
+            .collect();
+        assert_eq!(
+            dispositions,
+            [
+                CacheDisposition::Selected,
+                CacheDisposition::Retained,
+                CacheDisposition::LiveProcess
+            ]
+        );
+        assert!(report.caches.iter().all(|record| record.bytes >= 32));
+        assert_eq!(report.caches.iter().find(|record| record.path == orphan).unwrap().disposition,
+            CacheDisposition::OwnershipUncertain);
+        let cargo = OpenOptions::new().read(true).write(true).open(targets[0].1.join("debug/.cargo-lock")).unwrap();
+        cargo.lock_exclusive().unwrap();
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(targets[0].1.exists(), "contended Cargo output must survive");
+        drop(cargo);
+        report = inspect_with_probe(&cas, policy, &[], &live, false, probe).unwrap();
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(!targets[0].1.exists(), "dead scratch target must be reclaimed");
+        assert!(report.reclaimed_bytes >= 32);
+        assert!(targets[1].1.exists(), "warm cache retained");
+        assert!(targets[2].1.exists(), "live cache retained");
+        assert_eq!(fs::read_to_string(targets[0].0.join("source.txt")).unwrap(), "keep source");
+        assert_eq!(fs::read_to_string(unmanaged.join("evidence")).unwrap(), "review only");
+        assert!(orphan.exists(), "unknown checkout must remain review-only");
+        // Resume an interrupted scratch quarantine without crossing devices.
+        let quarantine = targets[1].1.with_file_name(format!("{QUARANTINE_PREFIX}warm--{}", uuid::Uuid::new_v4()));
+        fs::rename(&targets[1].1, &quarantine).unwrap();
+        report = inspect_with_probe(&cas, policy, &[], &live, false, probe).unwrap();
+        assert_eq!(report.caches.iter().find(|record| record.path == quarantine).unwrap().disposition,
+            CacheDisposition::Selected);
+        cleanup_selected(&cas, &mut report, policy, &live).unwrap();
+        assert!(!quarantine.exists(), "interrupted scratch quarantine must be reclaimed");
+        let rendered = crate::factory_scratch::render_relocated(&cas);
+        assert!(rendered.contains(&unmanaged.display().to_string()), "unmanaged scratch review item absent: {rendered}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn lsof_output_handles_paths_process_identity_and_unknown_evidence_cas_29b0() {
@@ -1572,7 +1955,12 @@ mod tests {
             min_idle_secs: 0,
             retention_count: 1,
         };
-        let report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        // cas-9725 counts projected builder growth (10 GiB per lane) against
+        // free space, so the real host disk decides "normal". Pin a roomy
+        // filesystem: 1% used, only the 1% watermark is under pressure.
+        let gib = 1024u64.pow(3);
+        let roomy = |_: &Path, policy| Ok(capacity_from_bytes(1000 * gib, 999 * gib, policy));
+        let report = inspect_with_probe(&cas, pressure, &[], &[], true, roomy).unwrap();
         assert_eq!(
             report.caches[0].disposition,
             CacheDisposition::Retained,
@@ -1580,7 +1968,7 @@ mod tests {
         );
         task.status = cas_types::TaskStatus::Closed;
         tasks.update(&task).unwrap();
-        let normal = inspect(
+        let normal = inspect_with_probe(
             &cas,
             TargetCachePolicy {
                 high_watermark_percent: 100,
@@ -1590,11 +1978,12 @@ mod tests {
             &[],
             &[],
             true,
+            roomy,
         )
         .unwrap();
         assert!(!normal.filesystem.pressure);
         assert_eq!(normal.caches[0].disposition, CacheDisposition::Retained);
-        let mut report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], true, roomy).unwrap();
         assert!(report.filesystem.pressure);
         assert_eq!(report.caches[0].bytes, 11);
         assert_eq!(
@@ -1626,7 +2015,7 @@ mod tests {
             .open(target.join("debug/.cargo-lock"))
             .unwrap();
         lock.try_lock_exclusive().unwrap();
-        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], false, roomy).unwrap();
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
         assert_ne!(
             report.caches[0].disposition,
@@ -1636,7 +2025,7 @@ mod tests {
         assert!(target.exists());
         FileExt::unlock(&lock).unwrap();
         drop(lock);
-        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], false, roomy).unwrap();
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
         assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
         assert!(!target.exists());

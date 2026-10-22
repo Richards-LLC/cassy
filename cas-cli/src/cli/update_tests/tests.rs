@@ -2510,6 +2510,8 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     cas_6718_git(&project, &["config", "user.name", "Fixture"]);
     cas_6718_git(&project, &["add", "."]);
     cas_6718_git(&project, &["commit", "-qm", "project baseline"]);
+    cas_6718_git(&project, &["branch", "-M", "main"]);
+    cas_6718_git(&project, &["checkout", "-qb", "repair/managed-files"]);
     rule.content = "Current authoritative source content".into();
     store.update(&rule).unwrap();
     syncer.sync_rule(&rule).unwrap();
@@ -2577,6 +2579,49 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
         assert_eq!(finding.contains("remove"), case == "abandoned", "{finding}");
         assert!(lock_path.exists(), "update must never remove the lock");
         assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
+    }
+}
+
+#[test]
+fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let home = env.home().to_path_buf();
+    for (branch, can_commit) in [
+        ("main", false),
+        ("staging", false),
+        ("production", false),
+        ("release/base", false),
+        ("epic/shared", false),
+        ("repair/managed", true),
+    ] {
+        let project = cas_6718_drifted_project(&home.join(branch));
+        let root = project.join(".cas");
+        env.set("CAS_ROOT", &root);
+        cas_6718_git(&project, &["update-ref", "refs/remotes/origin/production", "HEAD"]);
+        cas_6718_git(&project, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/production"]);
+        cas_6718_git(&project, &["checkout", "-qB", branch]);
+        if branch == "main" {
+            // A same-named tag must not change the checked-out branch identity.
+            cas_6718_git(&project, &["tag", "main", "HEAD"]);
+        }
+        let path = root.join("config.toml");
+        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        config["factory"]["epic_base_branch"] = toml_edit::value("release/base");
+        std::fs::write(path, config.to_string()).unwrap();
+        let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let report = sync_claude_files_into(&update_test_cli(true), Some(&root), Some(&project)).unwrap();
+        let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        assert_eq!(after != before, can_commit, "reconcile moved {branch}");
+        assert_eq!(report.commit.is_some(), can_commit, "{branch}");
+        assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
+        if !can_commit {
+            assert_eq!(report.outcome, "staged", "{branch}");
+            assert!(report.staged > 0);
+            assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        }
+        assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
     }
 }
 
@@ -2824,7 +2869,8 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
-        cas_6718_git(&project, &["branch", "-M", "main"]);
+        // Hook refusal is tested on a branch where automatic commits are allowed.
+        cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
         let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let readme = project.join("README.md");
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();

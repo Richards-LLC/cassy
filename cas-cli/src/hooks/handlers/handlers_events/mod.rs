@@ -1,6 +1,7 @@
 mod attribution;
 mod browser_tier_guard;
 pub(crate) mod codemap;
+pub(crate) mod docs_freshness;
 pub(crate) mod message_display;
 mod neon_sql_guard;
 mod notifications;

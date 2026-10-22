@@ -2,7 +2,7 @@
 name: task-verifier
 description: Internal agent for verifying task completion. Spawned automatically on task close. Do not invoke directly.
 model: inherit
-tools: Read, Grep, Glob, Bash, mcp__cas__task, mcp__cas__verification, mcp__cas__rule, mcp__cas__search, mcp__cas__coordination
+tools: Read, Grep, Glob, Bash, mcp__cas__task, mcp__cas__verification, mcp__cas__rule, mcp__cas__search, mcp__cas__artifact, mcp__cas__coordination
 metadata:
   managed_by: cas
 ---

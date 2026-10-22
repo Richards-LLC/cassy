@@ -77,6 +77,34 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+fn may_commit_managed_files(root: &Path) -> Result<bool> {
+    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
+        .filter(|branch| !branch.is_empty())
+    else {
+        // Detached or unreadable HEAD is not permission to create history.
+        return Ok(false);
+    };
+    if matches!(branch.as_str(), "main" | "master" | "staging" | "develop" | "trunk")
+        || branch.starts_with("epic/")
+        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
+    {
+        return Ok(false);
+    }
+    let config = crate::config::Config::load(&root.join(".cas"))?;
+    let configured_base = config.factory().epic_base_branch;
+    Ok(!configured_base.as_deref().is_some_and(|base| {
+        let normalized = base
+            .strip_prefix("refs/heads/")
+            .or_else(|| base.strip_prefix("refs/remotes/origin/"))
+            .or_else(|| base.strip_prefix("origin/"))
+            .unwrap_or(base);
+        base == branch || normalized == branch
+    }))
+}
+
 // Read the effective rules (including nested/global ignores) without touching
 // the index. A project exception is a conflict, not permission to override it.
 fn ignore_conflicts(root: &Path, paths: &[String]) -> Result<Vec<String>> {
@@ -593,7 +621,10 @@ impl Reconcile {
             } else {
                 "current"
             }
-        } else if self.staged_before || pending.iter().any(|p| !changed.contains(p)) {
+        } else if self.staged_before
+            || pending.iter().any(|p| !changed.contains(p))
+            || !may_commit_managed_files(root)?
+        {
             "staged"
         } else {
             // No repository configuration is changed. Normal Git hooks still

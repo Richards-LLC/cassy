@@ -14,6 +14,7 @@ pub mod mission_epic;
 pub mod mission_workers;
 pub mod panel;
 mod prompts;
+pub(crate) use prompts::refresh_ci_merge_signal;
 mod reminders;
 #[cfg(test)]
 mod supervisor_stall_tests;

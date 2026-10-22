@@ -575,6 +575,9 @@ pub fn revalidate_event_for_delivery_with_context(
 /// A prompt to be injected into an agent's terminal
 #[derive(Debug, Clone)]
 pub struct Prompt {
+    /// Immutable delivery identity for CI-completed signals. Final release
+    /// must not substitute a later tip from the reused worker lane.
+    pub merge_alert: Option<MergeAlertEvidence>,
     /// Target agent name (worker name or "supervisor")
     pub target: String,
     /// Typed routing for a routine worker stall nudge; always uses the durable queue.
@@ -1010,6 +1013,16 @@ fn fresh_merge_alert_git_evidence(
     factory_branch: &str,
     epic_branch: &str,
 ) -> MergeAlertFreshness {
+    fresh_merge_alert_tip_evidence(repo_root, task_id, factory_branch, epic_branch, None)
+}
+
+fn fresh_merge_alert_tip_evidence(
+    repo_root: &Path,
+    task_id: &str,
+    factory_branch: &str,
+    epic_branch: &str,
+    delivery_tip: Option<&str>,
+) -> MergeAlertFreshness {
     let epic_branch = epic_branch.strip_prefix("origin/").unwrap_or(epic_branch);
     let has_origin = std::process::Command::new("git")
         .args(["config", "--get", "remote.origin.url"]).current_dir(repo_root)
@@ -1021,7 +1034,7 @@ fn fresh_merge_alert_git_evidence(
     // Pin all three movable refs once. Every merge-base/rev-list below uses
     // these immutable IDs, so a concurrent fetch/branch update cannot combine
     // a SHA from one instant with a count from another.
-    let factory_commit = resolve_ref_commit_sha(repo_root, factory_branch)
+    let factory_commit = delivery_tip.map(str::to_owned).or_else(|| resolve_ref_commit_sha(repo_root, factory_branch))
         .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{factory_branch}")));
     let local = observe_merge_ref(repo_root, factory_commit.as_deref(), epic_branch);
     let origin_ref = format!("origin/{epic_branch}");
@@ -1031,6 +1044,61 @@ fn fresh_merge_alert_git_evidence(
         evidence.factory_tip = factory_commit.unwrap_or_default();
     }
     result
+}
+
+/// Build the released signal from the original tip and live target/task state.
+/// Called only from delivery jobs: all store/Git reads stay off the control lane.
+pub(crate) fn refresh_ci_merge_signal(
+    prompt: &mut Prompt,
+    data: &DirectorData,
+    cas_dir: &Path,
+    repo_root: &Path,
+) -> bool {
+    let Some(original) = prompt.merge_alert.clone() else {
+        return prompt_is_still_deliverable(prompt, data, repo_root);
+    };
+    let task = cas_dir.join("cas.db").is_file().then(|| {
+        crate::store::open_task_store_local(cas_dir)
+            .ok().and_then(|store| store.get(&original.task_id).ok())
+    }).flatten();
+    if let Some(task) = &task {
+        if task.deliverables.declined_factory_anchors().contains(&original.factory_tip)
+            || task.deliverables.factory_branch_anchor.as_ref().is_some_and(|anchor| anchor != &original.factory_tip)
+        {
+            prompt.text = format!(
+                "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
+                original.factory_tip, original.task_id,
+            );
+            // Keep the original identity so subsequent release checks preserve
+            // this informational label instead of checking the mutable worker lane.
+            tracing::info!(target: "cas::coordination", status = "superseded",
+                task_id = %original.task_id, delivery_tip = %original.factory_tip,
+                "CI-completed merge signal superseded before release");
+            return true;
+        }
+        if task.status != TaskStatus::AwaitingMerge { return false; }
+    }
+    let (_, snapshot_target, _) = resolve_merge_target_for_task(data, &original.task_id);
+    let target = task.as_ref().and_then(|task| task.deliverables.work_target.as_ref())
+        .map(|target| target.target_branch.as_str()).or(snapshot_target.as_deref());
+    let Some(target) = target else { return true; };
+    match fresh_merge_alert_tip_evidence(
+        repo_root, &original.task_id, &original.factory_branch, target, Some(&original.factory_tip),
+    ) {
+        MergeAlertFreshness::Stale | MergeAlertFreshness::Unavailable => false,
+        MergeAlertFreshness::Fresh(current) => {
+            prompt.text = prompt.text.replace(
+                &format!("(checked {} at {})", original.checked_epic_ref, original.epic_sha),
+                &format!("(checked {} at {})", current.checked_epic_ref, current.epic_sha),
+            ).replace(
+                &format!("Live evidence: {} unmerged commit(s)", original.unmerged_count),
+                &format!("Live evidence: {} unmerged commit(s)", current.unmerged_count),
+            );
+            prompt.merge_alert = Some(current);
+            true
+        }
+        MergeAlertFreshness::NotApplicable => true,
+    }
 }
 
 /// Parked per-task branches survive worker reuse and must win over the worker's lane.
@@ -1524,6 +1592,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
@@ -1608,6 +1677,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1634,6 +1704,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1782,6 +1853,7 @@ pub fn generate_prompt_at(
                 };
 
                 return Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
@@ -1852,6 +1924,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
@@ -1898,6 +1971,7 @@ pub fn generate_prompt_at(
                 );
 
                 return Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -1923,6 +1997,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
+                    merge_alert: None,
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
@@ -1969,6 +2044,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2037,6 +2113,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
                 retract_worker: Some(agent_name.clone()),
@@ -2175,6 +2252,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text,
                 retract_worker: None,
@@ -7048,6 +7126,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
+                merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7079,6 +7158,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
+                merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7556,6 +7636,7 @@ mod tests {
 fn idle_relays_and_merge_relays_use_the_status_verdict() {
     use crate::mcp::tools::service::worker_liveness::{Liveness, Observation};
     let prompt = Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: "Worker wolf is idle while task t is awaiting_merge".into(),
         retract_worker: Some("wolf".into()),

@@ -276,9 +276,42 @@ probes remain unknown; unrelated Git processes conservatively count as busy.
 Update never removes a lock. Recheck writers before manually removing the exact
 stale lock and retrying; recent/live locks require waiting, unknown ownership
 requires inspection.
-With no other staged work, it makes one dedicated
+With no other staged work on a work branch, it makes one dedicated
 `chore(cassy): reconcile managed project files` commit, using a command-scoped
-Cassy author identity. It never pushes. A second update is a no-op.
+Cassy author identity. It never auto-commits on `main`, `master`, `staging`,
+`develop`, `trunk`, the detected repository default, the configured
+`factory.epic_base_branch`, or an `epic/*` branch. Detached or unreadable HEAD
+also leaves the repair staged. These cases report `outcome: "staged"` with no
+commit; review with `git diff --cached` and move the repair to a dedicated work
+branch before committing through the project's normal review process. It never
+pushes. A second update does not create another commit.
+
+### Recovering an already-diverged trunk
+
+The operator owns recovery; update never resets, rewrites or fast-forwards a
+diverged trunk. Stop older Cassy update processes first, inspect
+`git status --short`, and preserve any staged or unstaged project work before
+switching branches. Do not assume that every local-only commit is generated:
+fetch the intended remote, inspect `git rev-list --left-right --count
+staging...origin/staging` and `git log --oneline origin/staging..staging`, and
+review the local-only diffs.
+
+After confirming a clean worktree and deciding that local `staging` should
+follow the fetched `origin/staging`, preserve its existing history by renaming
+it to a unique recovery branch, then recreate the tracking branch. For example,
+with a recovery name that does not already exist:
+
+```sh
+git branch -m staging recovery/cassy-managed-files-2026-10-21
+git switch -c staging --track origin/staging
+```
+
+This retains every old local commit on the recovery ref and uses no force or
+hard reset. Substitute the actual trunk, remote and a unique recovery name.
+Review any useful managed-file changes on a fresh work branch based on current
+trunk and submit them normally; do not merge the stale recovery branch merely
+to clear the divergence. Run the patched update only after the operator's
+branch recovery decision; its repair remains staged on trunk.
 
 Normal Git hooks remain authoritative. An attempted managed commit that fails
 returns `outcome: "commit_failed"` and an additive `commit_error` containing Git's

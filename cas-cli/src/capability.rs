@@ -5,6 +5,8 @@
 //! checks may invoke a provider CLI and must never turn session startup into a
 //! network probe.
 
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -13,11 +15,16 @@ use std::time::Duration;
 use cas_factory::CapabilitySnapshot;
 use cas_factory::{CapabilityAvailability, CapabilityEvidence, RouteIdentity};
 use cas_pty::{Harness, HarnessConformanceReceipt};
+use fs2::FileExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+// A transient failure has a shorter evidence TTL, but must not cause another
+// short-lived Claude process during the same token refresh (GH #1294).
+const CLAUDE_AUTH_PROBE_INTERVAL_MS: u64 = 60_000;
 const CLAUDE_ENDPOINT: &str = "https://api.anthropic.com";
 const CODEX_ENDPOINT: &str = "https://api.openai.com";
 const GROK_ENDPOINT: &str = "https://api.x.ai";
@@ -221,6 +228,164 @@ fn probe_claude_auth(
     now_ms: u64,
     deadline: Deadline,
 ) -> CapabilityEvidence {
+    let macos_ssh = cfg!(target_os = "macos")
+        && ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    probe_claude_auth_with(account_dir, now_ms, deadline, macos_ssh, &mut run_command)
+}
+
+// The process/session boundary is explicit so fixtures never mutate global PATH
+// or depend on the test host's platform or login keychain.
+fn probe_claude_auth_with(
+    account_dir: Option<&str>,
+    now_ms: u64,
+    deadline: Deadline,
+    macos_ssh: bool,
+    run: &mut impl FnMut(
+        &mut Command,
+        Deadline,
+        Duration,
+    ) -> Result<std::process::Output, BoundedCommandError>,
+) -> CapabilityEvidence {
+    // Account auth is independent of model. Persist only typed, credential-free
+    // evidence so separate doctor/preflight processes share the same limit.
+    let cached = (|| -> std::io::Result<CapabilityEvidence> {
+        let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("no home directory"))?;
+        let profile = account_dir
+            .filter(|dir| !dir.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let profile = if profile.is_absolute() {
+            profile
+        } else {
+            std::env::current_dir()?.join(profile)
+        };
+        let profile = profile.canonicalize().unwrap_or(profile);
+        let mut key = Sha256::new();
+        key.update(profile.as_os_str().as_encoded_bytes());
+        key.update([u8::from(macos_ssh)]);
+        let cache_dir = home.join(".cas/cache/claude-auth");
+        std::fs::create_dir_all(&cache_dir)?;
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(cache_dir.join(format!("{:x}.json", key.finalize())))?;
+        // Concurrent per-model checks share the completed observation rather
+        // than each launching Claude. Waiting consumes only the caller's budget.
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if deadline.remaining().is_zero() {
+                        return Ok(unknown(
+                            now_ms,
+                            "Claude auth status probe is already running",
+                            "Retry doctor after the current probe completes.",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5).min(deadline.remaining()));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if let Ok(evidence) =
+            serde_json::from_reader::<_, CapabilityEvidence>((&mut file).take(8192))
+        {
+            let interval = evidence.ttl_ms.max(CLAUDE_AUTH_PROBE_INTERVAL_MS);
+            if now_ms >= evidence.observed_at_ms
+                && now_ms < evidence.observed_at_ms.saturating_add(interval)
+            {
+                // Do not renew the timestamp or freshness of cached evidence.
+                return Ok(evidence);
+            }
+        }
+        // Reserve the attempt before spawning so a crashed caller cannot cause
+        // immediate retries by the next CLI process. No credentials are stored.
+        write_claude_auth_cache(
+            &mut file,
+            &unknown(
+                now_ms,
+                "Claude auth status probe did not complete",
+                "Retry doctor after one minute; a transient probe failure is not an unavailable account.",
+            ),
+        )?;
+        let evidence = probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run);
+        // A completed probe already supplies real evidence. Persistence failure
+        // must neither hide that result nor launch the auth command a second time.
+        let _ = write_claude_auth_cache(&mut file, &evidence);
+        Ok(evidence)
+    })();
+    cached.unwrap_or_else(|_| {
+        probe_claude_auth_uncached(account_dir, now_ms, deadline, macos_ssh, run)
+    })
+}
+
+fn write_claude_auth_cache(file: &mut File, evidence: &CapabilityEvidence) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(evidence)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(&bytes)
+}
+
+fn ssh_login_keychain_unavailable(
+    deadline: Deadline,
+    run: &mut impl FnMut(
+        &mut Command,
+        Deadline,
+        Duration,
+    ) -> Result<std::process::Output, BoundedCommandError>,
+) -> bool {
+    // Read only keychain metadata, never a password (-w/-g), and never unlock
+    // or change the search list. In the reported SSH incident only System was
+    // searchable; a locked keychain can also report interaction-not-allowed (36).
+    let mut search_list = Command::new("security");
+    search_list.args(["list-keychains", "-d", "user"]);
+    if let Ok(output) = run(&mut search_list, deadline, AUTH_PROBE_TIMEOUT) {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let paths = stdout
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix('"'))
+                .collect::<Vec<_>>();
+            if !paths.is_empty()
+                && !paths.iter().any(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .is_some_and(|name| name == "login.keychain" || name == "login.keychain-db")
+                })
+            {
+                return true;
+            }
+        }
+    }
+    let mut metadata = Command::new("security");
+    metadata.args(["find-generic-password", "-s", "Claude Code-credentials"]);
+    matches!(run(&mut metadata, deadline, AUTH_PROBE_TIMEOUT), Ok(output) if output.status.code() == Some(36))
+}
+
+fn probe_claude_auth_uncached(
+    account_dir: Option<&str>,
+    now_ms: u64,
+    deadline: Deadline,
+    macos_ssh: bool,
+    run: &mut impl FnMut(
+        &mut Command,
+        Deadline,
+        Duration,
+    ) -> Result<std::process::Output, BoundedCommandError>,
+) -> CapabilityEvidence {
+    if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
+        return unknown(
+            now_ms,
+            "macOS login keychain locked in ssh session",
+            "Unlock the login keychain from a local macOS session, then retry doctor after one minute.",
+        );
+    }
     let mut command = Command::new("claude");
     if let Some(account_dir) = account_dir.filter(|dir| !dir.trim().is_empty()) {
         command
@@ -235,7 +400,7 @@ fn probe_claude_auth(
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .args(["auth", "status", "--json"]);
-    match run_command(&mut command, deadline, AUTH_PROBE_TIMEOUT) {
+    match run(&mut command, deadline, AUTH_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             match serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) {
                 Ok(status) if status.logged_in => {
@@ -464,6 +629,166 @@ fn harness_name(harness: Harness) -> &'static str {
 mod tests {
     use super::*;
     use cas_factory::CAPABILITY_UNKNOWN_TTL_MS;
+
+    #[cfg(unix)]
+    fn claude_probe_fixture() -> crate::test_support::TestEnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (name, body) in [
+            (
+                "claude",
+                "printf 'probe\\n' >> \"$HOME/claude-calls\"; printf '%s' \"$CLAUDE_TEST_STATUS\"; exit \"$CLAUDE_TEST_EXIT\"",
+            ),
+            (
+                "security",
+                "if [ \"$1\" = list-keychains ]; then printf '%s\\n' \"$CLAUDE_TEST_KEYCHAINS\"; else exit \"$CLAUDE_TEST_KEYCHAIN_EXIT\"; fi",
+            ),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
+        env.set("CLAUDE_TEST_EXIT", "0");
+        env.set(
+            "CLAUDE_TEST_KEYCHAINS",
+            "    \"/Library/Keychains/System.keychain\"",
+        );
+        env.set("CLAUDE_TEST_KEYCHAIN_EXIT", "36");
+        for name in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            env.remove(name);
+        }
+        env
+    }
+
+    #[cfg(unix)]
+    fn fixture_claude_probe(
+        env: &crate::test_support::TestEnvGuard,
+        account: Option<&str>,
+        now_ms: u64,
+        macos_ssh: bool,
+    ) -> CapabilityEvidence {
+        probe_claude_auth_with(
+            account,
+            now_ms,
+            Deadline::after(Duration::from_secs(30)),
+            macos_ssh,
+            &mut |command, deadline, cap| {
+                command.env("PATH", env.home().join("bin"));
+                run_command(command, deadline, cap)
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_cache_failure_keeps_real_auth_evidence_cas_eb0f() {
+        let mut env = claude_probe_fixture();
+        let cache = env.home().join(".cas/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        // A file in place of the cache directory fails even under privileged
+        // test runners; unlike chmod, it deterministically prevents caching.
+        std::fs::write(cache.join("claude-auth"), "not a directory").unwrap();
+        let calls = env.home().join("claude-calls");
+        for (index, (response, expected)) in [
+            (r#"{"loggedIn":false}"#, CapabilityAvailability::Unavailable),
+            (r#"{"loggedIn":true}"#, CapabilityAvailability::Available),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            env.set("CLAUDE_TEST_STATUS", response);
+            let evidence = fixture_claude_probe(&env, None, 10, false);
+            assert_eq!(
+                evidence.availability, expected,
+                "a broken optional cache must not hide the account's real auth status"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap().lines().count(),
+                index + 1,
+                "each failed-cache request must execute exactly one real auth probe"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_ssh_locked_keychain_is_not_a_logout_cas_43b3() {
+        let mut env = claude_probe_fixture();
+        env.set("SSH_CONNECTION", "fixture");
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
+        env.set("CLAUDE_TEST_EXIT", "1");
+        for (profile, search_list) in [
+            (None, "    \"/Library/Keychains/System.keychain\""),
+            (
+                Some("listed-but-locked"),
+                "    \"/Users/fixture/Library/Keychains/login.keychain-db\"",
+            ),
+        ] {
+            env.set("CLAUDE_TEST_KEYCHAINS", search_list);
+            let evidence = fixture_claude_probe(&env, profile, 10, true);
+            assert_eq!(evidence.availability, CapabilityAvailability::Unknown);
+            // pin: incident #1294 requires this diagnostic instead of login advice.
+            assert_eq!(
+                evidence.reason.as_deref(),
+                Some("macOS login keychain locked in ssh session")
+            );
+            assert!(
+                !evidence
+                    .remediation
+                    .unwrap_or_default()
+                    .contains("claude login")
+            );
+            assert!(
+                !env.home().join("claude-calls").exists(),
+                "inaccessible keychain must not trigger a Claude auth probe"
+            );
+        }
+        // An SSH observation must not leak into a local session's cache.
+        env.set("CLAUDE_TEST_EXIT", "0");
+        let local = fixture_claude_probe(&env, None, 10, false);
+        assert_eq!(local.availability, CapabilityAvailability::Unavailable);
+        assert!(local.remediation.unwrap().contains("claude login"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_auth_probes_are_bounded_per_profile_cas_43b3() {
+        let mut env = claude_probe_fixture();
+        let calls = env.home().join("claude-calls");
+        let first = fixture_claude_probe(&env, None, 10, false);
+        assert_eq!(first.availability, CapabilityAvailability::Available);
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
+        let cached = fixture_claude_probe(&env, None, 1_010, false);
+        assert_eq!(
+            cached, first,
+            "a repeated check must reuse the observation, including its timestamp"
+        );
+        let default_profile = env.home().join(".claude");
+        let alias = fixture_claude_probe(&env, default_profile.to_str(), 1_010, false);
+        assert_eq!(
+            alias, first,
+            "the explicit default directory must share the default cache entry"
+        );
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+        let other = fixture_claude_probe(&env, Some("other-profile"), 1_010, false);
+        assert_eq!(other.availability, CapabilityAvailability::Unavailable);
+        let refreshed = fixture_claude_probe(&env, None, 300_010, false);
+        assert_eq!(refreshed.availability, CapabilityAvailability::Unavailable);
+        assert_eq!(refreshed.observed_at_ms, 300_010);
+        env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
+        env.set("CLAUDE_TEST_EXIT", "1");
+        let failed = fixture_claude_probe(&env, None, 360_010, false);
+        assert_eq!(failed.availability, CapabilityAvailability::Unknown);
+        let repeated = fixture_claude_probe(&env, None, 370_010, false);
+        assert_eq!(
+            repeated, failed,
+            "transient failures must also throttle probes without refreshing evidence"
+        );
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 4);
+    }
 
     #[test]
     fn route_identity_keeps_endpoint_and_account_separate() {

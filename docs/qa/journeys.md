@@ -7,6 +7,9 @@ described in [journey-evaluation.md](journey-evaluation.md).
 
 Machine-read by `scripts/journeys-for-diff.py`; validate edits with
 `scripts/journeys-for-diff.py --check`. Keep each field on one line.
+The paired [v1 registry](journeys.yaml) supplies ownership and invariant metadata
+for `cas qa impact` and the upkeep gates. Its `legacy_catalog` selection mode
+preserves this catalog's import and CSS selector coverage; keep IDs and goals aligned.
 In **Steps**, the text before ` — ` must match the suite's stage
 (`test.step`) title exactly.
 

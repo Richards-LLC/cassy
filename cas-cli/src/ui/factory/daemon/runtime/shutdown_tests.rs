@@ -382,7 +382,11 @@ async fn recycle_with_a_refused_recipe_keeps_the_worker_running_cas_033a() {
     );
     assert!(alive(pid), "a refused recipe must not stop the worker");
     assert!(
-        daemon.app.worker_names().iter().any(|worker| worker == name),
+        daemon
+            .app
+            .worker_names()
+            .iter()
+            .any(|worker| worker == name),
         "the worker keeps its pane"
     );
     let prompts = open_prompt_queue_store(&cas_dir).unwrap();
@@ -813,7 +817,13 @@ async fn long_transcript_recycle(register_replacement: bool) {
             "phantom dispatch never completed"
         );
         store_worker.drain(Duration::from_secs(5));
-        let session = daemon.app.mux.get(NAME).unwrap().harness_session_id().unwrap();
+        let session = daemon
+            .app
+            .mux
+            .get(NAME)
+            .unwrap()
+            .harness_session_id()
+            .unwrap();
         let mut replacement = cas_types::Agent::new(session, NAME.into());
         replacement.role = cas_types::AgentRole::Worker;
         replacement.factory_session = Some(SESSION.into());
@@ -824,7 +834,9 @@ async fn long_transcript_recycle(register_replacement: bool) {
         // A delayed store-worker callback for the retired generation must
         // also remain harmless after same-name registration.
         crate::ui::factory::app::queue_phantom_worker_teardowns(
-            &cas_dir, SESSION, &[old_generation],
+            &cas_dir,
+            SESSION,
+            &[old_generation],
         );
         let controls = consume_queued_shutdowns(&mut daemon).await;
         let held = tasks.get("cas-recycled-held").unwrap();
@@ -924,4 +936,138 @@ async fn long_transcript_recycle(register_replacement: bool) {
         daemon.pane_buffers["unrelated-worker"].as_plain_text(),
         "unrelated live output"
     );
+}
+
+/// The same stop operation backs shutdown and same-name replacement. Both must
+/// drop regenerable scratch output while preserving the checkout and its proof.
+#[tokio::test]
+async fn shutdown_and_replacement_reclaim_scratch_target_cas_2e6e() {
+    let env = crate::test_env_guard::TestEnvGuard::temp_home();
+    use cas_types::TaskStatus::{AwaitingMerge, Closed, InProgress};
+    for (index, (replacement, status, unpushed, reclaimed)) in [
+        (false, Closed, false, true),
+        (true, Closed, false, true),
+        (true, AwaitingMerge, false, true),
+        (true, InProgress, false, false),
+        (true, AwaitingMerge, true, false),
+        (false, Closed, true, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let repo = env.home().join(format!("case-{index}"));
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("source"), "keep source").unwrap();
+        git(&["add", "source"]);
+        git(&["commit", "-qm", "fixture"]);
+        let remote = env.home().join(format!("origin-{index}.git"));
+        git(&["init", "--bare", "-q", remote.to_str().unwrap()]);
+        git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&["push", "-q", "origin", "HEAD"]);
+        let cas = crate::store::init_cas_dir(&repo).unwrap();
+        let scratch = env.home().join("scratch");
+        std::fs::write(
+            cas.join("config.toml"),
+            format!(
+                "[factory]\nscratch_root = {:?}\nartifacts_root = {:?}\n",
+                scratch.display().to_string(),
+                env.home().join("artifacts").display().to_string()
+            ),
+        )
+        .unwrap();
+        let name = "retiring-worker";
+        let worker = cas.join("worktrees").join(name);
+        std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "factory/retiring-worker",
+            worker.to_str().unwrap(),
+        ]);
+        drop(
+            crate::factory_target_cache::owner::acquire(&cas, &worker)
+                .unwrap()
+                .unwrap(),
+        );
+        let target = crate::factory_scratch::worker_target_dir(&worker);
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        std::fs::write(target.join("debug/output"), "regenerable").unwrap();
+        let proof = b"proof survives";
+        std::fs::write(target.join("worker-check.log"), proof).unwrap();
+        register_idle_worker(&cas, name);
+        let agents = open_agent_store(&cas).unwrap();
+        let mut agent = agents.get(&format!("agent-{name}")).unwrap();
+        agent
+            .metadata
+            .insert("clone_path".into(), worker.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut task = cas_types::Task::new("cas-retiring".into(), "Delivered task".into());
+        task.assignee = Some(name.into());
+        task.status = status;
+        crate::store::open_task_store(&cas).unwrap().add(&task).unwrap();
+        if unpushed {
+            git(&[
+                "-C",
+                worker.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "unpublished",
+            ]);
+        }
+        let mut runtime = daemon(&cas);
+        runtime
+            .app
+            .adopt_worker_pane_for_test(idle_worker_pane(name, cas_mux::SupervisorCli::Codex));
+        if replacement {
+            runtime.app.shutdown_worker_for_recycle(name).await.unwrap();
+        } else {
+            runtime.app.shutdown_worker(name, false).await.unwrap();
+        }
+        assert_eq!(
+            !target.exists(),
+            reclaimed,
+            "replacement={replacement}, status={status}, unpushed={unpushed}: {}",
+            target.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(worker.join("source")).unwrap(),
+            "keep source"
+        );
+        if !reclaimed {
+            assert_eq!(
+                std::fs::read(target.join("worker-check.log")).unwrap(),
+                proof
+            );
+            continue;
+        }
+        // pin: retirement preserves capped runner proof-log bytes under its durable artifact basename.
+        assert!(
+            walkdir::WalkDir::new(env.home().join("artifacts"))
+                .into_iter()
+                .flatten()
+                .any(|entry| {
+                    // pin: retirement must preserve the capped runner proof log by its artifact basename.
+                    entry.file_name() == "worker-check.log"
+                        && std::fs::read(entry.path()).unwrap() == proof
+                }),
+            "proof must be durable before scratch is removed"
+        );
+    }
 }

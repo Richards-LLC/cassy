@@ -83,7 +83,9 @@ fn target_is_ignored(worktree: &Path) -> io::Result<bool> {
             return Ok(false);
         }
         if !status.success() {
-            return Err(io::Error::other("cannot verify worker target ignore policy"));
+            return Err(io::Error::other(
+                "cannot verify worker target ignore policy",
+            ));
         }
     }
     Ok(true)
@@ -208,10 +210,25 @@ pub(crate) fn for_retirement(cas_root: &Path, worktree: &Path) -> io::Result<Opt
     open(cas_root, worktree, false)
 }
 
+/// Caller has already validated the exact managed target/quarantine layout.
+/// The durable inode/generation record still has to match this actual target.
+pub(super) fn for_gc(cas_root: &Path, worktree: &Path, target: &Path) -> io::Result<Option<Lease>> {
+    open_target(cas_root, worktree, target, false)
+}
+
 fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lease>> {
     let worktree = worktree.canonicalize()?;
-    // cas-3f93: `[factory] scratch_root` may place the target off-checkout.
     let target = crate::factory_scratch::worker_target_dir(&worktree);
+    open_target(cas_root, &worktree, &target, create)
+}
+
+fn open_target(
+    cas_root: &Path,
+    worktree: &Path,
+    target: &Path,
+    create: bool,
+) -> io::Result<Option<Lease>> {
+    let worktree = worktree.canonicalize()?;
     let relocated = crate::factory_scratch::is_relocated(&worktree, &target);
     if fs::symlink_metadata(&target)
         .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())

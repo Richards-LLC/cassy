@@ -8,11 +8,22 @@ use serde_yaml::{Mapping, Value};
 
 pub const DEFAULT_PATH: &str = "docs/qa/journeys.yaml";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    #[default]
+    Globs,
+    LegacyCatalog,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Registry {
     pub version: Option<u32>,
     pub updated: Option<String>,
+    pub selection: Selection,
+    /// Tracked policy wins; local qa.registry.enforce is fallback only.
+    pub enforce: Option<crate::config::RegistryEnforcement>,
     pub seeded_from: Vec<String>,
     pub traffic_snapshot: Option<Mapping>,
     pub ignore: Vec<String>,
@@ -21,6 +32,9 @@ pub struct Registry {
     pub kinds: Option<Vec<String>>,
     pub owner_groups: BTreeMap<String, OwnerGroup>,
     pub invariants: BTreeMap<String, Invariant>,
+    /// Criteria graded by a person, or declared before their checker exists.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub manual_checks: BTreeMap<String, ManualCheck>,
     pub fixtures: Option<BTreeMap<String, Fixture>>,
     pub bug_families: BTreeMap<String, BugFamily>,
     pub journeys: Vec<Journey>,
@@ -41,6 +55,179 @@ pub struct Invariant {
     pub statement: String,
     pub check: String,
     pub bug: Option<Value>,
+    /// Declared criterion whose executable checker is not written yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_checker: Option<PendingChecker>,
+    /// What counts, so a grader can apply the criterion without a judgment call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Graded against each fixture's `labels` entry instead of one universal rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub labeled: bool,
+    /// How a measured value is graded against its baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare: Option<CompareSpec>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+const INVARIANT_FIELDS: [&str; 7] = [
+    "statement",
+    "check",
+    "bug",
+    "pending_checker",
+    "definition",
+    "labeled",
+    "compare",
+];
+const MANUAL_CHECK_FIELDS: [&str; 7] = [
+    "statement",
+    "check",
+    "reason",
+    "pending_checker",
+    "definition",
+    "labeled",
+    "compare",
+];
+const FIXTURE_FIELDS: [&str; 3] = ["description", "provider", "labels"];
+
+/// Numeric grading mode: `exact`, or `{banded: {min_ratio | max_delta}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Compare {
+    /// Any difference from the baseline fails (coverage counts, presence).
+    Exact,
+    /// Wording noise inside the band passes; the measured % stays visible.
+    Banded(Band),
+}
+
+/// A criterion's `compare` as written. A malformed value stays a validation
+/// problem on that criterion instead of failing the whole registry load,
+/// which also feeds impact and close-time checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompareSpec {
+    Valid(Compare),
+    Invalid { raw: Value, error: String },
+}
+
+impl CompareSpec {
+    pub fn valid(&self) -> Option<&Compare> {
+        match self {
+            Self::Valid(compare) => Some(compare),
+            Self::Invalid { .. } => None,
+        }
+    }
+}
+
+/// Singleton-map form (`exact`, `{banded: {...}}`), not serde_yaml's `!banded` tags.
+impl<'de> Deserialize<'de> for CompareSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        Ok(
+            match serde_yaml::with::singleton_map_recursive::deserialize(raw.clone()) {
+                Ok(compare) => Self::Valid(compare),
+                Err(error) => Self::Invalid {
+                    raw,
+                    error: error.to_string(),
+                },
+            },
+        )
+    }
+}
+
+impl Serialize for CompareSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Valid(compare) => {
+                serde_yaml::with::singleton_map_recursive::serialize(compare, serializer)
+            }
+            Self::Invalid { raw, .. } => raw.serialize(serializer),
+        }
+    }
+}
+
+/// Exactly one bound: `min_ratio` is a floor of `baseline * min_ratio`;
+/// `max_delta` allows `|measured - baseline| <= max_delta`.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Band {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_delta: Option<f64>,
+}
+
+/// A graded measurement as the ledger records it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Grade {
+    pub pass: bool,
+    pub measured: f64,
+    pub baseline: f64,
+    /// `measured / baseline` as a percentage; absent for a zero baseline.
+    pub pct_of_baseline: Option<f64>,
+}
+
+impl Compare {
+    pub fn grade(&self, measured: f64, baseline: f64) -> Grade {
+        let pass = match self {
+            Self::Exact => measured == baseline,
+            Self::Banded(band) => {
+                band.min_ratio
+                    .is_none_or(|ratio| measured >= baseline * ratio)
+                    && band
+                        .max_delta
+                        .is_none_or(|delta| (measured - baseline).abs() <= delta)
+            }
+        };
+        Grade {
+            pass,
+            measured,
+            baseline,
+            pct_of_baseline: (baseline != 0.0).then(|| measured / baseline * 100.0),
+        }
+    }
+
+    fn problem(&self) -> Option<&'static str> {
+        let Self::Banded(band) = self else {
+            return None;
+        };
+        match (band.min_ratio, band.max_delta) {
+            (Some(ratio), None) if ratio > 0.0 && ratio <= 1.0 => None,
+            (None, Some(delta)) if delta.is_finite() && delta >= 0.0 => None,
+            (Some(_), None) => Some("banded min_ratio must be in (0, 1]"),
+            (None, Some(_)) => Some("banded max_delta must be a non-negative number"),
+            _ => Some("banded needs exactly one of min_ratio or max_delta"),
+        }
+    }
+}
+
+/// Automation debt with an accountable owner; overdue once `due` has passed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PendingChecker {
+    pub owner: String,
+    pub due: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManualCheck {
+    pub statement: String,
+    pub check: String,
+    /// `human_judgment` stays manual; `checker_unwritten` needs `pending_checker`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_checker: Option<PendingChecker>,
+    /// What counts, so a grader can apply the criterion without a judgment call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Graded against each fixture's `labels` entry instead of one universal rule.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub labeled: bool,
+    /// How a measured value is graded against its baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compare: Option<CompareSpec>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -50,6 +237,11 @@ pub struct Invariant {
 pub struct Fixture {
     pub description: String,
     pub provider: String,
+    /// Expected value per labeled criterion ID for this fixture.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -100,6 +292,8 @@ pub struct Journey {
     pub owner_groups: Vec<String>,
     pub owners: Owners,
     pub invariants: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub manual_checks: Vec<String>,
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
@@ -266,6 +460,87 @@ impl ValidationReport {
     }
 }
 
+fn iso_date(date: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .filter(|parsed| date.len() == 10 && parsed.format("%Y-%m-%d").to_string() == date)
+}
+
+impl ValidationReport {
+    /// Reject an extra key that is a near-miss of a known field, so a typo
+    /// (`lables`, `pending_cheker`) cannot silently drop a rule.
+    fn misspelled_fields(
+        &mut self,
+        subject: &str,
+        extra: &BTreeMap<String, Value>,
+        known: &[&str],
+    ) {
+        for key in extra.keys() {
+            // At most two edits, and no more than a third of the field, so
+            // short free-form keys (`tag` vs `bug`) stay free-form.
+            if let Some(field) = known.iter().find(|field| {
+                let distance =
+                    crate::sync::skill_suggest::levenshtein(&key.to_ascii_lowercase(), field);
+                distance <= 2 && distance * 3 <= field.len()
+            }) {
+                self.problem(
+                    "unknown_field",
+                    subject,
+                    format!("unknown field {key:?}; did you mean {field}?"),
+                );
+            }
+        }
+    }
+
+    fn compare(&mut self, subject: &str, compare: Option<&CompareSpec>) {
+        match compare {
+            Some(CompareSpec::Invalid { error, .. }) => self.problem(
+                "compare",
+                subject,
+                format!(
+                    "invalid compare ({error}); use exact or {{banded: {{min_ratio | max_delta}}}}"
+                ),
+            ),
+            Some(CompareSpec::Valid(compare)) => {
+                if let Some(message) = compare.problem() {
+                    self.problem("compare", subject, message);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Validate a pending checker; its owner/due summary when it is well formed.
+    fn pending_checker(
+        &mut self,
+        subject: &str,
+        pending: &PendingChecker,
+        today: chrono::NaiveDate,
+    ) -> Option<String> {
+        match iso_date(&pending.due) {
+            Some(due) if !pending.owner.trim().is_empty() => {
+                let summary = format!("owner {}, due {}", pending.owner, pending.due);
+                if due < today {
+                    self.problem(
+                        "overdue_checker",
+                        subject,
+                        format!("checker is overdue ({summary}); write it or move the date"),
+                    );
+                }
+                Some(summary)
+            }
+            _ => {
+                self.problem(
+                    "pending_checker",
+                    subject,
+                    "pending_checker needs owner and due (YYYY-MM-DD)",
+                );
+                None
+            }
+        }
+    }
+}
+
 fn valid_status(status: &str) -> bool {
     matches!(status, "live" | "dark" | "dead")
 }
@@ -298,6 +573,80 @@ impl Registry {
         }
     }
 
+    /// `(definition, labeled)` for an invariant or manual-check ID.
+    fn criterion(&self, id: &str) -> Option<(Option<&str>, bool)> {
+        self.invariants
+            .get(id)
+            .map(|c| (c.definition.as_deref(), c.labeled))
+            .or_else(|| {
+                self.manual_checks
+                    .get(id)
+                    .map(|c| (c.definition.as_deref(), c.labeled))
+            })
+    }
+
+    /// Labeled criteria need a definition and a label on every fixture a journey pairs them with.
+    fn validate_labels(&self, report: &mut ValidationReport) {
+        let criteria = self.invariants.keys().map(|id| ("invariants", id));
+        for (kind, id) in criteria.chain(self.manual_checks.keys().map(|id| ("manual_checks", id)))
+        {
+            if let Some((definition, true)) = self.criterion(id)
+                && !present(definition)
+            {
+                report.problem(
+                    "missing_definition",
+                    &format!("{kind}.{id}"),
+                    "labeled criteria need a definition of what counts",
+                );
+            }
+        }
+        let Some(fixtures) = &self.fixtures else {
+            return;
+        };
+        for (name, fixture) in fixtures {
+            for criterion in fixture.labels.keys() {
+                match self.criterion(criterion) {
+                    None => report.problem(
+                        "unknown_label",
+                        &format!("fixtures.{name}"),
+                        format!("label for unknown criterion {criterion:?}"),
+                    ),
+                    Some((_, false)) => report.problem(
+                        "label_without_labeled",
+                        &format!("fixtures.{name}"),
+                        format!("{criterion} has a label but is not labeled: true"),
+                    ),
+                    Some((_, true)) => {}
+                }
+            }
+        }
+        let mut owed = std::collections::BTreeMap::new();
+        for journey in &self.journeys {
+            for fixture in &journey.fixtures {
+                let Some(labels) = fixtures.get(fixture).map(|f| &f.labels) else {
+                    continue;
+                };
+                for criterion in journey.invariants.iter().chain(&journey.manual_checks) {
+                    if self
+                        .criterion(criterion)
+                        .is_some_and(|(_, labeled)| labeled)
+                        && labels.get(criterion).is_none_or(Value::is_null)
+                    {
+                        owed.entry((fixture.as_str(), criterion.as_str()))
+                            .or_insert(journey.id.as_str());
+                    }
+                }
+            }
+        }
+        for ((fixture, criterion), journey) in owed {
+            report.debt(
+                "unlabeled_fixture",
+                &format!("fixtures.{fixture}"),
+                &format!("no label for labeled criterion {criterion} (journey {journey})"),
+            );
+        }
+    }
+
     /// Validate in memory against the caller's tracked-file snapshot (no subprocess).
     pub fn validate(&self, tracked: &[String]) -> ValidationReport {
         use std::collections::BTreeSet;
@@ -305,12 +654,8 @@ impl Registry {
         if self.version != Some(1) {
             report.problem("version", "registry", "version must be 1");
         }
-        let date_valid = self.updated.as_deref().is_some_and(|date| {
-            date.len() == 10
-                && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d").to_string() == date)
-        });
-        if !date_valid {
+        let today = chrono::Utc::now().date_naive();
+        if self.updated.as_deref().and_then(iso_date).is_none() {
             report.problem(
                 "updated",
                 "registry",
@@ -319,6 +664,17 @@ impl Registry {
         }
         if self.journeys.is_empty() {
             report.problem("journeys", "registry", "journeys must be a non-empty list");
+        }
+        if self.selection == Selection::LegacyCatalog {
+            for path in ["docs/qa/journeys.md", "scripts/journeys-for-diff.py"] {
+                if !tracked.iter().any(|file| file == path) {
+                    report.problem(
+                        "untracked_spec",
+                        "selection",
+                        format!("legacy_catalog requires tracked {path}"),
+                    );
+                }
+            }
         }
         let ids: BTreeSet<_> = self.journeys.iter().map(|j| j.id.as_str()).collect();
         let mut seen = BTreeSet::new();
@@ -339,23 +695,80 @@ impl Registry {
             );
         }
         for (name, invariant) in &self.invariants {
+            let subject = format!("invariants.{name}");
             if invariant.statement.trim().is_empty() || invariant.check.trim().is_empty() {
+                report.problem("invariant", &subject, "statement and check are required");
+            }
+            report.misspelled_fields(&subject, &invariant.extra, &INVARIANT_FIELDS);
+            report.compare(&subject, invariant.compare.as_ref());
+            if let Some(pending) = &invariant.pending_checker {
+                if let Some(summary) = report.pending_checker(&subject, pending, today) {
+                    report.debt(
+                        "pending_checker",
+                        &subject,
+                        &format!("checker pending: {summary}"),
+                    );
+                }
+            }
+        }
+        for (name, manual) in &self.manual_checks {
+            let subject = format!("manual_checks.{name}");
+            if manual.statement.trim().is_empty() || manual.check.trim().is_empty() {
+                report.problem("manual_check", &subject, "statement and check are required");
+            }
+            if self.invariants.contains_key(name) {
                 report.problem(
-                    "invariant",
-                    &format!("invariants.{name}"),
-                    "statement and check are required",
+                    "duplicate_criterion",
+                    &subject,
+                    "id is also an invariant; criterion ids must be unique",
                 );
+            }
+            report.misspelled_fields(&subject, &manual.extra, &MANUAL_CHECK_FIELDS);
+            report.compare(&subject, manual.compare.as_ref());
+            match (manual.reason.as_deref(), &manual.pending_checker) {
+                (Some("human_judgment"), Some(_)) => report.problem(
+                    "contradiction",
+                    &subject,
+                    "human_judgment cannot have a pending_checker; use checker_unwritten",
+                ),
+                (Some("human_judgment"), None) => report.debt(
+                    "manual_human_judgment",
+                    &subject,
+                    "manual check: needs human judgment",
+                ),
+                (Some("checker_unwritten"), Some(pending)) => {
+                    if let Some(summary) = report.pending_checker(&subject, pending, today) {
+                        report.debt(
+                            "manual_checker_unwritten",
+                            &subject,
+                            &format!("manual check: checker unwritten, {summary}"),
+                        );
+                    }
+                }
+                (Some("checker_unwritten"), None) => report.problem(
+                    "pending_checker",
+                    &subject,
+                    "reason checker_unwritten needs pending_checker {owner, due}",
+                ),
+                (None, _) => report.debt(
+                    "manual_unclassified",
+                    &subject,
+                    "manual check has no reason; set human_judgment or checker_unwritten",
+                ),
+                (Some(other), _) => report.problem(
+                    "manual_reason",
+                    &subject,
+                    format!("unknown reason {other:?}; use human_judgment or checker_unwritten"),
+                ),
             }
         }
         if let Some(fixtures) = &self.fixtures {
             for (name, fixture) in fixtures {
+                let subject = format!("fixtures.{name}");
                 if fixture.description.trim().is_empty() || fixture.provider.trim().is_empty() {
-                    report.problem(
-                        "fixture",
-                        &format!("fixtures.{name}"),
-                        "description and provider are required",
-                    );
+                    report.problem("fixture", &subject, "description and provider are required");
                 }
+                report.misspelled_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
             }
         }
         report.globs(
@@ -430,6 +843,15 @@ impl Registry {
                         "unknown_invariant",
                         id,
                         format!("unknown invariant {invariant:?}"),
+                    );
+                }
+            }
+            for manual in &journey.manual_checks {
+                if !self.manual_checks.contains_key(manual) {
+                    report.problem(
+                        "unknown_manual_check",
+                        id,
+                        format!("unknown manual check {manual:?}"),
                     );
                 }
             }
@@ -533,6 +955,7 @@ impl Registry {
                 }
             }
         }
+        self.validate_labels(&mut report);
         for (name, family) in &self.bug_families {
             let subject = format!("bug_families.{name}");
             if family.title.trim().is_empty() {
@@ -611,6 +1034,31 @@ journeys:
     evidence: {verdict: PASS}
 "#;
 
+    /// GABBER plus a pending invariant checker and one manual check per reason.
+    fn with_criteria(due: &str) -> String {
+        GABBER
+            .replace(
+                "    bug: {task: cas-1234}\n",
+                &format!("    bug: {{task: cas-1234}}\n    pending_checker: {{owner: qa-team, due: \"{due}\"}}\n    compare: exact\n"),
+            )
+            .replace(
+                "    fixtures: [fresh]\n",
+                "    manual_checks: [MANUAL-LOOK, MANUAL-COUNT, MANUAL-OLD]\n    fixtures: [fresh]\n",
+            )
+            + &format!(
+                r#"manual_checks:
+  MANUAL-LOOK: {{statement: Slides read well, check: Look at 390px, reason: human_judgment}}
+  MANUAL-COUNT:
+    statement: One run per click
+    check: Count runs
+    reason: checker_unwritten
+    pending_checker: {{owner: qa-team, due: "{due}"}}
+    compare: {{banded: {{min_ratio: 0.9}}}}
+  MANUAL-OLD: {{statement: Legacy entry, check: Walk it}}
+"#
+            )
+    }
+
     fn repo(contents: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -682,7 +1130,136 @@ journeys:
     }
 
     #[test]
+    fn qa_registry_pending_checkers_and_manual_checks_are_debt_by_reason() {
+        let yaml = with_criteria("2999-12-31");
+        let registry = parse(&yaml).unwrap();
+        let pending = registry.invariants["INV-CLAIM"]
+            .pending_checker
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (pending.owner.as_str(), pending.due.as_str()),
+            ("qa-team", "2999-12-31")
+        );
+        assert_eq!(
+            registry.manual_checks["MANUAL-LOOK"].reason.as_deref(),
+            Some("human_judgment")
+        );
+        assert_eq!(
+            registry.journeys[0].manual_checks,
+            ["MANUAL-LOOK", "MANUAL-COUNT", "MANUAL-OLD"]
+        );
+        assert_eq!(
+            registry.invariants["INV-CLAIM"]
+                .compare
+                .as_ref()
+                .and_then(CompareSpec::valid)
+                .copied(),
+            Some(Compare::Exact)
+        );
+        assert_eq!(
+            registry.manual_checks["MANUAL-COUNT"]
+                .compare
+                .as_ref()
+                .and_then(CompareSpec::valid)
+                .copied(),
+            Some(Compare::Banded(Band {
+                min_ratio: Some(0.9),
+                max_delta: None
+            }))
+        );
+        let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        let debt: Vec<_> = report
+            .debt
+            .iter()
+            .map(|p| (p.code.as_str(), p.subject.as_str()))
+            .collect();
+        assert_eq!(
+            debt,
+            [
+                ("pending_checker", "invariants.INV-CLAIM"),
+                ("manual_checker_unwritten", "manual_checks.MANUAL-COUNT"),
+                ("manual_human_judgment", "manual_checks.MANUAL-LOOK"),
+                ("manual_unclassified", "manual_checks.MANUAL-OLD"),
+            ]
+        );
+        assert!(
+            report.debt[0]
+                .message
+                .contains("owner qa-team, due 2999-12-31")
+        );
+    }
+
+    #[test]
+    fn qa_registry_labeled_criteria_grade_against_fixture_labels() {
+        let yaml = GABBER
+            .replace(
+                "    check: Count workspaces and read claimed_at\n",
+                "    check: Count workspaces and read claimed_at\n    definition: An authored text overlay, not text inside a photo\n    labeled: true\n",
+            )
+            .replace(
+                "  fresh: {description: New account, provider: account-seed}\n",
+                "  fresh: {description: New account, provider: account-seed, labels: {INV-CLAIM: {authored_text_slides: [2]}}}\n  jersey: {description: Photo carousel, provider: frozen}\n  typo: {description: Stale, provider: frozen, labels: {INV-GONE: 1}}\n",
+            )
+            .replace("    fixtures: [fresh]\n", "    fixtures: [fresh, jersey]\n");
+        let registry = parse(&yaml).unwrap();
+        let fresh = &registry.fixtures.as_ref().unwrap()["fresh"];
+        assert_eq!(
+            serde_yaml::to_string(&fresh.labels["INV-CLAIM"]).unwrap(),
+            "authored_text_slides:\n- 2\n"
+        );
+        let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
+        let rows = |rows: &[Problem]| {
+            rows.iter()
+                .map(|p| format!("{} {} {}", p.code, p.subject, p.message))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&report.problems),
+            ["unknown_label fixtures.typo label for unknown criterion \"INV-GONE\""]
+        );
+        assert_eq!(
+            rows(&report.debt),
+            [
+                "unlabeled_fixture fixtures.jersey no label for labeled criterion INV-CLAIM (journey B2-home)"
+            ]
+        );
+        let undefined = yaml.replace(
+            "    definition: An authored text overlay, not text inside a photo\n",
+            "",
+        );
+        let report = check(repo(&undefined).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert_eq!(report.problems[0].code, "missing_definition");
+    }
+
+    #[test]
+    fn qa_registry_compare_grades_exact_and_banded() {
+        let floor = Compare::Banded(Band {
+            min_ratio: Some(0.9),
+            max_delta: None,
+        });
+        let noise = floor.grade(1862.0, 1871.0);
+        assert!(noise.pass);
+        assert_eq!(format!("{:.2}", noise.pct_of_baseline.unwrap()), "99.52");
+        assert!(!floor.grade(1600.0, 1871.0).pass);
+        assert!(Compare::Exact.grade(15.0, 15.0).pass);
+        let drift = Compare::Exact.grade(1862.0, 1871.0);
+        assert!(!drift.pass);
+        assert_eq!(drift.pct_of_baseline, noise.pct_of_baseline);
+        let delta = Compare::Banded(Band {
+            min_ratio: None,
+            max_delta: Some(20.0),
+        });
+        assert!(delta.grade(1853.0, 1871.0).pass);
+        assert!(!delta.grade(1891.5, 1871.0).pass);
+        assert_eq!(Compare::Exact.grade(0.0, 0.0).pct_of_baseline, None);
+    }
+
+    #[test]
     fn qa_registry_invalid_registries_and_seeded_debt() {
+        let journey = &GABBER[GABBER.find("  - id: B2-home").unwrap()..];
+        let two_journeys = format!("{GABBER}{}", journey.replace("id: B2-home", "id: B3-home"));
         let no_invariants = GABBER.replace(
             "    invariants: [INV-CLAIM]\n    fixtures:",
             "    fixtures:",
@@ -741,6 +1318,107 @@ journeys:
                 vec!["traffic_basis"],
                 vec![],
             ),
+            (
+                "overdue pending checker fails",
+                with_criteria("2020-01-01"),
+                vec!["overdue_checker", "overdue_checker"],
+                vec![
+                    "pending_checker",
+                    "manual_checker_unwritten",
+                    "manual_human_judgment",
+                    "manual_unclassified",
+                ],
+            ),
+            (
+                "unwritten checker needs an owner and due date",
+                with_criteria("2999-12-31")
+                    .replace(
+                        "    pending_checker: {owner: qa-team, due: \"2999-12-31\"}\n    compare: {banded",
+                        "    compare: {banded",
+                    )
+                    .replace(
+                        "MANUAL-OLD: {statement: Legacy entry, check: Walk it}",
+                        "MANUAL-OLD: {statement: Legacy entry, check: Walk it, reason: later}",
+                    )
+                    .replace(
+                        "[MANUAL-LOOK, MANUAL-COUNT, MANUAL-OLD]",
+                        "[MANUAL-LOOK, MANUAL-GONE]",
+                    ),
+                vec!["pending_checker", "manual_reason", "unknown_manual_check"],
+                vec!["pending_checker", "manual_human_judgment"],
+            ),
+            (
+                "human judgment cannot have a pending checker",
+                with_criteria("2999-12-31").replace(
+                    "reason: human_judgment}",
+                    "reason: human_judgment, pending_checker: {owner: qa, due: \"2999-12-31\"}}",
+                ),
+                vec!["contradiction"],
+                vec![
+                    "pending_checker",
+                    "manual_checker_unwritten",
+                    "manual_unclassified",
+                ],
+            ),
+            (
+                "misspelled criterion and fixture fields",
+                GABBER
+                    .replace(
+                        "    check: Count workspaces and read claimed_at\n",
+                        "    check: Count workspaces and read claimed_at\n    defintion: Typo\n",
+                    )
+                    .replace(
+                        "provider: account-seed}",
+                        "provider: account-seed, lables: {INV-CLAIM: 1}}",
+                    ),
+                vec!["unknown_field", "unknown_field"],
+                vec![],
+            ),
+            (
+                "invalid band",
+                GABBER.replace(
+                    "    check: Count workspaces and read claimed_at\n",
+                    "    check: Count workspaces and read claimed_at\n    compare: {banded: {min_ratio: 1.5}}\n",
+                ),
+                vec!["compare"],
+                vec![],
+            ),
+            (
+                "malformed compare is one problem per criterion, not a load failure",
+                with_criteria("2999-12-31")
+                    .replace("    compare: exact\n", "    compare: fuzzy\n")
+                    .replace("{banded: {min_ratio: 0.9}}", "{banded: {min_rato: 0.9}}"),
+                vec!["compare", "compare"],
+                vec![
+                    "pending_checker",
+                    "manual_checker_unwritten",
+                    "manual_human_judgment",
+                    "manual_unclassified",
+                ],
+            ),
+            (
+                "criterion id shared by an invariant and a manual check",
+                format!(
+                    "{GABBER}manual_checks:\n  INV-CLAIM: {{statement: Dup, check: Dup, reason: human_judgment}}\n"
+                ),
+                vec!["duplicate_criterion"],
+                vec!["manual_human_judgment"],
+            ),
+            (
+                "labeled manual check: null label owes once across journeys",
+                two_journeys
+                    .replace(
+                        "    fixtures: [fresh]\n",
+                        "    manual_checks: [MANUAL-SLIDES]\n    fixtures: [fresh]\n",
+                    )
+                    .replace(
+                        "provider: account-seed}",
+                        "provider: account-seed, labels: {MANUAL-SLIDES: null, INV-CLAIM: 1}}",
+                    )
+                    + "manual_checks:\n  MANUAL-SLIDES: {statement: Text slides, check: Count overlays, reason: human_judgment, labeled: true, definition: Authored overlays only}\n",
+                vec!["label_without_labeled"],
+                vec!["manual_human_judgment", "unlabeled_fixture"],
+            ),
         ];
         for (name, yaml, problems, debt) in cases {
             let dir = repo(&yaml);
@@ -764,13 +1442,37 @@ journeys:
                 debt,
                 "{name}"
             );
-            assert!(
-                report
+            assert!(report.problems.iter().chain(&report.debt).all(|p| {
+                p.subject == "B2-home"
+                    || ["invariants.", "manual_checks.", "fixtures."]
+                        .iter()
+                        .any(|prefix| p.subject.starts_with(prefix))
+            }));
+            if name.starts_with("malformed compare") {
+                let rows: Vec<_> = report
                     .problems
                     .iter()
-                    .chain(&report.debt)
-                    .all(|p| p.subject == "B2-home")
-            );
+                    .map(|p| {
+                        (
+                            p.subject.as_str(),
+                            p.message.contains("fuzzy") || p.message.contains("min_rato"),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    rows,
+                    [
+                        ("invariants.INV-CLAIM", true),
+                        ("manual_checks.MANUAL-COUNT", true)
+                    ]
+                );
+            }
+            if let Some(owed) = report.debt.iter().find(|p| p.code == "unlabeled_fixture") {
+                assert_eq!(
+                    owed.message,
+                    "no label for labeled criterion MANUAL-SLIDES (journey B2-home)"
+                );
+            }
         }
     }
 

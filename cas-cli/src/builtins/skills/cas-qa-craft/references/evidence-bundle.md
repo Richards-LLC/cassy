@@ -149,6 +149,19 @@ Produce pairs for every `visual_change: true` bundle; omit them otherwise.
     "unpaired": []}
    ```
 
+   Use each stable `id` as the cell identity on both sides. Entries in `unpaired[]`
+   use the same row shape, with just `before` or `after`; each present side must
+   name a nonempty `png` resolved relative to, and confined inside, the directory
+   containing `pairs.json`. Keep every baseline cell, including cells with no
+   AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
+   AFTER must contain every BEFORE id, and may add ids. A partial comparison that
+   drops BEFORE cells refuses and names all missing ids, even with no AFTER cells.
+   Capture the missing cells, or obtain an existing recorded exact-tip `qa_waive`
+   or `supervisor_override`; a manifest flag or ledger reason does not waive it.
+   BEFORE captures may predate the delivery; AFTER captures and `pairs.json` must
+   be fresh for the delivered build. Match `pairs.json` task and head to the bundle,
+   including when rebinding evidence after documentation-only commits.
+
 4. **Record the status.** In `bundle.json`, set `files.pairs` to
    `pairs/pairs.json` and `pairs_status` to `complete` (every shot paired),
    `partial` (some shots in `unpaired[]`) or `unavailable` (no pair; give the

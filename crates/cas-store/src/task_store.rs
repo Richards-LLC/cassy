@@ -578,8 +578,7 @@ impl SqliteTaskStore {
                 }
                 if replacement.as_deref() == Some(notes.as_str())
                     || (replacement.is_none()
-                        && (notes.starts_with(formatted_note)
-                            || notes.contains(&format!("\n{formatted_note}")))) {
+                        && crate::task_note_markers::contains_complete_lines(&notes, formatted_note)) {
                     if !receipt_id.is_empty() {
                         Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
                     }

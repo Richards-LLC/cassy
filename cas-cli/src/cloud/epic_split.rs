@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 
 use cas_store::{
     EpicSplit, SplitDirection, SplitState, decide_epic_split, get_epic_split, insert_epic_split,
-    list_epic_splits, open_epic_splits, decide_epic_split_by, finish_epic_split_work,
+    list_epic_splits, decide_epic_split_by, finish_epic_split_work,
     pending_epic_split_work,
 };
 
@@ -225,12 +225,75 @@ fn has_store(cas_root: &Path) -> bool {
     cas_root.join("cas.db").exists()
 }
 
+/// Shares that can still reserve children in their original epic. Keep raw
+/// list/get and cleanup reads historical: this projection never cancels a
+/// split or releases a claim. Callers still apply their split-state policy.
+pub(crate) fn current_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
+    projected_epic_splits(cas_root, false)
+}
+
+/// Overlap also reserves the original shares while claim cleanup is pending.
+/// Keep that historical coverage out of ordinary ownership/renewal projections.
+fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
+    let splits = list_epic_splits(cas_root)
+        .map_err(|error| format!("epic split store: {error}"))?;
+    if splits.is_empty() {
+        return Ok(splits);
+    }
+    // Ownership reads must not replay a failed outbox repair and lose a live
+    // binding while local task/parent rows remain perfectly readable.
+    let tasks = crate::store::open_task_store_local(cas_root)
+        .map_err(|error| format!("could not open the task store: {error}"))?;
+    let mut terminal_epics = std::collections::HashMap::new();
+    let mut parents = std::collections::HashMap::new();
+    let mut current = Vec::new();
+    for mut split in splits {
+        if include_cleanup && split.cleanup_pending {
+            current.push(split);
+            continue;
+        }
+        let terminal = match terminal_epics.get(&split.epic_id) {
+            Some(terminal) => *terminal,
+            None => {
+                let terminal = match tasks.get(&split.epic_id) {
+                    Ok(epic) => epic.is_terminal(),
+                    // An incomplete sync is not proof that ownership ended.
+                    Err(cas_store::StoreError::TaskNotFound(_)) => false,
+                    Err(error) => return Err(format!("could not read split epic: {error}")),
+                };
+                terminal_epics.insert(split.epic_id.clone(), terminal);
+                terminal
+            }
+        };
+        if terminal {
+            continue;
+        }
+        for id in split.mine.iter().chain(&split.theirs) {
+            if !parents.contains_key(id) {
+                let parent = tasks.get_parent_epic(id)
+                    .map_err(|error| format!("could not read split child parent: {error}"))?
+                    .map(|epic| epic.id);
+                parents.insert(id.clone(), parent);
+            }
+        }
+        let still_child = |id: &String| {
+            parents[id].as_deref().is_none_or(|parent| parent == split.epic_id)
+        };
+        split.mine.retain(still_child);
+        split.theirs.retain(still_child);
+        if !split.mine.is_empty() || !split.theirs.is_empty() {
+            current.push(split);
+        }
+    }
+    Ok(current)
+}
+
 /// The binding split, if any, under which `task_id` is the peer's.
 pub fn split_hold_for(cas_root: &Path, task_id: &str) -> Option<SplitHold> {
     if !has_store(cas_root) {
         return None;
     }
-    let splits = match open_epic_splits(cas_root) {
+    let splits = match current_epic_splits(cas_root) {
         Ok(splits) => splits,
         Err(error) => {
             tracing::debug!(%error, "could not read epic splits");
@@ -647,13 +710,13 @@ fn local_check(cas_root: &Path) -> Result<impl Fn(&str) -> bool, String> {
     Ok(move |id: &str| agents.get(id).is_ok())
 }
 
-/// Splits reserving a child in `ids`, other than `except`: `(split id, child)`.
+/// Splits reserving a current child in `ids`, other than `except`.
 /// Outgoing proposals reserve through expiry cleanup; a live successor may
 /// cancel an expired orphan after proving its owner is gone. Cleanup work and
 /// accepted splits also reserve, while expired incoming proposals do not.
-fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(String, String)>, String> {
+fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<Option<(EpicSplit, String)>, String> {
     let now = Utc::now();
-    let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
+    let splits = projected_epic_splits(cas_root, true)?;
     Ok(splits
         .into_iter()
         .filter(|split| Some(split.id.as_str()) != except)
@@ -661,10 +724,24 @@ fn overlapping(cas_root: &Path, ids: &[String], except: Option<&str>) -> Result<
             || (split.state == SplitState::Pending
                 && (split.direction == SplitDirection::Outgoing || !split.is_expired(now))))
         .find_map(|split| {
-            ids.iter()
+            let child = ids.iter()
                 .find(|id| split.mine.contains(id) || split.theirs.contains(id))
-                .map(|id| (split.id.clone(), id.clone()))
+                .cloned()?;
+            Some((split, child))
         }))
+}
+
+fn overlap_refusal(cas_root: &Path, split: &EpicSplit, child: &str) -> String {
+    let epic_state = crate::store::open_task_store(cas_root).ok()
+        .and_then(|tasks| tasks.get(&split.epic_id).ok())
+        .map(|epic| epic.status.to_string()).unwrap_or_else(|| "unknown".into());
+    format!(
+        "{child} is already in epic split {} ({}) of epic {} ({}). \
+         Settle pending cleanup, or end it with factory action=epic_split id={} decision=cancel \
+         reason=\"<why this split should end>\". If its owner is gone, a live registered \
+         supervisor can cancel after the stale-owner check.",
+        split.id, split.state.as_str(), split.epic_id, epic_state, split.id,
+    )
 }
 
 /// Propose splitting `epic_id` with peer supervisor `peer_target`: claim
@@ -714,9 +791,7 @@ pub fn propose(
     }
     let all: Vec<String> = mine.iter().chain(theirs).cloned().collect();
     if let Some((split, child)) = overlapping(cas_root, &all, None)? {
-        return Err(format!(
-            "{child} is already in epic split {split}; settle pending cleanup, or cancel/reject the active split first"
-        ));
+        return Err(overlap_refusal(cas_root, &split, &child));
     }
 
     let (peer, redirect) = match discover_peers(cas_root, Some(&caller.id)) {
@@ -935,9 +1010,7 @@ pub fn answer(
     }
 
     if let Some((other, child)) = overlapping(cas_root, &[split.mine.clone(), split.theirs.clone()].concat(), Some(id))? {
-        return Err(format!(
-            "{child} is already in epic split {other}; cancel or reject that one first"
-        ));
+        return Err(overlap_refusal(cas_root, &other, &child));
     }
     let claims = peer_claims(cas_root)?;
     let is_local = local_check(cas_root)?;
@@ -1254,7 +1327,7 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
     if !has_store(cas_root) {
         return 0;
     }
-    let Ok(splits) = open_epic_splits(cas_root) else {
+    let Ok(splits) = current_epic_splits(cas_root) else {
         return 0;
     };
     let now = Utc::now();

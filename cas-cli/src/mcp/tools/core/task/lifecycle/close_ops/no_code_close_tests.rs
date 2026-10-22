@@ -311,6 +311,88 @@ fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
     );
 }
 
+/// cas-255b: a worker-created helper never allocated a lane or delivered code.
+/// HEAD happens to be a previous UI merge; that is not the helper's delivery.
+#[tokio::test]
+async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
+    let mut env = TestEnvGuard::temp_home();
+    for lane_exists in [true, false] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        std::fs::write(worker_path.join("app.css"), "body { color: red; }\n").unwrap();
+        git(&worker_path, &["add", "app.css"]);
+        git(&worker_path, &["commit", "-q", "-m", OTHER]);
+        git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge earlier UI delivery"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        if !lane_exists {
+            git(repo, &["worktree", "remove", "--force", worker_path.to_str().unwrap()]);
+            git(repo, &["branch", "-D", LANE]);
+            git(repo, &["push", "-q", "origin", "--delete", LANE]);
+        }
+        let id = "cas-255b";
+        let mut helper = assigned(id, TaskType::Task, "main");
+        helper.title = "Own the iOS simulator".into();
+        helper.execution_note = Some("no-code".into());
+        helper.external_ref = Some("artifact:cas-255b/ios-simulator-release".into());
+        f.put(&helper);
+        claim(&f, id);
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        config.set("verification.enabled", "true").unwrap();
+        config.save(&f.cas_dir()).unwrap();
+        // A real exact-task verdict and portable no-code proof authorize close
+        // without treating an unmeasured empty range as proof by itself.
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let pending = call(
+            &f.worker,
+            serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
+        ).await;
+        assert!(pending.contains("VERIFICATION"), "{pending}");
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{pending}");
+        let mut verdict = cas_types::Verification::approved(
+            "ver-empty-helper".into(), id.into(), "Simulator released; no code delivered".into(),
+        );
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.agent_id = Some("nocode-supervisor-session".into());
+        verdict.issuer_agent_id = verdict.agent_id.clone();
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        use cas_store::VerificationStore;
+        cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap().add(&verdict).unwrap();
+        let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+        ).unwrap();
+        let response = call(
+            &f.worker,
+            serde_json::json!({"action": "close", "id": id, "reason": "Simulator released"}),
+        ).await;
+        assert_closed_without_lane(&f, id, &response);
+        assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        assert!(cas_store::list_qa_passes(&f.cas_dir(), id).unwrap().is_empty());
+
+        if lane_exists {
+            // An unnamed unmerged commit is possible task work, even before any
+            // delivery metadata is recorded. It must still owe its UI bundle.
+            let code_id = "cas-255c";
+            f.put(&assigned(code_id, TaskType::Task, "main"));
+            claim(&f, code_id);
+            std::fs::write(worker_path.join("app.css"), "body { color: blue; }\n").unwrap();
+            git(&worker_path, &["add", "app.css"]);
+            git(&worker_path, &["commit", "-q", "-m", "Change stylesheet"]);
+            let refused = call(
+                &f.worker,
+                serde_json::json!({"action": "close", "id": code_id, "reason": "Stylesheet changed"}),
+            ).await;
+            assert!(refused.contains("QA evidence bundle"), "{refused}");
+            assert_eq!(f.task(code_id).status, TaskStatus::InProgress, "{refused}");
+        }
+    }
+}
+
 /// GH #1133: a deploy-only task targeting `main`, started on a lane whose tip
 /// is another task's delivery. The worker declares no-code at close.
 #[tokio::test]

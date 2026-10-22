@@ -76,7 +76,7 @@ pub struct HubArgs {
     /// Publish through tailnet-only Tailscale Serve HTTPS (on by default)
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]
     pub tailscale_serve: bool,
-    /// Keep this launch loopback-only (overrides hub.tailscale_serve)
+    /// Keep this launch loopback-only (overrides hub.transport_mode for this launch)
     #[arg(long, visible_alias = "loopback", global = true, conflicts_with = "tailscale_serve")]
     pub no_tailscale_serve: bool,
     /// Tailscale Serve HTTPS port (443 is the stable no-port URL)
@@ -98,6 +98,12 @@ pub enum HubCommands {
     /// Gracefully stop the machine hub
     Stop(HubStopArgs),
     /// Stop and start the hub while preserving machine identity
+    ///
+    /// Detached restart: one `{stop,start}` JSON; start errors include `stop`.
+    ///
+    /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
+    ///
+    /// Stop also has `already_satisfied`; supervised restart reports hub status.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),
@@ -612,7 +618,7 @@ struct RelaunchIntent<'a> {
 /// How a stop resolved.
 enum StopOutcome {
     /// The hub is gone and the machine is quiescent.
-    Stopped,
+    Stopped(HubStopReceipt),
     /// A concurrent command already produced the hub the caller was going to
     /// relaunch. Only reachable with a [`RelaunchIntent`].
     ///
@@ -621,6 +627,47 @@ enum StopOutcome {
     /// cgroup kill, Tailscale disable) would otherwise dismantle a healthy hub
     /// this command does not own.
     AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+#[derive(Serialize)]
+struct HubStopReceipt {
+    stopped: bool,
+    pid: Option<u32>,
+    tailscale_serve_removed: bool,
+    tailscale_warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HubRestartStopReceipt {
+    stopped: bool,
+    pid: Option<u32>,
+    tailscale_serve_removed: Option<bool>,
+    tailscale_warning: Option<String>,
+    already_satisfied: bool,
+}
+
+impl From<HubStopReceipt> for HubRestartStopReceipt {
+    fn from(stop: HubStopReceipt) -> Self {
+        Self {
+            stopped: stop.stopped,
+            pid: stop.pid,
+            tailscale_serve_removed: Some(stop.tailscale_serve_removed),
+            tailscale_warning: stop.tailscale_warning,
+            already_satisfied: false,
+        }
+    }
+}
+
+impl HubRestartStopReceipt {
+    fn already_satisfied() -> Self {
+        Self {
+            stopped: false,
+            pid: None,
+            tailscale_serve_removed: None,
+            tailscale_warning: None,
+            already_satisfied: true,
+        }
+    }
 }
 
 /// Wait for the machine to go quiescent, unless the relaunch is already done.
@@ -1062,18 +1109,68 @@ fn version_warning(
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
     let result = execute_command(args, cli);
+    let required_policy = matches!(
+        args.command,
+        Some(HubCommands::Start(_) | HubCommands::Restart(_))
+    )
+        && host_transport_mode().is_ok_and(|mode| mode == HubTransportMode::Required);
     // Warn on every interactive path, including an already-running hub and JSON
     // output. Keep diagnostics on stderr so stdout remains one JSON document.
-    if matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
+    if !required_policy
+        && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
         && let Ok(paths) = HubRuntimePaths::default_for_user()
         && let Ok(record) = paths.read_process_record()
         && let Some(warning) = &record.transport_warning
         && record_is_ready(&paths, &record)
     {
-        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
-        eprintln!("For local access, run `cas hub start --loopback`.");
+        eprintln!("{}", format_hub_transport_warning(warning));
     }
     result
+}
+
+fn format_hub_transport_warning(warning: &str) -> String {
+    format!(
+        "Tailscale Serve inactive; hub is loopback-only.\n\
+         Cause: {warning}\n\
+         Retry: tailscale status && cas hub restart"
+    )
+}
+
+fn required_transport_refusal(
+    args: &HubArgs,
+    paths: &HubRuntimePaths,
+    issue: Option<&str>,
+) -> String {
+    let (operation, loopback, retry) = match &args.command {
+        Some(HubCommands::Restart(_)) => {
+            let state = paths
+                .read_process_record()
+                .ok()
+                .filter(|record| record_is_ready(paths, record))
+                .map(|record| {
+                    format!(
+                        "Restart refused; existing hub (pid {}) remains running.",
+                        record.pid
+                    )
+                })
+                .unwrap_or_else(|| "Restart refused before stopping any hub.".to_owned());
+            (state, "cas hub restart --loopback", "cas hub restart")
+        }
+        _ => (
+            "Start refused; no hub was started.".to_owned(),
+            "cas hub start --loopback",
+            "cas hub start",
+        ),
+    };
+    let mut message = format!("Hub transport required: Tailscale is unavailable.\n{operation}");
+    if let Some(issue) = issue {
+        message.push('\n');
+        message.push_str(issue);
+    }
+    message.push_str(&format!(
+        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}. Or run `{loopback}`."
+    ));
+    message
 }
 
 fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
@@ -1097,12 +1194,12 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
         && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
-        HubTransportMode::Required.require_publication(manager.cli_available())?;
-        if manager.cli_available() {
-            let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
-            if let Some(issue) = issue {
-                anyhow::bail!("{issue}\nSelect a daemon with TAILSCALE_SOCKET or run `cas hub start --loopback`.");
-            }
+        if !manager.cli_available() {
+            anyhow::bail!(required_transport_refusal(args, &paths, None));
+        }
+        let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
+        if let Some(issue) = issue {
+            anyhow::bail!(required_transport_refusal(args, &paths, Some(&issue)));
         }
     }
     match args.command.clone().unwrap_or_else(default_hub_command) {
@@ -1125,7 +1222,7 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
             // `hub stop` still goes through stop(), which passes no intent.
             match stop_with_output(
                 cli,
-                true,
+                !cli.json,
                 Some(RelaunchIntent {
                     args: &serve,
                     tailscale_serve,
@@ -1135,7 +1232,11 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
             )? {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
-                        println!("{}", serde_json::to_string(&record)?);
+                        let stop = HubRestartStopReceipt::already_satisfied();
+                        println!(
+                            "{}",
+                            serde_json::json!({"stop": stop, "start": record})
+                        );
                     } else {
                         println!(
                             "hub already running (pid {}, version {}) — a concurrent start won the race",
@@ -1144,15 +1245,35 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                     }
                     Ok(())
                 }
-                StopOutcome::Stopped => {
-                    start_with_output_resolved(
+                StopOutcome::Stopped(stop) => {
+                    let stop = HubRestartStopReceipt::from(stop);
+                    let start = match start_with_output_resolved(
                         &serve,
                         cli,
                         tailscale_serve,
                         tailscale_port,
-                        true,
+                        !cli.json,
                         cli_launch_origin(),
-                    )
+                    ) {
+                        Ok(start) => start,
+                        Err(error) if cli.json => {
+                            let message = super::json_error_message(&error);
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "error",
+                                    "message": message,
+                                    "stop": stop,
+                                })
+                            );
+                            return Err(super::JsonReportedFailure(error).into());
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if cli.json {
+                        println!("{}", serde_json::json!({"stop": stop, "start": start}));
+                    }
+                    Ok(())
                 }
             }
         }
@@ -1283,6 +1404,7 @@ fn start_with_output_from(
         emit_output,
         launch_origin,
     )
+    .map(|_| ())
 }
 
 fn start_with_output_resolved(
@@ -1292,7 +1414,7 @@ fn start_with_output_resolved(
     tailscale_port: u16,
     emit_output: bool,
     launch_origin: HubLaunchOrigin,
-) -> Result<()> {
+) -> Result<HubProcessRecord> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
         SocketAddr::new(args.bind, args.port),
@@ -1331,7 +1453,7 @@ fn start_with_output_resolved(
                             );
                         }
                     }
-                    return Ok(());
+                    return Ok(record);
                 }
                 HubStartDecision::Restart {
                     version_drift,
@@ -1372,7 +1494,7 @@ fn start_with_output_resolved(
                                 record.pid, record.version
                             );
                         }
-                        return Ok(());
+                        return Ok(*record);
                     }
                     return start_with_output_resolved(
                         args,
@@ -1413,7 +1535,7 @@ fn start_with_output_resolved(
                     record.pid, record.version
                 );
             }
-            return Ok(());
+            return Ok(*record);
         }
     };
     let prior_record = paths.read_process_record().ok();
@@ -1556,7 +1678,7 @@ fn start_with_output_resolved(
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
                 }
-                return Ok(());
+                return Ok(record);
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
@@ -2791,23 +2913,24 @@ fn stop_with_output_before(
     };
     paths.remove_process_record()?;
     ensure_stop_budget(stop_deadline)?;
+    let receipt = HubStopReceipt {
+        stopped: true,
+        pid: record.as_ref().map(|record| record.pid),
+        tailscale_serve_removed: matches!(&tailscale_outcome, Ok((true, _))),
+        tailscale_warning: tailscale_outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string),
+    };
     if emit_output && cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "stopped":true,
-                "pid":record.as_ref().map(|record| record.pid),
-                "tailscale_serve_removed":matches!(&tailscale_outcome, Ok((true, _))),
-                "tailscale_warning":tailscale_outcome.as_ref().err().map(ToString::to_string),
-            })
-        );
+        println!("{}", serde_json::to_string(&receipt)?);
     } else if emit_output {
         if let Some(record) = &record {
             println!("Cassy hub stopped (pid {})", record.pid);
         } else {
             println!("Cassy hub was not running");
         }
-        match tailscale_outcome {
+        match &tailscale_outcome {
             Ok((true, Some(receipt))) => println!(
                 "Removed Cassy Tailscale Serve mapping at {}",
                 receipt.public_url
@@ -2819,7 +2942,7 @@ fn stop_with_output_before(
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
         }
     }
-    Ok(StopOutcome::Stopped)
+    Ok(StopOutcome::Stopped(receipt))
 }
 
 fn update_prior_state(

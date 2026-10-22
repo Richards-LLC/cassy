@@ -3,10 +3,11 @@ use std::path::Path;
 use clap::Subcommand;
 
 use crate::hooks::handlers::handlers_events::codemap::{
-    CodemapPending, evaluate_codemap_freshness,
+    CodemapPending, evaluate_codemap_at,
 };
 
 use super::Cli;
+use crate::hooks::handlers::handlers_events::docs_freshness::Measurement;
 
 #[derive(Subcommand)]
 pub enum CodemapCommands {
@@ -22,55 +23,35 @@ const CODEMAP_PENDING_FILE: &str = "codemap-pending.json";
 
 pub fn execute(cmd: &CodemapCommands, _cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     match cmd {
-        CodemapCommands::Status => execute_status(cas_root),
+        CodemapCommands::Status => execute_status(&Measurement::at(&std::env::current_dir()?, cas_root)),
         CodemapCommands::Pending => execute_pending(cas_root),
         CodemapCommands::Clear => execute_clear(cas_root),
     }
 }
 
-fn execute_status(cas_root: &Path) -> anyhow::Result<()> {
-    let project_root = cas_root
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine project root from Cassy directory"))?;
-
+fn execute_status(measurement: &Measurement) -> anyhow::Result<()> {
+    let project_root = &measurement.root;
     let codemap_path = project_root.join(".claude/CODEMAP.md");
-    let pending_path = cas_root.join(CODEMAP_PENDING_FILE);
-
-    // Check CODEMAP.md existence and last modified time
-    if !codemap_path.exists() {
-        println!("CODEMAP.md: not found");
-        println!("  Run the /codemap skill to generate one.");
-        return Ok(());
-    }
-
-    // Get last modified time from git or filesystem (display only)
-    let last_updated = get_codemap_last_updated(&codemap_path);
+    let pending_path = measurement.store.join(CODEMAP_PENDING_FILE);
     println!("CODEMAP.md: {}", codemap_path.display());
+    println!("  Evaluated ref: {}", measurement.reference);
+    let last_updated = measurement.last_updated(".claude/CODEMAP.md")
+        .unwrap_or_else(|| get_codemap_last_updated(&codemap_path));
     println!("  Last updated: {last_updated}");
-
-    // Authoritative freshness signal — same function used by the SessionStart hook.
-    // This ensures `cas codemap status` and the hook can never disagree.
-    if let Some(evaluation) = evaluate_codemap_freshness(cas_root) {
-        println!("  Evaluated ref: {}", evaluation.evaluated_ref);
+    if let Some(evaluation) = evaluate_codemap_at(measurement) {
         match evaluation.staleness {
             None => println!("  Status: up to date"),
             Some(staleness) => {
-                // Strip XML wrapper tags (with any attributes) for CLI display
+                let missing = matches!(staleness, crate::hooks::handlers::handlers_events::codemap::CodemapStaleness::Missing);
                 let injection = staleness.format_injection(false);
-                let clean = injection
-                    .lines()
-                    .filter(|l| {
-                        !l.starts_with("<codemap-freshness")
-                            && !l.starts_with("</codemap-freshness")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                println!("  Status: stale");
+                let clean = injection.lines().filter(|l| {
+                    !l.starts_with("<codemap-freshness") && !l.starts_with("</codemap-freshness")
+                }).collect::<Vec<_>>().join("\n");
+                println!("  Status: {}", if missing { "not found" } else { "stale" });
                 println!("  {clean}");
             }
         }
     }
-
     // Informational: show pending-ledger entries (not used for staleness decisions,
     // but useful for understanding what changed within the session).
     let pending_count = count_pending_changes(&pending_path);

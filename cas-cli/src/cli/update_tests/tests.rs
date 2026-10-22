@@ -510,11 +510,22 @@ fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
     assert!(home.join(".claude/skills/cas-worker/SKILL.md").is_file());
     let warnings: Vec<_> = output.lines().filter(|line| !line.starts_with('{')).collect();
     assert!(warnings.iter().all(|line| line.chars().count() <= 78), "{output}");
-    assert!(output.contains("outside HOME"), "{output}");
+    let normalized = warnings.join(" ");
+    assert!(normalized.contains("outside HOME"), "{output}");
     assert!(output.contains("~/.claude-operator@example.com/skills"), "{output}");
     assert!(warnings.iter().all(|line| !line.contains(home.to_str().unwrap())), "{output}");
-    let joined: String = warnings.iter().flat_map(|line| line.split_whitespace()).collect();
-    assert!(joined.contains(target.to_str().unwrap()), "{output}");
+    let document: serde_json::Value = serde_json::from_str(output.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    let full_warnings = document["warnings"].as_array().expect("JSON must preserve full warning paths");
+    assert!(full_warnings.iter().any(|warning| warning.as_str().unwrap().contains(target.to_str().unwrap())), "{document}");
+    assert!(warnings.iter().any(|line| line.contains("--verbose")), "{output}");
+    assert!(!warnings.iter().any(|line| line.trim_start().starts_with("outside-profile-with")), "a path token was split: {output}");
+    let mut verbose = update_test_cli(false);
+    verbose.verbose = true;
+    let (result, expanded) = capture_phase(true, || sync_user_builtins_with_violet(&verbose, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(expanded.contains(target.to_str().unwrap()), "verbose must keep the full path token: {expanded}");
     assert!(warnings.iter().any(|line| line.trim() == "Retry: cas update --user"), "{output}");
     assert!(account.join("skills").is_symlink());
     // pin: migration must never alter the rejected external target's bytes.

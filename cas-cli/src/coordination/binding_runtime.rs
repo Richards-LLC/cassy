@@ -67,12 +67,23 @@ impl RuntimeInventory {
                 // Attribute the record before any process/socket refusal: the
                 // registry is machine-wide, but this drain is project-scoped.
                 if let Some(project) = metadata.project_dir.as_deref() {
-                    let session_root = crate::store::find_cas_root_ignoring_env(Path::new(project))
-                        .map_err(|_| "runtime project root is unresolved")?
-                        .canonicalize()
-                        .map_err(|_| "runtime project root unreadable")?;
-                    if session_root != root {
-                        continue;
+                    match crate::store::find_cas_root_ignoring_env(Path::new(project))
+                        .ok()
+                        .and_then(|root| root.canonicalize().ok())
+                    {
+                        Some(session_root) if session_root != root => continue,
+                        None if crate::mcp::daemon::pid_alive(metadata.daemon_pid) => {
+                            let [remedy] = crate::worktree::GitOperations::shell_remedies([
+                                ("cas", &["kill", "--", metadata.name.as_str()]),
+                            ])?;
+                            return Err(format!(
+                                "runtime project root is unresolved for live session {}; run `{remedy}`",
+                                crate::worktree::GitOperations::visible_git_label(&metadata.name),
+                            ));
+                        }
+                        // A deleted/moved project cannot attribute this record;
+                        // a dead PID still needs the endpoint check below.
+                        _ => {}
                     }
                 }
                 if !crate::mcp::daemon::pid_alive(metadata.daemon_pid) {

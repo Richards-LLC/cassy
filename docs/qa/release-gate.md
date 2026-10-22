@@ -774,9 +774,11 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
   `--minutes`, `--subject kind=id`, `--covers-pr N` and `--covers-commit <sha>`. Files in `<dir>`
   become the row's frames, and a PASS needs at least one. The row id and
   every argument are checked before anything is copied; a row id is letters,
-  digits, `_`, `.` or `-`, never `.` or `..`. Evidence is staged beside the
-  pack and moved into `media/<row>/` only under the run lock, so a refused
-  or racing record leaves no files behind. A declared
+  digits, `_`, `.` or `-`, starting with a letter or digit. Evidence is
+  staged beside the pack and replaces `media/<row>/` in one rename under the
+  run lock, so a refused or racing record leaves no files behind. A link in
+  the evidence, or a linked `media/` or `media/<row>`, is refused, and
+  nothing is created through it. A declared
   read-back runs with the given subjects. A row the plan lacks must name
   `--covers-pr` or `--covers-commit`.
 - `cas qa release-gate abort [--sha <sha>] --reason <why>` ends a live run

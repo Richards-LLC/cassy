@@ -775,19 +775,30 @@ fn walk_manual(
     Ok(walked)
 }
 
-/// A row id names one directory, `media/<row>/`: letters, digits, `_`, `.`
-/// or `-`, and never `.` or `..`.
+/// A row id names one directory, `media/<row>/`: it starts with a letter or
+/// digit (so never `.`, `..` or a dot directory such as the `.slack`
+/// transcode dir) and continues with letters, digits, `_`, `.` or `-`.
 pub(crate) fn valid_row_id(row: &str) -> Result<()> {
     ensure!(
-        !row.is_empty()
-            && row != "."
-            && row != ".."
+        row.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
             && row.len() <= 200
             && row.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
-        "row id {} must be letters, digits, `_`, `.` or `-`, and not `.` or `..`",
+        "row id {} must start with a letter or digit and continue with letters, digits, `_`, `.` or `-`",
         printable(row)
     );
     Ok(())
+}
+
+/// `parent/name` as a real directory: an existing entry must be a directory
+/// and not a link; a missing one is created. Never creates through a link.
+fn real_dir(parent: &Path, name: &str) -> Result<PathBuf> {
+    let path = parent.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) => ensure!(meta.file_type().is_dir(), "{} is not a real directory under the pack", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&path)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(path)
 }
 
 /// Evidence copied into a private staging directory beside the pack's
@@ -806,9 +817,12 @@ impl Staged {
         };
         ensure!(fs::symlink_metadata(evidence).is_ok_and(|m| m.is_dir()), "--evidence must be a directory");
         fs::create_dir_all(pack)?;
-        let dir = pack.join(format!(".staged-{}", uuid::Uuid::new_v4()));
+        let root = pack.join(format!(".staged-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root)?;
+        let mut staged = Self { dir: Some(root.clone()), files: Vec::new() };
+        // The row's whole new media directory, swapped in by `commit`.
+        let dir = root.join("row");
         fs::create_dir(&dir)?;
-        let mut staged = Self { dir: Some(dir.clone()), files: Vec::new() };
         for entry in walkdir::WalkDir::new(evidence).follow_links(false).sort_by_file_name() {
             let entry = entry?;
             if entry.file_type().is_dir() {
@@ -837,33 +851,42 @@ impl Staged {
             .collect()
     }
 
-    /// Moves every staged file into `media/<row>/`, refusing a target that a
-    /// link or non-directory would carry outside it.
+    /// Replaces `media/<row>/` with the staged directory, all or nothing:
+    /// the old directory moves aside, the staged one moves in by a single
+    /// rename, and any failure puts the old one back. No directory is ever
+    /// created or entered through a link.
     fn commit(&self, pack: &Path, row: &str) -> Result<()> {
-        let Some(dir) = &self.dir else { return Ok(()) };
+        let Some(root) = &self.dir else { return Ok(()) };
         valid_row_id(row)?;
-        let media = pack.join(pack::MEDIA_DIR).join(row);
-        for relative in &self.files {
-            let target = media.join(relative);
-            let parent = target.parent().context("media path")?;
-            fs::create_dir_all(parent)?;
-            // Every directory from the pack down must be real, not a link.
-            let mut walk = pack.to_path_buf();
-            for component in parent.strip_prefix(pack)?.components() {
-                walk.push(component);
-                ensure!(
-                    fs::symlink_metadata(&walk).is_ok_and(|m| m.file_type().is_dir()),
-                    "{} is not a real directory under the pack",
-                    walk.display()
-                );
+        ensure!(
+            fs::symlink_metadata(pack).is_ok_and(|m| m.file_type().is_dir()),
+            "{} is not a real directory",
+            pack.display()
+        );
+        let media = real_dir(pack, pack::MEDIA_DIR)?;
+        let target = media.join(row);
+        let old = root.join("old");
+        let had_old = match fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                ensure!(meta.file_type().is_dir(), "{} is not a real directory under the pack", target.display());
+                fs::rename(&target, &old)?;
+                true
             }
-            if fs::symlink_metadata(&target).is_ok_and(|m| !m.file_type().is_file()) {
-                bail!("{} is not a regular file", target.display());
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        let restore = |error: anyhow::Error| -> anyhow::Error {
+            if fs::symlink_metadata(&target).is_ok() {
+                let _ = fs::rename(&target, root.join("refused"));
             }
-            fs::rename(dir.join(relative), &target)?;
-        }
+            if had_old {
+                let _ = fs::rename(&old, &target);
+            }
+            error
+        };
+        fs::rename(root.join("row"), &target).map_err(|e| restore(e.into()))?;
         for frame in self.frames(row) {
-            pack::media_path(pack, &frame).map_err(anyhow::Error::msg)?;
+            pack::media_path(pack, &frame).map_err(|e| restore(anyhow::Error::msg(e)))?;
         }
         Ok(())
     }

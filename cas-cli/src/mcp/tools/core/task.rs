@@ -7,6 +7,7 @@ mod notes;
 pub(crate) use notes::note_notification_ids;
 mod proposals;
 mod query;
+mod rebind;
 pub(crate) mod repo_context;
 mod update;
 

@@ -13,7 +13,7 @@ struct DeliveryRange {
 
 use crate::git_evidence::git_text;
 
-pub(super) struct StartedDelivery {
+pub(crate) struct StartedDelivery {
     pub branch: String,
     pub commits: Vec<String>,
 }
@@ -22,7 +22,7 @@ pub(super) struct StartedDelivery {
 /// this cycle. Old subjects before it cannot claim the new task's lane.
 /// Bound all probes to immutable SHAs and refuse foreign descendants before
 /// any anchor/commit-subject shortcut can grant delivery identity.
-pub(super) fn started_delivery(
+pub(crate) fn started_delivery(
     repo: &Path,
     task: &Task,
 ) -> Result<Option<StartedDelivery>, String> {

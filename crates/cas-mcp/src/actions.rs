@@ -54,6 +54,7 @@ pub const TASK_ACTIONS: &[&str] = &[
     "release",
     "reset",
     "transfer",
+    "rebind_branch",
     "available",
     "mine",
 ];

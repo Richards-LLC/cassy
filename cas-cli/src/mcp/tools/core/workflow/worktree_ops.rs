@@ -3451,6 +3451,27 @@ impl CasCore {
         Ok((Box::new(task), worker))
     }
 
+    /// A server-recorded delivery keeps its assignee even when the approved
+    /// branch has a recovery suffix that cannot be parsed as a worker name.
+    fn recorded_task_merge_source(
+        &self, task: &cas_types::Task, branch: &str,
+    ) -> Result<Option<(String, String)>, McpError> {
+        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+            return Ok(None);
+        };
+        if start.branch != branch
+            || task.assignee.as_deref() != Some(start.assignee.as_str())
+            || task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        {
+            return Ok(None);
+        }
+        let agents = self.open_agent_store()?;
+        let worker = crate::mcp::tools::core::task::resolve_agent_identity(
+            agents.as_ref(), &start.assignee,
+        ).map(|agent| agent.name).unwrap_or_else(|| start.assignee.clone());
+        Ok(Some((worker, branch.to_string())))
+    }
+
     /// Resolve a remote-only delivery through task and supervisor authority.
     /// The real pushed branch is materialized locally for the existing CI/QA
     /// gates; divergent local refs are never overwritten.
@@ -3474,7 +3495,8 @@ impl CasCore {
         ) else {
             return Ok(None);
         };
-        let (branch_worker, canonical_branch) = system_b_merge_source(branch, Some(&task.id));
+        let (branch_worker, canonical_branch) = self.recorded_task_merge_source(task, branch)?
+            .unwrap_or_else(|| system_b_merge_source(branch, Some(&task.id)));
         let assignee = worker_hint.unwrap_or(&branch_worker).to_string();
         // Live local workers retain their existing merge/dirty-tree policy.
         if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
@@ -3863,6 +3885,12 @@ impl CasCore {
             });
         }
 
+        let recorded_source = match scoped_task.as_deref().filter(|task| {
+            task.deliverables.parked_branch.as_deref() == Some(id)
+        }) {
+            Some(task) => self.recorded_task_merge_source(task, id)?,
+            None => None,
+        };
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
             match system_a {
                 Some(mut wt) => {
@@ -3880,6 +3908,7 @@ impl CasCore {
                         .or_else(|| implicit_delivery.as_ref().map(|(task, worker)| (
                             worker.clone(), task.deliverables.parked_branch.clone().expect("validated parked branch"),
                         )))
+                        .or_else(|| recorded_source.clone())
                         .unwrap_or_else(|| system_b_merge_source(id, task_id));
                     let path = manager.worktree_path_for_worker(&assignee);
                     let source_worktree_live = is_git_worktree(&path);

@@ -638,7 +638,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 original.deliverables.factory_branch_start);
             env.set("CAS_AGENT_ROLE", "supervisor");
             let supervisor = delivery_service(&cas_root, &supervisor_id);
-            run_git(&["commit", "--allow-empty", "-m", "cas-other: foreign task work"], &worker_path);
+            run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);
             let refused = supervisor.task(Parameters(rebind())).await.expect_err("foreign work cannot be hidden by a new base");
             assert!(refused.message.contains("foreign"), "{refused}");
             run_git(&["reset", "--hard", "HEAD^"], &worker_path);

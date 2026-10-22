@@ -188,3 +188,42 @@ pub fn observe_rule_candidate(
     tx.commit()?;
     Ok(candidate)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn observe_waits_for_a_foreign_sqlite_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        list_rule_candidates(root).unwrap();
+
+        let db_path = root.join("cas.db");
+        let (locked, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+
+        let candidate = observe_rule_candidate(
+            root,
+            None,
+            "A concurrent observation must wait for the SQLite writer",
+            "concurrency",
+            "cas-lock",
+            "ver-lock",
+        )
+        .expect("observation should wait for the foreign writer and be recorded");
+        holder.join().unwrap();
+
+        assert_eq!(candidate.distinct_tasks(), 1);
+        assert_eq!(candidate.occurrences.len(), 1);
+        assert_eq!(candidate.occurrences[0].verdict_id, "ver-lock");
+    }
+}

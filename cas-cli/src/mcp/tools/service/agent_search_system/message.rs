@@ -14,6 +14,27 @@ pub(crate) fn resolve_worker_supervisor_target(
     )
 }
 
+fn collapse_message_summary(summary: &str) -> String {
+    let mut collapsed = String::with_capacity(summary.len());
+    let mut pending_space = false;
+    for character in summary.chars() {
+        if character.is_control() {
+            pending_space |= character.is_whitespace() && !collapsed.is_empty();
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space |= !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(character);
+    }
+    collapsed
+}
+
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
     environment_name: Option<String>,
@@ -957,7 +978,8 @@ impl CasService {
         message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
         let summary = req
             .summary
-            .filter(|summary| !summary.trim().is_empty())
+            .map(|summary| collapse_message_summary(&summary))
+            .filter(|summary| !summary.is_empty())
             .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,

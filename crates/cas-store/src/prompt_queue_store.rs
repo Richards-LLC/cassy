@@ -5648,12 +5648,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // resends use the same representation.
             let parser_delimiter = format!("\n\n{FOLD_END}");
             let escaped_delimiter = format!("\n\n\\{FOLD_END}");
-            let escaped_prompt = prompt.replace(&parser_delimiter, &escaped_delimiter);
-            let prompt_for_storage = if escaped_prompt == prompt {
-                prompt.to_string()
-            } else {
-                escaped_prompt
-            };
+            let prompt_for_storage = prompt.replace(&parser_delimiter, &escaped_delimiter);
 
             // Keep the ordinary exact-resend suppression contract for action
             // messages too. A new body is the event that supersedes pending
@@ -5760,7 +5755,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 if !own.is_empty() && own != new_body {
                     let label = old_summary
                         .filter(|summary| !summary.trim().is_empty())
-                        .map(|summary| format!(" ({})", summary.trim()))
+                        .map(|summary| {
+                            let summary = summary
+                                .trim()
+                                .replace(&parser_delimiter, &escaped_delimiter);
+                            format!(" ({summary})")
+                        })
                         .unwrap_or_default();
                     pieces.push(format!(
                         "Earlier message #{old_id}{label}, not yet delivered when this one was sent:\n{own}"

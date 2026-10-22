@@ -30,9 +30,9 @@ pub mod async_runtime;
 mod bounded_process;
 pub mod bridge;
 pub mod builtins;
+pub mod capability;
 pub mod cli;
 pub mod cloud;
-pub mod capability;
 pub mod config;
 pub mod consolidation;
 pub mod coordination;
@@ -43,71 +43,71 @@ pub mod extraction;
 mod light_lane;
 #[doc(hidden)]
 pub use light_lane::run_detached_worker;
+/// cas-e8d1 (GH #1233): open work the record says is done.
+pub(crate) mod backlog_hygiene;
+pub mod db_branch;
 pub mod factory_auth_health;
-pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
 pub(crate) mod factory_build_memory;
-pub(crate) mod factory_worker_check;
 pub(crate) mod factory_capacity_wait;
 pub mod factory_context_reset;
+pub mod factory_daemon_health;
+pub mod factory_hook_canary;
 pub mod factory_isolation;
 pub mod factory_permission_relay;
 pub mod factory_preflight;
-pub mod factory_daemon_health;
+pub mod factory_review_scratch;
+pub(crate) mod factory_scratch;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
-pub(crate) mod supervisor_notices;
-pub(crate) mod supervisor_continuity;
-pub(crate) mod supervisor_branch_recovery;
-pub(crate) mod supervisor_message_wakes;
-pub(crate) mod factory_scratch;
-pub mod factory_review_scratch;
 pub mod factory_target_cache;
+pub(crate) mod factory_worker_check;
 pub mod fs_space;
 pub mod gh_graphql;
-pub mod github_issue_attach;
-pub(crate) mod github_repo;
 pub(crate) mod git_evidence;
 pub mod git_log;
+pub mod github_issue_attach;
+pub(crate) mod github_repo;
 pub mod harness_policy;
 pub mod history;
-pub mod task_ownership;
-pub mod task_simulators;
-pub mod db_branch;
 pub mod hooks;
-pub mod issue_reconcile;
 pub mod hub;
 pub mod hybrid_search;
 pub(crate) mod internal_llm;
+pub mod issue_reconcile;
 pub mod knowledge;
 pub mod logging;
 pub mod maintenance_jobs;
 pub mod memory_migration;
 pub mod migration;
 pub mod notifications;
+pub mod opencode_preflight;
+pub(crate) mod ops;
 pub mod orchestration;
 pub mod otel;
-pub(crate) mod ops;
-pub mod qa_evidence;
-pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
-pub(crate) mod task_assignment;
-pub mod qa_pass;
-pub mod qa_registry;
-pub mod qa_impact;
-pub mod qa_seed;
-pub mod qa_post_release;
-/// cas-e8d1 (GH #1233): open work the record says is done.
-pub(crate) mod backlog_hygiene;
 pub(crate) mod qa_batch;
-pub(crate) mod review_body;
+pub mod qa_evidence;
+pub mod qa_impact;
+pub mod qa_pass;
+pub mod qa_post_release;
+pub mod qa_registry;
+pub mod qa_seed;
 pub mod retrieval_eval;
 pub mod retrieval_parity;
+pub(crate) mod review_body;
 pub mod sentry;
 pub(crate) mod server_signals;
 mod skill_validation;
 pub mod store;
+pub(crate) mod supervisor_branch_recovery;
+pub(crate) mod supervisor_continuity;
+pub(crate) mod supervisor_message_wakes;
+pub(crate) mod supervisor_notices;
 pub mod sync;
+pub(crate) mod task_assignment;
+pub mod task_ownership;
+pub mod task_simulators;
 pub mod telemetry;
 pub mod temp_hygiene;
 pub mod test_paths;
@@ -134,6 +134,55 @@ pub(crate) mod test_support {
     pub(crate) use crate::test_paths::private_hub_tempdir;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Pin real styled bytes independently of crossterm's memoized NO_COLOR.
+    /// Declare after `TestEnvGuard` and keep both alive through rendering, so
+    /// color-policy changes are serialized and restored before the env lock.
+    #[must_use]
+    pub(crate) struct StyledColorGuard(bool);
+
+    impl StyledColorGuard {
+        pub(crate) fn new(_env: &TestEnvGuard) -> Self {
+            use crossterm::style::{Colored, force_color_output};
+            let enabled = !Colored::ansi_color_disabled_memoized();
+            force_color_output(true);
+            Self(enabled)
+        }
+    }
+
+    impl Drop for StyledColorGuard {
+        fn drop(&mut self) {
+            crossterm::style::force_color_output(self.0);
+        }
+    }
+
+    #[test]
+    fn styled_color_guard_restores_cached_policy() {
+        use crossterm::style::{Color, SetForegroundColor, force_color_output};
+        let env = TestEnvGuard::new();
+        let _restore = StyledColorGuard::new(&env);
+        for enabled in [false, true] {
+            force_color_output(enabled);
+            for unwind in [false, true] {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _colors = StyledColorGuard::new(&env);
+                    assert_eq!(
+                        SetForegroundColor(Color::Green).to_string(),
+                        "\x1b[38;5;10m"
+                    );
+                    if unwind {
+                        panic!("exercise styled-color guard unwinding");
+                    }
+                }));
+                assert_eq!(result.is_err(), unwind);
+                assert_eq!(
+                    SetForegroundColor(Color::Green).to_string(),
+                    if enabled { "\x1b[38;5;10m" } else { "\x1b[m" },
+                    "cached policy not restored (enabled={enabled}, unwind={unwind})"
+                );
+            }
+        }
+    }
 
     /// Cargo's in-process test harness runs otherwise isolated Tantivy
     /// fixtures concurrently. Keep the tests that intentionally exercise
@@ -179,7 +228,9 @@ pub(crate) mod test_support {
             status.success(),
             "nested TestEnvGuard did not panic with the expected diagnostic"
         );
-        let output = child.wait_with_output().expect("capture nested guard child");
+        let output = child
+            .wait_with_output()
+            .expect("capture nested guard child");
         crate::test_child::assert_passed(
             &String::from_utf8_lossy(&output.stdout),
             "test_support::nested_test_env_guard_panics_with_clear_message",

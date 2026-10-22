@@ -713,6 +713,7 @@ mod tests {
                 Some(value) => env.set("NO_COLOR", value),
                 None => env.remove("NO_COLOR"),
             }
+            let _colors = crate::test_support::StyledColorGuard::new(&env);
             let theme = ActiveTheme::default_light();
             let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
                 panic!("text_error must use a concrete theme color");
@@ -750,6 +751,7 @@ mod tests {
                 Some(value) => env.set("NO_COLOR", value),
                 None => env.remove("NO_COLOR"),
             }
+            let _colors = crate::test_support::StyledColorGuard::new(&env);
             let mut buf = Vec::new();
             {
                 let mut fmt = Formatter::new(

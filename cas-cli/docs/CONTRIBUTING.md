@@ -1511,7 +1511,11 @@ exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
 Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
 pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
-writes a PASS receipt for the pushed tip; a missing tool fails the push. With
+writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
+attempts print a retained log directory under the Git common directory's
+`cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
+Each attempt has its own directory so a later push preserves the original failure.
+With
 the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
 and no broad Rust tests for factory pushes; unset (the default) the lanes run as
 before, so the switch waits for a runtime with these guards. Park reads, and

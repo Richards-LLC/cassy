@@ -646,6 +646,8 @@ mod tests {
     /// agent context and keeps the edit unsaved; ordinary keys save.
     #[test]
     fn cas_0d4f0_config_tui_refuses_operator_keys_from_agents() {
+        use ratatui::{Terminal, backend::TestBackend};
+
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let agent = || InvocationContext {
@@ -687,6 +689,35 @@ mod tests {
                 && message.contains("operator"),
             "{message}"
         );
+
+        for width in [80, 120] {
+            let height = 24;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.ui(frame)).unwrap();
+            let screen = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer().get((x, y)).symbol().to_owned())
+                        .collect::<Vec<_>>()
+                        .join("")
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                screen.contains("Operator-only config change refused."),
+                "TUI at {width} columns hides the refusal headline:\n{screen}"
+            );
+            assert!(
+                screen.contains("Run this command yourself from your own terminal:"),
+                "TUI at {width} columns hides the remedy label:\n{screen}"
+            );
+            assert!(
+                screen.contains("cas config set notifications.webhook_url <value>"),
+                "TUI at {width} columns hides the remedy command:\n{screen}"
+            );
+        }
         assert_eq!(
             Config::load(&root)
                 .unwrap()

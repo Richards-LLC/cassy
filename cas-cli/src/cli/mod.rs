@@ -1015,6 +1015,17 @@ mod tests {
             error.to_string(),
             "machine output keeps the original one-line refusal"
         );
+
+        let no_context = anyhow::anyhow!(
+            "refused: CAS_AGENT_NAME is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal."
+        );
+        let rendered_without_context = super::human_error_message(&no_context);
+        assert!(
+            rendered_without_context
+                .lines()
+                .all(|line| line == line.trim_end()),
+            "human refusal has no trailing whitespace-only line: {rendered_without_context:?}"
+        );
     }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory

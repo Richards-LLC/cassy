@@ -1092,6 +1092,8 @@ fn is_named_by_tracked_rust_source(
             let Ok(source) = std::str::from_utf8(source) else {
                 return true;
             };
+            let tree_prefix = format!("{delivered_head}:");
+            let source = source.strip_prefix(&tree_prefix).unwrap_or(source);
             let Some(relative_path) = relative_path_from_source(source, path) else {
                 return true;
             };

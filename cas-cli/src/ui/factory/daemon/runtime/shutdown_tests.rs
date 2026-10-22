@@ -187,7 +187,7 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
             .unwrap();
             groups.push(pty.process_group_id().unwrap());
             let pane =
-                cas_mux::Pane::with_pty(name, kind, pty, 24, 80, cas_mux::SupervisorCli::Claude)
+                cas_mux::Pane::with_pty(name, kind.clone(), pty, 24, 80, cas_mux::SupervisorCli::Claude)
                     .unwrap();
             if kind == cas_mux::PaneKind::Worker {
                 daemon.app.adopt_worker_pane_for_test(pane);

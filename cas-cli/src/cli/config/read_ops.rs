@@ -962,7 +962,7 @@ mod tests {
         keys.dedup();
 
         for key in keys {
-            let document = if key == "factory.write_roots" {
+            let mut document = if key == "factory.write_roots" {
                 let mut config = Config::default();
                 config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
                 toml_edit::Document::parse(toml::to_string(&config).unwrap())

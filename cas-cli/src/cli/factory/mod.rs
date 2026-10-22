@@ -754,6 +754,7 @@ pub enum FactoryCommands {
         cargo_args: Vec<String>,
     },
     /// Create a disposable task-owned detached checkout; print its absolute path.
+    #[command(override_usage = "cas factory scratch-checkout [OPTIONS]\n       --cas-root <ROOT> --task-id <TASK> --head <SHA>")]
     ScratchCheckout {
         #[arg(long)]
         cas_root: std::path::PathBuf,

@@ -13403,6 +13403,23 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+#[derive(serde::Deserialize)]
+struct ReferenceHistory {
+    version: u64,
+    files: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    #[serde(flatten)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn parse_reference_history(bytes: &[u8]) -> Result<ReferenceHistory, String> {
+    let history: ReferenceHistory =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if history.version != 1 {
+        return Err(format!("unsupported reference history version {}", history.version));
+    }
+    Ok(history)
+}
+
 /// cas-2ea6: the most a keyed regeneration may take inside a close gate. A
 /// few keys took about 1 s on cas-src (40 keys: 6 s); a whole-history run
 /// takes about 30 s, which no close gate can spend.
@@ -13453,7 +13470,6 @@ fn dropped_ledger_keys_regenerate(
     anchor: &str,
     target: &str,
 ) -> Option<Vec<String>> {
-    type Entries = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
     let show = |revision: &str, path: &str| {
         std::process::Command::new("git")
             .args(["show", &format!("{revision}:{path}")])
@@ -13463,19 +13479,8 @@ fn dropped_ledger_keys_regenerate(
             .filter(|output| output.status.success())
             .map(|output| output.stdout)
     };
-    let entries = |bytes: &[u8]| -> Option<Entries> {
-        let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-        doc.get("files")?
-            .as_object()?
-            .iter()
-            .map(|(key, hashes)| {
-                let hashes = hashes.as_array()?.iter().map(|hash| hash.as_str().map(str::to_owned)).collect::<Option<_>>()?;
-                Some((key.clone(), hashes))
-            })
-            .collect()
-    };
-    let delivered = entries(&show(anchor, REFERENCE_HISTORY_LEDGER)?)?;
-    let landed = entries(&show(target, REFERENCE_HISTORY_LEDGER)?)?;
+    let delivered = parse_reference_history(&show(anchor, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
+    let landed = parse_reference_history(&show(target, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
     let dropped: Vec<String> = delivered
         .iter()
         .filter(|(key, hashes)| landed.get(*key).is_none_or(|kept| !hashes.is_subset(kept)))
@@ -13520,7 +13525,7 @@ fn dropped_ledger_keys_regenerate(
     if !output.ok()?.status.success() {
         return None;
     }
-    let regenerated = entries(&std::fs::read(&fresh).ok()?)?;
+    let regenerated = parse_reference_history(&std::fs::read(&fresh).ok()?).ok()?.files;
     dropped
         .iter()
         .all(|key| regenerated.get(key) == landed.get(key))
@@ -32675,6 +32680,93 @@ esac
             regenerated_artifact_drop_note(p, &tip, &paths).is_some(),
             "cas-baf7 accepts a bundle-only drop when the delivery carries source"
         );
+    }
+
+    /// cas-af3b: a failed optional blob probe must leave the ordinary line
+    /// proof available. Both the batched lookup and a later blob read can
+    /// fail while Git diffs remain readable.
+    #[test]
+    fn unreadable_reference_history_blobs_fall_back_to_line_proof_cas_af3b() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let path = p.join(REFERENCE_HISTORY_LEDGER);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let history = |hashes: &[&str]| {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "files": {"skills/demo/references/guide.md": hashes},
+            }))
+            .unwrap()
+        };
+        std::fs::write(&path, history(&["base"])).unwrap();
+        git(p, &["add", REFERENCE_HISTORY_LEDGER]);
+        git(p, &["commit", "-qm", "baseline ledger"]);
+        let parent = rev_parse_local(p, "HEAD");
+        std::fs::write(&path, history(&["base", "delivered"])).unwrap();
+        git(p, &["commit", "-qam", "cas-test1: add reference hash"]);
+        let delivery = rev_parse_local(p, "HEAD");
+        std::fs::write(p.join("unrelated-one.txt"), "one\n").unwrap();
+        git(p, &["add", "unrelated-one.txt"]);
+        git(p, &["commit", "-qm", "later unrelated edit one"]);
+        let targets = [rev_parse_local(p, "HEAD"), {
+            std::fs::write(p.join("unrelated-two.txt"), "two\n").unwrap();
+            git(p, &["add", "unrelated-two.txt"]);
+            git(p, &["commit", "-qm", "later unrelated edit two"]);
+            rev_parse_local(p, "HEAD")
+        }];
+
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let real_git = std::env::split_paths(&original_path)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("real git on PATH");
+        let shim_dir = p.join("git-shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let shim = shim_dir.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$1" = cat-file ]; then
+  case "$CAS_AF3B_FAIL" in
+    batch) [ "$2" = '--batch-check=%(objectname) %(objecttype)' ] && exit 87 ;;
+    blob) [ "$2" = blob ] && exit 87 ;;
+  esac
+fi
+exec "$CAS_AF3B_REAL_GIT" "$@"
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AF3B_REAL_GIT", &real_git);
+        env.set(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(shim_dir.clone()).chain(std::env::split_paths(&original_path)),
+            )
+            .unwrap(),
+        );
+        for (mode, target) in ["batch", "blob"].into_iter().zip(targets) {
+            env.set("CAS_AF3B_FAIL", mode);
+            let presence = super::delivery_evolution::line_content_presence(
+                p,
+                &parent,
+                &delivery,
+                &target,
+                REFERENCE_HISTORY_LEDGER,
+            );
+            assert_eq!(
+                presence,
+                Ok(Some(DeliveryContentPresence::Present {
+                    paths: vec![REFERENCE_HISTORY_LEDGER.to_string()],
+                })),
+                "{mode} failure must use the ordinary line proof"
+            );
+        }
     }
 
     /// cas-2ea6: the cas-9dee shape. A lane's reference-history ledger records

@@ -921,6 +921,23 @@ pub(crate) fn resolve_repo_context(
             target_branch,
         });
     }
+    // The caller's checkout is direct repository evidence. Resolve it before
+    // unrelated host roots can exhaust the scan budget or stall on storage.
+    // Explicit bindings above remain authoritative, including stale refusals.
+    if let Some(local) =
+        candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET))?
+        && local.identities.iter().any(|identity| {
+            canonical_selector(identity) == canonical_selector(&target.repo_selector)
+        })
+    {
+        let target_branch = validate_target_branch(&local.repo_root, &target.target_branch)?;
+        return Ok(RepoContext {
+            repo_selector: target.repo_selector.clone(),
+            repo_root: local.repo_root,
+            git_common_dir: local.git_common_dir,
+            target_branch,
+        });
+    }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
     for candidate in candidate_paths(cas_root)? {
@@ -1391,7 +1408,10 @@ mod tests {
                 first
             });
             assert_eq!(first.repo_root, healthy.canonicalize().unwrap());
-            assert!(!calls.exists(), "a matching worker checkout must bypass host scanning");
+            assert!(
+                !calls.exists(),
+                "a matching worker checkout must bypass host scanning"
+            );
             std::fs::write(
                 healthy.join(".cas/config.toml"),
                 "[project]\ncanonical_id = \"healthy-renamed\"\n",
@@ -1410,8 +1430,14 @@ mod tests {
             };
             for _ in 0..2 {
                 let error = resolve_repo_context(&cas_root, &missing).unwrap_err();
-                assert!(error.contains("WORK TARGET REPOSITORY UNAVAILABLE"), "{error}");
-                assert!(!error.contains("MISMATCH"), "an incomplete scan cannot prove a mismatch");
+                assert!(
+                    error.contains("WORK TARGET REPOSITORY UNAVAILABLE"),
+                    "{error}"
+                );
+                assert!(
+                    !error.contains("MISMATCH"),
+                    "an incomplete scan cannot prove a mismatch"
+                );
             }
             assert_eq!(
                 std::fs::read_to_string(&calls).unwrap().lines().count(),
@@ -1442,10 +1468,31 @@ mod tests {
             .unwrap();
             std::fs::write(healthy.join("base"), "base").unwrap();
             git(&healthy, &["add", "base"]);
-            git(&healthy, &["-c", "user.name=Cassy", "-c", "user.email=cas@example.com",
-                "commit", "-q", "-m", "base"]);
+            git(
+                &healthy,
+                &[
+                    "-c",
+                    "user.name=Cassy",
+                    "-c",
+                    "user.email=cas@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "base",
+                ],
+            );
             let linked = fixtures.path().join("linked");
-            git(&healthy, &["worktree", "add", "-q", "-b", "factory/worker", linked.to_str().unwrap()]);
+            git(
+                &healthy,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "factory/worker",
+                    linked.to_str().unwrap(),
+                ],
+            );
             std::fs::create_dir(linked.join(".cas")).unwrap();
             let fifo = if mode == "config" {
                 blocked.join(".cas/config.toml")

@@ -533,7 +533,13 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         std::fs::write(root.join("commands/finish.md"), text).unwrap();
     }
     let cli = update_test_cli(true);
-    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || Ok(())));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let accounts = receipt["finish_accounts"].as_array().unwrap();
+    let named_account = home.join(".codex-existing@example.com");
+    assert_eq!(accounts.iter().find(|row| row["path"] == named_account.to_str().unwrap()).unwrap()["updated"], 1);
+    assert!(accounts.iter().any(|row| row["preserved"] == serde_json::json!(["commands/finish.md"])));
     for (harness, root) in roots {
         let installed = home.join(root).join("skills/finish/SKILL.md");
         assert!(
@@ -595,8 +601,28 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     }
     let named = home.join(".codex-existing@example.com/skills/finish/SKILL.md");
     std::fs::remove_file(&named).unwrap();
-    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
     assert!(named.is_file());
+    assert!(human.contains("~/.codex-existing@example.com: finish 1 updated"), "{human}");
+    assert!(human.contains("1 preserved"), "{human}");
+    // Inject just the filesystem discovery failure; defaults and shared bases
+    // must still run through the actual update writer and JSON receipt.
+    let base_finish = home.join(".cas/claude-base/skills/finish/SKILL.md");
+    std::fs::remove_file(&base_finish).unwrap();
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_discovery(&cli, || Ok(()), |provider, home| {
+        if provider == crate::accounts::Provider::Claude {
+            Err(std::io::Error::other("account directory unavailable"))
+        } else {
+            crate::accounts::discover(provider, home)
+        }
+    }));
+    result.unwrap();
+    assert!(base_finish.is_file());
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let warnings = receipt["account_discovery_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("claude account discovery failed: account directory unavailable"));
     // Init and project refresh use this same writer, including OpenCode's
     // physical project skills (its user catalog is projected at launch).
     let project = home.join("project");
@@ -698,8 +724,8 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     std::fs::write(&personal, customized).unwrap();
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
     crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
-    for builtin in copies {
-        assert_eq!([&personal, &builtin].iter().filter(|path| path.is_file()).count(), 1,
+    for builtin in &copies {
+        assert_eq!([&personal, builtin].iter().filter(|path| path.is_file()).count(), 1,
             "Codex must see exactly the personal finish, not {} too", builtin.display());
     }
     assert_eq!(std::fs::read_to_string(&personal).unwrap(), customized);
@@ -708,6 +734,21 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     std::fs::create_dir_all(&fresh).unwrap();
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
     assert!(!fresh.join("skills/finish/SKILL.md").exists());
+    assert!(crate::builtins::preview_all_codex_builtins(&fresh).unwrap().iter().all(|file| file.path != "skills/finish/SKILL.md"));
+    assert!(!crate::builtins::install_parity_for_harness(SupervisorCli::Codex, &fresh).missing.iter().any(|file| file == "skills/finish/SKILL.md"));
+
+    // A retained managed marker alone is never proof of pristine content.
+    let custom_copy = &copies[0];
+    let custom_body = "---\nmanaged_by: cas\n---\nMy customized Codex finish.\n";
+    std::fs::write(custom_copy, custom_body).unwrap();
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || Ok(())));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let warnings = receipt["builtin_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains(personal.to_str().unwrap()) && warning.contains(custom_copy.to_str().unwrap()), "{warning}");
+    assert_eq!(std::fs::read_to_string(custom_copy).unwrap(), custom_body);
     assert_eq!(std::fs::read_to_string(personal).unwrap(), customized);
 }
 

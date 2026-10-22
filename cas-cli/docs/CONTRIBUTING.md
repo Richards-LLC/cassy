@@ -2520,6 +2520,16 @@ An existing customized finish `SKILL.md` is preserved, even when it retains
 `managed_by: cas`. Delete the custom entrypoint and rerun `cas update` to accept
 the builtin. Other builtin skills keep their existing ownership policy.
 
+For Codex, a personal `~/.agents/skills/finish/SKILL.md` takes precedence over
+Cassy's default, named-account, shared-base and project copies. Update skips
+installing another finish and removes an earlier Cassy copy only when its hash
+matches the recorded baseline or a shipped version. Customized copies and
+symlinks are preserved; if both entrypoints exist, update warns with both paths
+so the operator can choose which to keep. Named-account/shared-base finish
+updates and preservations appear in human output and JSON `finish_accounts`;
+account-discovery failures appear in `account_discovery_warnings` and do not
+abort default-profile or shared-base refresh.
+
 Every file in a managed builtin skill directory other than its `SKILL.md` (references, scripts, examples, templates) is owned by that skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version Cassy has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions Cassy has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`. The ledger keeps deleted files too: sync prunes an installed file Cassy no longer ships only when its content proves it is Cassy's (a shipped hash, the recorded baseline, or `managed_by: cas`). Retired managed agents are pruned the same way, and `cas doctor` reports installed-vs-catalog drift as `host install parity`.
 
 **After changing, adding or deleting any builtin skill file — and before cutting a release — run:**

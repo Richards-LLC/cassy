@@ -50,6 +50,9 @@ fn report_modified_builtin_references(
     location: &str,
     theme: &ActiveTheme,
 ) -> std::io::Result<()> {
+    for warning in &result.warnings {
+        report_builtin_advisory(warning, theme)?;
+    }
     if !result.has_modified_references() {
         return Ok(());
     }
@@ -71,6 +74,24 @@ fn report_modified_builtin_references(
         "Review each file; to accept the Cassy version, delete it and rerun `cas update --sync`.",
     )?;
     fmt.newline()
+}
+
+fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()> {
+    let mut out = io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme.clone());
+    let (lines, shortened) = findings::wrap(message, usize::from(fmt.width()).saturating_sub(9), false);
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            fmt.write_raw("  ")?;
+            fmt.warning(line)?;
+        } else {
+            fmt.write_raw(&format!("         {line}\n"))?;
+        }
+    }
+    if shortened {
+        fmt.write_raw("    Full paths: cas update --user --json\n")?;
+    }
+    Ok(())
 }
 
 /// Report one harness's builtin sync result, attributed to the harness
@@ -3346,6 +3367,14 @@ fn sync_user_builtins_with_violet(
     cli: &Cli,
     violet: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    sync_user_builtins_with_discovery(cli, violet, crate::accounts::discover)
+}
+
+fn sync_user_builtins_with_discovery(
+    cli: &Cli,
+    violet: impl FnOnce() -> anyhow::Result<()>,
+    mut discover: impl FnMut(crate::accounts::Provider, &Path) -> io::Result<Vec<crate::accounts::AccountDir>>,
+) -> anyhow::Result<()> {
     if let Err(error) = violet() {
         eprintln!("warning: Violet update advisory: {error}; continuing builtin sync");
     }
@@ -3494,6 +3523,8 @@ fn sync_user_builtins_with_violet(
 
     // Named accounts and linked shared bases can outlive the retired default
     // dirs. Refresh only finish here; their other configuration stays local.
+    let mut finish_accounts = Vec::new();
+    let mut account_discovery_warnings = Vec::new();
     for (provider, harness) in [
         (
             crate::accounts::Provider::Claude,
@@ -3505,7 +3536,18 @@ fn sync_user_builtins_with_violet(
         ),
     ] {
         let default_dir = home.join(format!(".{}", provider.name()));
-        let mut accounts: Vec<_> = crate::accounts::discover(provider, &home)?
+        let discovered = match discover(provider, &home) {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                let warning = format!("{} account discovery failed: {error}; continuing default and shared-base sync. Retry: cas update --user", provider.name());
+                if !cli.json {
+                    report_builtin_advisory(&warning, &theme)?;
+                }
+                account_discovery_warnings.push(warning);
+                Vec::new()
+            }
+        };
+        let mut accounts: Vec<_> = discovered
             .into_iter()
             .map(|account| account.path)
             .filter(|path| *path != default_dir)
@@ -3515,7 +3557,26 @@ fn sync_user_builtins_with_violet(
             accounts.push(base);
         }
         for account in accounts {
-            crate::builtins::sync_finish_builtins(harness, &account)?;
+            let result = crate::builtins::sync_finish_builtins(harness, &account)?;
+            let preserved: Vec<_> = result.modified_reference_files.iter()
+                .chain(&result.skipped_files).map(String::as_str)
+                .chain((!result.warnings.is_empty()).then_some("skills/finish/SKILL.md"))
+                .collect();
+            if !cli.json {
+                let location = format!("~/{}", account.strip_prefix(&home).unwrap_or(&account).display());
+                let receipt = format!("{location}: finish {} updated, {} preserved, {} removed", result.total_updated(), preserved.len(), result.pruned_files.len());
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                let (lines, shortened) = findings::wrap(&receipt, usize::from(fmt.width()).saturating_sub(2), false);
+                for line in lines { fmt.write_raw(&format!("  {line}\n"))?; }
+                if shortened { fmt.write_raw("  Full paths: cas update --user --json\n")?; }
+                drop(fmt);
+                for warning in &result.warnings { report_builtin_advisory(warning, &theme)?; }
+            }
+            finish_accounts.push(serde_json::json!({
+                "path": account, "updated": result.total_updated(), "preserved": preserved,
+                "removed": result.pruned_files, "warnings": result.warnings,
+            }));
         }
     }
 
@@ -3553,8 +3614,13 @@ fn sync_user_builtins_with_violet(
         let claude_files_pruned = files_pruned(&claude_result);
         let codex_files_pruned = files_pruned(&codex_result);
         let grok_files_pruned = files_pruned(&grok_result);
+        let builtin_warnings: Vec<_> = [&claude_result, &codex_result, &grok_result].into_iter()
+            .filter_map(Option::as_ref).flat_map(|result| &result.warnings).collect();
+        let finish_accounts = serde_json::to_string(&finish_accounts)?;
+        let account_discovery_warnings = serde_json::to_string(&account_discovery_warnings)?;
+        let builtin_warnings = serde_json::to_string(&builtin_warnings)?;
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned},"finish_accounts":{finish_accounts},"account_discovery_warnings":{account_discovery_warnings},"builtin_warnings":{builtin_warnings}}}"#
         );
     }
 

@@ -131,17 +131,76 @@ fn prepare_claude_finish(target_dir: &Path) -> std::io::Result<bool> {
 pub(crate) fn sync_finish_builtins(
     harness: SupervisorCli,
     target_dir: &Path,
-) -> std::io::Result<()> {
-    if harness == SupervisorCli::Claude && !prepare_claude_finish(target_dir)? {
-        return Ok(());
+) -> std::io::Result<SyncResult> {
+    let (install, mut result) = prepare_finish(harness, target_dir)?;
+    if !install {
+        return Ok(result);
     }
     for builtin in skill_catalog_for_harness(harness)
         .iter()
         .filter(|file| is_finish_entrypoint(file))
     {
-        sync_builtin_detailed(builtin, target_dir)?;
+        match sync_builtin_detailed(builtin, target_dir)? {
+            SyncOutcome::Created | SyncOutcome::Updated => {
+                result.skills_updated += 1;
+                result.updated_files.push(builtin.path.to_string());
+            }
+            SyncOutcome::SkippedModifiedReference => result.modified_reference_files.push(builtin.path.to_string()),
+            SyncOutcome::SkippedNotManaged => result.skipped_files.push(builtin.path.to_string()),
+            SyncOutcome::Unchanged => {}
+        }
     }
-    Ok(())
+    Ok(result)
+}
+
+fn personal_codex_finish() -> Option<std::path::PathBuf> {
+    let path = dirs::home_dir()?.join(".agents/skills/finish/SKILL.md");
+    (path.exists() || path.is_symlink()).then_some(path)
+}
+
+/// Personal Codex skills win. Only a content hash, never a managed marker or
+/// replacement request, authorizes removal of an earlier Cassy installation.
+fn prepare_finish(harness: SupervisorCli, target_dir: &Path) -> std::io::Result<(bool, SyncResult)> {
+    let mut result = SyncResult::default();
+    if harness == SupervisorCli::Claude {
+        let install = prepare_claude_finish(target_dir)?;
+        if !install {
+            result.skipped_files.push("commands/finish.md".to_string());
+        }
+        return Ok((install, result));
+    }
+    let Some(personal) = (harness == SupervisorCli::Codex).then(personal_codex_finish).flatten() else {
+        return Ok((true, result));
+    };
+    let relative = "skills/finish/SKILL.md";
+    let target = target_dir.join(relative);
+    match std::fs::read(&target) {
+        Ok(bytes) => {
+            let mut state = BuiltinReferenceState::load(target_dir)?;
+            let hash = file_bytes_hash(&bytes);
+            if !target.is_symlink()
+                && !target_dir.join("skills/finish").is_symlink()
+                && !target_dir.join("skills").is_symlink()
+                && (state.files.get(relative) == Some(&hash)
+                    || is_shipped_builtin_reference_version(relative, &hash))
+            {
+                std::fs::remove_file(&target)?;
+                state.files.remove(relative);
+                state.skipped_references.remove(relative);
+                state.replace_on_next_sync.remove(relative);
+                state.save(target_dir)?;
+                result.pruned_files.push(relative.to_string());
+            } else {
+                result.warnings.push(format!("Two finish skills preserved: {} and {}; review both custom entrypoints.", personal.display(), target.display()));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !target.is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            result.warnings.push(format!("Two finish entrypoints preserved: {} and {}; review the custom symlink.", personal.display(), target.display()));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok((false, result))
 }
 
 /// All built-in skills managed by Cassy
@@ -3478,7 +3537,11 @@ pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
 
 /// Sync all built-in files to .codex/ directory
 pub fn sync_all_codex_builtins(codex_dir: &Path) -> std::io::Result<SyncResult> {
-    sync_all_builtins_inner(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
+    let (install, policy) = prepare_finish(SupervisorCli::Codex, codex_dir)?;
+    let mut result = sync_all_builtins_with_finish_policy(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, install)?;
+    result.pruned_files.extend(policy.pruned_files);
+    result.warnings.extend(policy.warnings);
+    Ok(result)
 }
 
 /// Sync all built-in files to .grok/ directory (EPIC cas-8888, Phase 5).
@@ -3521,6 +3584,7 @@ pub fn sync_all_builtins_for_project(
         SupervisorCli::Claude => {
             let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
             sync_project_catalog(
+                harness,
                 &project_root.join(".claude"),
                 BUILTIN_AGENTS,
                 &skills,
@@ -3529,11 +3593,11 @@ pub fn sync_all_builtins_for_project(
         }
         SupervisorCli::Codex => {
             let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::Grok => {
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
         // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
         // `.claude/skills`, so the `cas_` projection is written there. Agents
@@ -3541,7 +3605,7 @@ pub fn sync_all_builtins_for_project(
         // agent frontmatter does not fit it.
         SupervisorCli::OpenCode => {
             let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
-            sync_project_catalog(&project_root.join(".opencode"), NO_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".opencode"), NO_AGENTS, &skills, None)
         }
     }
 }
@@ -3591,14 +3655,17 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
 /// prune on a non-empty catalog left the retired `cas-code-review.js` in about
 /// 20 projects after every sync.
 fn sync_project_catalog(
+    harness: SupervisorCli,
     target_dir: &Path,
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
     workflows: Option<&[BuiltinFile]>,
 ) -> std::io::Result<SyncResult> {
-    let install_finish = workflows.is_none() || prepare_claude_finish(target_dir)?;
+    let (install_finish, policy) = prepare_finish(harness, target_dir)?;
     let mut result =
         sync_all_builtins_with_finish_policy(target_dir, agents, skills, install_finish)?;
+    result.pruned_files.extend(policy.pruned_files);
+    result.warnings.extend(policy.warnings);
     if let Some(workflows) = workflows {
         sync_workflows(target_dir, workflows, &mut result)?;
         let keep = builtin_workflow_names(workflows);
@@ -4261,7 +4328,10 @@ pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> 
             install_parity(target_dir, BUILTIN_AGENTS, &skills)
         }
         SupervisorCli::Codex => {
-            install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
+            let personal = personal_codex_finish().is_some();
+            let skills: Vec<_> = CODEX_BUILTIN_SKILLS.iter().copied()
+                .filter(|file| !personal || !is_finish_entrypoint(file)).collect();
+            install_parity(target_dir, CODEX_BUILTIN_AGENTS, &skills)
         }
         SupervisorCli::Grok => install_parity(target_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS),
         SupervisorCli::OpenCode => InstallParity::default(),
@@ -4318,6 +4388,8 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
 
 #[derive(Default, Debug)]
 pub struct SyncResult {
+    /// Advisory conflicts that preserve the operator's entrypoints.
+    pub warnings: Vec<String>,
     pub agents_updated: usize,
     pub skills_updated: usize,
     pub updated_files: Vec<String>,
@@ -4395,7 +4467,8 @@ pub fn preview_all_codex_builtins(codex_dir: &Path) -> std::io::Result<Vec<Built
 
     let all_builtins = CODEX_BUILTIN_AGENTS
         .iter()
-        .chain(CODEX_BUILTIN_SKILLS.iter());
+        .chain(CODEX_BUILTIN_SKILLS.iter())
+        .filter(|file| personal_codex_finish().is_none() || !is_finish_entrypoint(file));
 
     for builtin in all_builtins {
         if let Some((old, new)) = preview_builtin(builtin, codex_dir)? {
@@ -4469,7 +4542,8 @@ pub fn preview_all_builtins_for_project(
         }
         SupervisorCli::Codex => (
             CODEX_BUILTIN_AGENTS,
-            filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root),
+            filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root).into_iter()
+                .filter(|file| personal_codex_finish().is_none() || !is_finish_entrypoint(file)).collect(),
         ),
         SupervisorCli::Grok => (
             GROK_BUILTIN_AGENTS,

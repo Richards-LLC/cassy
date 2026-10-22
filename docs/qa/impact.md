@@ -92,16 +92,19 @@ ID cell and a verdict cell (`PASS`, `FAIL`, `NOT A ROUTE`, or
 `NOT EXERCISED: <reason>`), or a compact list row such as `- SEND: PASS`.
 A bare ID, a similar ID, an empty reason or an example inside a code fence does
 not count. The journey ID must be the row's first cell, and only the verdict
-column counts: the table's `Verdict` header column, else the fifth cell of an
-eight-column ledger row, else the second cell. A verdict word in another
-column, such as an observed `FAIL: 502`, does not count.
-A `BLOCKED_EXTERNAL` verdict with `blocked: provider=<provider> error=<error>`
-is neither PASS nor FAIL: the journey stays owed and approval is refused,
-naming the journey, cell and provider. A journey that declares
-`independence_key` (see [release gate](release-gate.md#independent-runs-independence_key))
-needs a distinct `<key>=<id>` in each PASS or FAIL row; a duplicate or
-missing identity is refused by name. Rejections remain recordable without these rows. Dark/dead journeys,
-legacy catalog reports and projects without a registry keep advisory context.
+column counts. A table header names it: `Verdict`, `Run` (the independent-QA
+journeys table), `Result` or `Status`, in that order; a headed table without one
+of them records no verdict. Only a row with no header falls back by position:
+the fifth cell of a row with five or more cells, else the second. A verdict word
+in another column, such as an observed `FAIL: 502`, does not count. A
+`BLOCKED_EXTERNAL` verdict with `blocked: provider=<provider> error=<error>` is
+neither PASS nor FAIL: the journey stays owed and approval is refused, naming
+the journey, cell and provider. A journey that declares `independence_key` (see
+[release gate](release-gate.md#independent-runs-independence_key)) needs a
+distinct `<key>=<id>` in each PASS or FAIL row; a duplicate or missing identity
+is refused by name. Rejections remain recordable without these rows. Dark/dead
+journeys, legacy catalog reports and projects without a registry keep advisory
+context.
 
 ```markdown
 | Journey | Verdict |

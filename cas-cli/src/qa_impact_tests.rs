@@ -427,21 +427,27 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
     );
 }
 
-/// cas-d863 (+ cas-9779 carry-over): G8 reads only the verdict column. A
-/// BLOCKED_EXTERNAL journey row stays owed and names its provider, and a
-/// journey's `independence_key` counts distinct run identities, refusing
-/// duplicates by name.
+/// cas-d863 (+ cas-9779 carry-over): G8 reads only the verdict column, found
+/// by its header (Verdict, Run, Result or Status) in every documented ledger
+/// format. A BLOCKED_EXTERNAL journey row stays owed and names its provider,
+/// and a keyed journey counts distinct run identities, refusing duplicate or
+/// unidentified runs by name; an unkeyed journey beside it needs no identity.
 #[test]
 fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs() {
     use crate::mcp::tools::core::task::lifecycle::qa_impact::ledger_refusal;
     let temp = repo();
     let repo = temp.path();
     write(repo, "src/audit.ts", "audit");
-    write(
-        repo,
-        crate::qa_registry::DEFAULT_PATH,
-        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Audited, check: Read the run}\njourneys:\n  - id: AUDIT\n    status: live\n    entry: {url: /audit, trigger: Audit}\n    steps: [Submit]\n    owners: ['src/audit.ts']\n    invariants: [INV]\n    traffic: {share_pct: 50, basis: audits}\n    independence_key: post_audit_v2_runs.id\n",
+    let mut yaml = String::from(
+        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Audited, check: Read the run}\njourneys:\n",
     );
+    for (id, key) in [
+        ("AUDIT", "\n    independence_key: post_audit_v2_runs.id"),
+        ("SEND", ""),
+    ] {
+        yaml.push_str(&format!("  - id: {id}\n    status: live\n    entry: {{url: /audit, trigger: Audit}}\n    steps: [Submit]\n    owners: ['src/audit.ts']\n    invariants: [INV]\n    traffic: {{share_pct: 50, basis: audits}}{key}\n"));
+    }
+    write(repo, crate::qa_registry::DEFAULT_PATH, &yaml);
     let head = commit(repo);
     let report = analyze(
         repo,
@@ -454,28 +460,69 @@ fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs(
     assert!(report.registry.valid, "{:?}", report.registry);
     let mut impact = serde_json::to_value(&report).unwrap();
     impact["head_sha"] = head.clone().into();
-    let header = "| id | cell | expected | observed | verdict | label | evidence | defect |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n";
-    let refusal = |rows: &str| ledger_refusal(&impact, &head, &format!("{header}{rows}"));
+    let refusal = |ledger: String| ledger_refusal(&impact, &head, &ledger);
+    let grammar = |rows: &[&str]| {
+        let mut ledger = String::from(
+            "| id | cell | expected | observed | verdict | label | evidence | defect |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        );
+        for row in rows {
+            ledger.push_str(row);
+            ledger.push('\n');
+        }
+        ledger
+            .push_str("| SEND | composer | sent | sent | PASS | real-build | qa/send.png | - |\n");
+        ledger
+    };
 
-    let blocked = refusal(
-        "| AUDIT | instagram url | audited | FAIL: 502 | BLOCKED_EXTERNAL | real-build | blocked: provider=rapidapi error=502 failed_fetch | - |\n",
-    )
+    let blocked = refusal(grammar(&[
+        "| AUDIT | instagram url | audited | FAIL: 502 | BLOCKED_EXTERNAL | real-build | blocked: provider=rapidapi error=502 failed_fetch | - |",
+    ]))
     .expect("a blocked row is owed, not a verdict");
     assert!(
         blocked.contains("AUDIT (cell instagram url) is BLOCKED_EXTERNAL{provider=rapidapi, error=502 failed_fetch}"),
         "{blocked}"
     );
+    let observed = refusal(grammar(&[
+        "| AUDIT | url | audited | FAIL: 502 | partial | real-build | - | - |",
+    ]))
+    .expect("a verdict word outside the verdict column is not a verdict");
+    assert!(
+        observed.contains("no row for live journeys AUDIT."),
+        "{observed}"
+    );
     let run = |id: &str| {
         format!(
-            "| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | qa/{id}.png | - |\n"
+            "| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | - | - |"
         )
     };
-    let duplicate = refusal(&[run("a1"), run("b2"), run("b2")].concat())
+    let duplicate = refusal(grammar(&[&run("a1"), &run("b2"), &run("b2")]))
         .expect("a duplicate run identity is not an independent run");
     assert!(
         duplicate.contains("3 AUDIT runs recorded, 2 independent")
             && duplicate.contains("duplicate post_audit_v2_runs.id=b2"),
         "{duplicate}"
     );
-    assert_eq!(refusal(&[run("a1"), run("b2"), run("c3")].concat()), None);
+    let unidentified = refusal(grammar(&[
+        &run("a1"),
+        "| AUDIT | run | audited | done | FAIL | real-build | - | - |",
+    ]))
+    .expect("a run without an identity is not independent");
+    assert!(
+        unidentified.contains("1 without post_audit_v2_runs.id=<id>"),
+        "{unidentified}"
+    );
+    assert_eq!(
+        refusal(grammar(&[&run("a1"), &run("b2"), &run("c3")])),
+        None
+    );
+    // Documented formats: the independent-QA journeys table (PASS in `Run`),
+    // scripts/journey-bundles.py, and short Result/Status tables.
+    for ledger in [
+        "| ID | Run | Dead end | Copy | Steps | Context | Waits | Severity | Findings / tasks |\n|---|---|---|---|---|---|---|---|---|\n| AUDIT | PASS | 0 | 1 | 0 | 0 | 0 | none | post_audit_v2_runs.id=a1 |\n| SEND | FAIL | 1 | 0 | 0 | 0 | 0 | high | cas-1 |\n".to_string(),
+        "| ID | Journey | Run | Total | Slowest stage |\n|---|---|---|---|---|\n| AUDIT | Audit post_audit_v2_runs.id=a1 | PASS | 4.2s | submit (3.1s) |\n| SEND | Send | PASS | 1.0s | send (0.4s) |\n".to_string(),
+        "| Journey | Result |\n| --- | --- |\n| AUDIT | PASS post_audit_v2_runs.id=a1 |\n| SEND | NOT EXERCISED: sandbox unavailable |\n".to_string(),
+        "| Journey | Status | Note |\n| --- | --- | --- |\n| AUDIT | PASS | post_audit_v2_runs.id=a1 |\n| SEND | NOT A ROUTE | retired |\n".to_string(),
+    ] {
+        assert_eq!(refusal(ledger.clone()), None, "{ledger}");
+    }
 }

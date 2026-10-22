@@ -25,3 +25,19 @@ Locale-width receipt: `terminal-qa: PASS config-set-force-bypass-c-locale-80-120
 | Machine contract | 5 | `--json` emits one error document with the original one-line refusal message. |
 
 Tracked terminal captures are under `captures/operator-config-refusal/`; both complete reports and the HTML captures are in the task artifact directory.
+
+## Webhook value validation (cas-2e34)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The edit dialog keeps the setting and entered value visible; invalid URL details remain inside that dialog. |
+| Scannable | Show the validation cause beside the edit, with Enter and Esc recovery controls still visible at 80/120 columns. |
+| Readable | Wrap the existing validation message inside the dialog and allow enough height for the cause and controls. |
+| Machine output | No CLI JSON or config serialization changes; invalid entries do not update in-memory values or disk. |
+| Omitted | Do not echo webhook URLs or payloads into refusal logs; stored-value refusal gets one warning naming the setting. |
+
+Curl ignores default config with first-argument `-q` and has a ten-second total
+transfer budget. Existing destination normalization, protocol restrictions,
+glob suppression and option separation remain in place. Clearing the URL stays
+a quiet no-op. Successful edits remain unsaved until the existing save action,
+including its operator-only policy check.

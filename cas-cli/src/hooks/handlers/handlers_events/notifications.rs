@@ -641,6 +641,13 @@ mod pre_compact_flush_tests {
 
     #[test]
     fn notification_webhook_sender_rejects_non_https() {
+        if std::env::var_os("CAS_2E34_REFUSAL_CAPTURE").is_some() {
+            send_webhook_notification(
+                " https://hooks.example.test/private-destination ",
+                "private-notification-text",
+            ).expect_err("old whitespace-bearing stored values must still be refused");
+            return;
+        }
         let error = send_webhook_notification(
             "file:///dev/null",
             "notification text must not leave over HTTP",
@@ -648,6 +655,22 @@ mod pre_compact_flush_tests {
         .expect_err("non-HTTPS destinations must be rejected before sending")
         .to_string();
         assert!(error.contains("HTTPS"), "{error}");
+
+        let name = concat!(module_path!(), "::notification_webhook_sender_rejects_non_https");
+        let name = name.strip_prefix("cas::").unwrap_or(name);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("CAS_2E34_REFUSAL_CAPTURE", "1")
+            .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        crate::test_child::assert_passed(&stdout, name);
+        let warning = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(warning.lines().count(), 1, "{warning:?}");
+        assert!(warning.contains("Warning: notification webhook refused"), "{warning}");
+        assert!(warning.contains("notifications.webhook_url"), "{warning}");
+        assert!(!warning.contains("private-destination"), "destination leaked: {warning}");
+        assert!(!warning.contains("private-notification-text"), "payload leaked: {warning}");
     }
 
     #[test]
@@ -694,10 +717,49 @@ mod pre_compact_flush_tests {
             .unwrap();
         let args = std::fs::read_to_string(captured_args).unwrap();
         let args: Vec<_> = args.lines().collect();
-        assert_eq!(args.first(), Some(&"--globoff"));
+        assert_eq!(args.first(), Some(&"-q"), "curl must ignore default config before any other argument");
+        assert!(args.contains(&"--globoff"));
+        // pin: the background sender has a ten-second total transfer budget.
+        assert!(args.windows(2).any(|pair| pair == ["--max-time", "10"]));
         assert!(args.windows(2).any(|pair| pair == ["--proto", "=https,http"]));
         assert_eq!(args.get(args.len() - 2), Some(&"--"));
         assert_eq!(args.last(), Some(&"https://hooks.example.test/webhook"));
+    }
+
+    #[test]
+    fn notification_webhook_sender_ignores_hostile_home_curlrc() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.remove("CURL_HOME");
+        env.set("NO_PROXY", "*");
+        let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let endpoint = format!("http://{}", server.server_addr());
+        std::fs::write(env.home().join(".curlrc"), format!(
+            "url = \"{endpoint}/stolen\"\nheader = \"X-Curlrc: injected\"\n"
+        )).unwrap();
+        let receiver = {
+            let server = server.clone();
+            std::thread::spawn(move || {
+                let mut received = Vec::new();
+                while let Ok(mut request) = server.recv() {
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let injected = request.headers().iter().any(|h| h.field.equiv("X-Curlrc"));
+                    received.push((request.url().to_string(), injected, body));
+                    request.respond(tiny_http::Response::empty(200)).unwrap();
+                }
+                received
+            })
+        };
+        let sent = send_webhook_notification(&format!("{endpoint}/intended"), "private notification");
+        // Curl has completed every transfer before this deterministic server shutdown.
+        server.unblock();
+        let received = receiver.join().unwrap();
+        sent.unwrap();
+        assert_eq!(received.len(), 1, "curlrc added a destination: {received:?}");
+        assert_eq!(received[0].0, "/intended");
+        assert!(!received[0].1, "curlrc injected a header");
+        let body: serde_json::Value = serde_json::from_str(&received[0].2).unwrap();
+        assert_eq!(body["text"], "private notification");
     }
 
     // -------------------------------------------------------------------------

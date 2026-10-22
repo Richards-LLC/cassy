@@ -938,7 +938,11 @@ fn recent_other_epic_planner(
         .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
         .filter_map(|dependency| {
             let planner = dependency.created_by?;
-            (planner != creator && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
+            // Legacy transport tags contain no actor identity and cannot prove
+            // that a different supervisor planned these children.
+            (planner != "mcp"
+                && planner != creator
+                && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
         .max_by_key(|(_, created_at)| *created_at);
@@ -1060,6 +1064,53 @@ impl CasCore {
 }
 
 impl CasCore {
+    /// One binding is inherited as a unit. A held/expired task is not active
+    /// filing context, and multiple live tasks must agree before we default.
+    fn active_task_create_binding(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        agent_id: &str,
+    ) -> Result<Option<(String, Option<String>, Option<cas_types::WorkTarget>)>, McpError> {
+        let agents = self.open_agent_store()?;
+        let inspect_error = |error: cas_store::StoreError| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to inspect active task binding: {error}")),
+            data: None,
+        };
+        let mut leases = agents.list_agent_leases(agent_id).map_err(inspect_error)?;
+        leases.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        let mut binding: Option<(String, Option<String>, Option<cas_types::WorkTarget>)> = None;
+        for lease in leases.into_iter().filter(|lease| lease.is_valid()) {
+            let task = match task_store.get(&lease.task_id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(inspect_error(error)),
+            };
+            if task.status != TaskStatus::InProgress {
+                continue;
+            }
+            let epic = task_store
+                .get_parent_epic(&task.id)
+                .map_err(inspect_error)?
+                .map(|t| t.id);
+            let target = task.deliverables.work_target;
+            if let Some((_, previous_epic, previous_target)) = &binding {
+                if previous_epic != &epic || previous_target != &target {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Active tasks have different epic or target bindings. Retry task action=create with an explicit epic, target_repo or target_branch; epic=\"\" creates a standalone task.",
+                        ),
+                        data: None,
+                    });
+                }
+            } else {
+                binding = Some((task.id, epic, target));
+            }
+        }
+        Ok(binding)
+    }
+
     pub async fn cas_task_create(
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
@@ -1171,13 +1222,28 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+        let created_by = self.get_agent_id().ok();
+        let active_binding =
+            if req.epic.is_none() && target_repo.is_none() && target_branch.is_none() {
+                created_by
+                    .as_deref()
+                    .map(|agent| self.active_task_create_binding(task_store.as_ref(), agent))
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
         let epic_id = req
             .epic
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(ToString::to_string);
-        let created_by = self.get_agent_id().ok();
+            .map(ToString::to_string)
+            .or_else(|| {
+                active_binding
+                    .as_ref()
+                    .and_then(|(_, epic, _)| epic.clone())
+            });
 
         // Set when the new task overlaps a sibling under its own epic; shown
         // in the create receipt, never a reason to refuse the write.
@@ -1362,9 +1428,11 @@ impl CasCore {
                     None
                 }
             });
-        let (work_target, default_target_warning) = if let Some(target) =
-            inherited_from_epic.or(declared_work_target)
-        {
+        let (work_target, default_target_warning) = if let Some((_, _, target)) = &active_binding {
+            // Preserve the active task's exact binding, even when its target
+            // differs from the parent epic's current lane (or is absent).
+            (target.clone(), None)
+        } else if let Some(target) = inherited_from_epic.or(declared_work_target) {
             (Some(target), None)
         } else if task_type == TaskType::Epic {
             // The branch created below is the epic's canonical WorkTarget.
@@ -1856,11 +1924,30 @@ impl CasCore {
             None
         };
 
+        let inherited_receipt = active_binding
+            .as_ref()
+            .map(|(source, epic, target)| {
+                let mut receipt = format!(
+                    "\nInherited epic: {} (active task {source})",
+                    epic.as_deref().unwrap_or("(standalone)")
+                );
+                if let Some(target) = target {
+                    receipt.push_str(&format!(
+                        "\n  Repository: {}\n  Branch: {}",
+                        target.repo_selector, target.target_branch
+                    ));
+                } else {
+                    receipt.push_str("\n  Work target: (unbound)");
+                }
+                receipt
+            })
+            .unwrap_or_default();
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}{}",
             id,
             task.title,
             task.priority.0,
+            inherited_receipt,
             assignee_receipt,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
@@ -4204,6 +4291,17 @@ mod related_recall_response_tests {
                     "{response}"
                 );
                 assert!(!response.contains("WORK TARGET DEFAULTED"), "{response}");
+                if case == "default" {
+                    assert_eq!(
+                        response.replace(&child.id, "cas-new").trim(),
+                        include_str!(concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/../docs/design/cli/task-create-inheritance.capture.txt"
+                        ))
+                        .trim(),
+                        "real create receipt matches the terminal capture"
+                    );
+                }
             } else {
                 assert!(
                     !response.contains("Inherited"),

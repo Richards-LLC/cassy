@@ -8,7 +8,7 @@ use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEventKind},
     execute, queue,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
+    style::{Attribute, Print, SetAttribute},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 
@@ -163,17 +163,16 @@ pub fn confirm(message: &str, default: bool) -> io::Result<bool> {
     })
 }
 
-/// A styled column value within a picker row.
+/// A column value within a picker row, rendered in the terminal foreground.
 pub struct PickerTag {
     pub text: String,
-    pub color: Color,
 }
 
 /// An item (row) in the interactive picker.
 pub struct PickerItem {
     /// Main label (first column, highlighted when selected)
     pub label: String,
-    /// Additional columns rendered after the label, each with its own color
+    /// Additional text columns rendered after the label
     pub tags: Vec<PickerTag>,
 }
 
@@ -291,36 +290,30 @@ fn render_completed(
     mode: OutputMode,
 ) -> io::Result<()> {
     let styled_glyphs = super::supports_styled_glyphs(mode);
-    // The same summary renderer is used after acceptance and cancellation.
+    let styled = mode == OutputMode::Styled && std::env::var_os("NO_COLOR").is_none();
+    // Terminal-default foreground keeps both summaries legible on every palette.
     match selected {
         Some(label) => {
-            execute!(
-                stdout,
-                SetForegroundColor(Color::Green),
-                Print(if styled_glyphs { "  ✓ " } else { "  + " }),
-                ResetColor,
-                SetAttribute(Attribute::Bold),
-                Print(title),
-                SetAttribute(Attribute::Reset),
-                SetForegroundColor(Color::DarkGrey),
-                Print(": "),
-                ResetColor,
-                Print(label),
-                Print("\n"),
-            )?;
+            queue!(stdout, Print(if styled_glyphs { "  ✓ " } else { "  + " }))?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Bold))?;
+            }
+            queue!(stdout, Print(title))?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
+            }
+            queue!(stdout, Print(": "), Print(label), Print("\n"))?;
         }
         None => {
-            execute!(
+            queue!(
                 stdout,
-                SetForegroundColor(Color::DarkGrey),
                 Print(if styled_glyphs { "  ✗ " } else { "  x " }),
                 Print(title),
-                Print(": cancelled"),
-                ResetColor,
-                Print("\n"),
+                Print(": cancelled\n"),
             )?;
         }
     }
+    stdout.flush()?;
     Ok(())
 }
 
@@ -343,82 +336,58 @@ fn render_picker(
     mode: OutputMode,
 ) -> io::Result<()> {
     let styled_glyphs = super::supports_styled_glyphs(mode);
+    let styled = mode == OutputMode::Styled && std::env::var_os("NO_COLOR").is_none();
     let mut row = origin_row;
 
-    // Title
-    queue!(
-        stdout,
-        MoveTo(0, row),
-        Clear(ClearType::CurrentLine),
-        SetAttribute(Attribute::Bold),
-        Print(format!("  {title}")),
-        SetAttribute(Attribute::Reset),
-    )?;
+    // Emphasis is independent of glyph selection; NO_COLOR suppresses all SGR.
+    queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
+    if styled {
+        queue!(stdout, SetAttribute(Attribute::Bold))?;
+    }
+    queue!(stdout, Print(format!("  {title}")))?;
+    if styled {
+        queue!(stdout, SetAttribute(Attribute::Reset))?;
+    }
     row += 1;
 
-    // Blank line
     queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
     row += 1;
 
-    // Rows
     for (i, item) in items.iter().enumerate() {
         queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
-
         let label_padded = pad(&item.label, cols.label);
-
         if i == selected {
-            // Cursor + bold label column
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Bold))?;
+            }
             queue!(
                 stdout,
-                SetForegroundColor(Color::Magenta),
-                SetAttribute(Attribute::Bold),
                 Print(if styled_glyphs { "  ❯ " } else { "  > " }),
-                SetAttribute(Attribute::Reset),
-                SetAttribute(Attribute::Bold),
                 Print(&label_padded),
-                SetAttribute(Attribute::Reset),
             )?;
-            // Tag columns in their own colors, padded
-            for (col, tag) in item.tags.iter().enumerate() {
-                let w = cols.tags.get(col).copied().unwrap_or(0);
-                queue!(
-                    stdout,
-                    Print("  "),
-                    SetForegroundColor(tag.color),
-                    Print(pad(&tag.text, w)),
-                    ResetColor,
-                )?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
             }
         } else {
-            // Dimmed label column
-            queue!(
-                stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print(format!("    {label_padded}")),
-            )?;
-            // Dimmed tag columns, padded
-            for (col, tag) in item.tags.iter().enumerate() {
-                let w = cols.tags.get(col).copied().unwrap_or(0);
-                queue!(stdout, Print(format!("  {}", pad(&tag.text, w))))?;
-            }
-            queue!(stdout, ResetColor)?;
+            queue!(stdout, Print(format!("    {label_padded}")))?;
         }
-
+        // Status words carry their meaning without low-contrast palette colors.
+        for (col, tag) in item.tags.iter().enumerate() {
+            let w = cols.tags.get(col).copied().unwrap_or(0);
+            queue!(stdout, Print(format!("  {}", pad(&tag.text, w))))?;
+        }
         row += 1;
     }
 
-    // Help line
     queue!(
         stdout,
         MoveTo(0, row),
         Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::DarkGrey),
         Print(if styled_glyphs {
             "  ↑/↓ navigate • enter select • q cancel"
         } else {
             "  up/down navigate | enter select | q cancel"
         }),
-        ResetColor,
     )?;
 
     stdout.flush()?;
@@ -439,7 +408,6 @@ mod tests {
     fn picker_decorations_follow_locale_cas_ba0e() {
         use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
         use crate::ui::components::OutputMode;
-        use crossterm::style::Color;
         let mut env = crate::test_support::TestEnvGuard::new();
         let _colors = crate::test_support::StyledColorGuard::new(&env);
         let items = vec![
@@ -447,7 +415,6 @@ mod tests {
                 label: "Alpha".into(),
                 tags: vec![PickerTag {
                     text: "ready".into(),
-                    color: Color::Green,
                 }],
             },
             PickerItem {
@@ -494,7 +461,7 @@ mod tests {
                     if locale == "C.UTF-8" && mode == OutputMode::Styled && no_color.is_none() {
                         assert_eq!(
                             text, utf8_snapshot,
-                            "styled UTF-8 bytes must not change (NO_COLOR={no_color:?})"
+                            "approved styled UTF-8 default-foreground/bold bytes changed"
                         );
                     } else if locale == "C" || mode == OutputMode::Plain {
                         assert!(

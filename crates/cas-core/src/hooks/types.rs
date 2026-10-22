@@ -655,6 +655,43 @@ impl HookOutput {
         }
     }
 
+    /// cas-8dbe: add advisory `additionalContext` to a PreToolUse response
+    /// that does not deny, keeping any decision or rewritten input. Codex
+    /// treats a decision-less PreToolUse body as invalid output, so only the
+    /// Claude harness carries the advisory. Returns whether it was added.
+    pub fn append_pre_tool_context(&mut self, context: &str) -> bool {
+        self.append_pre_tool_context_for_harness(PreToolUseHarness::current(), context)
+    }
+
+    /// [`Self::append_pre_tool_context`] for an explicit harness.
+    pub fn append_pre_tool_context_for_harness(
+        &mut self,
+        harness: PreToolUseHarness,
+        context: &str,
+    ) -> bool {
+        if harness == PreToolUseHarness::Codex {
+            return false;
+        }
+        match self.hook_specific_output.get_or_insert(HookSpecificOutput::PreToolUse {
+            permission_decision: None,
+            permission_decision_reason: None,
+            updated_input: None,
+            additional_context: None,
+        }) {
+            HookSpecificOutput::PreToolUse { permission_decision, additional_context, .. } => {
+                if permission_decision.as_deref() == Some("deny") {
+                    return false;
+                }
+                *additional_context = Some(match additional_context.take() {
+                    Some(existing) => format!("{existing}\n\n{context}"),
+                    None => context.to_string(),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// PreToolUse with a modified tool input. Claude Code applies the updated
     /// input in place of the original before the tool runs.
     pub fn with_pre_tool_updated_input(updated_input: serde_json::Value) -> Self {
@@ -806,6 +843,35 @@ impl HookOutput {
 #[cfg(test)]
 mod tests {
     use crate::hooks::types::*;
+
+    /// cas-8dbe: an advisory joins an allowed or empty PreToolUse response,
+    /// never a deny, and never a Codex response.
+    #[test]
+    fn append_pre_tool_context_keeps_decisions_and_skips_denies() {
+        let mut empty = HookOutput::default();
+        assert!(empty.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "shared file"));
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["additionalContext"], "shared file");
+        assert!(json["hookSpecificOutput"].get("permissionDecision").is_none());
+
+        let mut allow = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode, "allow", "ok", Some("first"),
+        );
+        assert!(allow.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "second"));
+        let json = serde_json::to_value(&allow).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(json["hookSpecificOutput"]["additionalContext"], "first\n\nsecond");
+
+        let mut deny = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::ClaudeCode, "deny", "no", None,
+        );
+        assert!(!deny.append_pre_tool_context_for_harness(PreToolUseHarness::ClaudeCode, "x"));
+        assert!(serde_json::to_value(&deny).unwrap()["hookSpecificOutput"].get("additionalContext").is_none());
+
+        let mut codex = HookOutput::default();
+        assert!(!codex.append_pre_tool_context_for_harness(PreToolUseHarness::Codex, "x"));
+        assert!(codex.hook_specific_output.is_none());
+    }
 
     #[test]
     fn test_parse_session_start_input() {

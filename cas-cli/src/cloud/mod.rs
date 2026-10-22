@@ -29,6 +29,7 @@ pub mod device;
 pub mod code_embeddings;
 pub mod embeddings;
 // cas-e477: peer supervisor discovery through the cloud agent registry.
+pub mod file_leases;
 pub mod peers;
 pub mod peers_detail;
 pub(crate) mod activation;

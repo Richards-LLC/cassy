@@ -65,3 +65,17 @@ branches for that worker and task. Several discovered names refuse before merge,
 even at the same SHA. The refusal names every candidate in sorted order and tells
 the supervisor to record the intended branch and anchor. Existing authorization,
 repository binding, anchor, QA and CI gates still apply. No new TUI surface.
+
+
+## cas-98f9: escaping follow-up (WIP checkpoint)
+
+Route hook-parse/trust error paths and merge-conflict path lists through their
+existing visible-label helpers. Align hook-path invisible-character coverage
+with the Git label policy. Keep path labels single-line and visibly escaped;
+render multi-line Git details by escaping each line while retaining structural
+line breaks. This preserves readable porcelain residue without permitting a
+newline inside a filename to impersonate another diagnostic row.
+
+Implementation and failing-first regressions are pending after the operator
+restart. Extend the existing hook-trust, conflict and checkout-residue tests;
+verify bidi/U+2028 paths, actual multi-line residue and scoped rustfmt output.

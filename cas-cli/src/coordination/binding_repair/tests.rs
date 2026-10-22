@@ -188,7 +188,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
             body["binding"]["team_id"] = target.team_id.clone().into();
             post.respond(
                 tiny_http::Response::from_string(body.to_string())
-                    .with_status_code(if round == 0 { 409 } else { 200 })
+                    .with_status_code(if round == 1 { 409 } else { 200 })
                     .with_header(
                         tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap(),
                     ),

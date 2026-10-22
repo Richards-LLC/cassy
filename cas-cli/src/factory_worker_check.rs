@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 static WORKER_WAIT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+#[cfg(unix)]
+static WORKER_WAIT_HANDLER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
 extern "C" fn record_worker_wait_signal(signum: libc::c_int) {
@@ -24,12 +26,18 @@ extern "C" fn record_worker_wait_signal(signum: libc::c_int) {
 
 /// Signal handling applies only while this worker Cargo command is owned.
 #[cfg(unix)]
-struct WorkerWaitSignals(Vec<(libc::c_int, libc::sigaction)>);
+struct WorkerWaitSignals {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
 
 #[cfg(unix)]
 impl WorkerWaitSignals {
     fn install() -> std::io::Result<Self> {
-        let mut guard = Self(Vec::new());
+        let mut guard = Self {
+            _lock: WORKER_WAIT_HANDLER_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+            previous: Vec::new(),
+        };
         WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);
         for signum in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -39,7 +47,7 @@ impl WorkerWaitSignals {
             if unsafe { libc::sigaction(signum, &action, &mut previous) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            guard.0.push((signum, previous));
+            guard.previous.push((signum, previous));
         }
         Ok(guard)
     }
@@ -48,7 +56,7 @@ impl WorkerWaitSignals {
 #[cfg(unix)]
 impl Drop for WorkerWaitSignals {
     fn drop(&mut self) {
-        for (signum, previous) in self.0.iter().rev() {
+        for (signum, previous) in self.previous.iter().rev() {
             unsafe { libc::sigaction(*signum, previous, std::ptr::null_mut()) };
         }
         WORKER_WAIT_SIGNAL.store(0, Ordering::Relaxed);

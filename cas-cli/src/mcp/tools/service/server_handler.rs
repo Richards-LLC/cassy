@@ -1451,6 +1451,61 @@ mod tests {
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
     }
 
+    /// cas-3fc8: after a merge's early COMMITTED answer, the task note says
+    /// what its close concluded ("not eligible" rather than a blank) and,
+    /// when the merge itself then fails, that failure too.
+    #[tokio::test]
+    async fn post_commit_note_names_an_ineligible_close_and_a_later_merge_failure_cas_3fc8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        tasks.add(&crate::types::Task::new("cas-merged".into(), "merged".into())).unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action": "worktree_merge", "id": "wt", "task_id": "cas-merged"});
+        let merge = async {
+            super::super::mutation_receipt::merge_committed("abc123", "epic/x", "pushed to origin");
+            // Cassy's close found the task not eligible: its receipt is empty.
+            super::super::mutation_receipt::merge_followup("");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Err(rmcp::ErrorData {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: "Failed to mark worker delivery complete: disk full".into(),
+                data: None,
+            })
+        };
+        let answered = service
+            .call_with_deadline_and_grace(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_secs(30),
+                std::time::Duration::ZERO,
+                merge,
+            )
+            .await
+            .expect("the committed merge answers early");
+        assert!(format!("{answered:?}").contains("COMMITTED"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let notes = loop {
+            let notes = tasks.get("cas-merged").unwrap().notes;
+            if notes.contains("POST_COMMIT_OUTCOME") || std::time::Instant::now() > deadline {
+                break notes;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        // pin: the note's wording for an ineligible close and a later failure (cas-3fc8).
+        assert!(notes.contains("not eligible for Cassy's close"), "{notes}");
+        assert!(notes.contains("disk full"), "{notes}");
+    }
+
     /// cas-3b81 (GH #1142): a close still running at the deadline with
     /// nothing committed is not "UNKNOWN". It keeps running, the caller is
     /// told so, and its final outcome lands on the task as a note.

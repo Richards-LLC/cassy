@@ -102,7 +102,8 @@ fn lease(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
-/// Create a fresh detached, disposable checkout. No legacy directory is adopted.
+/// Create or reuse one detached, disposable checkout per task/dispatch/head.
+/// No legacy directory is adopted, and changed source is never reset.
 /// Callers retain this value while running tests; standalone creation releases
 /// the lease on return, and GC also checks open files, cwd, mappings and argv.
 pub fn create(
@@ -143,34 +144,69 @@ pub fn create(
             "dispatch belongs to a different task"
         );
     }
-    let directory = base(&cas)
-        .join(task_id)
-        .join(uuid::Uuid::new_v4().to_string());
-    private_dir(&directory)?;
-    let lock = lease(&directory, true)?;
-    // Write ownership before Git, so even an interrupted creation is visible.
-    fs::write(
-        directory.join("owner.json"),
-        serde_json::to_vec(&Owner {
-            schema_version: 1,
-            cas_root: cas,
-            task_id: task_id.into(),
-            dispatch_id: dispatch_id.map(str::to_owned),
-            head: head.into(),
-            created_at: Utc::now(),
-        })?,
-    )?;
+    let run = dispatch_id.unwrap_or("walk");
+    ensure!(component(run), "invalid scratch dispatch id");
+    let parent = base(&cas).join(task_id);
+    private_dir(&parent)?;
+    // Repeated admission refusals must not multiply full source checkouts.
+    let directory = parent.join(format!("{run}-{head}"));
+    safe_path(&directory)?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    let fresh = match builder.create(&directory) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error.into()),
+    };
+    let lock = lease(&directory, fresh)?;
+    if fresh {
+        // Write ownership before Git, so interrupted creation stays visible.
+        fs::write(
+            directory.join("owner.json"),
+            serde_json::to_vec(&Owner {
+                schema_version: 1,
+                cas_root: cas.clone(),
+                task_id: task_id.into(),
+                dispatch_id: dispatch_id.map(str::to_owned),
+                head: head.into(),
+                created_at: Utc::now(),
+            })?,
+        )?;
+    } else {
+        let record = owner(&cas, &directory)?;
+        ensure!(
+            record.head == head
+                && record.task_id == task_id
+                && record.dispatch_id.as_deref() == dispatch_id,
+            "existing review checkout has another owner; it was not adopted"
+        );
+    }
     let path = directory.join("repo");
-    git(
-        repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            path.to_str().context("non-UTF-8 scratch path")?,
-            head,
-        ],
-    )?;
+    if path.exists() {
+        ensure!(
+            is_managed_checkout(&cas, &path),
+            "review checkout head or ownership changed"
+        );
+        ensure!(
+            git(&path, &["status", "--porcelain"])?.is_empty(),
+            "review checkout has source changes; preserve them before retrying"
+        );
+    } else {
+        git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                path.to_str().context("non-UTF-8 scratch path")?,
+                head,
+            ],
+        )?;
+    }
     Ok(Checkout { path, _lease: lock })
 }
 

@@ -1490,7 +1490,9 @@ Use the printed absolute path as the review directory. Add `--dispatch-id` when
 reviewing a dispatch. With `factory.scratch_root` configured, the managed home
 is `<scratch_root>/<project-key>/verify/<task-id>/<run>/repo`; otherwise it is
 `<root>/review-scratch/<task-id>/<run>/repo`. Each run has a private ownership
-record and exclusive lease; no existing ad-hoc directory is adopted.
+record and exclusive lease; retries reuse the same task/dispatch/full-head
+checkout, so admission refusals cannot multiply source trees. Changed source
+or ownership refuses reuse; no existing ad-hoc directory is adopted.
 Publish durable proof outside that disposable home, in the task artifact root.
 
 `gc_report` includes managed review checkout status and flags unmanaged scratch

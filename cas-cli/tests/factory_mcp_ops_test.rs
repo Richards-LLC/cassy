@@ -6530,6 +6530,9 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
         cas_types::factory_scratch::project_scratch_dir(&scratch, &env.cas_root).join("verify")
     ));
     drop(managed);
+    let retried = cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    assert_eq!(retried.path, checkout, "admission retries must reuse the same task/head checkout");
+    drop(retried);
     let marker = owned.join("owner.json");
     let mut owner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();

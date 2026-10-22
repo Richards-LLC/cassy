@@ -18,6 +18,7 @@ use cas_pty::{Harness, HarnessConformanceReceipt};
 use fs2::FileExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
@@ -293,9 +294,11 @@ fn probe_claude_auth_with(
                 Err(error) => return Err(error),
             }
         }
-        if let Ok(evidence) =
+        if let Ok(mut evidence) =
             serde_json::from_reader::<_, CapabilityEvidence>((&mut file).take(8192))
         {
+            // The cache is user-writable; it cannot extend a state's freshness.
+            evidence.ttl_ms = evidence.ttl_ms.min(evidence.availability.default_ttl_ms());
             let interval = evidence.ttl_ms.max(CLAUDE_AUTH_PROBE_INTERVAL_MS);
             if now_ms >= evidence.observed_at_ms
                 && now_ms < evidence.observed_at_ms.saturating_add(interval)
@@ -333,6 +336,7 @@ fn write_claude_auth_cache(file: &mut File, evidence: &CapabilityEvidence) -> st
 }
 
 fn ssh_login_keychain_unavailable(
+    account_dir: Option<&str>,
     deadline: Deadline,
     run: &mut impl FnMut(
         &mut Command,
@@ -363,8 +367,18 @@ fn ssh_login_keychain_unavailable(
             }
         }
     }
+    // Match Claude's secure-storage selector: hash the NFC selector text, not
+    // a canonicalized path. An unscoped process uses the legacy service.
+    let service = account_dir
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| {
+            let normalized: String = dir.nfc().collect();
+            let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+            format!("Claude Code-credentials-{}", &hash[..8])
+        })
+        .unwrap_or_else(|| "Claude Code-credentials".to_string());
     let mut metadata = Command::new("security");
-    metadata.args(["find-generic-password", "-s", "Claude Code-credentials"]);
+    metadata.args(["find-generic-password", "-s", &service]);
     matches!(run(&mut metadata, deadline, AUTH_PROBE_TIMEOUT), Ok(output) if output.status.code() == Some(36))
 }
 
@@ -379,7 +393,7 @@ fn probe_claude_auth_uncached(
         Duration,
     ) -> Result<std::process::Output, BoundedCommandError>,
 ) -> CapabilityEvidence {
-    if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
+    if macos_ssh && ssh_login_keychain_unavailable(account_dir, deadline, run) {
         return unknown(
             now_ms,
             "macOS login keychain locked in ssh session",
@@ -409,7 +423,7 @@ fn probe_claude_auth_uncached(
                 Ok(_) => unavailable(
                     now_ms,
                     "Claude auth status is logged out",
-                    "Run `claude login`, then rerun doctor.",
+                    "Run `claude login`, then retry doctor after one minute.",
                 ),
                 Err(_) => unknown(
                     now_ms,

@@ -11166,6 +11166,8 @@ impl CasCore {
 
         self.retire_delivered_worker_cache(&task);
 
+        crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.id).await;
+
         // cas-3bd4: use the typed skip reason so the audit suffix cites
         // the real reason (e.g. "assignee unknown" for name/id mismatches,
         // "supervisor bypass" for explicit overrides) instead of always

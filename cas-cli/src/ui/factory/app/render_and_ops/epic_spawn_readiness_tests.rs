@@ -141,6 +141,8 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
     for adopted in [false, true] {
         with_fixture(|f| {
             let core = crate::mcp::CasCore::with_daemon(f.root.clone(), None, None);
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            core.register_agent("peer-lane-creator".into(), "peer-lane-creator".into(), None).unwrap();
             let request = serde_json::from_value(serde_json::json!({
                 "title": "Peer-only epic", "task_type": "epic", "risk": "none"
             }))

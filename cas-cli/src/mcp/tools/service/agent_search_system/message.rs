@@ -1049,10 +1049,10 @@ impl CasService {
             .unwrap_or_else(|| "primary".to_string());
         // Persist this message's classification before folding adds labels
         // and other bodies that no longer look like a pure acknowledgement.
-        if req.wake == Some(false)
+        let quiet_message = req.wake == Some(false)
             || req.kind.as_deref() == Some("receipt")
-            || crate::supervisor_message_wakes::pure_ack(&message)
-        {
+            || crate::supervisor_message_wakes::pure_ack(&message);
+        if quiet_message && role != "worker" {
             message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
         }
         // Resolve cross-machine peers before applying the local inbox cap.
@@ -1111,6 +1111,11 @@ impl CasService {
         if role == "worker" {
             message = crate::prompt_revalidation::
                 neutralize_worker_authored_envelope_tags(&message);
+            // Add CAS's quiet marker only after neutralizing caller tags,
+            // so it remains a type marker rather than escaped body text.
+            if quiet_message {
+                message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+            }
         }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.

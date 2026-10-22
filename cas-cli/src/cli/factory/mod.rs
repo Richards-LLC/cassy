@@ -8,6 +8,7 @@
 mod cloud_attach;
 mod daemon;
 mod doctor;
+mod gc;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -750,6 +751,12 @@ pub enum FactoryCommands {
         cas_root: Option<std::path::PathBuf>,
     },
 
+    /// Inspect or clean factory-owned state using the MCP GC handlers.
+    Gc {
+        #[command(subcommand)]
+        command: FactoryGcCommands,
+    },
+
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
     Daemon {
@@ -1135,6 +1142,29 @@ pub enum FactoryCommands {
     },
 }
 
+/// Factory garbage-collection commands.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+#[command(next_line_help = true)]
+pub enum FactoryGcCommands {
+    /// Show the same factory GC report as the coordination gc_report action.
+    Report,
+    /// Run the same cleanup as coordination gc_cleanup.
+    ///
+    /// Cleanup defaults to a dry run. Actual mutation requires both --force
+    /// and --no-dry-run.
+    Cleanup {
+        /// Authorize cleanup actions that require explicit force consent.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Explicitly keep cleanup in preview mode (the default).
+        #[arg(long, conflicts_with = "no_dry_run")]
+        dry_run: bool,
+        /// Apply eligible cleanup instead of only previewing it.
+        #[arg(long = "no-dry-run", conflicts_with = "dry_run")]
+        no_dry_run: bool,
+    },
+}
+
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
@@ -1163,6 +1193,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
+            FactoryCommands::Gc { command } => gc::execute(command, cas_root),
             FactoryCommands::Daemon {
                 session,
                 cwd,

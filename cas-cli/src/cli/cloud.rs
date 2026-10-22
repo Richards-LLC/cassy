@@ -8158,6 +8158,7 @@ mod team_cmd_tests {
 
     #[test]
     fn cas_e29c_pull_warns_with_remedy_and_preserves_team_warning_ids() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let result = crate::cloud::SyncResult {
             memory_fold_conflicts: vec!["source-fold0123456789ab".into()],
             conflicts_resolved: 1,
@@ -8221,6 +8222,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_only_nonzero_pull_kinds() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 pulled_entries: 3,
@@ -8243,6 +8245,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_prints_pull_errors_in_non_verbose_mode() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 errors: vec!["task deserialize error (id=cas-bad): invalid status".to_string()],
@@ -8266,6 +8269,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_merges_team_counts_conflicts_and_healed_edges() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 pulled_entries: 3,
@@ -8300,6 +8304,7 @@ mod team_cmd_tests {
     /// different event from one that was.
     #[test]
     fn sync_summary_names_edge_deletes_and_tombstone_skips() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 healed_task_dependencies_to_cloud: 2,
@@ -8321,6 +8326,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_verbose_renders_counted_conflict_details() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let now = chrono::Utc::now();
         let mut result = crate::cloud::SyncResult::default();
         result.record_conflict(crate::cloud::SyncConflict {
@@ -8487,6 +8493,7 @@ mod team_cmd_tests {
 
     #[test]
     fn cas_fd42_team_summary_names_intentional_memory_parks() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         use crate::cloud::{EntityType, SyncOperation};
         let temp = tempfile::tempdir().unwrap();
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -8539,6 +8546,7 @@ mod team_cmd_tests {
     /// queue commands count and name the team-only fix.
     #[test]
     fn cas_25c1_team_linked_push_receipt_reports_held_personal_rejections() {
+        let mut _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
         let mut summary = team_only_push_summary();
 
@@ -8591,6 +8599,13 @@ mod team_cmd_tests {
             verbose.contains("    Personal queue held (team-linked sync pushes team rows only): 1 pending, 3 failed/parked"),
             "{verbose}"
         );
+        _locale.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains(" - cloud.team_only is off but 2 row(s)"), "{output}");
+        assert!(!output.contains('·'), "{output}");
+
     }
 
     /// cas-25c1: with `cloud.team_only` on, held rejections are still counted
@@ -8598,6 +8613,7 @@ mod team_cmd_tests {
     /// incomplete instead of reading "0 pending".
     #[test]
     fn cas_25c1_team_only_receipt_counts_team_backlog_without_the_fix_hint() {
+        let mut _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(true);
         let mut summary = team_only_push_summary();
 
@@ -8613,6 +8629,13 @@ mod team_cmd_tests {
         assert!(output.contains("3 failed/parked"), "{output}");
         assert!(output.contains("see `cas cloud queue`"), "{output}");
         assert!(!output.contains("cloud.team_only is off"), "{output}");
+        _locale.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains(" - see `cas cloud queue`"), "{output}");
+        assert!(!output.contains('·'), "{output}");
+
     }
 
     /// cas-25c1: a nothing-newer team pull advances the team watermark, but
@@ -8696,6 +8719,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_successful_push_with_batch_and_pending_counts() {
+        let mut _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::push(
             &crate::cloud::SyncResult {
                 batches_run: 2,
@@ -8704,11 +8728,15 @@ mod team_cmd_tests {
             crate::cloud::PushScope::All,
             None,
         );
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-
-        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-
-        assert_eq!(tf.output(), "[OK] Push complete · 2 batches · 0 pending\n");
+        for (locale, expected) in [
+            ("C.UTF-8", "[OK] Push complete · 2 batches · 0 pending\n"),
+            ("C", "[OK] Push complete - 2 batches - 0 pending\n"),
+        ] {
+            _locale.set("LC_ALL", locale);
+            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+            assert_eq!(tf.output(), expected, "locale={locale}");
+        }
     }
 
     /// cas-f64e x cas-cf1f: one sync carries both the push-side per-row
@@ -8717,6 +8745,7 @@ mod team_cmd_tests {
     /// SyncResult must not let either set swallow the other.
     #[test]
     fn push_row_outcomes_and_dependency_edge_outcomes_both_render() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 0,
             failed: 1,
@@ -8764,6 +8793,7 @@ mod team_cmd_tests {
     /// stays reserved for failures the cloud never explained.
     #[test]
     fn sync_summary_separates_lww_skips_from_named_cloud_rejections() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 4,
             failed: 3,
@@ -8837,6 +8867,7 @@ mod team_cmd_tests {
     /// remediation, and reports the post-upgrade requeue it performed.
     #[test]
     fn verbose_push_summary_lists_each_rejection_reason_with_its_remediation() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 0,
             failed: 1,
@@ -8875,6 +8906,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_groups_identical_push_failures_once_with_retry_hint() {
+        let mut _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let message = "Client version 3.7.7 is below minimum 3.8.0";
         let mut summary = SyncSummary::push(
             &crate::cloud::SyncResult {
@@ -8894,10 +8926,18 @@ mod team_cmd_tests {
             tf.output(),
             "[WARN] Push incomplete · 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) · run cas cloud queue --retry\n"
         );
+        _locale.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains("[WARN] Push incomplete - 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) - run cas cloud queue --retry"), "{output}");
+        assert!(!output.contains('·'), "{output}");
+
     }
 
     #[test]
     fn sync_summary_styled_output_uses_formatter_status_color() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
         let mut tf = crate::ui::components::test_helpers::TestFormatter::styled(80);
 

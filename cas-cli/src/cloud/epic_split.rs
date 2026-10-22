@@ -1327,9 +1327,6 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
     if !has_store(cas_root) {
         return 0;
     }
-    if let Err(error) = release_obsolete_split_claims(cas_root, claims, None) {
-        tracing::warn!(%error, "could not release obsolete epic split claims; will retry on a later renewal");
-    }
     let Ok(splits) = current_epic_splits(cas_root) else {
         return 0;
     };
@@ -1341,66 +1338,6 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
         .filter(|id| claims.holder(id).ok().flatten().as_deref() == Some(agent_id))
         .filter(|id| claims.renew(id, agent_id, duration).is_ok())
         .count()
-}
-
-/// Release this project's split-owner claims for children no longer bound by
-/// their split. Retargeting calls this after persisting the new parent; the
-/// renewal pass also calls it to retry a Cloud failure without renewing stale
-/// claims in the meantime.
-pub(crate) fn release_obsolete_claims_for_task(
-    cas_root: &Path,
-    task_id: &str,
-) -> Result<usize, String> {
-    let Some(claims) = PeerClaims::for_project(cas_root) else {
-        return Ok(0);
-    };
-    release_obsolete_split_claims(cas_root, &claims, Some(task_id))
-}
-
-fn release_obsolete_split_claims(
-    cas_root: &Path,
-    claims: &PeerClaims,
-    only_task: Option<&str>,
-) -> Result<usize, String> {
-    let splits = list_epic_splits(cas_root).map_err(|error| format!("epic split store: {error}"))?;
-    if splits.is_empty() {
-        return Ok(0);
-    }
-    let tasks = crate::store::open_task_store_local(cas_root)
-        .map_err(|error| format!("could not open the task store: {error}"))?;
-    let now = Utc::now();
-    let mut released = 0;
-    let mut errors = Vec::new();
-    for split in splits {
-        for task_id in split
-            .mine
-            .iter()
-            .filter(|id| only_task.is_none_or(|only| id.as_str() == only))
-        {
-            let parent_ids: Vec<String> = tasks
-                .get_dependencies(task_id)
-                .map_err(|error| format!("could not read split child parent: {error}"))?
-                .iter()
-                .filter(|dep| dep.dep_type == DependencyType::ParentChild)
-                .map(|dep| dep.to_id.clone())
-                .collect();
-            let still_child = parent_ids.iter().any(|parent| parent == &split.epic_id);
-            let moved = !still_child && (only_task.is_some() || !parent_ids.is_empty());
-            if split.is_binding(now) && !moved {
-                continue;
-            }
-            match claims.release_own(task_id, &split.local_agent_id) {
-                Ok(true) => released += 1,
-                Ok(false) => {}
-                Err(error) => errors.push(format!("{task_id} ({}): {error}", split.local_agent_id)),
-            }
-        }
-    }
-    if errors.is_empty() {
-        Ok(released)
-    } else {
-        Err(format!("Cloud split claim release failed for {}", errors.join("; ")))
-    }
 }
 
 #[cfg(test)]

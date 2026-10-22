@@ -1823,6 +1823,7 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     env.set("CAS_AGENT_ROLE", "worker");
     env.set("CAS_FACTORY_MODE", "1");
     let repo = GitRepo::new();
+    run_git(&["remote", "add", "origin", "https://github.com/test/reference-union.git"], &repo.root);
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
     std::fs::write(cas_root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
     let base_hash = "1".repeat(64);
@@ -1844,22 +1845,33 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     write_ledger(&repo.root, &ledger(&[&base_hash]));
     run_git(&["add", LEDGER], &repo.root);
     run_git(&["commit", "-m", "baseline reference history"], &repo.root);
+    let base = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    let target = WorkTarget {
+        repo_selector: "remote:github.com/test/reference-union".to_string(),
+        target_branch: "main".to_string(),
+    };
     let store = open_task_store(&cas_root).unwrap();
     let mut tasks = Vec::new();
-    for (worker, hash) in [("alice", &alice_hash), ("bob", &bob_hash)] {
+    for (id, worker, hash) in [("cas-e57a", "alice", &alice_hash), ("cas-e57b", "bob", &bob_hash)] {
         let branch = format!("factory/{worker}");
         let path = cas_root.join("worktrees").join(worker);
         repo.add_worktree(&path, &branch);
         write_ledger(&path, &ledger(&[&base_hash, hash]));
         run_git(&["add", LEDGER], &path);
-        let id = format!("cas-e579-{worker}");
         run_git(&["commit", "-m", &format!("{id}: extend reference history")], &path);
-        let mut task = Task::new(id, format!("Extend {worker}'s reference history"));
+        let mut task = Task::new(id.to_string(), format!("Extend {worker}'s reference history"));
         task.status = TaskStatus::AwaitingMerge;
         task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
         task.depth = TaskDepth::Light;
         task.assignee = Some(worker.to_string());
         task.deliverables.factory_branch_anchor = Some(git_stdout(&path, &["rev-parse", "HEAD"]));
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+            work_target: target.clone(),
+            assignee: worker.to_string(),
+            branch,
+            base_sha: base.clone(),
+        });
         store.add(&task).unwrap();
         tasks.push(task);
     }

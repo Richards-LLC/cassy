@@ -329,8 +329,12 @@ fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
 // Spinner frames (braille pattern)
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-fn spinner_frames_for_mode(_mode: OutputMode) -> &'static [char] {
-    SPINNER_FRAMES
+fn spinner_frames_for_mode(mode: OutputMode) -> &'static [char] {
+    if super::supports_styled_glyphs(mode) {
+        SPINNER_FRAMES
+    } else {
+        &['|', '/', '-', '\\']
+    }
 }
 
 // ============================================================================
@@ -1213,8 +1217,13 @@ where
 // Quick start guide
 // ============================================================================
 
-fn quick_start_table_for_mode(_mode: OutputMode) -> crate::ui::components::Table {
+fn quick_start_table_for_mode(mode: OutputMode) -> crate::ui::components::Table {
     crate::ui::components::Table::new()
+        .border(if super::supports_styled_glyphs(mode) {
+            crate::ui::components::Border::Unicode
+        } else {
+            crate::ui::components::Border::Ascii
+        })
         .columns(&["Command", "Description"])
         .rows(vec![
             vec!["cas", "Launch multi-agent factory"],

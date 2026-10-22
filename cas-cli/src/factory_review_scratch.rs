@@ -326,6 +326,28 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
 }
 
+/// Resolve the task's assigned worker rather than another dispatch's output.
+/// Called only inside the review lane's existing build admission and lease.
+pub(crate) fn seed_target_from_worker(cas: &Path, checkout: &Path) -> Result<()> {
+    if !is_managed_checkout(cas, checkout) || checkout.join("target/debug").exists() {
+        return Ok(());
+    }
+    let record = owner(cas, checkout.parent().context("review directory missing")?)?;
+    let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
+    let agents = crate::store::open_agent_store(cas)?;
+    let worker = task.assignee.as_deref().and_then(|assignee| {
+        crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+    }).filter(|agent| agent.role == cas_types::AgentRole::Worker);
+    if let Some(worker) = worker {
+        let source = worker.metadata.get("clone_path").map(PathBuf::from)
+            .unwrap_or_else(|| cas.join("worktrees").join(&worker.name));
+        if let Some(stats) = crate::ui::factory::seed_review_target_from_worker(cas, &source, checkout)? {
+            tracing::info!(source=%stats.snapshot, files=stats.files, bytes=stats.bytes, "review target seeded from assigned worker");
+        }
+    }
+    Ok(())
+}
+
 fn eligible(cas: &Path, record: &Owner) -> Result<()> {
     let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
     let finished = match &record.dispatch_id {

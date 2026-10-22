@@ -1837,6 +1837,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
         tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
     }
+    if let Err(error) = crate::factory_review_scratch::seed_target_from_worker(&cas_root, &repo) {
+        tracing::warn!(%error, "review worker seed skipped; Cargo will rebuild privately");
+    }
     #[cfg(unix)]
     let target_lease = crate::factory_target_cache::owner::acquire(&cas_root, &repo)?;
     // cas-3f93: the private target, relocated when `[factory] scratch_root` is set.

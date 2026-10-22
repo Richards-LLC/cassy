@@ -324,6 +324,14 @@ fn git_head(path: &Path) -> anyhow::Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+fn git_common_dir(repo: &Path) -> anyhow::Result<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(repo).output()?;
+    anyhow::ensure!(output.status.success(), "cannot resolve seed repository");
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()).canonicalize()?)
+}
+
 fn git_changed_paths(repo: &Path, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
     let output = std::process::Command::new("git")
         .args(["diff", "--name-only", from, to, "--"])
@@ -534,6 +542,90 @@ pub(crate) fn seed_worker_target_from_baseline(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
+    publish_target_seed(&staging, &target)?;
+    Ok(Some(stats))
+}
+
+/// A review can reuse its assigned worker's completed target even when no
+/// immutable baseline has been published. Hold every writer/retirement lock
+/// until the private seed is published; never borrow a live Cargo target.
+pub(crate) fn seed_review_target_from_worker(
+    cas_dir: &Path,
+    worker: &Path,
+    review: &Path,
+) -> anyhow::Result<Option<TargetSeedStats>> {
+    use fs2::FileExt;
+    if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() == Ok("1") {
+        return Ok(None);
+    }
+    let worker = worker.canonicalize()?;
+    anyhow::ensure!(
+        worker.parent() == Some(cas_dir.join("worktrees").canonicalize()?.as_path()),
+        "review seed must belong to a managed worker"
+    );
+    let target = review.join("target");
+    if target.join("debug").exists() {
+        return Ok(None);
+    }
+    let source = crate::factory_scratch::worker_target_dir(&worker);
+    if !source.join("debug").is_dir() {
+        return Ok(None);
+    }
+    let Some(_lane) = crate::factory_worker_check::try_lock_lane(cas_dir, &worker)? else {
+        return Ok(None);
+    };
+    #[cfg(unix)]
+    let Some(_target_lease) = crate::factory_target_cache::owner::for_retirement(cas_dir, &worker)? else {
+        return Ok(None);
+    };
+    for path in [&source, &source.join("debug"), &target] {
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()),
+            "review seed target must not be a symlink"
+        );
+    }
+    // Capped writers own the lane and target lease. Cargo's own lock also
+    // fences any uncapped writer before we inspect provenance or link files.
+    let cargo_lock_path = source.join("debug/.cargo-lock");
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(&cargo_lock_path).is_ok_and(|meta| meta.file_type().is_symlink()),
+        "review seed Cargo lock must not be a symlink"
+    );
+    let cargo_lock = std::fs::OpenOptions::new().read(true).write(true)
+        .create(true).truncate(false).open(cargo_lock_path)?;
+    if cargo_lock.try_lock_exclusive().is_err() {
+        return Ok(None);
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&worker).output()?;
+    anyhow::ensure!(status.status.success() && status.stdout.is_empty(), "worker seed source changed");
+    anyhow::ensure!(
+        git_common_dir(&worker)? == git_common_dir(review)?,
+        "worker seed belongs to another repository"
+    );
+    crate::factory_scratch::ensure_same_filesystem(&source, &target)?;
+    let source_commit = git_head(&worker)?;
+    let skipped_crates = changed_workspace_crates(review, &source_commit, &git_head(review)?)?;
+    let staging = review.join(".target-seed-in-progress");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    let mut stats = TargetSeedStats {
+        snapshot: source.display().to_string(),
+        source_commit,
+        skipped_crates: skipped_crates.clone(),
+        ..TargetSeedStats::default()
+    };
+    if let Err(error) = hardlink_seed_tree_with_skips(&source, &staging, &target, &mut stats, &skipped_crates) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    publish_target_seed(&staging, &target)?;
+    Ok(Some(stats))
+}
+
+fn publish_target_seed(staging: &Path, target: &Path) -> anyhow::Result<()> {
     if target.exists() {
         // Keep proof logs/reports at their original paths. Re-seeding only
         // supplies missing output entries and never overwrites evidence.
@@ -548,7 +640,7 @@ pub(crate) fn seed_worker_target_from_baseline(
     } else {
         std::fs::rename(&staging, &target)?;
     }
-    Ok(Some(stats))
+    Ok(())
 }
 
 fn hardlink_seed_tree(

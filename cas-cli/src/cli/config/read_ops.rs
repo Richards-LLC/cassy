@@ -953,6 +953,7 @@ mod tests {
             "notifications.on_idle_prompt",
             "notifications.on_permission_prompt",
             "notifications.webhook_url",
+            "slack.stakeholder_contacts",
         ];
 
         let registry = crate::config::registry();

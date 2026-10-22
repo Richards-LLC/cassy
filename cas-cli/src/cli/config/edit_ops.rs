@@ -259,7 +259,7 @@ mod tests {
         let env = crate::test_support::TestEnvGuard::temp_home();
         let root = env.home().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        let original = "# keep this comment\n[hub]\ntailscale_serve = false\n";
+        let original = "# keep this comment\n";
         std::fs::write(root.join("config.toml"), original).unwrap();
 
         let registry = registry();

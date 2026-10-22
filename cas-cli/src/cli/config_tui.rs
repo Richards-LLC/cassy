@@ -690,7 +690,7 @@ mod tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        let original = "# keep this comment\n[hub]\ntailscale_serve = false\n";
+        let original = "# keep this comment\n";
         std::fs::write(root.join("config.toml"), original).unwrap();
 
         let mut app = ConfigTuiApp::new(&root).unwrap();

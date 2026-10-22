@@ -2240,8 +2240,14 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     let mut env = test_env();
     let repo = GitRepo::new();
     let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
-    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
-    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(
+        &["init", "--bare", remote.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        &repo.root,
+    );
     run_git(&["branch", "epic/observation"], &repo.root);
     run_git(&["push", "origin", "main", "epic/observation"], &repo.root);
 
@@ -2327,7 +2333,9 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         .await
         .expect_err("first request must surface the failed observation write");
     assert!(
-        first.message.contains("Retry `worktree_merge id=factory/alice task_id=cas-8045-observation-retry`"),
+        first
+            .message
+            .contains("Retry `worktree_merge id=factory/alice task_id=cas-8045-observation-retry`"),
         "{}",
         first.message
     );
@@ -2337,7 +2345,8 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         "the first call has already merged and published the target"
     );
 
-    conn.execute_batch("DROP TRIGGER fail_fixture_observation;").unwrap();
+    conn.execute_batch("DROP TRIGGER fail_fixture_observation;")
+        .unwrap();
     let retry = service
         .coordination(Parameters(request))
         .await

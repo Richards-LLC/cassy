@@ -6191,9 +6191,6 @@ impl CasCore {
             }
         }
 
-        // cas-5f28: a parked delivery no longer needs its Cassy Cloud claim.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &task.id);
-        crate::cloud::file_leases::release_for_task(&self.cas_root, &task.id);
         if let Ok(agent_store) = self.open_agent_store() {
             if let Err(e) = agent_store
                 .release_lease_for_task(&task.id, "MERGE REQUIRED: parked awaiting_merge")
@@ -6205,6 +6202,11 @@ impl CasCore {
                 );
             }
         }
+        // cas-5f28: a parked delivery no longer needs its Cassy Cloud claim.
+        // cas-978d: released off the caller, after the local lease, so the
+        // background release can tell a later restart from this park.
+        crate::cloud::peer_claims::release_task_claim_in_background(&self.cas_root, &task.id);
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &task.id);
 
         self.record_close_rejection_activity(&task.id, reason, message);
         Ok(())
@@ -11019,8 +11021,9 @@ impl CasCore {
         } else {
             ""
         };
-        // cas-5f28: a closed task's Cassy Cloud claim is released too.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.id);
+        // cas-5f28: a closed task's Cassy Cloud claim is released too
+        // (cas-978d: off the caller).
+        crate::cloud::peer_claims::release_task_claim_in_background(&self.cas_root, &req.id);
         // cas-8dbe: so are the file leases taken for it while editing.
         crate::cloud::file_leases::release_for_task(&self.cas_root, &req.id);
 
@@ -11567,7 +11570,7 @@ impl CasCore {
         if let Ok(agent_store) = self.open_agent_store() {
             let _ = agent_store.release_lease_for_task(&task.id, "Task cancelled without delivery");
         }
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &task.id);
+        crate::cloud::peer_claims::release_task_claim_in_background(&self.cas_root, &task.id);
         crate::cloud::file_leases::release_for_task(&self.cas_root, &task.id);
 
         // cas-7877: cancelling a QA work item is the supervisor deciding the

@@ -364,6 +364,11 @@ enum CandidateCommand {
         #[arg(long)]
         plan: bool,
     },
+    /// Print a task's built candidate binary path (workers may run this)
+    Path {
+        #[arg(long)]
+        task: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -375,6 +380,8 @@ struct CandidatePlan {
     version_file: PathBuf,
     checksums_file: PathBuf,
     receipt_file: PathBuf,
+    /// cas-d0e6: the short form that resolves `binary` from the task id.
+    path_command: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -400,8 +407,8 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
-    let CandidateCommand::Build { task, rev, plan } = &args.command;
+/// cas-d0e6: a task's canonical candidate directory, from its id alone.
+fn candidate_dir_for_task(cas_root: Option<&Path>, task: &str) -> Result<(PathBuf, PathBuf)> {
     ensure!(
         task.starts_with("cas-")
             && task.len() > 4
@@ -412,6 +419,41 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     );
     let cas_root = cas_root.context("No Cassy project; run cas init first")?;
     let project = PathBuf::from(git_text(Path::new("."), &["rev-parse", "--show-toplevel"])?);
+    let config = crate::config::Config::load(cas_root)?;
+    let artifacts =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let artifacts = if artifacts.is_absolute() {
+        artifacts
+    } else {
+        project.join(artifacts)
+    };
+    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
+        .join(task)
+        .join("candidate");
+    Ok((project, candidate_dir))
+}
+
+fn candidate_path_command(task: &str) -> String {
+    format!("cas qa candidate path --task {task}")
+}
+
+fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
+    let (task, rev, plan) = match &args.command {
+        CandidateCommand::Build { task, rev, plan } => (task, rev, plan),
+        CandidateCommand::Path { task } => {
+            let (_, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
+            let binary = candidate_dir.join("cas");
+            ensure!(
+                binary.is_file(),
+                "no QA candidate built for {task} yet (expected {}); ask the supervisor to run \
+                 `cas qa candidate build --task {task} --rev <sha>`",
+                binary.display()
+            );
+            println!("{}", binary.display());
+            return Ok(());
+        }
+    };
+    let (project, candidate_dir) = candidate_dir_for_task(cas_root, task)?;
     let revision = git_text(
         &project,
         &[
@@ -425,17 +467,6 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "resolved revision is not a full commit SHA"
     );
-    let config = crate::config::Config::load(cas_root)?;
-    let artifacts =
-        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let artifacts = if artifacts.is_absolute() {
-        artifacts
-    } else {
-        project.join(artifacts)
-    };
-    let candidate_dir = crate::config::project_factory_artifacts_root(cas_root, &artifacts)
-        .join(task)
-        .join("candidate");
     let layout = CandidatePlan {
         task: task.clone(),
         revision: revision.clone(),
@@ -443,6 +474,7 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         version_file: candidate_dir.join("VERSION.txt"),
         checksums_file: candidate_dir.join("SHA256SUMS"),
         receipt_file: candidate_dir.join("RECEIPT.json"),
+        path_command: candidate_path_command(task),
         candidate_dir,
     };
     if *plan {
@@ -450,9 +482,10 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
             println!("{}", serde_json::to_string_pretty(&layout)?);
         } else {
             println!(
-                "Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json",
+                "Candidate: {}\nRevision: {}\nFiles: cas, VERSION.txt, SHA256SUMS, RECEIPT.json\nFind it: {}",
                 layout.candidate_dir.display(),
-                layout.revision
+                layout.revision,
+                layout.path_command
             );
         }
         return Ok(());
@@ -494,11 +527,12 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         print!("{}", String::from_utf8(output.stdout)?);
     } else {
         println!(
-            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}",
+            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}\nFind it: {}",
             receipt.candidate_dir.display(),
             receipt.version,
             receipt.revision,
-            receipt.sha256
+            receipt.sha256,
+            layout.path_command
         );
     }
     Ok(())

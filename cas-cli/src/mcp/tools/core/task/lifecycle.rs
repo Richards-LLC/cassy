@@ -896,8 +896,31 @@ fn open_task_similarity(
         {
             continue;
         }
+        // Siblings often repeat one mandatory safety/build block. Discount
+        // identical multiline paragraphs only when both briefs retain scope
+        // outside them. Single-line scope statements and identical full briefs
+        // still participate, as do titles and every non-sibling comparison.
+        let (candidate_scope, existing_scope) = if siblings.contains(&task.id) {
+            let candidate_blocks: Vec<_> = description.split("\n\n").map(str::trim).collect();
+            let existing_blocks: Vec<_> = task.description.split("\n\n").map(str::trim).collect();
+            let common: std::collections::HashSet<_> = candidate_blocks.iter().copied()
+                .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
+                    && existing_blocks.contains(block))
+                .collect();
+            let candidate = candidate_blocks.into_iter()
+                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+            let existing = existing_blocks.into_iter()
+                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+            if !candidate.trim().is_empty() && !existing.trim().is_empty() {
+                (candidate, existing)
+            } else {
+                (description.to_string(), task.description.clone())
+            }
+        } else {
+            (description.to_string(), task.description.clone())
+        };
         let Some((score, identifiers)) =
-            task_similarity(title, description, &task.title, &task.description)
+            task_similarity(title, &candidate_scope, &task.title, &existing_scope)
         else {
             continue;
         };
@@ -933,6 +956,7 @@ fn recent_other_epic_planner(
     task_store: &dyn cas_store::TaskStore,
     epic_id: &str,
     creator: &str,
+    creator_session: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>, String> {
     let recent = task_store
@@ -946,6 +970,7 @@ fn recent_other_epic_planner(
             // that a different supervisor planned these children.
             (planner != "mcp"
                 && planner != creator
+                && Some(planner.as_str()) != creator_session
                 && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
@@ -1283,10 +1308,15 @@ impl CasCore {
                 }
             }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
+                // Dependencies written by another transport may identify this
+                // same registered agent by its harness session instead.
+                let creator_session = self.open_agent_store()?.get(creator).ok()
+                    .and_then(|agent| agent.cc_session_id);
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
                     epic,
                     creator,
+                    creator_session.as_deref(),
                     chrono::Utc::now(),
                 )
                 .map_err(|error| McpError {

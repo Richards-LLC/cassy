@@ -1579,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn unbound_advanced_intent_is_retained_without_queue_output() {
+    fn unclassified_intent_does_not_abort_unrelated_task_recovery() {
         let (_temp, store) = create_test_store();
         let mut task = Task::new("task-ambiguous-intent".to_string(), "before".to_string());
         store.inner.add(&task).unwrap();
@@ -1595,15 +1595,30 @@ mod tests {
         task.title = "advanced outside the receipt protocol".to_string();
         store.inner.update(&task).unwrap();
 
-        let error = store.reconcile_pending_task_sync().unwrap_err();
+        // A separate, receipt-bound task mutation is the ordinary progress
+        // update that must still recover while this entity remains ambiguous.
+        let mut unrelated = Task::new("task-unrelated-recovery".to_string(), "before".to_string());
+        store.add(&unrelated).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(_temp.path(), "");
+        unrelated.title = "committed while sync was degraded".to_string();
+        assert_degraded(store.update(&unrelated).unwrap_err(), "update", &unrelated.id);
+        remove_task_enqueue_failure(_temp.path());
 
-        assert!(error.to_string().contains("unclassified"), "{error}");
-        assert!(error.to_string().contains("evidence retained"), "{error}");
-        assert!(store.queue.pending(10, 5).unwrap().is_empty());
+        let reopened = reopen_test_store(_temp.path(), false);
+        assert!(
+            reopened.init().is_ok(),
+            "an ambiguous intent must not make unrelated task-store opens fail"
+        );
+        assert_eq!(reopened.get(&unrelated.id).unwrap().title, unrelated.title);
         assert_eq!(
             store.queue.pending_task_sync_intents().unwrap(),
-            vec![intent]
+            vec![intent],
+            "the unresolved intent remains durable for supported operator recovery"
         );
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1, "the unrelated intent should be recovered");
+        assert_eq!(pending[0].entity_id, unrelated.id);
     }
 
     #[test]

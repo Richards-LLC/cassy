@@ -54,3 +54,14 @@ four palettes, pipe, C locale, NO_COLOR and one-document MCP JSON transport.
 
 Scoped text and mechanical captures reviewed by fierce-marten-72 on 2026-10-22;
 no GUI screenshot, live factory merge or full task-output grading is claimed.
+
+
+## cas-4fe8: delivery source resolution
+
+An explicit task owns its source: resolve its worker identity from the task and
+agent store, then prefer its recorded exact branch and anchor. A missing recorded
+branch permits discovery of canonical, shortened task-ID and retry/fix/resume
+branches for that worker and task. Several discovered names refuse before merge,
+even at the same SHA. The refusal names every candidate in sorted order and tells
+the supervisor to record the intended branch and anchor. Existing authorization,
+repository binding, anchor, QA and CI gates still apply. No new TUI surface.

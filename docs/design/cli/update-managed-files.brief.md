@@ -40,8 +40,9 @@ Its existing check JSON carries the same cause and PR remedy. Spawn and lane
 refusals name reconcile commits only when all commits on the implicated side
 are Cassy-authored managed-file repairs; refs remain untouched.
 
-Fresh terminal evidence and critique for this addition are pending; earlier
-receipts below cover their named earlier changes only.
+See the cas-3b812 task's commit-bound `LEDGER.md` for fresh terminal evidence
+and critique of this addition. Earlier receipts below cover their named earlier
+changes only.
 
 ## Critique
 

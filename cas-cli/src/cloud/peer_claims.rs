@@ -1712,41 +1712,26 @@ mod tests {
 
         #[cfg(unix)]
         #[test]
-        fn settled_claim_fences_are_removed_without_splitting_waiters_cas_923e() {
+        fn settled_claim_fences_preserve_legacy_waiter_exclusion_cas_d3b0() {
+            use fs2::FileExt;
             use std::os::unix::fs::MetadataExt;
             let dir = tempfile::tempdir().unwrap();
             let owner = lock_task_claim_release(dir.path(), TASK).unwrap();
             let path = dir.path().join("claim-release-locks")
                 .join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
-            let (opened, saw_open) = std::sync::mpsc::channel();
-            let (resume, proceed) = std::sync::mpsc::channel();
-            let root = dir.path().to_path_buf();
-            let waiter = std::thread::spawn(move || {
-                let mut first = true;
-                lock_task_claim_release_with(&root, TASK, |_| {
-                    if first {
-                        first = false;
-                        opened.send(()).unwrap();
-                        proceed.recv_timeout(Duration::from_secs(10)).unwrap();
-                    }
-                }).unwrap()
-            });
-            saw_open.recv_timeout(Duration::from_secs(10)).unwrap();
+            // Pre-923e callers open before flock and never recheck the path
+            // or its generation. They can open a UUID-bearing file too.
+            let legacy = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             drop(owner);
-            let removed = !path.exists();
-            // A new opener creates another inode while the waiter still has
-            // the old inode open. That waiter must reopen before proceeding.
             let replacement = lock_task_claim_release(dir.path(), TASK).unwrap();
+            assert!(legacy.try_lock_exclusive().is_err(),
+                "a legacy waiter must not acquire a detached inode while a new caller holds the task fence");
             drop(replacement);
-            resume.send(()).unwrap();
-            let waiter = waiter.join().unwrap();
+            legacy.lock_exclusive().unwrap();
+            let held = legacy.metadata().unwrap();
             let current = std::fs::metadata(&path).unwrap();
-            assert!(removed, "settlement must remove the task-specific lock file");
-            let held = waiter._file.metadata().unwrap();
             assert_eq!((held.dev(), held.ino()), (current.dev(), current.ino()),
-                "a waiter must lock the current path, not an unlinked inode");
-            drop(waiter);
-            assert!(!path.exists(), "the final owner must remove its lock file too");
+                "old and new callers must retain the same per-task inode");
         }
 
         #[tokio::test]

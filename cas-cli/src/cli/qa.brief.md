@@ -111,3 +111,23 @@ Scored by true-otter-3 on 2026-10-21; all floors hold.
 | Readable | A one-line notice identifies a working tree that differs from the measured ref; registry upkeep explicitly counts validation and ownership issues and shows their breakdown. |
 | Machine output | --status preserves existing coverage/upkeep fields and adds source=working_tree and differs_from_measured_ref (boolean, null when comparison is unavailable); upkeep.measured_ref labels all nested upkeep figures. |
 | Omitted | No second validation total is hidden in the headline, and integration drift does not alter the working-registry verdict; individual freshness commands remain available. |
+
+### Source consistency critique
+
+`terminal-qa: PASS qa-journeys-status · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+Receipt: task `cas-9fffc`, `terminal-qa/status/report.json`; candidate
+`4b082990243cebae658901d18b2604e8634e64d5`. The real CLI walk covers divergent
+refs, uncommitted curation, malformed YAML, an unavailable integration ref and
+aligned inputs. Working totals agree with `--check` on every valid registry.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 5 | The working problem/debt verdict leads, followed by the check command. |
+| Fit | 5 | Working coverage and measured integration upkeep have separate source groups; the longest human row is 66 cells. |
+| Craft | 4 | The measured registry row names validation/ownership units and shows their breakdown; the existing full-ref JSON escape remains. |
+| Theme safety | 5 | Four palettes, pipe, NO_COLOR and C locale pass; the 80-column dark/light captures were inspected. |
+| Machine contract | 5 | One JSON document preserves coverage/upkeep and labels source plus nullable divergence; working totals match --check. |
+
+Scored by wise-jay-99 on 2026-10-22. The CLI matrix and terminal gate use the
+supervisor-built candidate; final-tip receipts remain in the task ledger.

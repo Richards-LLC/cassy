@@ -139,10 +139,15 @@ pub fn help_wordmark() -> &'static str {
 }
 
 fn help_wordmark_for_mode(mode: crate::ui::components::OutputMode) -> &'static str {
-    match mode {
-        crate::ui::components::OutputMode::Styled if crate::ui::components::locale_is_utf8() => CASSY_WORDMARK,
-        _ => CASSY_PLAIN_WORDMARK,
+    if supports_styled_glyphs(mode) {
+        CASSY_WORDMARK
+    } else {
+        CASSY_PLAIN_WORDMARK
     }
+}
+
+fn supports_styled_glyphs(mode: crate::ui::components::OutputMode) -> bool {
+    mode == crate::ui::components::OutputMode::Styled && crate::ui::components::locale_is_utf8()
 }
 
 /// Parse with a destination-aware top-level help banner.
@@ -202,7 +207,7 @@ fn hub_tracing_root(
 #[command(name = "cas")]
 #[command(about = "Cassy - a multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
-#[command(before_help = CASSY_WORDMARK)]
+#[command(before_help = CASSY_PLAIN_WORDMARK)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
@@ -1097,6 +1102,8 @@ mod tests {
             assert!(help.contains("Usage:"), "root help retains command entry");
             if expected_styled.is_ascii() {
                 assert!(help.is_ascii(), "root help must be ASCII in {locale}: {help}");
+                let default_help = Cli::command().render_long_help().to_string();
+                assert!(default_help.is_ascii(), "raw clap entry must not bypass the locale fallback: {default_help}");
             }
         }
     }

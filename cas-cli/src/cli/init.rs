@@ -291,11 +291,32 @@ const CASSY_PLAIN_WORDMARK: [&str; 1] = ["Cassy"];
 const INIT_WORDMARK_WIDTH: usize = 52;
 
 fn cassy_wordmark_lines() -> &'static [&'static str] {
-    if OutputMode::detect() == OutputMode::Plain {
-        &CASSY_PLAIN_WORDMARK
-    } else {
+    cassy_wordmark_lines_for_mode(OutputMode::detect())
+}
+
+fn cassy_wordmark_lines_for_mode(mode: OutputMode) -> &'static [&'static str] {
+    if super::supports_styled_glyphs(mode) {
         &CASSY_WORDMARK
+    } else {
+        &CASSY_PLAIN_WORDMARK
     }
+}
+
+fn init_text_for_mode(text: &str, mode: OutputMode) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() || super::supports_styled_glyphs(mode) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    // Init's frame corners and section dot extend the shared punctuation
+    // fallback. Leave user content (paths and names) intact.
+    let decor: String = text
+        .chars()
+        .map(|ch| match ch {
+            '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' => '+',
+            '●' => '*',
+            other => other,
+        })
+        .collect();
+    std::borrow::Cow::Owned(crate::ui::components::ascii_fallback(&decor).into_owned())
 }
 
 fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {
@@ -1318,11 +1339,13 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 
 fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
     let mut stdout = stdout();
-    if OutputMode::detect() == OutputMode::Plain {
+    let mode = OutputMode::detect();
+    let text = init_text_for_mode(text, mode);
+    if mode == OutputMode::Plain {
         write!(stdout, "{text}")?;
         return Ok(());
     }
-    execute!(stdout, SetForegroundColor(color), Print(text))?;
+    execute!(stdout, SetForegroundColor(color), Print(text.as_ref()))?;
     execute!(stdout, SetForegroundColor(Color::Reset))?;
     Ok(())
 }
@@ -1383,6 +1406,23 @@ mod integration_flag_tests {
         assert!(CASSY_WORDMARK
             .iter()
             .all(|row| row.chars().count() <= INIT_WORDMARK_WIDTH));
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let frame = "╭─╮\n│ ● → Cassy │\n╰─╯\n";
+        for locale in ["C", "en_US.ISO-8859-1", "C.UTF-8"] {
+            env.set("LC_ALL", locale);
+            for mode in [OutputMode::Styled, OutputMode::Plain] {
+                let wordmark = cassy_wordmark_lines_for_mode(mode);
+                let text = init_text_for_mode(frame, mode);
+                if mode == OutputMode::Styled && locale == "C.UTF-8" {
+                    assert_eq!(wordmark, CASSY_WORDMARK);
+                    assert_eq!(text, frame, "UTF-8 styled init frame is unchanged");
+                } else {
+                    assert!(wordmark.iter().all(|line| line.is_ascii()), "{locale} {mode:?}: {wordmark:?}");
+                    assert!(text.is_ascii(), "{locale} {mode:?}: {text}");
+                    assert!(text.contains("Cassy"), "fallback retains welcome content");
+                }
+            }
+        }
     }
 
     #[test]

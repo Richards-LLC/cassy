@@ -3483,6 +3483,118 @@ mod epic_move_work_target_tests {
         );
     }
 
+    #[tokio::test]
+    async fn retargeting_a_split_child_releases_its_cloud_claim_cas_8503() {
+        use crate::test_support::TestEnvGuard;
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SESSION_ID", None),
+            ("CAS_AGENT_NAME", None),
+        ]);
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let old = epic("cas-8503-old", "epic/old");
+        let new = epic("cas-8503-new", "epic/new");
+        let mut child = Task::new("cas-8503-child".into(), "Moved split child".into());
+        child.deliverables.work_target = Some(target("epic/old"));
+        store.add(&old).unwrap();
+        store.add(&new).unwrap();
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                child.id.clone(),
+                old.id.clone(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+
+        let owner = crate::types::Agent::new_with_role(
+            "split-owner".into(),
+            "split-owner".into(),
+            crate::types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let project = "github.com/acme/widgets";
+        std::fs::write(
+            root.path().join("config.toml"),
+            format!("[project]\ncanonical_id = {project:?}\n"),
+        )
+        .unwrap();
+        let server = MockServer::start().await;
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("fixture-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(root.path())
+        .unwrap();
+
+        let key = crate::cloud::peer_claims::claim_key(project, &child.id);
+        let lock = cas_types::TaskLease::new(key.clone(), owner.id.clone(), 600);
+        Mock::given(method("GET"))
+            .and(path(format!("/api/agents/tasks/{key}/lock")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "lock": lock,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let released_tx = Arc::new(Mutex::new(Some(released_tx)));
+        let release_signal = released_tx.clone();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/agents/tasks/{key}/release")))
+            .respond_with(move |_| {
+                if let Some(sender) = release_signal.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "status": "success" }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        cas_store::insert_epic_split(
+            root.path(),
+            &cas_store::EpicSplit {
+                id: "split-cas-8503".into(),
+                epic_id: old.id.clone(),
+                local_agent_id: owner.id.clone(),
+                peer_agent_id: "peer-owner".into(),
+                peer_name: "peer-owner".into(),
+                peer_machine: "peer-host".into(),
+                direction: cas_store::SplitDirection::Outgoing,
+                mine: vec![child.id.clone()],
+                theirs: vec![],
+                state: cas_store::SplitState::Accepted,
+                reason: None,
+                message_id: None,
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                created_at: chrono::Utc::now(),
+                decided_at: Some(chrono::Utc::now()),
+                decided_by: Some(owner.id.clone()),
+                cleanup_pending: false,
+                expiry_notice_pending: false,
+            },
+        )
+        .unwrap();
+
+        move_into(&core, &child.id, &new.id).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), released_rx)
+            .await
+            .expect("retargeting must release the old split claim")
+            .expect("Cloud release request must reach the fixture");
+        assert!(crate::cloud::epic_split::split_hold_for(root.path(), &child.id).is_none());
+    }
+
     async fn add_parent(core: &CasCore, task_id: &str, epic_id: &str) -> Result<(), String> {
         let req: DependencyRequest = serde_json::from_value(serde_json::json!({
             "from_id": task_id,

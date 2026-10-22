@@ -298,18 +298,32 @@ impl GitOperations {
                 "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
             );
         }
-        if let Some(origin) =
-            origin.filter(|origin| origin.branch == branch && !origin.host.trim().is_empty())
+        let clean_host = |host: &str| {
+            host.chars()
+                .filter(|character| !character.is_control())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        if let Some(host) = origin
+            .filter(|origin| origin.branch == branch)
+            .map(|origin| clean_host(&origin.host))
+            .filter(|host| !host.is_empty())
         {
+            let local_host =
+                crate::cloud::device::DeviceConfig::hostname().map(|host| clean_host(&host));
+            if local_host.as_deref() == Some(host.as_str()) {
+                return format!(
+                    "epic branch missing on originating host {host}\nRestore {branch} from a known commit or backup; inspect history:\ngit reflog --all"
+                );
+            }
             return format!(
-                "spawn refused: epic branch not published by {}\nNo local/origin ref; publish on {}, then retry:\n`git push origin {}`",
-                origin.host,
-                origin.host,
+                "epic branch not published by {host}\nNo local/origin ref; publish on {host}, then retry:\ngit push origin {}",
                 shell_words::quote(branch),
             );
         }
         format!(
-            "spawn base '{branch}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
+            "epic branch '{branch}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
         )
     }
 

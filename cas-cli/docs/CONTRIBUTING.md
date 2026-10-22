@@ -344,7 +344,10 @@ sharing the task through Cloud does not transfer its ref. Task deliverables
 retain the originating host and branch so a peer's missing-lane spawn refusal
 names that host and prints `git push origin <epic-branch>` to run there before
 retrying. First focus or spawn on the source host still publishes the lane.
-The peer never reconstructs the lane from trunk. Missing legacy provenance
+The peer never reconstructs the lane from trunk. On the originating host, a
+missing lane gets known-tip recovery advice instead of an impossible push.
+Commands occupy their own plain line; synced host labels have control characters
+removed. Adopting an existing published lane does not invent an origin host. Missing legacy provenance
 produces a neutral unavailable-lane message; failed origin verification and
 previously published refs retain their separate refusal paths.
 

@@ -61,16 +61,25 @@ fn push_enabled() -> bool {
 /// - Local only: it is used as it is.
 /// - Nowhere: it is created from the configured trunk, under the same push
 ///   rule as an auto lane, and the receipt says so.
-pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
+pub(crate) fn ensure_adopted_lane(
+    repo_root: &Path,
+    lane: &str,
+) -> (String, Option<cas_types::EpicBranchOrigin>) {
     let header = format!(
         "\n\n🌿 Epic lane adopted: {lane} (the explicit target_branch). Children inherit it and \
          worktree_merge lands on it; no auto lane was created."
     );
     if !GitOperations::is_git_available() {
-        return format!("{header}\n   git is unavailable, so the lane was not checked.");
+        return (
+            format!("{header}\n   git is unavailable, so the lane was not checked."),
+            None,
+        );
     }
     let Ok(root) = GitOperations::detect_repo_root(repo_root) else {
-        return format!("{header}\n   No git repository at {}.", repo_root.display());
+        return (
+            format!("{header}\n   No git repository at {}.", repo_root.display()),
+            None,
+        );
     };
     let git = GitOperations::new(root.clone());
     let local = git.branch_exists(lane).unwrap_or(false);
@@ -93,9 +102,14 @@ pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
         } else {
             "local-only; it will be published on first focus or spawn"
         };
-        return format!(
-            "{header}\n   Tip: '{}' @ {sha} ({published}).{state}",
-            resolved.branch_ref
+        // A fetched or pre-existing lane supplies no evidence that this
+        // adopter was its originating host.
+        return (
+            format!(
+                "{header}\n   Tip: '{}' @ {sha} ({published}).{state}",
+                resolved.branch_ref
+            ),
+            None,
         );
     }
 
@@ -104,18 +118,27 @@ pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
     let base = match git.resolve_fresh_base(&trunk) {
         Ok(base) if !base.sha.is_empty() => base,
         _ => {
-            return format!(
-                "{header}\n   {lane} does not exist and its base '{trunk}' could not be \
+            return (
+                format!(
+                    "{header}\n   {lane} does not exist and its base '{trunk}' could not be \
                  resolved; create {lane} before workers merge."
+                ),
+                None,
             );
         }
     };
-    if let Err(error) = git.create_branch_from(lane, &base.sha) {
-        return format!(
-            "{header}\n   Creating {lane} from '{}' failed: {error}.",
-            base.branch_ref
-        );
-    }
+    let created = match git.create_branch_from(lane, &base.sha) {
+        Ok(created) => created,
+        Err(error) => {
+            return (
+                format!(
+                    "{header}\n   Creating {lane} from '{}' failed: {error}.",
+                    base.branch_ref
+                ),
+                None,
+            );
+        }
+    };
     let sha = &base.sha[..base.sha.len().min(8)];
     let push_state = if !push_enabled() {
         format!(
@@ -127,9 +150,12 @@ pub(crate) fn ensure_adopted_lane(repo_root: &Path, lane: &str) -> String {
             Err(error) => format!("local-only; publishing {lane} to origin failed: {error}"),
         }
     };
-    format!(
-        "{header}\n   {lane} did not exist; created it from '{}' @ {sha}. Push state: {push_state}.",
-        base.branch_ref
+    (
+        format!(
+            "{header}\n   {lane} did not exist; created it from '{}' @ {sha}. Push state: {push_state}.",
+            base.branch_ref
+        ),
+        created.then(|| branch_origin(lane)).flatten(),
     )
 }
 

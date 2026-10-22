@@ -1613,11 +1613,11 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-            let receipt = epic_lane::ensure_adopted_lane(&context.repo_root, lane);
+            let (receipt, origin) = epic_lane::ensure_adopted_lane(&context.repo_root, lane);
             let task_store = self.open_task_store()?;
             if let Ok(mut updated_task) = task_store.get(&id) {
                 updated_task.branch = Some(lane.to_string());
-                updated_task.deliverables.epic_branch_origin = epic_lane::branch_origin(lane);
+                updated_task.deliverables.epic_branch_origin = origin;
                 let _ = task_store.update(&updated_task);
             }
             Some(receipt)

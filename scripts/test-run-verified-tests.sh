@@ -184,13 +184,8 @@ def cleanup(wrapper, pids):
         os.killpg(wrapper.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
-    # The fake Cargo leader waits 60s in signal cases; never target a reaped group.
-    if pids and live(pids[0]):
-        try:
-            os.killpg(pids[0], signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    for pid in pids[1:]:
+    # Fake Cargo is not our child, so use only the recorded PIDs, never its PGID.
+    for pid in pids:
         if live(pid):
             try:
                 os.kill(pid, signal.SIGKILL)

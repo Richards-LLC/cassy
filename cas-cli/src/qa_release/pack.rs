@@ -106,7 +106,7 @@ pub(super) fn record_pruned(dir: &Path, entries: &[Pruned]) -> Result<(), PackEr
 
 /// Writes `dir/name` through a uniquely named temp file in `dir`, then an
 /// atomic rename, so concurrent writers (prune, seal) never share a temp.
-fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), PackError> {
+pub(super) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), PackError> {
     use std::io::Write;
     let io = |e: std::io::Error| PackError::Io(e.to_string());
     let mut temp = tempfile::Builder::new().prefix(&format!(".{name}.")).tempfile_in(dir).map_err(io)?;
@@ -313,8 +313,8 @@ impl Pack {
     }
 
     /// The pruned records a seal keeps: those whose entry this pack still
-    /// lists with the same digest and whose file is still gone. Loading never
-    /// reconciles, so a stray record still refuses there.
+    /// lists with the same digest and whose file is still gone. Loading
+    /// ignores the rest anyway; sealing drops them so the record stays small.
     fn reconciled(&self, dir: &Path, records: &[Pruned]) -> Vec<Pruned> {
         records
             .iter()

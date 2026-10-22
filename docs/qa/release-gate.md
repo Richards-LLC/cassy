@@ -40,6 +40,7 @@ env = "staging"
 | `adapter` | Project-relative adapter executable. Empty leaves the gate off. |
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
+| `slack_channel` | Slack channel the `cas serve` driver posts each sealed pack to through Violet (default empty: no post). |
 | `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
 | `components` | Served component name to the repository paths it is built from. |
 | `grant_envs` | Environments where preflight may `grant` a balance shortfall (default `["staging"]`). |
@@ -210,6 +211,26 @@ against the pack digest and is at most 25 MiB. Video over the limit is
 re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
 fits. If re-encoding fails or the video is still too large, it stays
 local-only and the row's frames carry the evidence.
+
+**Posting at seal.** When `slack_channel` is set, the `cas serve` driver
+posts each sealed pack through the serve process's Violet proxy, once per
+pack generation, keyed by the sha256 of `pack.json`. It never uses the Slack
+connector. An OWED reseal therefore posts its new generation once.
+
+- **Identity:** the driver calls as the fixed identity `release-gate-driver`
+  with the `Standard` role, and goes through Violet's normal policy and
+  audience checks.
+- **Limits:** that caller can call only `violet_post` and only to
+  `slack_channel`. Every call is audit-logged with the pack sha256 and the
+  channel.
+- **Receipts:** the permalink is written to the run notes and to `slack.json`
+  in the pack directory.
+- **Failures:** a failed post is noted and not recorded, so the next
+  generation posts. With no Violet proxy in the serve process, the run notes
+  say so and nothing is posted.
+- **Video sniffing:** a video's `ftyp` box must name a video brand (`isom`,
+  `mp42`, `qt` and others), so HEIC, AVIF or M4A saved under a video
+  extension is linked rather than uploaded.
 
 **PR comment.** Cassy keeps one comment per PR, marked
 `<!-- cassy:release-gate -->`, and edits it in place. A body over 65,000

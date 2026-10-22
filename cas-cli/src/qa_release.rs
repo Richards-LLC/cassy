@@ -24,6 +24,7 @@ pub mod verdict;
 pub mod independence;
 pub mod promotion;
 pub mod resources;
+pub mod slack;
 pub mod run;
 
 /// Adapter protocol version written to and required from every envelope.
@@ -63,6 +64,9 @@ pub struct ReleaseConfig {
     /// Named suites, run in name order; a journey runs in the first that selects it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub suites: BTreeMap<String, SuiteConfig>,
+    /// Slack channel the serve driver posts each sealed pack to through
+    /// Violet; empty posts nothing.
+    pub slack_channel: String,
 }
 
 /// `[qa.release.suites.<name>]`: which journeys, under what wall clock.
@@ -122,6 +126,7 @@ impl Default for ReleaseConfig {
             retention_days: 30,
             gate_env: "staging".into(),
             suites: BTreeMap::new(),
+            slack_channel: String::new(),
         }
     }
 }
@@ -882,6 +887,7 @@ mod tests {
     include!("qa_release/fixture_test.rs");
     include!("qa_release/resources_test.rs");
     include!("qa_release/run_test.rs");
+    include!("qa_release/slack_test.rs");
     include!("qa_release/promotion_test.rs");
 
     /// The tracked fake adapter runs through the real sandbox: `served` echoes

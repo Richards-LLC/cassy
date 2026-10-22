@@ -62,8 +62,11 @@ fallback_dir="${tmpdir}/without-waitid"
 mkdir -p "${fallback_dir}"
 cat >"${fallback_dir}/sitecustomize.py" <<'EOF'
 import os
+import select
 if hasattr(os, 'waitid'):
     del os.waitid
+if hasattr(select, 'kqueue'):
+    del select.kqueue
 EOF
 expect pass 'PASS: 2 test(s) passed' 'nextest discovery works without os.waitid' \
     env PYTHONPATH="${fallback_dir}" CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \

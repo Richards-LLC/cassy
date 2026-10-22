@@ -1712,14 +1712,15 @@ mod tests {
         assert!(crate::store::open_agent_store(dir.path()).unwrap()
             .try_claim("cas-8503-child", &owner.id, 600, None).unwrap().is_success());
         insert_child_split(dir.path(), &split_for_child(
-            "split-old", "cas-8503-old", "split-owner", "mine", SplitState::Accepted,
+            "split-old", "cas-8503-old", "split-owner", "mine", SplitState::Cancelled,
         ));
 
         let claims = PeerClaims::for_project(dir.path()).unwrap();
         assert_eq!(renew_split_claims(dir.path(), &claims, "split-owner", 600), 0);
         assert_eq!(releases.load(Ordering::SeqCst), 0, "the task lease, not the old split, owns this claim");
         assert_eq!(renewals.load(Ordering::SeqCst), 0, "the worker lease already renews this claim");
-        assert!(!list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-old".into(), "cas-8503-child".into())));
+        assert!(list_epic_split_child_releases(dir.path()).unwrap().contains(&("split-old".into(), "cas-8503-child".into())),
+            "cleanup must reach the owner's lease check and settle the ended split");
     }
 
     #[tokio::test]

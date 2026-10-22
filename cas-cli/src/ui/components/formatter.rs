@@ -108,10 +108,14 @@ pub enum OutputMode {
 impl OutputMode {
     /// Detect the appropriate output mode for stdout.
     pub fn detect() -> Self {
+        Self::for_terminal(io::stdout().is_terminal())
+    }
+
+    fn for_terminal(is_terminal: bool) -> Self {
         if std::env::var("NO_COLOR").is_ok() {
             return OutputMode::Plain;
         }
-        if io::stdout().is_terminal() {
+        if is_terminal {
             OutputMode::Styled
         } else {
             OutputMode::Plain
@@ -151,6 +155,16 @@ impl<'w> Formatter<'w> {
             theme,
             width,
         }
+    }
+
+    /// Create a Formatter for stderr, detecting styling from stderr itself.
+    pub fn stderr(writer: &'w mut dyn Write, theme: ActiveTheme) -> Self {
+        Self::new(
+            writer,
+            OutputMode::for_terminal(io::stderr().is_terminal()),
+            theme,
+            terminal_width(),
+        )
     }
 
     /// Create a styled Formatter (force styled mode).

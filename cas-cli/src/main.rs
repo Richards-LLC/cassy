@@ -182,7 +182,7 @@ fn main() -> ExitCode {
 
                 let mut err_out = std::io::stderr();
                 let theme = ActiveTheme::default();
-                let mut fmt = Formatter::stdout(&mut err_out, theme);
+                let mut fmt = Formatter::stderr(&mut err_out, theme);
 
                 if let Some(err) = e.downcast_ref::<error::CasError>() {
                     let _ = fmt.error(&err.to_string());

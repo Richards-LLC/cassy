@@ -4779,6 +4779,16 @@ impl CasCore {
                         commit_receipt: Some(receipt.commit_sha.clone()),
                     }))
                     .await?;
+                crate::mcp::tools::service::mutation_receipt::merge_followup(
+                    &close_result
+                        .content
+                        .iter()
+                        .find_map(|content| match &content.raw {
+                            rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
+                );
                 if self
                     .open_task_store()?
                     .get(task_id)
@@ -4968,6 +4978,7 @@ impl CasCore {
                     && push_outcome.is_published() =>
             {
                 let outcome = self.close_after_green_merge(task_id, merge_sha).await;
+                crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.receipt(task_id));
                 format!("{push_note}{}", outcome.receipt(task_id))
             }
             _ => push_note,

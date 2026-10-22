@@ -534,7 +534,7 @@ impl CasService {
                     .map(|commit| commit.description.clone())
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                if tool_name == "task" {
+                if receipt.action() != "worktree_merge" {
                     let watcher_receipt = receipt.clone();
                     let tool = tool_name.to_string();
                     tokio::spawn(async move {
@@ -588,7 +588,7 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
-                } else if commit.is_some() && tool_name != "task" {
+                } else if commit.is_some() && receipt.action() == "worktree_merge" {
                     // cas-3937 review: committed, still running; keep its result.
                     self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
@@ -776,13 +776,28 @@ impl CasService {
             let Some(task_id) = task_id else {
                 return;
             };
-            let summary = late_close_summary(&joined);
+            // cas-3937 review: the close's own outcome, not the merge
+            // answer's first line (always its CI block).
+            let followup = receipt
+                .followup
+                .lock()
+                .ok()
+                .and_then(|followup| followup.clone())
+                .map(|text| {
+                    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    crate::mcp::tools::truncate_str(&text, 400).to_string()
+                })
+                .unwrap_or_else(|| late_close_summary(&joined));
             let action = receipt.action().to_string();
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
+                let status = store
+                    .get(&task_id)
+                    .map(|task| task.status.to_string())
+                    .unwrap_or_else(|error| format!("unreadable ({error})"));
                 let note = format!(
-                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s. Result: {summary}",
+                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                     elapsed.as_secs_f64(),
                 );

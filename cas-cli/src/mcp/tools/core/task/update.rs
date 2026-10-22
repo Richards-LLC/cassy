@@ -631,13 +631,25 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        if req.priority.is_some() && task.status == TaskStatus::InProgress {
-            self.resolve_live_supervisor_authority().map_err(|_| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    "TASK PRIORITY UPDATE REJECTED: changing priority on an in-progress task requires a live registered supervisor.",
-                )
-            })?;
+        let requested_status_is_active = req
+            .status
+            .as_deref()
+            .and_then(|status| status.parse::<TaskStatus>().ok())
+            .is_some_and(|status| matches!(status, TaskStatus::InProgress | TaskStatus::Blocked));
+        let priority_touches_active_task = req.priority.is_some()
+            && (matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+                || requested_status_is_active);
+        if priority_touches_active_task
+            && let Some(caller) = self
+                .get_registered_agent_id_read_only()
+                .ok()
+                .and_then(|caller_id| self.open_agent_store().ok()?.get(&caller_id).ok())
+            && caller.role == cas_types::AgentRole::Worker
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on active tasks; a live registered supervisor must change it.",
+            ));
         }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment

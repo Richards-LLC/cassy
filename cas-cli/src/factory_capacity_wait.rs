@@ -115,9 +115,6 @@ fn entries(root: &Path) -> Result<Vec<(PathBuf, CapacityWait)>> {
 }
 
 fn current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool> {
-    if now > wait.next_retry + Duration::seconds(RETRY_SECONDS) {
-        return Ok(false);
-    }
     let agents = open_agent_store(root)?;
     let Ok(worker) = agents.get(&wait.worker_id) else {
         return Ok(false);
@@ -146,6 +143,16 @@ fn current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool>
             && lease.epoch == wait.lease_epoch
             && lease.expires_at > now
     }))
+}
+
+/// A live task lease can outlast the worker's last admission retry. Keep its
+/// wait record for aging and escalation, but stop reserving queue position
+/// until it retries.
+fn admission_current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool> {
+    if now > wait.next_retry + Duration::seconds(RETRY_SECONDS) {
+        return Ok(false);
+    }
+    current(root, wait, now)
 }
 
 /// Resolve only a registered worker actually holding an InProgress task in
@@ -259,7 +266,7 @@ pub(crate) fn priority_refusal(
     let mut first_ahead: Option<(i32, DateTime<Utc>, String)> = None;
     let mut ahead_count = 0;
     for (_, wait) in entries(root)? {
-        if wait.worker_id == requester.worker_id || !current(root, &wait, now)? {
+        if wait.worker_id == requester.worker_id || !admission_current(root, &wait, now)? {
             continue;
         }
         let task = match tasks.get(&wait.task_id) {
@@ -319,7 +326,7 @@ pub(crate) fn admitted(root: &Path, repo: &Path) -> Result<()> {
 /// Read-only view, including stale-lease rejection, shared by status and tests.
 pub(crate) fn view(root: &Path, worker: &str, now: DateTime<Utc>) -> Result<Option<CapacityWait>> {
     match read(&path(root, worker))? {
-        Some(wait) if current(root, &wait, now)? => Ok(Some(wait)),
+        Some(wait) if admission_current(root, &wait, now)? => Ok(Some(wait)),
         _ => Ok(None),
     }
 }
@@ -331,7 +338,7 @@ pub(crate) fn render(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> 
             if session.is_some() && wait.session.as_deref() != session {
                 continue;
             }
-            if !current(root, &wait, now)? {
+            if !admission_current(root, &wait, now)? {
                 continue;
             }
             lines.push(format!(

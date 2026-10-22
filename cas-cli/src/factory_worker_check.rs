@@ -3238,8 +3238,8 @@ PY"#);
         assert!(
             crate::factory_capacity_wait::view(&root, "higher-worker", chrono::Utc::now())
                 .unwrap()
-                .is_some(),
-            "an admission-expired wait remains visible while its task lease is live"
+                .is_none(),
+            "an admission-expired wait is no longer shown as queued"
         );
         crate::factory_capacity_wait::reconcile(
             &root,

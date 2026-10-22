@@ -5733,7 +5733,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             for (old_id, old_prompt, old_summary) in candidates {
                 let (old_quiet, old_prompt) = split_quiet_marker(&old_prompt);
                 let old_body = body_of(&old_prompt);
-                let (earlier, own) = match old_body.split_once(fold_end.as_str()) {
+                // Split before the closing line's own trailing blank line:
+                // `body_of` trims it away when the fold's own text is empty.
+                let (earlier, own) = match old_body.split_once(fold_end.trim_end()) {
                     Some((earlier, own)) => (Some(earlier.trim().to_string()), own.trim().to_string()),
                     None => (None, old_body),
                 };

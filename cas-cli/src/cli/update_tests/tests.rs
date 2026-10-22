@@ -3564,3 +3564,51 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
         );
     }
 }
+
+#[test]
+fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
+    use unicode_width::UnicodeWidthStr;
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("NO_COLOR", "1");
+    let home = env.home().to_path_buf();
+    let root = crate::store::init_cas_dir(&home.join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    let destination = home.join(".claude");
+    std::fs::create_dir_all(&destination).unwrap();
+    sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &destination).unwrap();
+    let path = "skills/cas-worker/references/discipline.md";
+    let edited = destination.join(path);
+    let local = "# Local instructions\n\nPreserve every word of our local customization.\n";
+    std::fs::write(&edited, local).unwrap();
+
+    for columns in ["80", "120"] {
+        env.set("COLUMNS", columns);
+        let (result, output) = capture_phase(true, || {
+            sync_user_builtins_with_violet(&update_test_cli(false), || Ok(()))
+        });
+        result.unwrap();
+        let warning = output.split_once("[WARN]").expect("modified reference warning").1;
+        assert!(warning.lines().all(|line| line.width() <= 80), "{output}");
+        let prose = warning.split_whitespace().collect::<Vec<_>>().join(" ");
+        // pin: preserve the existing explanation in full; wrapping must not elide it.
+        assert!(prose.contains("1 locally modified builtin reference file(s) in ~/.claude were preserved (content matches no version Cassy has shipped):"), "{output}");
+        assert!(prose.contains(path), "{output}");
+        assert!(prose.contains("Review each file; to accept the Cassy version, delete it and rerun `cas update --user`."), "{output}");
+        assert!(!prose.contains("--sync") && !prose.contains('…'), "{output}");
+        assert_eq!(std::fs::read_to_string(&edited).unwrap(), local);
+    }
+
+    // The same real reporting path must retain the project-scoped remedy.
+    let result = SyncResult {
+        modified_reference_files: vec![path.to_owned()],
+        ..SyncResult::default()
+    };
+    let (reported, output) = capture_phase(true, || {
+        report_builtin_sync(&result, ".claude", &ActiveTheme::default())
+    });
+    reported.unwrap();
+    assert!(output.lines().all(|line| line.width() <= 80), "{output}");
+    let prose = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(prose.contains("cas update --sync") && !prose.contains("--user"), "{output}");
+}

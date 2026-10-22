@@ -493,6 +493,75 @@ fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
     );
 }
 
+/// Install/update must not depend on a personal HOME seed, and both legacy
+/// overrides and edits to an installed managed finish remain the operator's.
+#[test]
+fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
+    use cas_mux::SupervisorCli;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home();
+    assert!(!home.join(".agents/skills/finish").exists());
+    let roots = [
+        (SupervisorCli::Claude, ".claude"),
+        (SupervisorCli::Claude, ".claude-existing@example.com"),
+        (SupervisorCli::Claude, ".cas/claude-base"),
+        (SupervisorCli::Codex, ".codex"),
+        (SupervisorCli::Codex, ".codex-existing@example.com"),
+        (SupervisorCli::Codex, ".cas/codex-base"),
+        (SupervisorCli::Grok, ".grok"),
+    ];
+    for (_, root) in roots {
+        std::fs::create_dir_all(home.join(root)).unwrap();
+    }
+    let custom = home.join(".claude-custom@example.com");
+    for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
+        let path = custom.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "operator's personal finish\n").unwrap();
+    }
+    let cli = update_test_cli(true);
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    for (harness, root) in roots {
+        let installed = home.join(root).join("skills/finish/SKILL.md");
+        assert!(installed.is_file(), "{root} missing finish after real update");
+        let builtin = crate::builtins::skill_catalog_for_harness(harness)
+            .iter().find(|file| file.path == "skills/finish/SKILL.md").unwrap();
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), builtin.content);
+        if harness == SupervisorCli::Claude {
+            assert_eq!(std::fs::read_to_string(home.join(root).join("commands/finish.md")).unwrap(), builtin.content);
+        }
+        // Retain the managed marker: an operator edit still takes precedence.
+        std::fs::write(&installed, format!("{}\nOperator customization.\n", builtin.content)).unwrap();
+    }
+    let command = home.join(".claude/commands/finish.md");
+    std::fs::write(&command, "customized command after install\n").unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert_eq!(std::fs::read_to_string(command).unwrap(), "customized command after install\n");
+    for (_, root) in roots {
+        assert!(std::fs::read_to_string(home.join(root).join("skills/finish/SKILL.md"))
+            .unwrap().ends_with("Operator customization.\n"), "{root}");
+    }
+    for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
+        assert_eq!(std::fs::read_to_string(custom.join(path)).unwrap(), "operator's personal finish\n");
+    }
+    // Init and project refresh use this same writer, including OpenCode's
+    // physical project skills (its user catalog is projected at launch).
+    let project = home.join("project");
+    for (harness, dir) in [
+        (SupervisorCli::Claude, ".claude"),
+        (SupervisorCli::Codex, ".codex"),
+        (SupervisorCli::Grok, ".grok"),
+        (SupervisorCli::OpenCode, ".opencode"),
+    ] {
+        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        let path = project.join(dir).join("skills/finish/SKILL.md");
+        assert!(path.is_file(), "{harness:?} missing project finish");
+        std::fs::write(&path, "project finish override\n").unwrap();
+        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "project finish override\n");
+    }
+}
+
 #[test]
 fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();

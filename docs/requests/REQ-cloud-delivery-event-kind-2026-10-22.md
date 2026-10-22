@@ -1,101 +1,82 @@
-# Expose source event kind on managed activity delivery targets
+# Source event kind on managed activity deliveries
 
-Date: 2026-10-22. Cassy task: `cas-c28b6df4a2b653af`, from
-`Richards-LLC/violet_ps#70`. Requested by the Cassy supervisor in message
-542324. This file is the requested contract specification; the supervisor
-owns relaying it to the Cloud and Violet teams. No Cloud deployment or issue
-filing is claimed here.
+Status: **Satisfied by [Cloud PR #204](https://github.com/Richards-LLC/petra-stella-cloud/pull/204)**,
+merged at `a052e1f53a48635f9ea1f484e4cf4bfbc29adef6` on 2026-10-22.
+The Cloud supervisor reports this deployed; Cassy independently inspected the
+merged source and claim/recovery fixtures, without a live authenticated delivery.
+Cassy task: `cas-c28b6df4a2b653af`, from `Richards-LLC/violet_ps#70`.
 
-## Requested additive response field
+## Shipped contract
 
-Add optional `target.event_kind: string | null` to **both**:
+Cloud supplies optional `delivery.event_kind`, alongside `id`, `occurrence_id`
+and `route_kind`. **The field is on `delivery`, not `target`.** This supersedes
+the original proposal for `target.event_kind`; targets are unchanged.
+Cloud also supplies optional `delivery.author_user_id`; this Cassy change does
+not use it for classification.
 
-- `POST /api/violet/activity/claim`: `deliveries[].target.event_kind`.
-- `GET /api/coordination/activity/deliveries`: each recovery admission's
-  `target.event_kind`, for resume and recovery-notice entries alike.
+The delivery metadata is present in claim, recover/admission listings, lookup,
+rebind and receipt bodies. Supported event kinds are `message`, `app_mention`
+and `message_changed`. Historical journal replays may omit the fields.
 
-The value must come from the persisted occurrence's `event_kind`, with its
-existing spelling. For a direct Violet mention this is `"app_mention"`.
-Do not infer it from timestamps, thread ownership, the fetched Slack body,
-or the reader slot. If the original kind is unavailable, omit the field or
-return `null`; never manufacture a mention.
-
-Example delivery target (the surrounding delivery, lease and receipt fields
-remain unchanged):
+Example item shape (other fields omitted):
 
 ```json
 {
+  "delivery": {
+    "id": "0000de2a-1111-4111-8111-00000000de2a",
+    "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2",
+    "event_kind": "app_mention",
+    "author_user_id": "U01HUMAN42"
+  },
   "target": {
-    "resource_id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
-    "project_id": "github.com/richards-llc/cassy",
     "external_ref": {
       "provider": "slack",
       "workspace_id": "T07ABCDEF",
       "channel_id": "C08COORD01",
       "root_ts": "1760616000.123456"
     },
-    "message_ts": "1760616042.000200",
-    "permalink": null,
-    "event_kind": "app_mention"
+    "message_ts": "1760616042.000200"
   }
 }
 ```
 
-The same field must survive delivery recovery and reader rebind. Return
-the source occurrence kind, not delivery status, route kind or consumption.
-No Slack text or extra personal data is needed.
+Confirmed at immutable Cloud revision `a052e1f53a48635f9ea1f484e4cf4bfbc29adef6`:
 
-## Confirmed source boundary
-
-Cloud source inspected at immutable revision
-`d619807f456304c6a93eaaf5ee152ed251faad74`:
-
-- [occurrences.ts:130–133](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/occurrences.ts#L130)
-  persists `occ.event_kind` in `activity_occurrences.event_kind`.
-- [deliveries.ts:106](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L106)
-  selects claim target identity and permalink without `o.event_kind`;
-  [133–138](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L133)
-  serializes that target without source kind.
-- [deliveries.ts:341](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L341)
-  and [356–361](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L356)
-  omit it from the recovery projection and target serialization too.
-
-Cassy's current vendored `violet_activity--claim_v2.json` agrees with this
-shape. `violet_reader.rs::parse_delivery` retains the returned target;
-`PromptQueueTyper::type_into` currently labels every managed item
-`kind="delivery"`. The formatter consequently emits `addressed="thread"`.
-Cloud does not directly supply that addressed label.
+- [deliveries.ts:36–40](https://github.com/Richards-LLC/petra-stella-cloud/blob/a052e1f53a48635f9ea1f484e4cf4bfbc29adef6/lib/coordination/deliveries.ts#L36)
+  projects the persisted occurrence metadata through shared `deliveryJsonSql`.
+  Claim uses it at line 106 and recovery at line 342.
+- [contract.ts:234–239](https://github.com/Richards-LLC/petra-stella-cloud/blob/a052e1f53a48635f9ea1f484e4cf4bfbc29adef6/lib/coordination/contract.ts#L234)
+  declares these optional delivery fields.
+- [Claim fixture](https://github.com/Richards-LLC/petra-stella-cloud/blob/a052e1f53a48635f9ea1f484e4cf4bfbc29adef6/tests/contracts/coordination/v1/violet_activity--claim_v2.json)
+  puts `event_kind` on `deliveries[].delivery`.
+- [Recovery fixture](https://github.com/Richards-LLC/petra-stella-cloud/blob/a052e1f53a48635f9ea1f484e4cf4bfbc29adef6/tests/contracts/coordination/v1/deliveries--recover.json)
+  puts it on `admissions[].delivery`, including dispatch-uncertain entries.
 
 ## Cassy compatibility and wake policy
 
-Cassy will recognize only the exact string `target.event_kind="app_mention"`
-as a managed direct mention: emit `kind="mention" addressed="mention"`,
-enqueue at High with explicit interrupt intent, and retain the existing
-per-delivery idempotency key. Root and reply timestamps do not affect this
-classification. Queue ordering (High) alone does not grant interrupt intent.
+Cassy reads optional `item.delivery.event_kind` into `ClaimedDelivery.event_kind`.
+Only the exact string `app_mention` emits `kind="mention" addressed="mention"`
+and enqueues at High with explicit interrupt intent. Existing per-delivery
+idempotency keys remain unchanged; replay cannot escalate the first wake.
+Root and reply timestamps do not affect classification.
 
-When the field is absent, null, malformed or unrecognized, retain the current
-`kind="delivery" addressed="thread"`, High priority and `urgent=false`.
-Plain `message`/reply activity does likewise. Legacy v1 formatting and
-unrelated High-priority queue callers keep their current behavior. A
-recovery notice about uncertain prior typing remains a recovery notice and
-does not reissue the original mention as a fresh interrupt.
+Missing, null, malformed and unknown values, `message`, and `message_changed`
+retain `kind="delivery" addressed="thread"`, High priority and `urgent=false`.
+Legacy v1 formatting and unrelated High-priority callers keep their behavior.
+An uncertain prior dispatch stays a non-interrupting recovery notice.
+No inference from Slack text, timestamps or author identity is used.
 
-The Cassy fixture test explicitly models this **requested, not yet shipped**
-field. Its passing result is not proof of live Cloud support.
+The existing Cassy regression now models the shipped Cloud field location,
+through the real reader, body source and SQLite queue. The old requested-target
+fixture passed locally but missed the shipped shape; the corrected delivery
+fixture failed before the parser fix. Local evidence does not establish live
+PTY interruption or the original incident's end-to-end latency.
 
-## Cloud acceptance and handoff
+## Original source boundary
 
-1. Observe an `app_mention`, then claim it: `target.event_kind` is
-   `"app_mention"`. A root and a reply mention both retain that value.
-2. Recover/rebind the same admission: the value remains available with the
-   existing delivery identity and consumption semantics.
-3. A plain message retains its original kind; missing historical information
-   stays absent/null. Existing clients that ignore the additive field work.
-4. Update claim and recovery contract fixtures together and provide their
-   source/deployment revision to Cassy for a live-path verification.
-
-Until Cloud supplies that evidence, production mention classification and
-the reported incident's end-to-end latency remain unverified. Cassy's
-forward-compatible parsing and atomic urgency/dedupe behavior can be proved
-locally without inventing current production metadata.
+At the pre-fix revision `d619807f456304c6a93eaaf5ee152ed251faad74`,
+[occurrences.ts:130–133](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/occurrences.ts#L130)
+persisted `event_kind`, while
+[claim selection/target serialization:106,133–138](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L106)
+and [recovery:341,356–361](https://github.com/Richards-LLC/petra-stella-cloud/blob/d619807f456304c6a93eaaf5ee152ed251faad74/lib/coordination/deliveries.ts#L341)
+omitted it. Cloud PR #204 resolves that missing metadata boundary.

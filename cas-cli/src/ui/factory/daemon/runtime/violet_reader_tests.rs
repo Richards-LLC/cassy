@@ -590,6 +590,7 @@ fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
     queue.init().unwrap();
     let delivery = ClaimedDelivery {
         id: DELIVERY.to_owned(),
+        event_kind: None,
         delivery_generation: 1,
         lease_token: "fixture-lease".into(),
         target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":old}, "message_ts":old}),
@@ -653,6 +654,7 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         queue.init().unwrap();
         let delivery = ClaimedDelivery {
             id: DELIVERY.to_owned(),
+            event_kind: None,
             delivery_generation: 1,
             lease_token: "fixture-lease".into(),
             target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":fresh}, "message_ts":source}),

@@ -2309,7 +2309,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         // A missing recorded ref and an unrecorded retry both need discovery.
         task.deliverables.parked_branch = match branch {
             "factory/peer-worker-cas-c28b-r2" => None,
-            "factory/peer-worker-cas-c28b-fix" => Some("factory/peer-worker-cas-c28b-missing".into()),
+            "factory/peer-worker-cas-c28b-fix" => Some("factory/peer-worker-cas-c28b6df4a2b653af-r9".into()),
             _ => Some(branch.into()),
         };
         task.deliverables.work_target = Some(WorkTarget {
@@ -2344,7 +2344,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                     .expect_err("two fallback branches are ambiguous even at the same SHA");
                 let message = refused.message.as_ref();
                 assert!(message.contains("AMBIGUOUS DELIVERY SOURCE"), "{message}");
-                let candidates = format!("{sibling}, {branch}");
+                let candidates = format!("{branch}, {sibling}");
                 assert!(message.contains(&candidates), "sorted candidates: {message}");
                 assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
                 assert!(tasks.get(&task.id).unwrap().deliverables.parked_branch.is_none());

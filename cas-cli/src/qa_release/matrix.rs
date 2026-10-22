@@ -226,8 +226,8 @@ pub fn settle(rows: &mut [Row], golden: &[Planned<'_>]) -> Vec<Coverage> {
 /// Grades a walked PASS cell: each labeled criterion the cell has a label for
 /// is graded against it with the criterion's `compare` (cas-aff3). A band
 /// miss is FAIL naming the % of the baseline; a labeled criterion with no
-/// `measured` value is NOT_EXERCISED (owed). Unlabeled criteria are debt and
-/// leave the runner's verdict.
+/// `measured` value, or whose label is not a number, is NOT_EXERCISED
+/// (owed). Unlabeled criteria are debt and leave the runner's verdict.
 pub fn grade_measured(
     registry: &crate::qa_registry::Registry,
     journey: &Journey,
@@ -238,8 +238,13 @@ pub fn grade_measured(
     let labels = &cell.record.as_ref()?.labels;
     let mut misses = Vec::new();
     let mut unmeasured = Vec::new();
+    let mut ungradable = Vec::new();
     for criterion in registry.labeled_criteria(journey) {
-        let Some(baseline) = labels.get(criterion).and_then(serde_yaml::Value::as_f64) else { continue };
+        let Some(label) = labels.get(criterion).filter(|label| !label.is_null()) else { continue };
+        let Some(baseline) = label.as_f64() else {
+            ungradable.push(criterion);
+            continue;
+        };
         let Some(value) = measured.get(criterion) else {
             unmeasured.push(criterion);
             continue;
@@ -260,8 +265,12 @@ pub fn grade_measured(
     if !misses.is_empty() {
         return Some(RowVerdict::Fail { reason: format!("band miss: {}", misses.join("; ")) });
     }
-    (!unmeasured.is_empty()).then(|| RowVerdict::NotExercised {
-        cause: NotExercisedCause::Automation,
-        detail: format!("no measured value for labeled {}", unmeasured.join(", ")),
-    })
+    let mut owed = Vec::new();
+    if !ungradable.is_empty() {
+        owed.push(format!("label not gradable (not a number) for {}", ungradable.join(", ")));
+    }
+    if !unmeasured.is_empty() {
+        owed.push(format!("no measured value for labeled {}", unmeasured.join(", ")));
+    }
+    (!owed.is_empty()).then(|| RowVerdict::NotExercised { cause: NotExercisedCause::Automation, detail: owed.join("; ") })
 }

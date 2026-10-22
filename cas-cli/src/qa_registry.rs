@@ -1023,6 +1023,10 @@ impl ValidationReport {
     }
 }
 
+/// Golden-set rows `--check` expands to look for row-id clashes; a larger
+/// journey is reported as unchecked, never skipped silently.
+const ROW_ID_CHECK_LIMIT: u32 = 100_000;
+
 fn valid_status(status: &str) -> bool {
     matches!(status, "live" | "dark" | "dead")
 }
@@ -1041,7 +1045,13 @@ impl Registry {
         let mut row_ids: BTreeMap<String, &str> = BTreeMap::new();
         for journey in &self.journeys {
             let rows: Vec<String> = if journey.is_golden_set() {
-                crate::qa_release::matrix::planned_ids(project_root, journey, 100_000).unwrap_or_default()
+                match crate::qa_release::matrix::planned_ids(project_root, journey, ROW_ID_CHECK_LIMIT) {
+                    Ok(rows) => rows,
+                    Err(why) => {
+                        report.problem("row_id", &journey.id, format!("row ids were not checked for clashes: {why}"));
+                        continue;
+                    }
+                }
             } else {
                 vec![journey.id.clone()]
             };
@@ -2190,7 +2200,13 @@ journeys:
         let jsonl = golden("tests/golden.jsonl", &format!("{}\n{}\n", line("A"), line("A")));
         let report = check(jsonl.path(), Path::new(DEFAULT_PATH)).unwrap();
         let problems: Vec<_> = report.problems.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect();
-        assert_eq!(problems, [("fixture_set", "tests/golden.jsonl repeats record id A")]);
+        assert_eq!(
+            problems,
+            [
+                ("row_id", "row ids were not checked for clashes: B2-home: tests/golden.jsonl repeats record id A"),
+                ("fixture_set", "tests/golden.jsonl repeats record id A"),
+            ]
+        );
 
         // A journey named like a golden row id would be filled by that row's
         // walk, and runs above 1 need an independence_key.

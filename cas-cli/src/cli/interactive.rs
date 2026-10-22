@@ -285,18 +285,19 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
 }
 
 fn render_completed(
-    mut stdout: &mut impl Write,
+    stdout: &mut impl Write,
     title: &str,
     selected: Option<&str>,
-    _mode: OutputMode,
+    mode: OutputMode,
 ) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
     // The same summary renderer is used after acceptance and cancellation.
     match selected {
         Some(label) => {
             execute!(
                 stdout,
                 SetForegroundColor(Color::Green),
-                Print("  ✓ "),
+                Print(if styled_glyphs { "  ✓ " } else { "  + " }),
                 ResetColor,
                 SetAttribute(Attribute::Bold),
                 Print(title),
@@ -312,7 +313,7 @@ fn render_completed(
             execute!(
                 stdout,
                 SetForegroundColor(Color::DarkGrey),
-                Print("  ✗ "),
+                Print(if styled_glyphs { "  ✗ " } else { "  x " }),
                 Print(title),
                 Print(": cancelled"),
                 ResetColor,
@@ -333,14 +334,15 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 fn render_picker(
-    mut stdout: &mut impl Write,
+    stdout: &mut impl Write,
     title: &str,
     items: &[PickerItem],
     selected: usize,
     origin_row: u16,
     cols: &ColumnWidths,
-    _mode: OutputMode,
+    mode: OutputMode,
 ) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
     let mut row = origin_row;
 
     // Title
@@ -370,7 +372,7 @@ fn render_picker(
                 stdout,
                 SetForegroundColor(Color::Magenta),
                 SetAttribute(Attribute::Bold),
-                Print("  ❯ "),
+                Print(if styled_glyphs { "  ❯ " } else { "  > " }),
                 SetAttribute(Attribute::Reset),
                 SetAttribute(Attribute::Bold),
                 Print(&label_padded),
@@ -411,7 +413,11 @@ fn render_picker(
         MoveTo(0, row),
         Clear(ClearType::CurrentLine),
         SetForegroundColor(Color::DarkGrey),
-        Print("  ↑/↓ navigate • enter select • q cancel"),
+        Print(if styled_glyphs {
+            "  ↑/↓ navigate • enter select • q cancel"
+        } else {
+            "  up/down navigate | enter select | q cancel"
+        }),
         ResetColor,
     )?;
 
@@ -449,46 +455,39 @@ mod tests {
             },
         ];
         let cols = ColumnWidths::compute(&items);
-        let mut failures = Vec::new();
+        let utf8_snapshot: String = serde_json::from_str(include_str!(
+            "../../../docs/design/cli/interactive-picker.utf8.json"
+        ))
+        .unwrap();
         for locale in ["C.UTF-8", "C"] {
             env.set("LC_ALL", locale);
-            let mut output = Vec::new();
-            render_picker(
-                &mut output,
-                "Destination",
-                &items,
-                0,
-                0,
-                &cols,
-                OutputMode::Styled,
-            )
-            .unwrap();
-            render_completed(
-                &mut output,
-                "Destination",
-                Some("Alpha"),
-                OutputMode::Styled,
-            )
-            .unwrap();
-            render_completed(&mut output, "Destination", None, OutputMode::Styled).unwrap();
-            let text = String::from_utf8(output).unwrap();
-            if locale == "C.UTF-8" {
-                // Save the pre-fix bytes in the red receipt before pinning them.
-                eprintln!(
-                    "CAS_BA0E_UTF8_RENDER={}",
-                    serde_json::to_string(&text).unwrap()
-                );
-                assert!(text.contains("  ❯ ") && text.contains("  ✓ ") && text.contains("  ✗ "));
-                assert!(text.contains("  ↑/↓ navigate • enter select • q cancel"));
-            } else if !text.is_ascii() {
-                failures.push(format!("{locale}: {text:?}"));
+            for mode in [OutputMode::Styled, OutputMode::Plain] {
+                let mut output = Vec::new();
+                render_picker(&mut output, "Destination", &items, 0, 0, &cols, mode).unwrap();
+                render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
+                render_completed(&mut output, "Destination", None, mode).unwrap();
+                let text = String::from_utf8(output).unwrap();
+                if locale == "C.UTF-8" && mode == OutputMode::Styled {
+                    assert_eq!(text, utf8_snapshot, "styled UTF-8 bytes must not change");
+                } else {
+                    assert!(
+                        text.is_ascii(),
+                        "non-ASCII decorations for {locale}/{mode:?}: {text:?}"
+                    );
+                    for expected in [
+                        "  > ",
+                        "  + ",
+                        "  x ",
+                        "  up/down navigate | enter select | q cancel",
+                    ] {
+                        assert!(
+                            text.contains(expected),
+                            "missing {expected:?} for {locale}/{mode:?}"
+                        );
+                    }
+                }
             }
         }
-        assert!(
-            failures.is_empty(),
-            "picker locale fallback missing: {}",
-            failures.join("; ")
-        );
     }
 
     /// EOF on stdin must NOT cause `select` to loop forever (cas-bf06).

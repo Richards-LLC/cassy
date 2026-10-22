@@ -126,7 +126,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
     }
     .save_user()
     .unwrap();
-    let gui = runtime_rounds(&root, true, 3);
+    let gui = runtime_rounds(&root, true, 4);
     let runtime = VioletWakeRuntime::start(&root, "bind-fx", "supervisor").unwrap();
     let target = scope.clone();
     let remote = std::thread::spawn(move || {
@@ -148,11 +148,11 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
             ))
             .unwrap();
         let mut claimed_during_hold = false;
-        for round in 0..3 {
+        for round in 0..4 {
             let mut get = receive();
             // Respond even on the broken path so the real tick and subsequent
             // retry finish; assert the unwanted claim after joining both peers.
-            if round == 2 && get.url() == "/api/violet/activity/claim" {
+            if round == 3 && get.url() == "/api/violet/activity/claim" {
                 claimed_during_hold = true;
                 get.respond(tiny_http::Response::from_string(
                     r#"{"events":[],"denied":[]}"#,
@@ -162,7 +162,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
             }
             assert_eq!(get.method().as_str(), "GET");
             assert_eq!(get.url(), format!("/api/teams/{}/projects", target.team_id));
-            if round == 1 {
+            if round == 0 || round == 2 {
                 get.respond(
                     tiny_http::Response::from_string("temporarily unavailable")
                         .with_status_code(503),
@@ -176,7 +176,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
             let post = receive();
             assert_eq!(post.method().as_str(), "POST");
             assert_eq!(post.url(), RECONCILE_PATH);
-            let mut body: serde_json::Value = serde_json::from_str(if round == 0 {
+            let mut body: serde_json::Value = serde_json::from_str(if round == 1 {
                 include_str!(
                     "../../../tests/fixtures/binding_reconciliation/v1/legacy-intake-active.json"
                 )
@@ -188,7 +188,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
             body["binding"]["team_id"] = target.team_id.clone().into();
             post.respond(
                 tiny_http::Response::from_string(body.to_string())
-                    .with_status_code(if round == 0 { 409 } else { 200 })
+                    .with_status_code(if round == 1 { 409 } else { 200 })
                     .with_header(
                         tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap(),
                     ),
@@ -200,6 +200,13 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
     });
     assert!(runtime.tick_blocking().0.errors.is_empty());
     let client = OrdinaryBindingClient::new(&endpoint, "ordinary-fixture-user").unwrap();
+    // A crash between pause and submit leaves no refusal-backed quiet window.
+    let journal = IntakeJournal::new(&root);
+    journal.pause(scope.clone(), Uuid::new_v4(), 0).unwrap();
+    let orphan_retry = client.repair(&root, &scope).unwrap();
+    assert!(matches!(orphan_retry.outcome, RepairOutcome::Blocked));
+    assert!(orphan_retry.response.is_none(), "orphan retry must not submit");
+    let orphan_released = journal.legacy_allowed().unwrap();
     let refused = client.repair(&root, &scope).unwrap();
     assert_eq!(
         refused.response.unwrap().code,
@@ -224,6 +231,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
         !claimed_during_hold,
         "failed preflight restarted v1 presence during the quiet window"
     );
+    assert!(orphan_released, "preflight failure must release an orphaned pause");
 }
 
 #[test]

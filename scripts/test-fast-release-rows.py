@@ -2,6 +2,7 @@
 """Exercise fast admission against real Git trees and real no-build checks."""
 
 import os
+import re
 import importlib.util
 import json
 import sys
@@ -678,11 +679,24 @@ sleep 2
         self.assertEqual(self.install_hooks().returncode, 0)
         self.assertEqual((self.repo / ".git/config.worktree").read_bytes(), config)
         self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
+        self.write("scripts/test-example.py", "raise SystemExit('fixture diagnostic: prebuild poll expired')\n")
         self.commit()
         refused = self.push()
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
         self.assertIn("FIX version-literals: ", refused.stderr)
         self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
+        self.assertIn("FAIL ci-script-tests-changed", refused.stderr)
+        # The real hook must keep the detailed child output after the gate's
+        # scratch guardian has exited, and tell the worker where it is.
+        retained = re.search(r"pre-push: fast-row logs: (.+)", refused.stderr)
+        self.assertIsNotNone(retained, refused.stderr)
+        logs = Path(retained.group(1))
+        row_log = logs / "ci-script-tests-changed.log"
+        original_log = row_log.read_text()
+        self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
+        self.assertIn("FAIL ci-script-tests-changed", (logs / "gate.log").read_text())
+        self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
 
         skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
@@ -692,6 +706,7 @@ sleep 2
         self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
 
         # A same-tip PASS receipt makes the next push free: no rows run.
+        self.write("scripts/test-example.py", "print('example ok')\n")
         self.write("cas-cli/tests/sample.rs", "#[test]\nfn sample() {}\n")
         self.commit()
         self.assertEqual(self.fast().returncode, 0)
@@ -706,6 +721,10 @@ sleep 2
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
         self.assertIn("FAIL markdown-lint", missing.stderr)
+        later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
+        self.assertIsNotNone(later, missing.stderr)
+        self.assertNotEqual(Path(later.group(1)), logs)
+        self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
     def test_hook_installer_preserves_existing_authority_and_refuses_workers_cas_edb0(self):
         self.copy_hook_installer()

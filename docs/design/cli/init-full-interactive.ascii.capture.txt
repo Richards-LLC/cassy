@@ -59,12 +59,12 @@ Select (1-2): 1
   | cas doctor              | Run diagnostics                |
   +-------------------------+--------------------------------+
 
-  +- Next steps ------------------------------------------+
-  |                                                        |
-  |  Commit Cassy config so factory workers can access it:   |
-  |                                                        |
-  |    git add .claude/ CLAUDE.md .mcp.json .gitignore     |
-  |    git commit -m "Configure Cassy"                       |
-  |                                                        |
-  +--------------------------------------------------------+
+  +- Next steps --------------------------------------------+
+  |                                                         |
+  |  Commit Cassy config so factory workers can access it:  |
+  |                                                         |
+  |    git add .claude/ CLAUDE.md .mcp.json .gitignore      |
+  |    git commit -m "Configure Cassy"                      |
+  |                                                         |
+  +---------------------------------------------------------+
 

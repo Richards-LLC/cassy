@@ -896,8 +896,31 @@ fn open_task_similarity(
         {
             continue;
         }
+        // Siblings often repeat one mandatory safety/build block. Discount
+        // identical multiline paragraphs only when both briefs retain scope
+        // outside them. Single-line scope statements and identical full briefs
+        // still participate, as do titles and every non-sibling comparison.
+        let (candidate_scope, existing_scope) = if siblings.contains(&task.id) {
+            let candidate_blocks: Vec<_> = description.split("\n\n").map(str::trim).collect();
+            let existing_blocks: Vec<_> = task.description.split("\n\n").map(str::trim).collect();
+            let common: std::collections::HashSet<_> = candidate_blocks.iter().copied()
+                .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
+                    && existing_blocks.contains(block))
+                .collect();
+            let candidate = candidate_blocks.into_iter()
+                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+            let existing = existing_blocks.into_iter()
+                .filter(|block| !common.contains(block)).collect::<Vec<_>>().join("\n\n");
+            if !candidate.trim().is_empty() && !existing.trim().is_empty() {
+                (candidate, existing)
+            } else {
+                (description.to_string(), task.description.clone())
+            }
+        } else {
+            (description.to_string(), task.description.clone())
+        };
         let Some((score, identifiers)) =
-            task_similarity(title, description, &task.title, &task.description)
+            task_similarity(title, &candidate_scope, &task.title, &existing_scope)
         else {
             continue;
         };
@@ -933,6 +956,7 @@ fn recent_other_epic_planner(
     task_store: &dyn cas_store::TaskStore,
     epic_id: &str,
     creator: &str,
+    creator_session: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<(String, chrono::DateTime<chrono::Utc>)>, String> {
     let recent = task_store
@@ -946,6 +970,7 @@ fn recent_other_epic_planner(
             // that a different supervisor planned these children.
             (planner != "mcp"
                 && planner != creator
+                && Some(planner.as_str()) != creator_session
                 && dependency.created_at >= now - EPIC_PLANNING_RACE_WINDOW)
                 .then_some((planner, dependency.created_at))
         })
@@ -1283,10 +1308,15 @@ impl CasCore {
                 }
             }
             if let (Some(epic), Some(creator)) = (epic_id.as_deref(), created_by.as_deref()) {
+                // Dependencies written by another transport may identify this
+                // same registered agent by its harness session instead.
+                let creator_session = self.open_agent_store()?.get(creator).ok()
+                    .and_then(|agent| agent.cc_session_id);
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
                     epic,
                     creator,
+                    creator_session.as_deref(),
                     chrono::Utc::now(),
                 )
                 .map_err(|error| McpError {
@@ -3559,6 +3589,40 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn sibling_safety_block_does_not_hide_distinct_scope_cas_8bcb() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "boilerplate-planner");
+        std::fs::create_dir_all(env.home().join("project")).unwrap();
+        let core = CasCore::with_daemon(env.home().join("project"), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut epic = Task::new("cas-safety-epic".into(), "QA journeys".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).unwrap();
+        let safety = "SAFETY: never read backend .env; stub /api/ and abort production hosts.\n\
+                      BUILD: NUXT_SSR=false; use 200.html and tests/auth.setup.ts.\n\
+                      DELIVER: ledger rows PASS or FAIL; all HARD assertions apply.";
+        for (title, scope) in [
+            ("Walk checkout", "Verify checkout-payment on /checkout in pages/checkout.vue."),
+            ("Walk account", "Verify account-profile on /account in pages/account.vue."),
+            ("Walk search", "Verify search-results on /search in pages/search.vue."),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
+        }
+        let mut duplicate = child_request("Inspect payment journey", epic.id);
+        duplicate.description = Some(format!(
+            "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
+        ));
+        let receipt = text(core.cas_task_create(Parameters(duplicate)).await.unwrap());
+        assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
+        assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
+        assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+    }
+
+    #[tokio::test]
     async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
         let mut env = TestEnvGuard::temp_home();
         for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
@@ -5231,12 +5295,9 @@ mod related_recall_response_tests {
     #[tokio::test]
     async fn recent_other_epic_plan_requires_confirmation_before_creating_child() {
         let temp = TempDir::new().expect("temp project");
-        let mut env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_SESSION_ID", Some("planning-supervisor-one")),
-            ("CAS_AGENT_NAME", Some("planning-supervisor-one")),
-            ("CAS_FACTORY_MODE", None),
-            ("CAS_FACTORY_SESSION", None),
-        ]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "planning-supervisor-one");
+        env.set("CAS_AGENT_NAME", "planning-supervisor-one");
         let first = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         first
             .cas_task_create(Parameters(epic_request(
@@ -5284,6 +5345,22 @@ mod related_recall_response_tests {
         store.add_dependency(&legacy).unwrap();
         first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
             .await.expect("anonymous historical metadata is not evidence of another planner");
+
+        // Parallel MCP instances and CLI writes may record either the stable
+        // registration or its harness session; neither is another planner.
+        let parallel = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        parallel.cas_task_create(Parameters(child_request("Own parallel child", epic_id.clone())))
+            .await.expect("the same supervisor's other MCP instance is not a competitor");
+        let agents = first.open_agent_store().unwrap();
+        let mut agent = agents.get("planning-supervisor-one").unwrap();
+        agent.cc_session_id = Some("planning-harness-session".into());
+        agents.update(&agent).unwrap();
+        store.add(&Task::new("cas-own-session".into(), "Session-authored child".into())).unwrap();
+        let mut own_session = Dependency::new("cas-own-session".into(), epic_id.clone(), DependencyType::ParentChild);
+        own_session.created_by = agent.cc_session_id.clone();
+        store.add_dependency(&own_session).unwrap();
+        first.cas_task_create(Parameters(child_request("Own session followup", epic_id.clone())))
+            .await.expect("the caller's harness session alias must not trigger a planning race");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");

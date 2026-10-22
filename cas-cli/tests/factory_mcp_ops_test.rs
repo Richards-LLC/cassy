@@ -10752,6 +10752,14 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         git_stdout(project, &["push", "origin", "epic/foreign"]);
         let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
 
+        // A prior delivery awaiting review is handed off, so it must not make
+        // this clean, owned checkout busy. Its anchor is not this fresh tip.
+        active.status = TaskStatus::AwaitingMerge;
+        active.deliverables.factory_branch_anchor = Some(git_stdout(
+            &worker_path, &["rev-parse", "HEAD^"],
+        ));
+        store.update(&active).unwrap();
+
         let assigned = assign(&env, &task_b, assignee)
             .await
             .expect("a clean idle worker may accept work behind its target");
@@ -10874,9 +10882,11 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         .expect("registered supervisor may explicitly accept stale assignment");
     let receipt = get_text(&response);
     assert!(receipt.contains("SUPERVISOR OVERRIDE"), "{receipt}");
+    // pin: the warning must name the limited start checks and require manual inspection.
     assert!(
-        receipt.contains("task start"),
-        "dirty worktree caveat must be visible: {receipt}"
+        receipt.contains("Open task") && receipt.contains("another owned factory branch")
+            && receipt.contains("Inspect dirty or unpushed work"),
+        "warning must qualify the start-time checks: {receipt}"
     );
     let saved = tasks.get(&task_id).unwrap();
     assert_eq!(saved.assignee.as_deref(), Some(worker));
@@ -10910,10 +10920,43 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         .await
         .expect_err("workers cannot override stale assignment gating");
     assert!(
-        refused.message.contains("SUPERVISOR OVERRIDE REJECTED"),
+        refused.message.contains("requires a live registered supervisor"),
         "{refused}"
     );
     assert!(tasks.get(&task_id).unwrap().assignee.is_none());
+
+    let dirty_before = std::fs::read(worker_path.join("README")).unwrap();
+    // The warning must reflect the actual start path: a reused lane refuses
+    // earlier dirty work, while this task's own lane skips reconciliation.
+    for (branch, checks_reused_work) in [
+        (format!("factory/{worker}"), true),
+        (format!("factory/{worker}-{task_id}"), false),
+    ] {
+        git_stdout(&worker_path, &["checkout", "-B", &branch]);
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        tasks.update(&task).unwrap();
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task_id, "assignee": worker,
+            "supervisor_override": true, "reason": reason,
+        })).unwrap();
+        let receipt = get_text(&env.service.task(Parameters(request)).await.unwrap());
+        // pin: both branch paths receive the same accurately qualified caveat.
+        assert!(receipt.contains("Open task") && receipt.contains("another owned factory branch"), "{receipt}");
+        let start: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_id,
+        })).unwrap();
+        let result = worker_service.task(Parameters(start)).await;
+        if checks_reused_work {
+            let refusal = result.expect_err("reused branch checks earlier dirty work");
+            assert!(refusal.message.contains("uncommitted changes"), "{refusal}");
+            assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::Open);
+        } else {
+            result.expect("current task branch does not run reuse reconciliation");
+            assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
+        }
+        assert_eq!(std::fs::read(worker_path.join("README")).unwrap(), dirty_before);
+    }
 }
 
 /// A review hold must preserve this task's work without admitting a prior task.

@@ -61,6 +61,10 @@ and JSON document contracts apply; no new terminal PASS is claimed here.
 Message text itself (the cause and remedy sentences) belongs to the doctor self-heal work;
 this brief covers the render only.
 
+The managed-commits check omits a missing configured upstream, just as it omits
+an absent upstream: neither proves unpublished repairs. Other inspection
+failures retain the warning; existing findings and JSON shape stay unchanged.
+
 The cloud queue warning now separates pending registration conflicts from retryable transport
 failures: it reports parked rows and gives `cas cloud project set <registered-canonical-id>`
 or the cloud-owner alias path, then directs the operator to sync; it does not prescribe

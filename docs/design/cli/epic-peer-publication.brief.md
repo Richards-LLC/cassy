@@ -12,6 +12,10 @@ The branch and originating host travel together in sync-safe task deliverables.
 A mismatched branch or legacy task uses a neutral missing-lane diagnostic.
 A previously observed remote ref still refuses automatic resurrection. Existing published adoption never invents an origin host.
 
+Reconcile attribution names the compared ref (`not on '<ref>'`) rather than
+assuming unique commits are local-only: the selected parent may be a published
+remote-tracking ref. Existing refusal, recovery advice and Git refs stay intact.
+
 Device identity takes precedence over hostname when recorded. This distinguishes
 peers sharing a default hostname and still recognizes a renamed source device.
 Legacy records retain hostname comparison. A control-bearing branch gets a

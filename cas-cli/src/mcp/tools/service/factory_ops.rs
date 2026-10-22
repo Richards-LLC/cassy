@@ -17328,6 +17328,44 @@ effort = "high"
     /// A real Codex rollout exists and is discoverable by the established
     /// cwd-aware resolver, so that production path must return it too.
     #[tokio::test]
+    async fn cas_3963_worker_status_flags_old_mcp_against_installed_binary() {
+        use cas_store::{AgentStore, HistoryStore, SqliteHistoryStore};
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cas = bin.join("cas");
+        std::fs::write(&cas, "#!/bin/sh\necho 'cas 3.72.0'\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", &path), ("CAS_FACTORY_SESSION", "release-session"),
+        ]);
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
+        );
+        worker.factory_session = Some("release-session".into());
+        worker.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
+        epoch.version = Some("3.70.0".into());
+        SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        assert!(output.contains("Factory MCP versions (installed 3.72.0)"), "{output}");
+        assert!(output.contains("release-worker (Worker") && output.contains("3.70.0 [STALE"), "{output}");
+    }
+
+    #[tokio::test]
     async fn worker_liveness_summary_five_workers_under_one_second() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
         use cas_store::{AgentStore, SqliteAgentStore};
@@ -17411,10 +17449,9 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 7, "{output}");
         assert!(
-            lines[6].starts_with("Peer mailbox: not receiving:")
-                && lines[6].contains("has not reported a mailbox poll"),
+            lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
+                && line.contains("has not reported a mailbox poll")),
             "summary must retain a visible mailbox health footer: {output}"
         );
         assert!(

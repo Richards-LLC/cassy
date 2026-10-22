@@ -831,25 +831,6 @@ fn test_is_newer() {
 }
 
 #[test]
-fn phase_status_keeps_a_gap_after_full_width_labels_cas_f1354() {
-    for label in ["Updating files", "Distributing built-ins to user-level"] {
-        for (mark, status, elapsed) in [
-            (None, "working", None),
-            (Some(Verdict::Ok), "done", Some(Duration::from_millis(194))),
-        ] {
-            let mut bytes = Vec::new();
-            let mut fmt = Formatter::new(&mut bytes, OutputMode::Plain, ActiveTheme::default(), 80);
-            live::render_line(&mut fmt, mark, None, "[1/1]", label, status, elapsed).unwrap();
-            let row = String::from_utf8(bytes).unwrap();
-            let after_label = row.split_once(label).expect("phase label").1;
-            assert!(after_label.starts_with(' '), "label and status joined: {row:?}");
-            assert_eq!(after_label.split_whitespace().next(), Some(status), "{row:?}");
-            assert!(ratatui::text::Line::from(row.as_str()).width() <= 80, "{row:?}");
-        }
-    }
-}
-
-#[test]
 fn project_table_plain_uses_phase_glyphs_and_compact_project_names() {
     let receipts = vec![ProjectRefreshReceipt {
         project: PathBuf::from("/home/alice/projects/demo"),

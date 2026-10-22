@@ -124,7 +124,9 @@ pub(super) fn render_line(
     fmt.write_raw(&" ".repeat(mark_column.saturating_sub(mark_cells) + 1))?;
     fmt.write_muted(counter)?;
     fmt.write_raw(" ")?;
-    let label_cells = label.chars().count().max(LABEL_CELLS);
+    // Padding is also the label/status separator, even when the label fills
+    // or exceeds the usual column. Include that cell in the width budget.
+    let label_cells = (label.chars().count() + 1).max(LABEL_CELLS);
     let label = format!("{label:<label_cells$}");
     fmt.write_bold_plain(&label)?;
     let used = mark_column.max(mark_cells) + 1 + counter.chars().count() + 1 + label_cells;
@@ -225,5 +227,33 @@ impl LiveLine {
 impl Drop for LiveLine {
     fn drop(&mut self) {
         self.halt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_status_keeps_a_gap_after_full_width_labels_cas_f1354() {
+        for label in ["Updating files", "Distributing built-ins to user-level"] {
+            for (mark, status, elapsed) in [
+                (None, "working", None),
+                (Some(Verdict::Ok), "done", Some(Duration::from_millis(194))),
+            ] {
+                let mut bytes = Vec::new();
+                let mut fmt =
+                    Formatter::new(&mut bytes, OutputMode::Plain, ActiveTheme::default(), 80);
+                render_line(&mut fmt, mark, None, "[1/1]", label, status, elapsed).unwrap();
+                let row = String::from_utf8(bytes).unwrap();
+                let after_label = row.split_once(label).expect("phase label").1;
+                assert!(
+                    after_label.starts_with(' '),
+                    "label and status joined: {row:?}"
+                );
+                assert_eq!(after_label.split_whitespace().next(), Some(status), "{row:?}");
+                assert!(ratatui::text::Line::from(row.as_str()).width() <= 80, "{row:?}");
+            }
+        }
     }
 }

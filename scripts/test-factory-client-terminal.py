@@ -56,6 +56,18 @@ def check_exit(binary, case, out):
         timed_out = False
 
         try:
+            if frozen:
+                # Fill the output PTY before starting the client and never drain
+                # it. Once the client enters raw mode, its setup write must block.
+                os.set_blocking(output, False)
+                while queued < 8 * 1024 * 1024:
+                    try:
+                        queued += os.write(output, b"x" * 65536)
+                    except BlockingIOError:
+                        break
+                else:
+                    raise AssertionError("fixture did not fill terminal output")
+                os.set_blocking(output, True)
             with socket.socket(socket.AF_UNIX) as listener:
                 listener.bind(address)
                 listener.listen(1)
@@ -67,7 +79,7 @@ def check_exit(binary, case, out):
                 was_raw = False
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
-                    sources = [master] + ([] if peer else [listener])
+                    sources = ([] if frozen else [master]) + ([] if peer else [listener])
                     readable, _, _ = select.select(sources, [], [], 0.05)
                     if listener in readable:
                         peer, _ = listener.accept()
@@ -82,28 +94,19 @@ def check_exit(binary, case, out):
                         if not data:
                             break
                         captured.extend(data)
-                    if not triggered and peer and b"\x1b[?1006h" in captured and b"fixture frame" in captured:
+                    raw_now = not (termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON))
+                    ready = raw_now if frozen else b"\x1b[?1006h" in captured and b"fixture frame" in captured
+                    if not triggered and peer and ready:
                         was_raw = not (termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON))
                         triggered = True
                         if frozen:
-                            # Stop the PTY, then fill the socket until backpressure
-                            # proves the client cannot drain into terminal output.
-                            termios.tcflow(slave, termios.TCOOFF)
-                            peer.setblocking(False)
-                            while queued < 8 * 1024 * 1024:
-                                try:
-                                    queued += peer.send(b"x" * 65536)
-                                except BlockingIOError:
-                                    break
-                            else:
-                                raise AssertionError("fixture did not block terminal output")
                             deadline = time.monotonic() + 5
                         if CASES[case] is None:
                             peer.shutdown(socket.SHUT_RDWR)
                         else:
                             signalled_at = time.monotonic()
                             child.send_signal(CASES[case])
-                    if child.poll() is not None and not readable:
+                    if child.poll() is not None and (frozen or not readable):
                         break
                 else:
                     if not triggered:
@@ -112,8 +115,6 @@ def check_exit(binary, case, out):
                     child.kill()  # Only test cleanup; a timeout must remain FAIL.
                 status = child.wait(timeout=1)
                 signal_elapsed = time.monotonic() - signalled_at if signalled_at else None
-                if frozen:
-                    termios.tcflow(slave, termios.TCOON)
                 missing = [value.decode("ascii") for value in RESETS if value not in captured]
                 restored = termios.tcgetattr(slave) == before
                 expected_exit = status == 0 if CASES[case] is None else status == -CASES[case]
@@ -121,7 +122,7 @@ def check_exit(binary, case, out):
                 result = {
                     "case": case, "exit_status": status, "entered_raw_mode": was_raw,
                     "raw_restored": restored, "missing_resets": missing,
-                    "blocked_bytes_queued": queued, "signal_elapsed_seconds": signal_elapsed,
+                    "blocked_output_bytes": queued, "signal_elapsed_seconds": signal_elapsed,
                     "timed_out": timed_out,
                     "pass": triggered and was_raw and terminal_ok and expected_exit and not timed_out,
                 }
@@ -132,8 +133,6 @@ def check_exit(binary, case, out):
                 child.wait()
             if peer:
                 peer.close()
-            if frozen:
-                termios.tcflow(slave, termios.TCOON)
             (out / f"{case}.ansi").write_bytes(captured)
             if output != slave:
                 os.close(output)

@@ -1411,7 +1411,7 @@ fn worktree_merge_mcp_error(
 ) -> McpError {
     use crate::worktree::{GitError, WorktreeError};
 
-    let [abort, add, merge, remove] = match crate::worktree::GitOperations::git_remedies([
+    let remedies = crate::worktree::GitOperations::git_remedies([
         &["merge", "--abort"],
         &[
             "worktree",
@@ -1422,17 +1422,21 @@ fn worktree_merge_mcp_error(
         ],
         &["merge", source_branch],
         &["worktree", "remove", "/tmp/cas-merge"],
-    ]) {
-        Ok(commands) => commands,
-        Err(refusal) => {
-            return McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::Owned(refusal),
-                data: None,
-            };
-        }
+    ]);
+    // A rendering refusal must not replace the original merge class or cause.
+    let (abort_advice, detached_advice) = match &remedies {
+        Ok([abort, add, merge, remove]) => (
+            format!("run `{abort}` in the shared target checkout"),
+            format!("`{add}`, run `{merge}` there, then move the branch ref and `{remove}`."),
+        ),
+        Err(_) => (
+            "abort it by hand in the shared target checkout".to_string(),
+            "use a temporary worktree, merge there by hand, then move the branch ref and remove the temporary worktree.".to_string(),
+        ),
     };
-    let message = match error {
+    let source_branch = crate::worktree::GitOperations::visible_git_label(source_branch);
+    let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
+    let mut message = match error {
         WorktreeError::Git(GitError::MergeConflictPaths(paths)) => format!(
             "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}. \
              Conflicting paths: {}.\n\n\
@@ -1458,7 +1462,7 @@ fn worktree_merge_mcp_error(
             "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Resolve and commit the \
-             existing merge, or run `{abort}` in the shared target checkout, \
+             existing merge, or {abort_advice}, \
              before retrying the merge into {target_branch}."
         ),
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
@@ -1472,24 +1476,30 @@ fn worktree_merge_mcp_error(
              1. Commit, stash, or move just the listed paths, then retry the merge into \
              {target_branch}.\n\
              2. Or merge out of band without touching the shared checkout: \
-             `{add}`, run `{merge}` there, then move the branch ref and \
-             `{remove}`.\n\n\
+             {detached_advice}\n\n\
              `force=true` does not bypass shared-checkout residue."
         ),
         WorktreeError::Git(GitError::TargetTipChanged {
             ref branch,
             ref expected,
             ref actual,
-        }) => format!(
+        }) => {
+            let branch = crate::worktree::GitOperations::visible_git_label(branch);
+            format!(
             "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
              {source_branch} was being merged.\n\n\
              The merge ran in an ephemeral worktree and was discarded rather than \
              published over the concurrent update — {target_branch} still points at the \
              other writer's commit and no shared checkout was touched. Re-run the merge \
              against the new tip."
-        ),
+            )
+        },
         other => format!("Failed to merge worktree: {other}"),
     };
+    if let Err(refusal) = remedies {
+        message.push_str("\n\n");
+        message.push_str(&refusal);
+    }
 
     McpError {
         code: ErrorCode::INTERNAL_ERROR,
@@ -6359,23 +6369,34 @@ mod tests {
 
     #[test]
     fn conflict_error_names_paths_restored_checkout_and_manual_options() {
-        let error = worktree_merge_mcp_error(
-            WorktreeError::Git(GitError::MergeConflictPaths(vec![
-                "src/one.rs".to_string(),
-                "src/two.rs".to_string(),
-            ])),
-            "factory/worker",
-            "epic/example",
-        );
-        let message = error.message.as_ref();
+        for (source, visible) in [
+            ("factory/worker", "factory/worker"),
+            ("factory/control\u{85}label", "factory/control\\u{85}label"),
+        ] {
+            let error = worktree_merge_mcp_error(
+                WorktreeError::Git(GitError::MergeConflictPaths(vec![
+                    "src/one.rs".to_string(),
+                    "src/two.rs".to_string(),
+                ])),
+                source,
+                "epic/example",
+            );
+            let message = error.message.as_ref();
 
-        assert!(message.contains("CONTENT CONFLICT"));
-        assert!(message.contains("src/one.rs"));
-        assert!(message.contains("src/two.rs"));
-        assert!(message.contains("restored"));
-        assert!(message.contains("temporary worktree"));
-        assert!(message.contains("factory/worker"));
-        assert!(message.contains("epic/example"));
+            assert!(message.contains("CONTENT CONFLICT"));
+            assert!(message.contains("src/one.rs"));
+            assert!(message.contains("src/two.rs"));
+            assert!(message.contains("restored"));
+            assert!(message.contains("temporary worktree"));
+            assert!(message.contains(visible), "{message:?}");
+            assert!(!message.contains('\u{85}'), "{message:?}");
+            assert_eq!(error.code, super::ErrorCode::INTERNAL_ERROR);
+            if source.contains('\u{85}') {
+                // pin: refused rendering must explain why no command can be pasted.
+                assert!(message.contains("no copyable command"), "{message}");
+            }
+            assert!(message.contains("epic/example"));
+        }
     }
 
     #[test]

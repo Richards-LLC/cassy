@@ -5,6 +5,21 @@ use std::time::Duration;
 
 use super::GitOperations;
 
+/// Display-safety policy: Unicode 17 Default_Ignorable_Code_Point plus controls.
+/// Pinned from https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt.
+/// These can hide or reorder a pasted ref even when shell quoting preserves argv.
+fn unsafe_remedy_character(character: char) -> bool {
+    character.is_control()
+        || matches!(character,
+            '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
+            | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}')
+}
+
 /// One network observation, reused by local preparation and publication.
 pub(crate) struct EpicPublicationObservation {
     pub remote: Result<Option<bool>, String>,
@@ -49,10 +64,15 @@ impl GitOperations {
         for (program, args) in commands {
             if let Some(value) = std::iter::once(program)
                 .chain(args.iter().copied())
-                .find(|value| value.chars().any(char::is_control))
+                .find(|value| value.chars().any(unsafe_remedy_character))
             {
+                let kind = if value.chars().any(char::is_control) {
+                    "control"
+                } else {
+                    "invisible Unicode"
+                };
                 return Err(format!(
-                    "branch name contains control characters: {}\nRename it or push it by hand; no copyable command is available.",
+                    "branch name contains {kind} characters: {}\nRename it or push it by hand; no copyable command is available.",
                     Self::visible_git_label(value),
                 ));
             }
@@ -76,10 +96,10 @@ impl GitOperations {
         }))
     }
 
-    /// Display synced labels without sending terminal control characters.
+    /// Display synced labels without hidden, reordered or terminal control text.
     pub(crate) fn visible_git_label(value: &str) -> String {
         value.chars().map(|character| {
-            if character.is_control() { character.escape_default().to_string() }
+            if unsafe_remedy_character(character) { character.escape_default().to_string() }
             else { character.to_string() }
         }).collect()
     }

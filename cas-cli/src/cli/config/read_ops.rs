@@ -224,9 +224,10 @@ pub(crate) fn save_editor_changes(
         !pending_resets.contains("factory.write_roots"),
         "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it"
     );
-    let mut changes_by_root = BTreeMap::<PathBuf, Vec<(String, bool)>>::new();
+    let original_values = original.list().into_iter().collect::<HashMap<_, _>>();
+    let mut changes_by_root = BTreeMap::<PathBuf, Vec<(String, Option<String>)>>::new();
     for (key, value) in edited.list() {
-        if pending_resets.contains(&key) || original.get(&key).as_deref() == Some(value.as_str()) {
+        if pending_resets.contains(&key) || original_values.get(&key) == Some(&value) {
             continue;
         }
 
@@ -234,7 +235,7 @@ pub(crate) fn save_editor_changes(
         changes_by_root
             .entry(config_root)
             .or_default()
-            .push((key, false));
+            .push((key, Some(value)));
     }
 
     for key in pending_resets {
@@ -242,10 +243,16 @@ pub(crate) fn save_editor_changes(
         changes_by_root
             .entry(config_root)
             .or_default()
-            .push((key.clone(), true));
+            .push((key.clone(), None));
     }
 
-    let edited_document = toml_edit::Document::parse(toml::to_string(edited)?)?.into_mut();
+    let mut saved_config = edited.clone();
+    for (key, value) in changes_by_root.values().flatten() {
+        if let Some(value) = value {
+            saved_config.set(key, value)?;
+        }
+    }
+    let edited_document = toml_edit::Document::parse(toml::to_string(&saved_config)?)?.into_mut();
     for (config_root, mut changes) in changes_by_root {
         changes.sort_by(|left, right| left.0.cmp(&right.0));
         let fallback = Config::load(&config_root)?;
@@ -260,7 +267,7 @@ fn persist_editor_changes_for_root(
     config_root: &Path,
     fallback: &Config,
     edited_document: &toml_edit::DocumentMut,
-    changes: &[(String, bool)],
+    changes: &[(String, Option<String>)],
 ) -> anyhow::Result<()> {
     let _lock = crate::config::lock_project_config(config_root)?;
     let path = config_root.join("config.toml");
@@ -277,11 +284,9 @@ fn persist_editor_changes_for_root(
     let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
     let mut reconcile_viktor = false;
 
-    for (key, reset) in changes {
+    for (key, value) in changes {
         let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
-        if *reset {
-            remove_config_document_key(&mut document, stored_path, alternate_path)?;
-        } else {
+        if value.is_some() {
             let replacement = config_document_item(edited_document.as_item(), serialized_path)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("edited config omitted {key}"))?;
@@ -292,6 +297,8 @@ fn persist_editor_changes_for_root(
             if let Some(marker) = upkeep_observe_marker_for_set(key) {
                 set_config_document_item(&mut document, marker, None)?;
             }
+        } else {
+            remove_config_document_key(&mut document, stored_path, alternate_path)?;
         }
         reconcile_viktor |= key == "viktor.enabled";
     }

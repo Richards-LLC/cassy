@@ -298,6 +298,9 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                             "  Seeded: {}  Unowned surfaces: {}",
                             result.seeded, result.unowned_surfaces.len()
                         );
+                        if let Some(line) = result.planned_specs_line() {
+                            println!("{line}");
+                        }
                         if differs == Some(true) {
                             println!("Working tree differs from measured ref.");
                         }

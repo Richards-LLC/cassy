@@ -975,6 +975,19 @@ impl Registry {
                     false
                 }
             };
+            match journey.spec.as_ref() {
+                Some(spec) if planned && tracked.contains(spec) => report.debt(
+                    "stale_planned_spec",
+                    id,
+                    &format!("spec {spec:?} is tracked now; remove spec_status: planned"),
+                ),
+                None if planned => report.debt(
+                    "stale_planned_spec",
+                    id,
+                    "spec_status: planned names no spec; add spec or remove spec_status",
+                ),
+                _ => {}
+            }
             if let Some(spec) = journey.spec.as_ref().filter(|spec| !tracked.contains(spec)) {
                 if planned {
                     report.debt(
@@ -1453,6 +1466,15 @@ journeys:
                     ),
                 vec![],
                 vec!["planned_spec", "unmeasured_traffic"],
+            ),
+            (
+                "a planned marker left on a tracked spec warns",
+                GABBER.replace(
+                    "    spec: tests/signup.spec.ts\n",
+                    "    spec: tests/signup.spec.ts\n    spec_status: planned\n",
+                ),
+                vec![],
+                vec!["stale_planned_spec"],
             ),
             (
                 "a shipped journey's missing spec still fails",

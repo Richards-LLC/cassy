@@ -257,7 +257,11 @@ fn impact_for_selected_changes(
                 env_status: journey.env_status.clone(),
                 invariants,
                 fixtures: journey.fixtures.clone(),
-                spec: journey.spec.clone(),
+                // GH #1344: a planned spec is not a file a reviewer can open.
+                spec: journey
+                    .spec
+                    .clone()
+                    .filter(|_| journey.spec_status.as_deref() != Some("planned")),
                 known_failure: journey.known_failure.clone(),
                 matches,
                 evidence_required: evidence_required(journey, report.safety.as_ref()),
@@ -349,6 +353,19 @@ fn sort_journeys(journeys: &mut [JourneyImpact]) {
 }
 
 fn evidence_required(
+    journey: &crate::qa_registry::Journey,
+    safety: Option<&crate::qa_registry::Safety>,
+) -> String {
+    let evidence = walk_evidence(journey, safety);
+    match (journey.spec_status.as_deref(), &journey.spec) {
+        (Some("planned"), Some(spec)) if journey.status != "dead" => {
+            format!("{evidence}; spec {spec} is planned, not written: no automated coverage yet")
+        }
+        _ => evidence,
+    }
+}
+
+fn walk_evidence(
     journey: &crate::qa_registry::Journey,
     safety: Option<&crate::qa_registry::Safety>,
 ) -> String {

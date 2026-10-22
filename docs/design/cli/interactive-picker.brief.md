@@ -8,14 +8,15 @@
 | Machine output | The picker has no JSON protocol; line-based confirm/select behavior is unchanged. Shared supports_styled_glyphs selects the decoration. |
 | Omitted | This change adds no prompt, option, animation, color policy or layout. |
 
-Terminal proof will exercise an actual supervisor-built candidate picker in a
-TTY at 80 and 120 columns, alongside the locale/mode renderer regression.
+Terminal proof exercised the supervisor-built candidate picker in a TTY at
+80 and 120 columns. The real-build ledger is art-a50aa9a3; captures, exact
+tuples, scripts and receipts are in art-90fa1268.
 
 ## Critique
 
-terminal-qa: PASS picker-select · 11 runs · 0 fail · 0 warn · 23 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-ba0e/final-terminal-select/report.json
+terminal-qa: PASS picker-select · 11 runs · 0 fail · 0 warn · 23 allowed · art-90fa1268:final-terminal-select/report.json
 
-terminal-qa: PASS picker-cancel · 11 runs · 0 fail · 0 warn · 18 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-ba0e/final-terminal-cancel/report.json
+terminal-qa: PASS picker-cancel · 11 runs · 0 fail · 0 warn · 18 allowed · art-90fa1268:final-terminal-cancel/report.json
 
 | Dimension | Score | Evidence |
 | --- | ---: | --- |
@@ -35,5 +36,8 @@ The committed `.capture.txt` files are line projections of actual terminal
 frames; raw ANSI, complete command streams, exact tuples, scripts and the
 real-build ledger live in task artifacts. Accepted selection uses a deliberately
 removed owned fixture to stop before factory launch. No thresholds were added.
-The snapshot JSON pins pre-fix unit-renderer bytes; the real-build walk pins
-four styled UTF-8 transcripts independently.
+The snapshot JSON pinned actual styled renderer bytes; the real-build walk
+pinned four styled UTF-8 transcripts independently. The regression forced
+crossterm color output and restored its prior cached setting on drop, including
+unwinding. It explicitly exercised NO_COLOR absent and present with both locales
+and both output modes; it did not inherit the harness color cache.

@@ -483,15 +483,14 @@ mod tests {
                     render_completed(&mut output, "Destination", None, mode).unwrap();
                     let text = String::from_utf8(output).unwrap();
                     if locale == "C.UTF-8" && mode == OutputMode::Styled {
-                        eprintln!(
-                            "CAS_BA0E_STYLED_RENDER={}",
-                            serde_json::to_string(&text).unwrap()
+                        assert_eq!(
+                            text, utf8_snapshot,
+                            "styled UTF-8 bytes must not change (NO_COLOR={no_color:?})"
                         );
-                        assert_eq!(text, utf8_snapshot, "styled UTF-8 bytes must not change");
                     } else {
                         assert!(
                             text.is_ascii(),
-                            "non-ASCII decorations for {locale}/{mode:?}: {text:?}"
+                            "non-ASCII decorations for {locale}/{mode:?}/NO_COLOR={no_color:?}: {text:?}"
                         );
                         for expected in [
                             "  > ",

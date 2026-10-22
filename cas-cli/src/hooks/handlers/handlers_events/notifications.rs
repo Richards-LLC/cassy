@@ -644,6 +644,49 @@ mod pre_compact_flush_tests {
         assert!(error.contains("HTTPS"), "{error}");
     }
 
+    #[test]
+    fn notification_webhook_sender_rejects_parser_differential_and_normalizes_curl_url() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let curl = temp.path().join("curl");
+        let captured_args = temp.path().join("curl-args");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CURL_ARGS_FILE\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{old_path}", temp.path().display());
+        let captured_args_path = captured_args.to_str().unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", path.as_str()),
+            ("CURL_ARGS_FILE", captured_args_path),
+        ]);
+
+        for url in [
+            "http://127.0.0.1\\@evil.example/",
+            "http://localhost\\@evil.example",
+            "http://127.0.0.1:80\\@evil.example/",
+        ] {
+            let error = send_webhook_notification(url, "secret notification")
+                .expect_err("parser-differential destinations must be refused")
+                .to_string();
+            assert!(error.to_ascii_lowercase().contains("https") || error.contains("URL"), "{error}");
+            assert!(!captured_args.exists(), "curl must not receive {url}");
+        }
+
+        send_webhook_notification("HTTPS://Hooks.Example.Test/webhook", "safe notification")
+            .unwrap();
+        let args = std::fs::read_to_string(captured_args).unwrap();
+        let args: Vec<_> = args.lines().collect();
+        assert_eq!(args.first(), Some(&"--globoff"));
+        assert!(args.windows(2).any(|pair| pair == ["--proto", "=https,http"]));
+        assert_eq!(args.get(args.len() - 2), Some(&"--"));
+        assert_eq!(args.last(), Some(&"https://hooks.example.test/webhook"));
+    }
+
     // -------------------------------------------------------------------------
     // Test helpers
     // -------------------------------------------------------------------------

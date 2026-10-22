@@ -639,7 +639,9 @@ fn test_init_failure_reports_force_retry() {
             assert!(!output.status.success(), "{harness}/{mode} must fail provisioning");
             assert!(temp.path().join(".cas/cas.db").is_file());
             assert!(blocked.is_dir(), "the user's obstruction must remain intact");
-            if !error.contains("cas init --force") {
+            if !error.lines().any(|line| line == "Fix the reported error, then re-run: cas init --force")
+                || error.lines().any(|line| line.chars().count() > 80)
+            {
                 missing_hints.push(format!("{harness}/{mode}: {error}"));
             }
             std::fs::remove_dir(&blocked).unwrap();

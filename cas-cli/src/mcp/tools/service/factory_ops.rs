@@ -17334,7 +17334,7 @@ effort = "high"
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let cas = bin.join("cas");
-        std::fs::write(&cas, "#!/bin/sh\necho 'cas 3.72.0'\n").unwrap();
+        std::fs::write(&cas, "#!/bin/sh\necho 'cas 9.99.2'\n").unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -17352,10 +17352,10 @@ effort = "high"
         crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
         crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
         let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
-        epoch.version = Some("3.70.0".into());
+        epoch.version = Some("9.99.1".into());
         SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
         let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
-        assert!(banner.contains("release-worker") && banner.contains("3.70.0 [STALE"), "{banner}");
+        assert!(banner.contains("release-worker") && banner.contains("9.99.1 [STALE"), "{banner}");
         let core = CasCore::with_daemon(root, None, None);
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
@@ -17363,8 +17363,8 @@ effort = "high"
         let service = CasService::new(core);
         let request = serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true})).unwrap();
         let output = response_text(service.factory_worker_status(request).await.unwrap());
-        assert!(output.contains("Factory MCP versions (installed 3.72.0)"), "{output}");
-        assert!(output.contains("release-worker (Worker") && output.contains("3.70.0 [STALE"), "{output}");
+        assert!(output.contains("Factory MCP versions (installed 9.99.2)"), "{output}");
+        assert!(output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"), "{output}");
     }
 
     #[tokio::test]

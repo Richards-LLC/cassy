@@ -281,7 +281,7 @@ mod tests {
         let store = open_agent_store(&root).unwrap();
         store.register(&worker).unwrap();
         let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
-        epoch.version = Some("3.70.0".into());
+        epoch.version = Some("9.99.1".into());
         SqliteHistoryStore::open(&root)
             .unwrap()
             .record_epoch(&epoch)
@@ -292,11 +292,11 @@ mod tests {
     #[test]
     fn worker_status_flags_live_old_mcp_against_installed_binary() {
         let (_dir, root, worker) = fixture();
-        let snapshot = snapshot_with_installed(&root, "3.72.0", Utc::now()).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         let status = render(&snapshot, Some("factory-release"));
-        assert!(status.contains("installed 3.72.0"), "{status}");
+        assert!(status.contains("installed 9.99.2"), "{status}");
         assert!(status.contains("old-worker (Worker"), "{status}");
-        assert!(status.contains("3.70.0 [STALE"), "{status}");
+        assert!(status.contains("9.99.1 [STALE"), "{status}");
 
         // A dead/reused PID cannot borrow a historical version and generate
         // a false alert for another process.
@@ -304,7 +304,7 @@ mod tests {
         reused.pid_starttime = Some(u64::MAX);
         open_agent_store(&root).unwrap().update(&reused).unwrap();
         assert!(
-            snapshot_with_installed(&root, "3.72.0", Utc::now())
+            snapshot_with_installed(&root, "9.99.2", Utc::now())
                 .unwrap()
                 .servers
                 .is_empty()
@@ -324,8 +324,8 @@ mod tests {
             .unwrap()
             .register(&supervisor)
             .unwrap();
-        assert_eq!(notify_after_install(&root, "3.72.0").unwrap(), 1);
-        assert_eq!(notify_after_install(&root, "3.72.0").unwrap(), 1);
+        assert_eq!(notify_after_install(&root, "9.99.2").unwrap(), 1);
+        assert_eq!(notify_after_install(&root, "9.99.2").unwrap(), 1);
         let queue = crate::store::open_supervisor_queue_store(&root).unwrap();
         let rows = queue.list_pending(&supervisor.id).unwrap();
         assert_eq!(

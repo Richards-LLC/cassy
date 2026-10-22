@@ -359,35 +359,28 @@ pub(crate) fn release_for_task_with(
     cas_root: &Path,
     task_id: &str,
 ) -> Option<std::thread::JoinHandle<()>> {
-    // Red: the pre-cas-c55f release, which asks the Cloud inline between
-    // reading and rewriting each ledger.
+    let now = chrono::Utc::now().timestamp();
     for ledger_file in ledger_files(cas_root) {
-        let mut ledger = load_at(&ledger_file);
-        let held: Vec<String> = ledger
-            .leases
-            .iter()
-            .filter(|(_, lease)| lease.task_id.as_deref() == Some(task_id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        if held.is_empty() {
-            continue;
-        }
-        for id in &held {
-            if let (Some(claims), Some(lease)) = (claims.as_ref(), ledger.leases.get(id))
-                && lease.mine
-                && !ledger.agent_id.is_empty()
-            {
-                let _ = claims.release_own(id, &ledger.agent_id);
+        update_at(&ledger_file, |ledger| {
+            let ended: Vec<String> = ledger
+                .leases
+                .iter()
+                .filter(|(_, lease)| lease.task_id.as_deref() == Some(task_id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ended {
+                if ledger.leases.remove(&id).is_some_and(|lease| lease.mine) {
+                    ledger.releasing.insert(id, now);
+                }
             }
-            ledger.leases.remove(id);
-        }
-        if ledger.leases.is_empty() {
-            let _ = std::fs::remove_file(&ledger_file);
-        } else {
-            save_at(&ledger_file, &ledger);
-        }
+        });
     }
-    None
+    let claims = claims?;
+    let cas_root = cas_root.to_path_buf();
+    std::thread::Builder::new()
+        .name("cas-file-lease-release".into())
+        .spawn(move || release_pending(&claims, &cas_root))
+        .ok()
 }
 
 /// Ask Cassy Cloud to release every recorded pending file lease of this

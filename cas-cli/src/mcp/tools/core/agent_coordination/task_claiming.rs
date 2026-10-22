@@ -507,6 +507,8 @@ impl CasCore {
             Ok(()) => {
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
                 crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+                // cas-c55f: and the file leases taken for the task.
+                crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -744,6 +746,8 @@ impl CasCore {
             .unwrap_or(false);
         // cas-5f28: and its Cassy Cloud claim, so peers may start it.
         crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        // cas-c55f: and the file leases taken for it.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         let prior_status = task.status;
         let prior_assignee = task.assignee.clone();

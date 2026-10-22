@@ -326,7 +326,11 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
     let socket = gui_socket_path(name);
     let mut failures = Vec::new();
     // The other-project held row proves filtering precedes endpoint refusal.
-    for (same_project, held) in [(false, false), (false, true), (true, false), (true, true)] {
+    for (recorded, same_project, held) in [
+        (true, false, false), (true, false, true),
+        (true, true, false), (true, true, true),
+        (false, false, false), (false, false, true),
+    ] {
         let project = if same_project { &root } else { &other };
         let metadata = create_metadata(
             name,
@@ -337,20 +341,27 @@ fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
             project.parent().unwrap().to_str(),
             None,
         );
-        SessionManager::new().save_metadata(&metadata).unwrap();
+        if recorded {
+            SessionManager::new().save_metadata(&metadata).unwrap();
+        } else {
+            let _ = std::fs::remove_file(crate::ui::factory::metadata_path(name));
+        }
         let listener = UnixListener::bind(&socket).unwrap();
         let listener = held.then_some(listener);
         let result = RuntimeInventory::discover(&root);
         match result {
-            Err(error) if same_project && held => {
+            Err(error) if recorded && same_project && held => {
                 if !error.contains(name) || !error.contains(&format!("cas kill {name}")) {
                     failures.push(format!("held endpoint lacks named remedy: {error}"));
                 }
             }
-            Err(error) => {
-                failures.push(format!("same_project={same_project}, held={held}: {error}"))
+            Err(error) if !recorded && held => {
+                assert!(error.contains("unattributed"), "{error}");
             }
-            Ok(_) if same_project && held => failures.push("held endpoint was allowed".into()),
+            Err(error) => failures.push(format!(
+                "recorded={recorded}, same_project={same_project}, held={held}: {error}"
+            )),
+            Ok(_) if held && (!recorded || same_project) => failures.push("held endpoint was allowed".into()),
             Ok(_) => {}
         }
         assert!(

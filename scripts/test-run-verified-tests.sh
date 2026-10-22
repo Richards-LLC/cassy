@@ -149,7 +149,8 @@ import json, os, subprocess, sys, time
 from pathlib import Path
 leave_child = os.environ.get('LEAVE_CHILD') == '1'
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
-                         stdout=subprocess.DEVNULL if leave_child else None)
+                         stdout=subprocess.DEVNULL if leave_child else None,
+                         stderr=subprocess.DEVNULL if leave_child else None)
 marker = Path(os.environ['PID_FILE'])
 ready = marker.with_suffix('.ready')
 ready.write_text(json.dumps([os.getpid(), child.pid]))

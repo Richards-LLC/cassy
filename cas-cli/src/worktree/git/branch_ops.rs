@@ -951,7 +951,30 @@ impl GitOperations {
     /// CI refusal must still leave that branch untouched.
     pub(crate) fn fetch_merge_target(&self, target: &str) -> Result<Option<String>> {
         if !self.has_origin_remote() { return Ok(None); }
-        self.fetch_merge_target_bounded(target, FETCH_TIMEOUT).map(Some)
+        match self.fetch_merge_target_bounded(target, FETCH_TIMEOUT) {
+            Ok(sha) => Ok(Some(sha)),
+            // cas-590a: origin answered but has no copy of this branch (a
+            // local-only epic lane), so the local target is the authority,
+            // exactly as with no origin. Only an unreachable, refused or
+            // timed-out origin stays an error.
+            Err(error) if self.origin_lacks_branch(target) => {
+                tracing::debug!(target = %target, %error, "origin has no copy of the merge target");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether origin answered and lists no `refs/heads/<branch>`
+    /// (`git ls-remote --exit-code` exits 2 for that, and only that).
+    fn origin_lacks_branch(&self, branch: &str) -> bool {
+        let mut command = Command::new("git");
+        command
+            .args(["ls-remote", "--exit-code", "--heads", "origin", &format!("refs/heads/{branch}")])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(&self.repo_root);
+        Self::run_command_bounded(command, FETCH_TIMEOUT)
+            .is_ok_and(|output| output.status.code() == Some(2))
     }
 
     /// A target refresh must update its exact origin ref even when the

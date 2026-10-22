@@ -2411,12 +2411,28 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     // the local target. The merge says containment is unverified, instead of
     // re-running the merge and push to end in NOT PUSHED.
     run_git(&["config", "--unset", "remote.origin.uploadpack"], &repo.root);
+    let local_before = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
+    let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
     let offline = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
     let offline = get_text(&offline);
     // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
     assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
     assert!(!offline.contains("NOT PUSHED"), "{offline}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
+    assert_eq!(git_stdout(remote.path(), &["for-each-ref"]), origin_refs, "origin did not move");
+
+    // cas-590a: origin is reachable but has no copy of the target, as for a
+    // local-only epic lane. The local target is then the authority, so an
+    // already-contained source is a no-op again rather than unverifiable.
+    run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["branch", "-D", "epic/race"], remote.path());
+    let local_only = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let local_only = get_text(&local_only);
+    assert!(!local_only.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{local_only}");
+    // pin: the existing contained receipt names the local authority.
+    assert!(local_only.contains("Already contained"), "{local_only}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
 }
 
 #[tokio::test]

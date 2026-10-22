@@ -7769,7 +7769,17 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             summary.push('\n');
             continue;
         }
-        let label = gc_report_category_label(heading);
+        // Keep actionable artifact counts independent of the potentially long
+        // root. Full/JSON/pages retain the producer's complete original heading.
+        // Split from the right so a root containing the marker stays opaque.
+        let (label, artifact_counts) = if let Some((_, counts)) = heading
+            .strip_prefix("Durable task artifacts: root=")
+            .and_then(|values| values.rsplit_once(" closed-task candidates="))
+        {
+            ("Durable task artifacts".to_owned(), Some(counts))
+        } else {
+            (gc_report_category_label(heading), None)
+        };
         let detail_lines = lines
             .iter()
             .skip(1)
@@ -7786,6 +7796,9 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             "- {label}: {item_count} items\n"
         ));
 
+        if let Some(counts) = artifact_counts {
+            summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
+        }
         if let Some(context) = detail_lines
             .iter()
             .copied()
@@ -7838,7 +7851,7 @@ fn gc_report_fit_human(text: &str) -> String {
     let mut output = String::new();
     for original in text.lines() {
         let ascii = gc_report_ascii(original);
-        let (prefix, body) = ["  Context: ", "  Sample: "]
+        let (prefix, body) = ["  Counts: ", "  Context: ", "  Sample: "]
             .into_iter()
             .find_map(|prefix| ascii.strip_prefix(prefix).map(|body| (prefix, body)))
             .unwrap_or(("", ascii.as_str()));

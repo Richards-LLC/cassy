@@ -12829,6 +12829,8 @@ mod managed_commits_tests {
         assert_eq!(git(&["rev-parse", "main"]), main, "doctor must not move local history");
         git(&["update-ref", "refs/remotes/origin/main", &main]);
         assert!(managed_commits_check(&repo).is_none(), "published repairs are no longer pending");
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert!(managed_commits_check(&repo).is_none(), "deleted configured upstream is not proof of an unpushed repair");
         git(&["config", "--unset", "branch.main.remote"]);
         git(&["config", "--unset", "branch.main.merge"]);
         assert!(managed_commits_check(&repo).is_none(), "no upstream is not proof of an unpushed repair");

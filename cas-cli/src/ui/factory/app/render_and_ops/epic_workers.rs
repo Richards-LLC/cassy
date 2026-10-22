@@ -5993,6 +5993,22 @@ mod spawn_base_tests {
         assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
         assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
         assert_eq!(head_sha(&repo, "main"), parent_tip);
+
+        // A published repair can be ahead of the local parent after rebase
+        // merging. The real lane check chooses its remote-tracking parent.
+        for args in [
+            vec!["update-ref", "refs/remotes/origin/main", parent_tip.as_str()],
+            vec!["reset", "--hard", "-q", "HEAD~1"],
+        ] {
+            assert!(Command::new("git").current_dir(&repo).args(args).status().unwrap().success());
+        }
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &repo.join(".cas"), "cas-legacy-child")
+            .err().expect("remote-parent repair divergence still refuses").to_string();
+        let cause = error.split("Cause:").nth(1).expect("Cassy-authored repair needs attribution");
+        assert!(!cause.contains("local-only"), "published repair was mislabelled: {error}");
+        assert!(cause.contains("not on") && cause.contains("epic/diverged"), "cause must identify the compared ref: {error}");
+        assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
+        assert_eq!(head_sha(&repo, "origin/main"), parent_tip);
     }
 
     /// GH #584 / cas-a075: the production spawn-preparation seam must stop

@@ -1517,6 +1517,11 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
              AND agents.status <> 'shutdown'
        )";
 
+/// A message whose body starts with this line (after an optional
+/// `[CAS reply: …]` first line) does not wake its recipient. cas-cli's
+/// `supervisor_message_wakes::QUIET` is this constant.
+pub const QUIET_MESSAGE_MARKER: &str = "<cas-message-quiet/>";
+
 /// cas-d1e0: the most rows one received-message history scan reads. It
 /// holds the connection lock, so even a filter that rejects every row
 /// stops here; a hit is logged.
@@ -10003,26 +10008,28 @@ mod tests {
             agent_id: "worker-agent-id".into(),
         };
 
+        let mut ids = Vec::new();
         for sequence in 1..=5 {
             let prompt = format!(
                 "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
             );
-            assert!(matches!(
-                store
-                    .enqueue_worker_action_with_outcome(
-                        "swift-fox",
-                        "cosmic-bear-43",
-                        &prompt,
-                        "swift-fox",
-                        "session-1",
-                        Some("status update"),
-                        None,
-                        false,
-                        &origin,
-                    )
-                    .unwrap(),
-                EnqueueOutcome::Created(_)
-            ));
+            let EnqueueOutcome::Created(id) = store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox",
+                    "cosmic-bear-43",
+                    &prompt,
+                    "swift-fox",
+                    "session-1",
+                    Some(&format!("update {sequence}")),
+                    None,
+                    false,
+                    &origin,
+                )
+                .unwrap()
+            else {
+                panic!("status {sequence} must be created");
+            };
+            ids.push(id);
         }
 
         let conn = store.conn.lock().unwrap();
@@ -10066,6 +10073,100 @@ mod tests {
         for sequence in 1..=5 {
             assert!(surviving.contains(&format!("status {sequence}")), "status {sequence} lost: {surviving}");
         }
+        // cas-6021 review: each earlier message's label sits directly above
+        // its own body, oldest first, however many folds came before.
+        let lines: Vec<&str> = surviving.lines().collect();
+        let mut last = 0;
+        for sequence in 1..=4 {
+            let label = format!("Earlier message #{} (update {sequence})", ids[sequence - 1]);
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with(&label))
+                .unwrap_or_else(|| panic!("{label} missing: {surviving}"));
+            assert_eq!(lines[at + 1], format!("status {sequence}"), "{label} labels another body: {surviving}");
+            assert!(at >= last, "labels run oldest first: {surviving}");
+            last = at;
+        }
+        assert_eq!(surviving.matches("Earlier message #").count(), 4, "{surviving}");
+    }
+
+    /// cas-6021 review: folding never loses or duplicates a message. An
+    /// empty or identical body is absorbed rather than repeated, a body
+    /// that would overflow the fold stays pending on its own, and a fold of
+    /// quiet messages stays quiet while a mixed one carries no raw marker.
+    #[test]
+    fn worker_action_folds_absorb_overflow_and_keep_quiet_cas_6021() {
+        let (_temp, store) = create_test_store();
+        let origin = QueueOrigin::RegisteredAgent { agent_id: "worker-agent-id".into() };
+        let envelope = "<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>";
+        let send = |body: &str| {
+            let prompt = if body.is_empty() { envelope.to_string() } else { format!("{body}\n\n{envelope}") };
+            match store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox", "cosmic-bear-43", &prompt, "swift-fox", "session-1",
+                    Some("status"), None, false, &origin,
+                )
+                .unwrap()
+            {
+                EnqueueOutcome::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let row = |id: i64| -> (String, bool) {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT prompt, processed_at IS NULL FROM prompt_queue WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        let quiet = QUIET_MESSAGE_MARKER;
+
+        // An identical body and an empty one are absorbed, not repeated.
+        let first = send("same question");
+        let second = send("same question");
+        assert!(!row(first).1, "the identical body is superseded");
+        assert!(!row(second).0.contains("Earlier message"), "{}", row(second).0);
+        let empty = send("");
+        let after_empty = send("next");
+        assert!(!row(empty).1);
+        assert!(!row(after_empty).0.contains(&format!("#{empty}")), "{}", row(after_empty).0);
+
+        // A body too large to fold stays pending on its own.
+        let large = send(&"x".repeat(7_000));
+        let small = send(&"y".repeat(2_000));
+        assert!(row(large).1, "an unfoldable body is left pending, never dropped");
+        assert!(!row(small).0.contains(&format!("#{large}")));
+
+        // Quiet messages fold into a quiet message, marked once.
+        let (_temp, store) = create_test_store();
+        let send = |body: &str| {
+            match store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox", "cosmic-bear-43", &format!("{body}\n\n{envelope}"), "swift-fox",
+                    "session-1", Some("status"), None, false, &origin,
+                )
+                .unwrap()
+            {
+                EnqueueOutcome::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        send(&format!("{quiet}\nquiet one"));
+        let both_quiet = send(&format!("{quiet}\nquiet two"));
+        let mixed = {
+            let id = send("loud three");
+            let conn = store.conn.lock().unwrap();
+            let prompt = |id: i64| -> String {
+                conn.query_row("SELECT prompt FROM prompt_queue WHERE id = ?1", [id], |row| row.get(0)).unwrap()
+            };
+            (prompt(both_quiet), prompt(id))
+        };
+        assert!(mixed.0.starts_with(quiet) && mixed.0.matches(quiet).count() == 1, "{}", mixed.0);
+        assert!(mixed.0.contains("quiet one") && mixed.0.contains("quiet two"), "{}", mixed.0);
+        assert!(!mixed.1.contains(quiet), "a fold with a waking message carries no marker: {}", mixed.1);
+        assert!(mixed.1.contains("quiet one") && mixed.1.contains("loud three"), "{}", mixed.1);
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so

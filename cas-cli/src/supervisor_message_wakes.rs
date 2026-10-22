@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const QUIET: &str = "<cas-message-quiet/>";
+pub(crate) const QUIET: &str = cas_store::QUIET_MESSAGE_MARKER;
 const DEBOUNCE_DETAIL: &str = "directed supervisor message burst debounce";
 
 // One warning per project per minute, shared across selection job threads.

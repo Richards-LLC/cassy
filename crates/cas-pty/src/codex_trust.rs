@@ -1779,6 +1779,7 @@ mod tests {
         assert!(!message.contains(['\u{85}', '\u{202e}']), "{message:?}");
         assert!(message.contains("no copyable command"), "{message:?}");
         assert!(!message.contains("`git -C "), "{message:?}");
+        // pin: refusing an unsafe remedy must leave the tracked hook bytes intact.
         assert_eq!(std::fs::read_to_string(unsafe_main.join(".codex/hooks.json")).unwrap(), stale);
     }
 

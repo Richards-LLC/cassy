@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use cas_store::{AgentStore, EPOCH_KIND_DAEMON_START, HistoryStore, SqliteHistoryStore};
 use cas_types::{Agent, AgentRole};
@@ -103,7 +104,13 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let version = latest.get(&pid).and_then(|epoch| epoch.version.clone());
+        let version = latest.get(&pid).and_then(|epoch| {
+            let observed = epoch.ended_at.as_deref().unwrap_or(&epoch.started_at);
+            DateTime::parse_from_rfc3339(observed)
+                .ok()
+                .filter(|at| at.with_timezone(&Utc) >= agent.registered_at)
+                .and_then(|_| epoch.version.clone())
+        });
         let older = version
             .as_deref()
             .and_then(version_triplet)
@@ -126,19 +133,33 @@ pub(crate) fn snapshot_with_installed(
 }
 
 fn installed_version() -> Option<String> {
-    let output = crate::bounded_process::run_command(
+    static CACHE: OnceLock<Mutex<Option<(String, Instant, Option<String>)>>> = OnceLock::new();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached_path, checked_at, version)) = guard.as_ref() {
+            if cached_path == &path && checked_at.elapsed() < Duration::from_secs(10) {
+                return version.clone();
+            }
+        }
+    }
+    let version = crate::bounded_process::run_command(
         Command::new("cas").arg("--version"),
         crate::bounded_process::Deadline::after(Duration::from_millis(500)),
         Duration::from_millis(500),
     )
-    .ok()?;
-    if !output.status.success() {
-        return None;
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| {
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .find(|word| version_triplet(word).is_some())
+            .map(|word| word.trim_start_matches('v').to_string())
+    });
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((path, Instant::now(), version.clone()));
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .find(|word| version_triplet(word).is_some())
-        .map(|word| word.trim_start_matches('v').to_string())
+    version
 }
 
 pub(crate) fn snapshot(cas_root: &Path) -> Result<Snapshot, String> {
@@ -176,8 +197,22 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
 
 pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Option<String> {
     let snapshot = snapshot(cas_root).ok()?;
-    snapshot.servers.iter().any(|row| row.older && session.is_none_or(|s| row.session.as_deref() == Some(s)))
-        .then(|| format!("⚠ Factory MCP servers older than installed Cassy.\n{}\nRecycle affected sessions after saving worker state.", render(&snapshot, session)))
+    let rows: Vec<_> = snapshot
+        .servers
+        .iter()
+        .filter(|row| session.is_none_or(|s| row.session.as_deref() == Some(s)))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let versions = render(&snapshot, session);
+    Some(if rows.iter().any(|row| row.older) {
+        format!(
+            "⚠ Factory MCP servers older than installed Cassy.\n{versions}\nRecycle affected sessions after saving worker state."
+        )
+    } else {
+        versions
+    })
 }
 
 /// Called by the newly installed post-swap child. Idempotency is per release

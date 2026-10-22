@@ -3885,7 +3885,8 @@ impl CasService {
         })?;
 
         // Snapshot execution before housekeeping can remove a dead worker.
-        // The fast poll does no Git, network, history scan or stale mutation.
+        // The fast poll does no Git, network or stale mutation. Binary-skew
+        // detection below reads bounded epoch history and caches its CLI probe.
         let factory_session = current_factory_session();
         let liveness_rows = worker_liveness_rows(
             &self.inner.cas_root,

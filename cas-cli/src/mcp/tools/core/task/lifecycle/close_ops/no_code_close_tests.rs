@@ -333,15 +333,13 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         let id = "cas-255b";
         let mut helper = assigned(id, TaskType::Task, "main");
         helper.title = "Own the iOS simulator".into();
-        helper.execution_note = Some("no-code".into());
-        helper.external_ref = Some("artifact:cas-255b/ios-simulator-release".into());
         f.put(&helper);
         claim(&f, id);
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
         config.save(&f.cas_dir()).unwrap();
-        // A real exact-task verdict and portable no-code proof authorize close
-        // without treating an unmeasured empty range as proof by itself.
+        // A real exact-task verdict still binds this undeclared helper;
+        // only a fresh no-delivery declaration may waive its delivery gates.
         let dispatch = cas_store::create_verification_dispatch_bound(
             &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
             &cas_types::VerificationProofBoundary::task(),

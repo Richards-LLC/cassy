@@ -1470,7 +1470,7 @@ mod integration_flag_tests {
 
     #[test]
     fn init_next_steps_box_has_one_width_for_every_row() {
-        use unicode_width::UnicodeWidthStr;
+        use ratatui::text::Line;
         let mut env = crate::test_support::TestEnvGuard::new();
         for locale in ["C", "C.UTF-8"] {
             env.set("LC_ALL", locale);
@@ -1479,7 +1479,7 @@ mod integration_flag_tests {
                 output.push_str(&init_text_for_mode(text, OutputMode::Styled));
                 Ok(())
             }).unwrap();
-            let widths: Vec<_> = output.lines().map(UnicodeWidthStr::width).collect();
+            let widths: Vec<_> = output.lines().map(|line| Line::raw(line).width()).collect();
             assert!(widths.iter().all(|width| *width == widths[0] && *width <= 80),
                 "{locale}: border and content must align within 80 cells: {widths:?}\n{output}");
         }

@@ -1,7 +1,10 @@
 //! Posts a sealed pack to Slack through Violet from the `cas serve` driver
 //! (cas-efb8), once per pack generation, when `qa.release.slack_channel` is
 //! set. Violet only: the call goes through the serve process's MCP proxy and
-//! its normal policy and audience checks.
+//! its normal policy and audience checks. A seal (in the driver or in the CLI
+//! `record` path, which has no proxy) only notes the post; each driver tick
+//! posts every sealed generation missing from `slack.json` and retries a
+//! failure on the next tick.
 //!
 //! The driver is not a registered agent, so it calls as the fixed identity
 //! [`DRIVER_AGENT`] with the `Standard` role (Violet routes are not
@@ -137,13 +140,48 @@ pub struct Posted {
 
 /// The generations already posted from the pack in `dir`.
 pub fn posted(dir: &Path) -> Vec<Posted> {
-    std::fs::read(dir.join(SLACK_FILE)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    ledger(dir).0
+}
+
+/// The posted generations, moving a `slack.json` that does not parse aside
+/// (as `slack.json.corrupt-<time>`) rather than overwriting it.
+fn ledger(dir: &Path) -> (Vec<Posted>, Option<String>) {
+    let path = dir.join(SLACK_FILE);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (Vec::new(), None);
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(posted) => (posted, None),
+        Err(error) => {
+            let aside = dir.join(format!("{SLACK_FILE}.corrupt-{}", Utc::now().format("%Y%m%dT%H%M%S%.f")));
+            let note = match std::fs::rename(&path, &aside) {
+                Ok(()) => format!("Slack: {SLACK_FILE} did not parse ({error}); moved aside to {}", aside.display()),
+                Err(rename) => format!("Slack: {SLACK_FILE} did not parse ({error}) and could not be moved aside: {rename}"),
+            };
+            (Vec::new(), Some(note))
+        }
+    }
+}
+
+/// A note for a seal: the driver posts this generation on its next tick.
+pub(crate) fn seal_note(config: &ReleaseConfig) -> Option<String> {
+    (!config.slack_channel.trim().is_empty())
+        .then(|| format!("Slack: the cas serve driver posts this generation to {}", config.slack_channel.trim()))
+}
+
+/// Each (pack, outcome) note once per process, so a post that keeps failing
+/// every tick is noted once, not every 30 seconds; the retry continues.
+fn once(pack_sha256: &str, note: String) -> Option<String> {
+    static NOTED: OnceLock<Mutex<std::collections::BTreeSet<(String, String)>>> = OnceLock::new();
+    let noted = NOTED.get_or_init(Default::default);
+    noted.lock().unwrap_or_else(|e| e.into_inner()).insert((pack_sha256.into(), note.clone())).then_some(note)
 }
 
 /// Posts the sealed pack in `dir` once per generation (keyed by the sha256 of
-/// `pack.json`) when `qa.release.slack_channel` is set. Returns run notes:
-/// the permalink, or why nothing was posted. A failed post is not recorded,
-/// so the next generation's seal posts.
+/// `pack.json`) when `qa.release.slack_channel` is set. The driver calls it
+/// every tick for every sealed run. Returns run notes: the permalink, or
+/// (once per pack and cause) why nothing was posted. A failure is not
+/// recorded, so the next tick retries.
 pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path) -> Vec<String> {
     let channel = config.slack_channel.trim();
     if channel.is_empty() {
@@ -153,9 +191,10 @@ pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path) -> Vec<String> {
         return vec!["Slack post skipped: pack.json is unreadable".into()];
     };
     let pack_sha256 = format!("{:x}", Sha256::digest(&bytes));
-    let mut ledger = posted(dir);
+    let (mut ledger, moved) = ledger(dir);
+    let mut notes: Vec<String> = moved.into_iter().collect();
     if ledger.iter().any(|p| p.pack_sha256 == pack_sha256) {
-        return Vec::new();
+        return notes;
     }
     let Some((transport, runtime)) = installed()
         .lock()
@@ -163,7 +202,8 @@ pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path) -> Vec<String> {
         .as_ref()
         .map(|i| (Arc::clone(&i.transport), i.runtime.clone()))
     else {
-        return vec!["Slack post skipped: no Violet proxy in this serve process".into()];
+        notes.extend(once(&pack_sha256, "Slack post waiting: no Violet proxy in this serve process".into()));
+        return notes;
     };
     let outcome = Pack::load(dir).map_err(|e| e.to_string()).and_then(|pack| {
         let bundle = slack_bundle(dir, cas_types::ARTIFACT_MAX_BYTES, &Ffmpeg).map_err(|e| e.to_string())?;
@@ -194,16 +234,19 @@ pub(crate) fn post_sealed(config: &ReleaseConfig, dir: &Path) -> Vec<String> {
             let recorded = serde_json::to_vec_pretty(&ledger)
                 .map_err(|e| e.to_string())
                 .and_then(|json| write_atomic(dir, SLACK_FILE, &json).map_err(|e| e.to_string()));
-            let mut notes = vec![format!(
+            notes.push(format!(
                 "Slack: posted pack {} ({files} files) to {channel} as {DRIVER_AGENT}: {permalink}",
                 &pack_sha256[..12]
-            )];
+            ));
             if let Err(error) = recorded {
                 notes.push(format!("Slack post not recorded in {SLACK_FILE}: {}", printable(&error)));
             }
             notes
         }
-        Err(error) => vec![format!("Slack post failed: {}", printable(&error))],
+        Err(error) => {
+            notes.extend(once(&pack_sha256, format!("Slack post failed (retrying each tick): {}", printable(&error))));
+            notes
+        }
     }
 }
 

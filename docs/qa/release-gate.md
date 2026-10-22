@@ -213,10 +213,13 @@ re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
 fits. If re-encoding fails or the video is still too large, it stays
 local-only and the row's frames carry the evidence.
 
-**Posting at seal.** When `slack_channel` is set, the `cas serve` driver
-posts each sealed pack through the serve process's Violet proxy, once per
-pack generation, keyed by the sha256 of `pack.json`. It never uses the Slack
-connector. An OWED reseal therefore posts its new generation once.
+**Posting from the driver.** When `slack_channel` is set, each seal, whether
+made by the driver or by `cas qa release-gate record` in the CLI (which has
+no proxy), notes that the driver will post it. On every tick, the `cas serve`
+driver posts each sealed generation missing from the pack's `slack.json`
+through the serve process's Violet proxy, keyed by the sha256 of `pack.json`.
+It never uses the Slack connector. An OWED reseal therefore posts its new
+generation once.
 
 - **Identity:** the driver calls as the fixed identity `release-gate-driver`
   with the `Standard` role, and goes through Violet's normal policy and
@@ -226,9 +229,11 @@ connector. An OWED reseal therefore posts its new generation once.
   channel.
 - **Receipts:** the permalink is written to the run notes and to `slack.json`
   in the pack directory.
-- **Failures:** a failed post is noted and not recorded, so the next
-  generation posts. With no Violet proxy in the serve process, the run notes
-  say so and nothing is posted.
+- **Failures:** a failed post is not recorded, so the next tick retries it.
+  The run notes record each pack's failure once, not every tick. With no
+  Violet proxy in the serve process, the notes say the post is waiting.
+- **Corrupt record:** a `slack.json` that does not parse is moved aside as
+  `slack.json.corrupt-<time>` and the current generation posts again.
 - **Video sniffing:** a video's `ftyp` box must name a video brand (`isom`,
   `mp42`, `qt` and others), so HEIC, AVIF or M4A saved under a video
   extension is linked rather than uploaded.

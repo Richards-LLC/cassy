@@ -277,3 +277,18 @@ pub fn prune_media(release_root: &Path, retention_days: u32, now: DateTime<Utc>)
     }
     deleted
 }
+
+#[cfg(test)]
+mod tests {
+    /// An `ftyp` box uploads as video only with a video major brand: HEIC,
+    /// AVIF and M4A share the box but are linked, never uploaded.
+    #[test]
+    fn video_sniff_requires_a_video_brand() {
+        let dir = tempfile::tempdir().unwrap();
+        for (brand, video) in [("isom", true), ("qt  ", true), ("heic", false), ("avif", false), ("M4A ", false)] {
+            let path = dir.path().join("clip.mp4");
+            std::fs::write(&path, [b"\0\0\0\x18ftyp".as_slice(), brand.as_bytes(), b"\0\0\0\0"].concat()).unwrap();
+            assert_eq!(super::sniffed(&path, true), video, "{brand}");
+        }
+    }
+}

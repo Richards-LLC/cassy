@@ -601,9 +601,11 @@ nothing. It checks, once each:
 | `aborted` | Ended by `abort`, with no pack. |
 
 **Driver.** One `cas serve` per project holds the driver lease
-(`.cas/release-gate/driver.lock`) and ticks every 30 seconds. A tick walks
-each unfinished suite, moves to `manual`, and seals once every planned row
-has a verdict. At driver start, expired fixture cleanups are replayed. Each
+(`.cas/release-gate/driver.lock`) and ticks every 30 seconds. Every server
+retries the lease each interval, so another one takes over when the holder
+exits. A tick walks each unfinished suite, moves to `manual`, and seals once
+every planned row has a verdict. On taking the lease, a server replays
+expired fixture cleanups. Each
 row is written as soon as it is walked. A restart or shutdown resumes the run
 and reruns only rows with no verdict. The suite clock is stored with the run,
 so a restart never extends it.
@@ -636,6 +638,8 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 
 - `cas qa release-gate status [--sha <sha>]` shows the state, the freeze,
   rows by verdict, owed rows and manual minutes. `--json` prints the run.
+  An unreadable run file is warned about on stderr. It freezes nothing,
+  because row-end `SERVED_DRIFT` still guards the verdicts.
 - `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
   records a manual row. Optional flags are `--reason`, `--cause`,
   `--minutes`, `--subject kind=id`, `--covers-pr N` and `--covers-commit <sha>`. Files in `<dir>`
@@ -650,8 +654,9 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 `--sha` defaults to the live run.
 
 **Sealing.** The pack is sealed when the last row gets its verdict. At
-the freeze TTL, unrecorded manual rows become `NOT_EXERCISED{timed_out}` and
-the pack is sealed. After the seal, Cassy does three things:
+the freeze TTL, merges are allowed again, so no suite starts or runs past it:
+every row still without a verdict, automated or manual, becomes
+`NOT_EXERCISED{timed_out}` and the pack is sealed. After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

@@ -6,7 +6,7 @@
 | **Scannable** | `list` prints one fixed-column row per artifact — name, size, status, id — sorted newest first, so the row just published is the first one. `show` is a labelled term/value block in a stable order (task, type, sha256, status, then any cloud and Slack references). Sizes use decimal units, matching the file dialog the operator read the size from. |
 | **Readable** | The storage line states Cloud availability or local-only retention. A failed upload preserves its HTTP status and complete cause without a success headline; the local artifact id remains available for inspection. MCP uses the same distinction: `Published` only after commit, otherwise `Local-only artifact`. |
 | **Machine output** | `--json` is one object per command: `publish` returns `artifact_id`, `task_id`, `name`, `mime`, `size_bytes`, `sha256`, `status`, `storage` (`committed` / `not_live` / `not_logged_in` / `upload_failed`), `storage_detail`, `cloud_url`, `source`; `show` returns the stored record; `list` returns an array of records. The human verdict line never appears on stdout in JSON mode. |
-| **Omitted** | The pre-signed upload URL, in every mode — it is a credential, so it is never printed, never persisted, and never included in a failure report. The full digest is shortened to `b94d27b9…cde9` in `publish` (whole in `show` and `--json`), and per-step upload timings are not reported at all. |
+| **Omitted** | The pre-signed upload URL, in every mode — it is a credential, so it is never printed, never persisted, and never included in a failure report. `publish` prints the complete 64-character SHA-256 on a 76-column ASCII line; `show` and `--json` also retain the whole digest. Per-step upload timings are not reported. |
 
 ## Fetch
 

@@ -196,7 +196,7 @@ fn print_publish(outcome: &PublishOutcome) {
         artifact.id
     );
     println!("     {}", outcome.disposition.summary());
-    println!("     sha256 {}", short_digest(&artifact.sha256));
+    println!("     sha256 {}", artifact.sha256);
     match &outcome.disposition {
         PublishDisposition::UploadFailed { reason } => {
             // The failure detail is the actionable part; it is printed in full,
@@ -430,14 +430,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Enough digest to compare by eye, in one terminal column.
-fn short_digest(sha256: &str) -> String {
-    if sha256.len() <= 16 {
-        return sha256.to_string();
-    }
-    format!("{}…{}", &sha256[..8], &sha256[sha256.len() - 4..])
-}
-
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
@@ -590,15 +582,6 @@ mod tests {
         assert_eq!(human_size(812_345), "813 KB");
         assert_eq!(human_size(3_400_000), "3.4 MB");
         assert_eq!(human_size(42_800_000_000), "42.8 GB");
-    }
-
-    #[test]
-    fn a_digest_is_shortened_but_still_comparable() {
-        let digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        let short = short_digest(digest);
-        assert_eq!(short, "b94d27b9…cde9");
-        assert!(digest.starts_with("b94d27b9") && digest.ends_with("cde9"));
-        assert_eq!(short_digest("abc"), "abc", "a short value is left alone");
     }
 
     #[test]

@@ -385,7 +385,9 @@ the expected value of each labeled criterion. It comes in two forms:
 - `runs: 0`, or `runs` above 1 with no `independence_key` (duplicates could
   not be told apart);
 - two journeys would plan the same row id, for example journey `a` cell `b`
-  and journey `a.b`.
+  and journey `a.b`. A golden set whose ids cannot be listed (an invalid
+  fixture set, or more than 100,000 rows) is reported as unchecked rather
+  than skipped.
 
 It reports `unlabeled_cell` debt for a record with no label for one of the
 journey's labeled criteria.
@@ -403,7 +405,8 @@ freeze, and persists nothing, in two cases:
 - A journey expands past `qa.release.max_cells` rows (default 500). Cells
   are counted before they are built, and the refusal names the journey,
   cells, runs and limit.
-- Two journeys plan the same row id, because one walk would fill both rows.
+- Two journeys plan the same row id, or two journeys share an id, because
+  one walk would fill both rows.
 
 **Grading.** The `run` request's `args` carry the cell:
 `{id, record: {id, frozen, labels}, axes}` and `run`. The answer may add
@@ -413,8 +416,8 @@ for is graded against that label with the criterion's `compare` (default
 
 - A band miss is a FAIL that names the value, the % of the baseline and the
   baseline.
-- A labeled criterion with no measured value is
-  `NOT_EXERCISED{automation}`, which is owed.
+- A labeled criterion with no measured value, or whose label is not a
+  number, is `NOT_EXERCISED{automation}`, which is owed.
 - An unlabeled cell keeps the runner's verdict. It is debt: the pack and the
   PR comment list it. The
 answer's `subjects` value for `independence_key` is the run's identity.

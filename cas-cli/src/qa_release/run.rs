@@ -393,6 +393,15 @@ fn plan(
         }
         None => None,
     };
+    // Two journeys sharing an id would share every row id; --check reports
+    // it, and the gate refuses it.
+    let mut ids = BTreeSet::new();
+    if let Some(twice) = registry.journeys.iter().find(|j| !ids.insert(j.id.as_str())) {
+        bail!(
+            "journey id {} is declared twice in the registry; run cas qa journeys --check and rename one",
+            printable(&twice.id)
+        );
+    }
     let mut rows = Vec::new();
     for journey in registry.journeys.iter().filter(|j| j.live_in(&config.gate_env)) {
         let why = match &impacted {
@@ -438,8 +447,9 @@ fn plan(
     for row in &rows {
         if let Some(other) = owners.insert(&row.id, &row.journey).filter(|other| *other != row.journey) {
             bail!(
-                "row id {} is planned by journeys {other} and {}; rename one before starting the gate",
+                "row id {} is planned by journeys {} and {}; rename one before starting the gate",
                 printable(&row.id),
+                printable(other),
                 printable(&row.journey)
             );
         }

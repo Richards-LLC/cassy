@@ -357,7 +357,7 @@ pub struct TaskRequest {
     /// was inspected before waiving the gate, and it is stored next to the
     /// gate's own measurements. Only honored for a live registered supervisor.
     #[schemars(
-        description = "Supervisor override for the epic close stranded-branch gate: a narrative of what you inspected (e.g. 'diffed all 11 delivered paths against main; content present and later refactored by PR #406'). Live registered supervisor only; the narrative and the gate's per-branch measurements are logged as a decision note. Use it, not a workaround, when every lane is measurably stale."
+        description = "Supervisor override for the epic close stranded-branch gate: what you inspected (e.g. 'diffed all 11 delivered paths against main; content present, later refactored by PR #406'). Live registered supervisor only; logged with the gate's per-branch measurements as a decision note. Use it, not a workaround, when every lane is measurably stale."
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
@@ -427,7 +427,7 @@ pub struct TaskRequest {
     /// effect on the current target. It is only needed
     /// when no commit-time factory anchor was captured.
     #[schemars(
-        description = "Full commit SHA or unambiguous hex abbreviation produced by this task. On close CAS resolves it to the full ID and checks it has a non-empty diff, is an ancestor of the task's parent branch, and its tree effect is still present (or explicitly evolved) on the target; only the full ID is stored. For work merged before close with no automatic factory anchor."
+        description = "Commit SHA (or unambiguous abbreviation) from this task, for work merged before close with no automatic factory anchor. Close stores the full ID after checking a non-empty diff, ancestry of the parent branch and that its tree effect is still present (or explicitly evolved) on the target."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,
@@ -435,7 +435,7 @@ pub struct TaskRequest {
     /// Serialized immutable worker-delivery receipt. This is an additive,
     /// opt-in transactional handoff; omitting it preserves legacy close.
     #[schemars(
-        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, commit/base/target tips, proof reference and optional artifact_path (an existing file or directory under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery transaction. Omit for the legacy close path."
+        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates worker, task, repository, branch, commit/base/target tips, proof reference and optional artifact_path (existing, under [factory] artifacts_root/<task-id>/) before persisting an immutable delivery transaction. Omit for the legacy close."
     )]
     #[serde(default)]
     pub completion_receipt: Option<String>,

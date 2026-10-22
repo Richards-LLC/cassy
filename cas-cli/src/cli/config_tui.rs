@@ -197,7 +197,9 @@ impl ConfigTuiApp {
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let footer = ratatui::widgets::Paragraph::new(self.footer_text())
-            .block(ratatui::widgets::Block::default().borders(Borders::ALL))
+            .block(
+                ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL),
+            )
             .wrap(ratatui::widgets::Wrap { trim: true });
         let footer_height = footer
             .line_count(area.width)

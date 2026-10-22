@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.74.0] - 2026-10-22
+
 ### Added
 
 - **Declared QA safety** — Carry the journey registry's fixture-only, staging or production-read-back policy into QA impact and briefs; preflight refuses declared protected credentials or forbidden configured origins.

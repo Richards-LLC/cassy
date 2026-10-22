@@ -472,7 +472,7 @@ fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String 
             None => format!("\nEPIC BRANCH READY: '{branch}' already published on origin."),
         },
         Err(error) => format!(
-            "\nEPIC BRANCH UNVERIFIED: {error}; focus recorded, branch readiness requires attention."
+            "\nEPIC BRANCH UNVERIFIED: {error}\nFocus recorded; branch readiness requires attention."
         ),
     }
 }

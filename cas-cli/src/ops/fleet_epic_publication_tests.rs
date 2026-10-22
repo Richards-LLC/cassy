@@ -195,11 +195,36 @@ fn cas_bfa1_expected_absent_publication_does_not_replace_racing_remote() {
 #[test]
 fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
     with_fixture(|repo, origin, root, _| {
+        let tasks = crate::store::open_task_store(root).unwrap();
+        let mut epic = tasks.get("cas-unpublished").unwrap();
+        let host = crate::cloud::device::DeviceConfig::hostname().unwrap();
+        epic.deliverables.epic_branch_origin = Some(cas_types::EpicBranchOrigin {
+            branch: "epic/unpublished".into(),
+            host: format!("\n{host}\r\u{7}"),
+        });
+        tasks.update(&epic).unwrap();
         git(repo, &["branch", "-D", "epic/unpublished"]);
         let receipt = focus(root);
         assert!(
-            receipt.contains("no lane was recreated"),
-            "{receipt}"
+            receipt.contains(&format!("epic branch missing on originating host {host}"))
+                && receipt.contains("Restore epic/unpublished from a known commit or backup")
+                && !receipt.contains("not published by")
+                && !receipt.contains("git push")
+                && !receipt.contains("spawn refused:")
+                && receipt.lines().any(|line| line == "git reflog --all"),
+            "source host needs recovery advice and a clean command line: {receipt}"
+        );
+        // pin: actual focus advice keeps the recovery command free of receipt prose.
+        let diagnostic = receipt
+            .split("EPIC BRANCH UNVERIFIED: ")
+            .nth(1)
+            .unwrap()
+            .split("\nFocus recorded;")
+            .next()
+            .unwrap();
+        assert_eq!(
+            format!("{}\n", diagnostic.replace(&host, "soundwave")),
+            include_str!("../../../docs/design/cli/epic-source-recovery.capture.txt")
         );
         for path in [repo, origin] {
             assert!(

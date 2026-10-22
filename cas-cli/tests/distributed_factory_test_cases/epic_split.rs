@@ -252,6 +252,16 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
         assert_eq!(cloud_holder(cloud, child), None, "receiving a proposal claims nothing");
     }
 
+    // A heartbeat or a same-parent task update between receive and accept
+    // must leave the pending shares available for the subsequent acceptance.
+    let claims = cas::cloud::peer_claims::PeerClaims::for_project(&prowl.machine.cas_dir).unwrap();
+    assert_eq!(cas::cloud::epic_split::renew_split_claims(&prowl.machine.cas_dir, &claims, prowl.id, 600), 0);
+    assert!(cas_store::list_epic_split_child_releases(&prowl.machine.cas_dir).unwrap().is_empty(),
+        "an incoming proposal is not an obsolete split");
+    prowl.task(json!({"action": "update", "id": "cas-d1", "epic": EPIC})).await.unwrap();
+    assert!(cas_store::list_epic_split_child_releases(&prowl.machine.cas_dir).unwrap().is_empty(),
+        "keeping the same parent must preserve both pending shares");
+
     let accepted = prowl
         .factory(json!({"id": id, "decision": "accept"}))
         .await
@@ -260,6 +270,8 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
     for child in PROWL_TAKES {
         assert_eq!(cloud_holder(cloud, child).as_deref(), Some("pr"), "{child}");
     }
+    assert_eq!(cas::cloud::epic_split::renew_split_claims(&prowl.machine.cas_dir, &claims, prowl.id, 600), 3,
+        "every accepted child must remain renewable after the pending heartbeat");
     for child in SOUNDWAVE_TAKES {
         assert_eq!(
             cloud_holder(cloud, child).as_deref(),
@@ -545,6 +557,18 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
         assert!(peers.contains("Epic splits:") && peers.contains(&id), "{peers}");
         assert!(peers.contains("accepted"), "{peers}");
     }
+
+    // Retarget a peer-owned child through MCP, then really start it on the
+    // new supervisor's worker. A cloud release alone cannot prove admission.
+    let mut next = Task::new("cas-8503-next".into(), "Next epic".into());
+    next.task_type = TaskType::Epic;
+    open_task_store(&prowl.machine.cas_dir).unwrap().add(&next).unwrap();
+    prowl.task(json!({"action": "update", "id": "cas-a3", "epic": next.id})).await.unwrap();
+    assert_eq!(cloud_holder(&cloud, "cas-a3"), None, "retarget releases the remote split owner's claim");
+    let started = prowl.start("cas-a3", false).await.unwrap();
+    assert!(started.contains("Started task:"), "{started}");
+    assert_eq!(cloud_holder(&cloud, "cas-a3").as_deref(), Some("pr-w"));
+    assert_eq!(open_task_store(&prowl.machine.cas_dir).unwrap().get("cas-a3").unwrap().status, TaskStatus::InProgress);
 }
 
 /// Either side cancels: the canceller releases only its own claims and the

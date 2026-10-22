@@ -1498,7 +1498,7 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
     );
 }
 
-fn candidate_worktree(sandbox: &CasSandbox) -> std::path::PathBuf {
+fn candidate_worktree(sandbox: &CasSandbox) -> (tempfile::TempDir, std::path::PathBuf) {
     for args in [
         vec!["init", "--quiet"],
         vec![
@@ -1524,7 +1524,8 @@ fn candidate_worktree(sandbox: &CasSandbox) -> std::path::PathBuf {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let worktree = sandbox.path().join("scratch-candidate");
+    let scratch = tempfile::tempdir().unwrap();
+    let worktree = scratch.path().join("scratch-candidate");
     let mut git = Command::new("git");
     sandbox.configure_command(&mut git);
     let output = git
@@ -1537,7 +1538,7 @@ fn candidate_worktree(sandbox: &CasSandbox) -> std::path::PathBuf {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    worktree
+    (scratch, worktree)
 }
 
 #[cfg(unix)]
@@ -1581,7 +1582,7 @@ fn worktree_serve_command(
 #[test]
 fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
     let sandbox = CasSandbox::new();
-    let worktree = candidate_worktree(&sandbox);
+    let (_scratch, worktree) = candidate_worktree(&sandbox);
     let db_path = sandbox.cas_root().join("cas.db");
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1674,13 +1675,14 @@ fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
 async fn current_worktree_store_stays_readable_without_candidate_cloud_sync_cas_a65b() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
     let sandbox = CasSandbox::new();
-    let worktree = candidate_worktree(&sandbox);
+    let (_scratch, worktree) = candidate_worktree(&sandbox);
     let server = MockServer::start().await;
     let cloud = cas::cloud::CloudConfig {
         endpoint: server.uri(),
         token: Some("synthetic-test-token".into()),
         ..Default::default()
     };
+    cas::cloud::set_canonical_id_in_config_toml(sandbox.cas_root(), "candidate-fixture").unwrap();
     cloud.save_to_cas_dir(sandbox.cas_root()).unwrap();
     for (binding, installed, sync_allowed) in [
         ("implicit", false, false),

@@ -335,7 +335,7 @@ fn set_config_document_path(
 }
 
 /// Whether the file contains a stored override for this key or its serde alias.
-pub(super) fn config_key_has_override(key: &str, cas_root: &Path) -> anyhow::Result<bool> {
+pub(in crate::cli) fn config_key_has_override(key: &str, cas_root: &Path) -> anyhow::Result<bool> {
     let path = cas_root.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,

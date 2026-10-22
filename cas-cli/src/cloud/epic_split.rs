@@ -233,11 +233,10 @@ pub(crate) fn current_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, Str
     projected_epic_splits(cas_root, false)
 }
 
-/// Overlap also reserves the original shares while claim cleanup is pending.
-/// Keep that historical coverage out of ordinary ownership/renewal projections.
-fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
-    let splits = list_epic_splits(cas_root)
-        .map_err(|error| format!("epic split store: {error}"))?;
+fn without_released_children(
+    cas_root: &Path,
+    mut splits: Vec<EpicSplit>,
+) -> Result<Vec<EpicSplit>, String> {
     if splits.is_empty() {
         return Ok(splits);
     }
@@ -246,6 +245,28 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
             .map_err(|error| format!("epic split release store: {error}"))?
             .into_iter()
             .collect();
+    for split in &mut splits {
+        let split_id = &split.id;
+        split
+            .mine
+            .retain(|id| !released.contains(&(split_id.clone(), id.clone())));
+        split
+            .theirs
+            .retain(|id| !released.contains(&(split_id.clone(), id.clone())));
+    }
+    splits.retain(|split| !split.mine.is_empty() || !split.theirs.is_empty());
+    Ok(splits)
+}
+
+/// Overlap also reserves the original shares while claim cleanup is pending.
+/// Keep that historical coverage out of ordinary ownership/renewal projections.
+fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
+    let raw = list_epic_splits(cas_root)
+        .map_err(|error| format!("epic split store: {error}"))?;
+    let splits = without_released_children(cas_root, raw)?;
+    if splits.is_empty() {
+        return Ok(splits);
+    }
     // Ownership reads must not replay a failed outbox repair and lose a live
     // binding while local task/parent rows remain perfectly readable.
     let tasks = crate::store::open_task_store_local(cas_root)
@@ -254,12 +275,6 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
     let mut parents = std::collections::HashMap::new();
     let mut current = Vec::new();
     for mut split in splits {
-        let split_id = split.id.clone();
-        split.mine.retain(|id| !released.contains(&(split_id.clone(), id.clone())));
-        split.theirs.retain(|id| !released.contains(&(split_id.clone(), id.clone())));
-        if split.mine.is_empty() && split.theirs.is_empty() {
-            continue;
-        }
         if include_cleanup && split.cleanup_pending {
             current.push(split);
             continue;
@@ -305,8 +320,10 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
 fn guarded_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
     current_epic_splits(cas_root).or_else(|error| {
         tracing::warn!(%error, "could not project epic splits; retaining historical bindings");
-        list_epic_splits(cas_root)
-            .map_err(|raw_error| format!("{error}; epic split fallback: {raw_error}"))
+        let raw = list_epic_splits(cas_root)
+            .map_err(|raw_error| format!("{error}; epic split fallback: {raw_error}"))?;
+        without_released_children(cas_root, raw)
+            .map_err(|release_error| format!("{error}; epic split fallback: {release_error}"))
     })
 }
 

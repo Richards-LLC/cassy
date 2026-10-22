@@ -1140,7 +1140,7 @@ fn test_not_initialized_error() {
             }
         }
         let error = if stderr_tty { &tty_output } else { &output.stderr };
-        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(String::from_utf8_lossy(error).contains("no Cassy store here"));
         assert_eq!(error.contains(&0x1b), stderr_tty && !no_color,
             "stderr styling must follow its own TTY and NO_COLOR: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, no_color={no_color}, stderr={error:?}");

@@ -5,9 +5,12 @@
 #   readback:   answers FAKE_READBACK_DATA, the {invariant: {ok, observed}} map.
 #   migrations: answers FAKE_MIGRATIONS, the {id: applied|pending|unknown} map.
 #   flags:      answers FAKE_FLAGS_STAGING or FAKE_FLAGS_PROD, the {flag: value}
-#               map of the request's env (the only verb that accepts prod).
+#               map of the request's env (flags and balance also accept prod).
+#   balance:    answers FAKE_BALANCE, the {resource: amount} map.
+#   grant:      answers FAKE_GRANT, the {resource: new balance} map.
 # FAKE_CALL_LOG records each request; FAKE_SLEEP delays the answer;
-# FAKE_ERROR_KIND answers any verb with that classified error instead.
+# FAKE_ERROR_KIND answers any verb with that classified error instead, with
+# retry_after_s FAKE_RETRY_AFTER (default 30).
 set -eu
 [ -z "${FAKE_PRIVATE:-}" ] || exit 1
 [ "$#" -eq 1 ] || exit 1
@@ -15,10 +18,10 @@ request=$(cat)
 [ -z "${FAKE_CALL_LOG:-}" ] || printf '%s\n' "$request" >>"$FAKE_CALL_LOG"
 case "$request" in *'"v":1'*) ;; *) exit 1 ;; esac
 case "$request" in *"\"verb\":\"$1\""*) ;; *) exit 1 ;; esac
-case "$1:$request" in *'"env":"staging"'*) env=staging ;; flags:*'"env":"prod"'*) env=prod ;; *) exit 1 ;; esac
+case "$1:$request" in *'"env":"staging"'*) env=staging ;; flags:*'"env":"prod"'* | balance:*'"env":"prod"'*) env=prod ;; *) exit 1 ;; esac
 [ -z "${FAKE_SLEEP:-}" ] || sleep "$FAKE_SLEEP"
 if [ -n "${FAKE_ERROR_KIND:-}" ]; then
-  printf '{"v":1,"ok":false,"error":{"kind":"%s","provider":"fake-health","status":429,"retry_after_s":30,"message":"slow down"}}\n' "$FAKE_ERROR_KIND"
+  printf '{"v":1,"ok":false,"error":{"kind":"%s","provider":"fake-health","status":429,"retry_after_s":%s,"message":"slow down"}}\n' "$FAKE_ERROR_KIND" "${FAKE_RETRY_AFTER:-30}"
   exit 0
 fi
 case "$1" in
@@ -32,5 +35,9 @@ case "$1" in
   flags)
     if [ "$env" = prod ]; then data=$FAKE_FLAGS_PROD; else data=$FAKE_FLAGS_STAGING; fi
     printf '{"v":1,"ok":true,"data":%s}\n' "$data" ;;
+  balance)
+    printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_BALANCE" ;;
+  grant)
+    printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_GRANT" ;;
   *) exit 1 ;;
 esac

@@ -2533,7 +2533,7 @@ mod status_transition_tests {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
         EpicCloseGateOutcome, run_epic_close_merge_gate,
     };
-    use cas_types::{Agent, Task, TaskStatus, TaskType};
+    use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus, TaskType};
     use tempfile::TempDir;
 
     fn git(repo: &std::path::Path, args: &[&str]) -> String {
@@ -2549,6 +2549,50 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_raise_priority_of_own_in_progress_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+
+        let mut worker = Agent::new_with_role(
+            "priority-worker-id".into(),
+            "priority-worker".into(),
+            AgentRole::Worker,
+        );
+        worker.factory_session = Some("priority-session".into());
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-priority-worker".into(), "worker task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(&task.id, &worker.id, 3600, Some("working"))
+            .unwrap();
+        core.set_agent_id_for_testing(worker.id);
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        let error = core
+            .cas_task_update(Parameters(request))
+            .await
+            .expect_err("a worker must not promote its active task");
+
+        assert!(
+            error.message.contains("priority") && error.message.contains("supervisor"),
+            "{}",
+            error.message
+        );
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
     }
 
     #[tokio::test]

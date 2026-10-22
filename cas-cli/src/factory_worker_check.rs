@@ -1664,6 +1664,54 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn capacity_test_root(base: &Path, cap: usize) -> PathBuf {
+        let root = base.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nmax_concurrent_builders={cap}\n"),
+        )
+        .unwrap();
+        crate::store::open_agent_store(&root).unwrap().init().unwrap();
+        crate::store::open_task_store(&root).unwrap().init().unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    fn register_capacity_worker(
+        root: &Path,
+        worker_id: &str,
+        worker_name: &str,
+        task_id: &str,
+        priority: cas_types::Priority,
+        checkout: &Path,
+    ) {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+
+        let agents = open_agent_store(root).unwrap();
+        let tasks = open_task_store(root).unwrap();
+        let mut agent = Agent::new_with_role(
+            worker_id.into(),
+            worker_name.into(),
+            AgentRole::Worker,
+        );
+        agent.factory_session = Some(format!("session-{worker_name}"));
+        agent
+            .metadata
+            .insert("clone_path".into(), checkout.display().to_string());
+        agents.register(&agent).unwrap();
+        let mut task = Task::new(task_id.into(), "wait for a builder slot".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker_name.into());
+        task.priority = priority;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(task_id, worker_id, 3600, Some("working"))
+            .unwrap();
+    }
+
     /// cas-c53a: on btrfs and overlayfs `/proc/locks` can name a different
     /// device than `stat`; a held FLOCK on the lane file's inode is still busy.
     #[cfg(target_os = "linux")]
@@ -3046,6 +3094,178 @@ PY"#);
             failures.is_empty(),
             "priority admission failed: {}",
             failures.join("; ")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_higher_priority_waiter_does_not_reserve_multiple_free_slots() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 3);
+        let lower_repo = root.join("worktrees/priority-lower");
+        let higher_repo = root.join("worktrees/priority-higher");
+        fixture_commit(&lower_repo);
+        fixture_commit(&higher_repo);
+        register_capacity_worker(
+            &root,
+            "lower-worker",
+            "priority-lower",
+            "cas-lower",
+            Priority::MEDIUM,
+            &lower_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "higher-worker",
+            "priority-higher",
+            "cas-higher",
+            Priority::CRITICAL,
+            &higher_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let slots = root.join("worker-check-slots");
+        let occupied = (0..3).map(|_| acquire_slot(&slots, 3).unwrap()).collect::<Vec<_>>();
+        assert!(execute_at(&root, &args, &higher_repo, &fake).is_err());
+        drop(occupied);
+
+        // One occupied slot leaves two available; one higher-ranked waiter
+        // consumes one of them, so the lower-ranked build can use the other.
+        let occupied = acquire_slot(&slots, 3).unwrap();
+        let lower_result = execute_at(&root, &args, &lower_repo, &fake);
+        drop(occupied);
+        assert!(
+            lower_result.is_ok(),
+            "one free slot remains beyond the higher-priority waiter's demand: {lower_result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_capacity_wait_does_not_block_lower_priority_build() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let lower_repo = root.join("worktrees/priority-lower");
+        let higher_repo = root.join("worktrees/priority-higher");
+        fixture_commit(&lower_repo);
+        fixture_commit(&higher_repo);
+        register_capacity_worker(
+            &root,
+            "lower-worker",
+            "priority-lower",
+            "cas-lower",
+            Priority::MEDIUM,
+            &lower_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "higher-worker",
+            "priority-higher",
+            "cas-higher",
+            Priority::CRITICAL,
+            &higher_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        assert!(execute_at(&root, &args, &higher_repo, &fake).is_err());
+        drop(held);
+
+        let wait_path = std::fs::read_dir(root.join("capacity-waits"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|wait| wait["worker_id"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("higher-worker")
+            })
+            .unwrap();
+        let expired = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let mut wait: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&wait_path).unwrap()).unwrap();
+        wait["next_retry"] = serde_json::json!(expired.to_rfc3339());
+        std::fs::write(&wait_path, serde_json::to_vec(&wait).unwrap()).unwrap();
+
+        assert!(
+            execute_at(&root, &args, &lower_repo, &fake).is_ok(),
+            "an expired higher-priority wait must not refuse the lower build"
+        );
+        assert!(
+            crate::factory_capacity_wait::view(&root, "higher-worker", chrono::Utc::now())
+                .unwrap()
+                .is_none()
+        );
+        crate::factory_capacity_wait::reconcile(
+            &root,
+            Some("session-priority-higher"),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert!(!wait_path.exists(), "reconciliation removes the expired wait record");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_capacity_wait_binding_does_not_abort_build() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let shared_repo = root.join("worktrees/shared");
+        fixture_commit(&shared_repo);
+        register_capacity_worker(
+            &root,
+            "worker-one",
+            "worker-one",
+            "cas-one",
+            Priority::MEDIUM,
+            &shared_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "worker-two",
+            "worker-two",
+            "cas-two",
+            Priority::MEDIUM,
+            &shared_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "printf called >> \"$PWD/target/cargo-ran\"\nexit 0");
+        std::fs::create_dir_all(shared_repo.join("target")).unwrap();
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+
+        let result = execute_at(&root, &args, &shared_repo, &fake);
+        assert!(
+            result.is_ok(),
+            "ambiguous capacity-wait binding should warn and continue: {result:?}"
+        );
+        assert!(
+            shared_repo.join("target/cargo-ran").exists(),
+            "Cargo still runs when task ownership cannot be resolved"
         );
     }
 

@@ -1,0 +1,11 @@
+Completed phase excerpt from full piped cas init --yes --no-integrations.
+
+  [OK] Saving configuration                    .cas/config.toml
+  [OK] Updating .gitignore                     .gitignore (created)
+  [OK] Configuring editor hooks                .claude/settings.json
+  [OK] Configuring MCP server                  .mcp.json
+  [OK] Updating agent instructions             CLAUDE.md
+  [OK] Generating Cassy guidance skill         .claude/skills/cas/SKILL.md
+  [OK] Syncing built-in files                  173 files
+  [OK] Updating AGENTS.md                      AGENTS.md
+  [OK] Setting up factory tooling              .env.worktree.template, scripts/worktree-boot.sh, .gitignore updated

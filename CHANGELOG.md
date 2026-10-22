@@ -43,7 +43,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Old launcher files** — Remove recognized launcher files for dead processes on hub launch while retaining live, malformed and unrelated files.
 
-- **Update connections** — Reconcile update bindings without letting another project's inactive session socket block the project; retain held/unknown socket refusals with a named cas kill remedy.
+- **Update connections** — Reconcile update bindings past unrelated inactive sessions and dead sessions whose project root no longer resolves; retain held or unknown endpoint refusals with a named cas kill remedy.
 
 - **Cloud receipts** — Keep guarded remote closes visible until the local delivery changes, deduplicate matching diagnostics across pull scopes, and include both scopes in transition totals.
 

@@ -226,7 +226,10 @@ fn cas_hook_trust_entries(hooks_path: &Path) -> io::Result<Vec<HookTrustEntry>> 
             }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{} is missing CAS {event} hook groups", visible_hook_path(hooks_path)),
+                format!(
+                    "{} is missing CAS {event} hook groups",
+                    visible_hook_path(hooks_path)
+                ),
             ));
         };
         let mut found = None;

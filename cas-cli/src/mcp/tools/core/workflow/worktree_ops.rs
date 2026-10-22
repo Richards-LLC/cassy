@@ -1503,6 +1503,15 @@ fn worktree_merge_mcp_error(
             "use a temporary worktree, merge there by hand, then move the branch ref and remove the temporary worktree.".to_string(),
         ),
     };
+    // Git details already contain structural line breaks (porcelain/status or
+    // stderr). Keep those rows, but escape controls and hidden text within each.
+    let visible_details = |details: &str| {
+        details
+            .split('\n')
+            .map(crate::worktree::GitOperations::visible_git_label)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let source_branch = crate::worktree::GitOperations::visible_git_label(source_branch);
     let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
     let mut message = match error {
@@ -1515,7 +1524,11 @@ fn worktree_merge_mcp_error(
              1. Resolve on {source_branch} by rebasing or merging {target_branch}, then retry.\n\
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree.",
-            paths.join(", ")
+            paths
+                .iter()
+                .map(|path| crate::worktree::GitOperations::visible_git_label(path))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         WorktreeError::Git(GitError::MergeConflict) => format!(
             "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}; \
@@ -1528,7 +1541,7 @@ fn worktree_merge_mcp_error(
              resolve and commit the conflicts, then remove the temporary worktree."
         ),
         WorktreeError::Git(GitError::MergeInProgress(details)) => {
-            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            let details = visible_details(&details);
             format!(
                 "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
@@ -1538,7 +1551,7 @@ fn worktree_merge_mcp_error(
             )
         }
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
-            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            let details = visible_details(&details);
             format!(
                 "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
              tracked changes on paths this merge would write: {details}.\n\n\
@@ -1571,7 +1584,7 @@ fn worktree_merge_mcp_error(
         }
         other => format!(
             "Failed to merge worktree: {}",
-            crate::worktree::GitOperations::visible_git_label(&other.to_string()),
+            visible_details(&other.to_string()),
         ),
     };
     if let Err(refusal) = remedies {
@@ -6733,7 +6746,10 @@ mod tests {
             ("factory/worker", "factory/worker"),
             ("factory/control\u{85}label", "factory/control\\u{85}label"),
             ("factory/line\u{2028}label", "factory/line\\u{2028}label"),
-            ("factory/paragraph\u{2029}label", "factory/paragraph\\u{2029}label"),
+            (
+                "factory/paragraph\u{2029}label",
+                "factory/paragraph\\u{2029}label",
+            ),
         ] {
             let error = worktree_merge_mcp_error(
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
@@ -6807,11 +6823,24 @@ mod tests {
             GitError::CommandFailed(detail.into()),
         ] {
             let message = worktree_merge_mcp_error(
-                WorktreeError::Git(git_error), "factory/worker", "epic/example",
-            ).message.into_owned();
-            assert!(message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"), "{message:?}");
-            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}', '\t']), "{message:?}");
-            assert!(message.contains("end\n M second\\tfile.rs\n"), "{message:?}");
+                WorktreeError::Git(git_error),
+                "factory/worker",
+                "epic/example",
+            )
+            .message
+            .into_owned();
+            assert!(
+                message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"),
+                "{message:?}"
+            );
+            assert!(
+                !message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}', '\t']),
+                "{message:?}"
+            );
+            assert!(
+                message.contains("end\n M second\\tfile.rs\n"),
+                "{message:?}"
+            );
         }
     }
 

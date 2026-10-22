@@ -67,7 +67,7 @@ the supervisor to record the intended branch and anchor. Existing authorization,
 repository binding, anchor, QA and CI gates still apply. No new TUI surface.
 
 
-## cas-98f9: escaping follow-up (WIP checkpoint)
+## cas-98f9: escaping follow-up
 
 Route hook-parse/trust error paths and merge-conflict path lists through their
 existing visible-label helpers. Align hook-path invisible-character coverage
@@ -76,6 +76,20 @@ render multi-line Git details by escaping each line while retaining structural
 line breaks. This preserves readable porcelain residue without permitting a
 newline inside a filename to impersonate another diagnostic row.
 
-Implementation and failing-first regressions are pending after the operator
-restart. Extend the existing hook-trust, conflict and checkout-residue tests;
-verify bidi/U+2028 paths, actual multi-line residue and scoped rustfmt output.
+**First two lines:** Existing refusal names and causes stay visible; path labels
+escape controls and invisible Unicode before the operator reads them.
+**Scannable:** Conflict paths stay comma-separated; Git residue retains one
+physical line per original porcelain or stderr line.
+**Readable:** Each detail line escapes controls, tabs, bidi and Unicode line
+separators; real LF separators and the trailing LF are retained.
+**Machine output:** The existing MCP error code and message fields remain; JSON
+encoding carries the message's real line breaks and literal path escapes.
+**Omitted:** No new command or terminal layout; unsafe paths still refuse a
+copyable Git remedy, while filesystem paths and trust keys retain their bytes.
+
+Three existing regressions cover hook errors under bidi/U+2028/zero-width paths,
+unsafe conflict labels, and multi-line Git detail rendering across merge,
+checkout-residue and generic failures. Ordinary quoted remedies retain their
+interactive Bash argv check; stale hook bytes remain unchanged. These exercise
+production functions with disposable fixtures; no live factory spawn or terminal
+palette walkthrough is claimed. Integrated execution remains merge-queue-owned.

@@ -1218,8 +1218,7 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
     Ok((pre_existing, delivery))
 }
 
-/// Why a rejection is refused: every issue it names is pre-existing, so it
-/// rejects the delivery for defects it did not cause.
+/// Why a rejection is refused: the reviewer marked every issue pre-existing.
 pub fn rejection_scope_refusal(
     verdict: cas_types::QaVerdict,
     pre_existing: usize,
@@ -1227,9 +1226,10 @@ pub fn rejection_scope_refusal(
 ) -> Option<String> {
     (verdict == cas_types::QaVerdict::Rejected && pre_existing > 0 && delivery == 0).then(|| {
         format!(
-            "every issue ({pre_existing}) is marked \"scope\": \"pre-existing\", and a pre-existing \
-             defect never rejects a delivery. Reject only for a regression the delivery introduced \
-             or an unmet acceptance criterion, and name that issue without the pre-existing scope; \
+            "every issue ({pre_existing}) is marked \"scope\": \"pre-existing\". Reject for a \
+             regression caused by the delivery or a failure within its stated purpose, acceptance \
+             criteria, demo statement, or any journey invariant the diff adds or edits, even when \
+             base shares it. Name that issue without the pre-existing scope; \
              otherwise record status=approved and Cassy files the pre-existing issues as follow-ups."
         )
     })
@@ -1370,7 +1370,7 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
 pub const QA_REJECTION_BAR: &str = "Rejection bar. Decide by this, not by impression. Judge what the \
 delivery changed (the pages, controls and journeys its diff touches) and its acceptance criteria, not the \
 page's older backlog.\n\
-- Reject on a regression the delivery introduced: a Blocking or High journey finding it causes, or a \
+- Reject on a regression caused by the delivery: a Blocking or High journey finding it causes, or a \
 visual-qa.mjs --strict finding the base build does not have.\n\
 - Reject when a cas-ui-craft critique dimension for what the delivery changed scores below 3, or \
 distinctiveness, fit or hierarchy scores below 4 on a public surface.\n\
@@ -2015,7 +2015,7 @@ mod tests {
             "scores below 3",
             "below 4 on a public surface",
             "page's older backlog",
-            "a regression the delivery introduced",
+            "a regression caused by the delivery",
             "finding the base build does not have",
             "the delivery's stated purpose, an acceptance criterion, the demo statement, or a journey invariant its diff adds or edits is not met on the running build, even if base shares the same failure",
             "is pre-existing only when it falls outside the delivery's stated purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or edits",
@@ -2382,7 +2382,9 @@ mod tests {
     fn a_rejection_needs_an_issue_the_delivery_owns() {
         use cas_types::QaVerdict::*;
         let refusal = rejection_scope_refusal(Rejected, 2, 0).expect("only pre-existing issues");
-        assert!(refusal.contains("never rejects a delivery"), "{refusal}");
+        for scope in ["stated purpose", "acceptance criteria", "demo statement", "journey invariant", "diff adds or edits"] {
+            assert!(refusal.contains(scope), "missing {scope}: {refusal}");
+        }
         assert!(rejection_scope_refusal(Rejected, 2, 1).is_none());
         assert!(rejection_scope_refusal(Rejected, 0, 0).is_none());
         assert!(rejection_scope_refusal(Approved, 3, 0).is_none());

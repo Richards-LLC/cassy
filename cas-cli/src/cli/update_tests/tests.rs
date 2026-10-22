@@ -520,35 +520,83 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "operator's personal finish\n").unwrap();
     }
+    let command_only = home.join(".claude-command@example.com");
+    let seeded = home.join(".claude-seeded@example.com");
+    for (root, text) in [
+        (&command_only, "operator's command-only finish\n"),
+        (
+            &seeded,
+            include_str!("../../../tests/data/finish-cas-f4ea.md"),
+        ),
+    ] {
+        std::fs::create_dir_all(root.join("commands")).unwrap();
+        std::fs::write(root.join("commands/finish.md"), text).unwrap();
+    }
     let cli = update_test_cli(true);
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
     for (harness, root) in roots {
         let installed = home.join(root).join("skills/finish/SKILL.md");
-        assert!(installed.is_file(), "{root} missing finish after real update");
+        assert!(
+            installed.is_file(),
+            "{root} missing finish after real update"
+        );
         let builtin = crate::builtins::skill_catalog_for_harness(harness)
-            .iter().find(|file| file.path == "skills/finish/SKILL.md").unwrap();
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), builtin.content);
-        if harness == SupervisorCli::Claude {
-            // pin: preserve or install the exact command/skill bytes at the harness boundary.
-            assert_eq!(std::fs::read_to_string(home.join(root).join("commands/finish.md")).unwrap(), builtin.content);
-        }
+            .iter()
+            .find(|file| file.path == "skills/finish/SKILL.md")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            builtin.content
+        );
+        assert!(!home.join(root).join("commands/finish.md").exists());
         // Retain the managed marker: an operator edit still takes precedence.
-        std::fs::write(&installed, format!("{}\nOperator customization.\n", builtin.content)).unwrap();
+        std::fs::write(
+            &installed,
+            format!("{}\nOperator customization.\n", builtin.content),
+        )
+        .unwrap();
     }
     let command = home.join(".claude/commands/finish.md");
+    std::fs::create_dir_all(command.parent().unwrap()).unwrap();
     std::fs::write(&command, "customized command after install\n").unwrap();
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert!(seeded.join("skills/finish/SKILL.md").is_file());
+    assert!(!seeded.join("commands/finish.md").exists());
+    assert!(!command_only.join("skills/finish/SKILL.md").exists());
+    // pin: a custom legacy command remains the callable entrypoint, byte-for-byte.
+    assert_eq!(
+        std::fs::read_to_string(command_only.join("commands/finish.md")).unwrap(),
+        "operator's command-only finish\n"
+    );
     // pin: preserve or install the exact command/skill bytes at the harness boundary.
-    assert_eq!(std::fs::read_to_string(command).unwrap(), "customized command after install\n");
+    assert_eq!(
+        std::fs::read_to_string(command).unwrap(),
+        "customized command after install\n"
+    );
     for (_, root) in roots {
         // pin: preserve or install the exact command/skill bytes at the harness boundary.
-        assert!(std::fs::read_to_string(home.join(root).join("skills/finish/SKILL.md"))
-            .unwrap().ends_with("Operator customization.\n"), "{root}");
+        assert!(
+            std::fs::read_to_string(home.join(root).join("skills/finish/SKILL.md"))
+                .unwrap()
+                .ends_with("Operator customization.\n"),
+            "{root}"
+        );
     }
     for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
         // pin: preserve or install the exact command/skill bytes at the harness boundary.
-        assert_eq!(std::fs::read_to_string(custom.join(path)).unwrap(), "operator's personal finish\n");
+        assert_eq!(
+            std::fs::read_to_string(custom.join(path)).unwrap(),
+            "operator's personal finish\n"
+        );
     }
+    // Retiring default account homes must not disable the named-account refresh.
+    for default in [".claude", ".codex"] {
+        std::fs::remove_dir_all(home.join(default)).unwrap();
+    }
+    let named = home.join(".codex-existing@example.com/skills/finish/SKILL.md");
+    std::fs::remove_file(&named).unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert!(named.is_file());
     // Init and project refresh use this same writer, including OpenCode's
     // physical project skills (its user catalog is projected at launch).
     let project = home.join("project");
@@ -561,10 +609,22 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         let path = project.join(dir).join("skills/finish/SKILL.md");
         assert!(path.is_file(), "{harness:?} missing project finish");
+        assert!(!project.join(dir).join("commands/finish.md").exists());
         std::fs::write(&path, "project finish override\n").unwrap();
         crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
         // pin: preserve or install the exact command/skill bytes at the harness boundary.
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "project finish override\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "project finish override\n"
+        );
+        if harness == SupervisorCli::Claude {
+            std::fs::remove_file(&path).unwrap();
+            let command = project.join(dir).join("commands/finish.md");
+            std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+            std::fs::write(command, "project command override\n").unwrap();
+            crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+            assert!(!path.exists(), "project command must not be shadowed");
+        }
     }
 }
 

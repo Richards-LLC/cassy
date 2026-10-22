@@ -3492,6 +3492,33 @@ fn sync_user_builtins_with_violet(
         None
     };
 
+    // Named accounts and linked shared bases can outlive the retired default
+    // dirs. Refresh only finish here; their other configuration stays local.
+    for (provider, harness) in [
+        (
+            crate::accounts::Provider::Claude,
+            cas_mux::SupervisorCli::Claude,
+        ),
+        (
+            crate::accounts::Provider::Codex,
+            cas_mux::SupervisorCli::Codex,
+        ),
+    ] {
+        let default_dir = home.join(format!(".{}", provider.name()));
+        let mut accounts: Vec<_> = crate::accounts::discover(provider, &home)?
+            .into_iter()
+            .map(|account| account.path)
+            .filter(|path| *path != default_dir)
+            .collect();
+        let base = provider.base_dir(&home);
+        if base.is_dir() {
+            accounts.push(base);
+        }
+        for account in accounts {
+            crate::builtins::sync_finish_builtins(harness, &account)?;
+        }
+    }
+
     if cli.json {
         let claude_total = claude_result
             .as_ref()

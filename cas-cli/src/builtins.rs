@@ -90,8 +90,66 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[BuiltinFile {
     content: include_str!("builtins/codex/agents/task-verifier.toml"),
 }];
 
+/// Hash of the unmodified cas-f4ea personal seed (fixture: finish-cas-f4ea.md).
+/// This recognizes the retired seed without carrying a second runtime body.
+const LEGACY_FINISH_COMMAND_HASH: &str =
+    "eeeede161e720bb59ad61f06cec534c57398744c322ffc70c1548a06957c410b";
+
+fn is_finish_entrypoint(builtin: &BuiltinFile) -> bool {
+    builtin.path == "skills/finish/SKILL.md"
+}
+
+/// A customized Claude command must keep its name: Claude skills otherwise
+/// shadow same-name commands. Inspection is read-only for preview/parity.
+fn custom_finish_command(target_dir: &Path) -> std::io::Result<bool> {
+    let command = target_dir.join("commands/finish.md");
+    if command.is_symlink() {
+        return Ok(true);
+    }
+    match std::fs::read(command) {
+        Ok(bytes) => Ok(file_bytes_hash(&bytes) != LEGACY_FINISH_COMMAND_HASH),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove only the exact retired personal seed. A custom command suppresses
+/// installation for this Claude profile, without changing either entrypoint.
+fn prepare_claude_finish(target_dir: &Path) -> std::io::Result<bool> {
+    if custom_finish_command(target_dir)? {
+        return Ok(false);
+    }
+    match std::fs::remove_file(target_dir.join("commands/finish.md")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(true)
+}
+
+/// Equip a new or existing account without refreshing unrelated configuration.
+pub(crate) fn sync_finish_builtins(
+    harness: SupervisorCli,
+    target_dir: &Path,
+) -> std::io::Result<()> {
+    if harness == SupervisorCli::Claude && !prepare_claude_finish(target_dir)? {
+        return Ok(());
+    }
+    for builtin in skill_catalog_for_harness(harness)
+        .iter()
+        .filter(|file| is_finish_entrypoint(file))
+    {
+        sync_builtin_detailed(builtin, target_dir)?;
+    }
+    Ok(())
+}
+
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
         content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
@@ -816,6 +874,10 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 /// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
         content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
@@ -1534,6 +1596,10 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// supervisor checklist is the Claude one (not Codex's tailored twin), since
 /// Grok's SessionStart hooks follow the Claude contract.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
         content: include_str!("builtins/skills/cas-worker.md"),
@@ -2690,7 +2756,9 @@ pub fn preview_builtin(
     let target = target_dir.join(builtin.path);
     let content = builtin.content;
 
-    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+    if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+        || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+    {
         return Ok(None);
     }
 
@@ -2698,7 +2766,7 @@ pub fn preview_builtin(
         let existing = std::fs::read_to_string(&target)?;
 
         // Only update if managed by Cassy
-        if is_native_agent(builtin) {
+        if is_native_agent(builtin) || is_finish_entrypoint(builtin) {
             let state = BuiltinReferenceState::load(target_dir)?;
             if !owned_destination_replaceable(builtin, &existing, &state) {
                 return Ok(None);
@@ -2766,7 +2834,7 @@ pub fn sync_builtin_detailed(
     builtin: &BuiltinFile,
     target_dir: &Path,
 ) -> std::io::Result<SyncOutcome> {
-    if is_native_agent(builtin) {
+    if is_native_agent(builtin) || is_finish_entrypoint(builtin) {
         let mut state = BuiltinReferenceState::load(target_dir)?;
         let outcome = sync_owned_reference(builtin, target_dir, &mut state)?;
         state.save(target_dir)?;
@@ -3053,8 +3121,12 @@ fn sync_owned_reference(
     state: &mut BuiltinReferenceState,
 ) -> std::io::Result<SyncOutcome> {
     let target = target_dir.join(builtin.path);
-    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
-        state.skipped_references.insert(builtin.path.to_string(), "symlink".to_string());
+    if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+        || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+    {
+        state
+            .skipped_references
+            .insert(builtin.path.to_string(), "symlink".to_string());
         return Ok(SyncOutcome::SkippedModifiedReference);
     }
     if let Some(parent) = target.parent() {
@@ -3162,6 +3234,15 @@ fn sync_all_builtins_inner(
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
 ) -> std::io::Result<SyncResult> {
+    sync_all_builtins_with_finish_policy(target_dir, agents, skills, true)
+}
+
+fn sync_all_builtins_with_finish_policy(
+    target_dir: &Path,
+    agents: &[BuiltinFile],
+    skills: &[BuiltinFile],
+    install_finish: bool,
+) -> std::io::Result<SyncResult> {
     let mut result = SyncResult::default();
     let mut reference_state = BuiltinReferenceState::load(target_dir)?;
 
@@ -3198,11 +3279,15 @@ fn sync_all_builtins_inner(
 
     // Sync skills
     for builtin in skills {
-        let outcome = if is_file_owned_by_managed_skill(builtin, skills) {
-            sync_owned_reference(builtin, target_dir, &mut reference_state)?
-        } else {
-            sync_builtin_detailed(builtin, target_dir)?
-        };
+        if is_finish_entrypoint(builtin) && !install_finish {
+            continue;
+        }
+        let outcome =
+            if is_file_owned_by_managed_skill(builtin, skills) || is_finish_entrypoint(builtin) {
+                sync_owned_reference(builtin, target_dir, &mut reference_state)?
+            } else {
+                sync_builtin_detailed(builtin, target_dir)?
+            };
         match outcome {
             SyncOutcome::Created | SyncOutcome::Updated => {
                 result.skills_updated += 1;
@@ -3378,7 +3463,13 @@ fn sync_workflows(
 
 /// Sync all built-in files to .claude/ directory
 pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
-    let mut result = sync_all_builtins_inner(claude_dir, BUILTIN_AGENTS, BUILTIN_SKILLS)?;
+    let install_finish = prepare_claude_finish(claude_dir)?;
+    let mut result = sync_all_builtins_with_finish_policy(
+        claude_dir,
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        install_finish,
+    )?;
     sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result)?;
     let keep = builtin_workflow_names(BUILTIN_WORKFLOWS);
     prune_stale_cas_workflow_files(&claude_dir.join("workflows"), &keep)?;
@@ -3505,7 +3596,9 @@ fn sync_project_catalog(
     skills: &[BuiltinFile],
     workflows: Option<&[BuiltinFile]>,
 ) -> std::io::Result<SyncResult> {
-    let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
+    let install_finish = workflows.is_none() || prepare_claude_finish(target_dir)?;
+    let mut result =
+        sync_all_builtins_with_finish_policy(target_dir, agents, skills, install_finish)?;
     if let Some(workflows) = workflows {
         sync_workflows(target_dir, workflows, &mut result)?;
         let keep = builtin_workflow_names(workflows);
@@ -4158,7 +4251,15 @@ impl InstallParity {
 /// would write there. Read-only. OpenCode has no installed tree.
 pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
     match harness {
-        SupervisorCli::Claude => install_parity(target_dir, BUILTIN_AGENTS, BUILTIN_SKILLS),
+        SupervisorCli::Claude => {
+            let custom_command = custom_finish_command(target_dir).unwrap_or(true);
+            let skills: Vec<_> = BUILTIN_SKILLS
+                .iter()
+                .copied()
+                .filter(|file| !custom_command || !is_finish_entrypoint(file))
+                .collect();
+            install_parity(target_dir, BUILTIN_AGENTS, &skills)
+        }
         SupervisorCli::Codex => {
             install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
         }
@@ -4172,7 +4273,9 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
     let mut parity = InstallParity::default();
     for builtin in agents.iter().chain(skills) {
         parity.checked += 1;
-        if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+        if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+            || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+        {
             parity.local_edits.push(builtin.path.to_string());
             continue;
         }
@@ -4185,8 +4288,12 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
         }
         // Mirror the sync decision exactly: owned files follow the baseline
         // and shipped-version ledger, everything else the managed marker.
-        let replaceable = if is_native_agent(builtin) || is_file_owned_by_managed_skill(builtin, skills) {
-            std::str::from_utf8(&existing).is_ok_and(|text| owned_destination_replaceable(builtin, text, &state))
+        let replaceable = if is_native_agent(builtin)
+            || is_finish_entrypoint(builtin)
+            || is_file_owned_by_managed_skill(builtin, skills)
+        {
+            std::str::from_utf8(&existing)
+                .is_ok_and(|text| owned_destination_replaceable(builtin, text, &state))
         } else {
             is_managed_by_cas(builtin.content)
                 || std::str::from_utf8(&existing).is_ok_and(is_managed_by_cas)
@@ -4262,7 +4369,11 @@ pub struct BuiltinChange {
 pub fn preview_all_builtins(claude_dir: &Path) -> std::io::Result<Vec<BuiltinChange>> {
     let mut changes = Vec::new();
 
-    let all_builtins = BUILTIN_AGENTS.iter().chain(BUILTIN_SKILLS.iter());
+    let custom_command = custom_finish_command(claude_dir)?;
+    let all_builtins = BUILTIN_AGENTS
+        .iter()
+        .chain(BUILTIN_SKILLS.iter())
+        .filter(|file| !custom_command || !is_finish_entrypoint(file));
 
     for builtin in all_builtins {
         if let Some((old, new)) = preview_builtin(builtin, claude_dir)? {
@@ -4348,10 +4459,26 @@ pub fn preview_all_builtins_for_project(
         SupervisorCli::OpenCode => project_root.join(".opencode"),
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
-        SupervisorCli::Claude => (BUILTIN_AGENTS, filtered_project_skills(BUILTIN_SKILLS, project_root)),
-        SupervisorCli::Codex => (CODEX_BUILTIN_AGENTS, filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::Grok => (GROK_BUILTIN_AGENTS, filtered_project_skills(GROK_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::OpenCode => (NO_AGENTS, filtered_project_skills(opencode_builtin_skills(), project_root)),
+        SupervisorCli::Claude => {
+            let custom_command = custom_finish_command(&target_dir)?;
+            let files = filtered_project_skills(BUILTIN_SKILLS, project_root)
+                .into_iter()
+                .filter(|file| !custom_command || !is_finish_entrypoint(file))
+                .collect();
+            (BUILTIN_AGENTS, files)
+        }
+        SupervisorCli::Codex => (
+            CODEX_BUILTIN_AGENTS,
+            filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root),
+        ),
+        SupervisorCli::Grok => (
+            GROK_BUILTIN_AGENTS,
+            filtered_project_skills(GROK_BUILTIN_SKILLS, project_root),
+        ),
+        SupervisorCli::OpenCode => (
+            NO_AGENTS,
+            filtered_project_skills(opencode_builtin_skills(), project_root),
+        ),
     };
     let mut changes = Vec::new();
     for builtin in agents.iter().chain(skills.iter()) {

@@ -2244,8 +2244,17 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         &["init", "--bare", remote.path().to_str().unwrap()],
         &repo.root,
     );
+    let origin = "https://github.com/org/delivery-observation.git";
     run_git(
-        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        &["remote", "add", "origin", origin],
+        &repo.root,
+    );
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", remote.path().display()),
+            origin,
+        ],
         &repo.root,
     );
     run_git(&["branch", "epic/observation"], &repo.root);

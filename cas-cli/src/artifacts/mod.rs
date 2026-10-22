@@ -57,8 +57,8 @@ pub enum PublishDisposition {
 }
 
 impl PublishDisposition {
-    /// Every disposition is a successful publish: the record exists and can be
-    /// referenced. Only the *storage* outcome differs.
+    /// Only a completed Cloud commit is delivered across machines; every
+    /// other disposition retains a local record without claiming delivery.
     pub fn is_committed(&self) -> bool {
         matches!(self, PublishDisposition::Committed { .. })
     }
@@ -80,9 +80,8 @@ impl PublishDisposition {
             PublishDisposition::NotLoggedIn => {
                 "recorded locally; not logged in to Cassy Cloud".to_string()
             }
-            PublishDisposition::UploadFailed { reason } => {
-                format!("recorded locally; the upload did not complete: {reason}")
-            }
+            PublishDisposition::UploadFailed { .. } =>
+                "recorded locally; Cloud delivery failed".to_string(),
         }
     }
 }
@@ -643,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn every_disposition_reads_as_a_successful_publish_with_a_storage_caveat() {
+    fn every_disposition_reports_whether_cloud_commit_completed() {
         let cases = [
             PublishDisposition::Committed {
                 cloud_url: Some("https://c/x".to_string()),

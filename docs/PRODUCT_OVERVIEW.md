@@ -41,6 +41,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack.
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
+8. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
 ## Authoritative Sources
 
@@ -53,6 +54,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
 - Commander browser app: `hub-web/`.
 - Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`.
+- Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 
 <!-- cas:project-overview

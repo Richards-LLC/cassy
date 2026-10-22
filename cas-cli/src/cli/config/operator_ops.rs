@@ -646,6 +646,10 @@ large_artifact_dir = \"before\"\n",
                 "staging.staging_dir" => "roundtrip-staging-dir".to_owned(),
                 "staging.large_artifact_dir" => "roundtrip-large-artifact-dir".to_owned(),
                 "factory.write_roots" => "~/Documents".to_owned(),
+                // The registry intentionally permits only `low` for the
+                // shared worker, so assert its serialized path instead of
+                // inventing an invalid non-default value.
+                "factory.ai_enrichment.effort" => "low".to_owned(),
                 "llm.supervisor.harness" => "codex".to_owned(),
                 "llm.supervisor.model" => "roundtrip-supervisor-model".to_owned(),
                 "llm.supervisor.reasoning_effort" => "medium".to_owned(),
@@ -671,10 +675,17 @@ large_artifact_dir = \"before\"\n",
             expected
                 .set(key, &value)
                 .unwrap_or_else(|error| panic!("unexpected set rejection for {key}: {error}"));
-            assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
+            if key != "factory.ai_enrichment.effort" {
+                assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
+            }
             set_config_value(&mut config, key, &value, &cas_root, operator).unwrap();
             let actual = Config::load(&cas_root).unwrap();
             assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");
+            if key == "factory.ai_enrichment.effort" {
+                let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+                assert!(saved.contains("[factory.ai_enrichment]"), "{saved}");
+                assert!(saved.contains("effort = \"low\""), "{saved}");
+            }
             if key == "factory.worker_build_jobs" {
                 let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
                 assert!(saved.contains("worker_build_jobs = \"8\""), "{saved}");

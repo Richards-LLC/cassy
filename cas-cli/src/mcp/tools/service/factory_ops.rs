@@ -17340,13 +17340,6 @@ effort = "high"
             ("PATH", &path), ("CAS_FACTORY_SESSION", "release-session"),
         ]);
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let mut worker = cas_types::Agent::new_with_role(
-            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
-        );
-        worker.factory_session = Some("release-session".into());
-        worker.pid = Some(std::process::id());
-        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
-        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
         struct Child(std::process::Child);
         impl Drop for Child {
             fn drop(&mut self) {
@@ -17355,11 +17348,18 @@ effort = "high"
             }
         }
         let daemon = Child(std::process::Command::new("sleep").arg("30").spawn().unwrap());
-        assert_ne!(worker.pid, Some(daemon.0.id()));
         let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
         epoch.pid = Some(daemon.0.id().into());
         epoch.version = Some("9.99.1".into());
         SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
+        );
+        worker.factory_session = Some("release-session".into());
+        worker.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        assert_ne!(worker.pid, Some(daemon.0.id()));
         let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
         assert!(banner.contains("release-worker") && banner.contains("9.99.1 [STALE"), "{banner}");
         let core = CasCore::with_daemon(root, None, None);

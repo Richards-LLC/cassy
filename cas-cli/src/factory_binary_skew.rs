@@ -285,15 +285,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Agent, DaemonChild) {
         let dir = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        let mut worker =
-            Agent::new_with_role("worker-old".into(), "old-worker".into(), AgentRole::Worker);
-        worker.factory_session = Some("factory-release".into());
-        worker.pid = Some(std::process::id());
-        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
-        let store = open_agent_store(&root).unwrap();
-        store.register(&worker).unwrap();
         let child = DaemonChild(std::process::Command::new("sleep").arg("30").spawn().unwrap());
-        assert_ne!(worker.pid, Some(child.0.id()));
         let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
         epoch.pid = Some(child.0.id().into());
         epoch.version = Some("9.99.1".into());
@@ -301,6 +293,14 @@ mod tests {
             .unwrap()
             .record_epoch(&epoch)
             .unwrap();
+        let mut worker =
+            Agent::new_with_role("worker-old".into(), "old-worker".into(), AgentRole::Worker);
+        worker.factory_session = Some("factory-release".into());
+        worker.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
+        let store = open_agent_store(&root).unwrap();
+        store.register(&worker).unwrap();
+        assert_ne!(worker.pid, Some(child.0.id()));
         (dir, root, worker, child)
     }
 

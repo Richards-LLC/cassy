@@ -372,7 +372,8 @@ pub(crate) fn assistance_queued(
         return Ok(());
     }
     let _lock = lock(root)?;
-    if let Some(mut wait) = view(root, worker, now)?
+    if let Some(mut wait) = read(&path(root, worker))?
+        && current(root, &wait, now)?
         && task.is_none_or(|task| task == wait.task_id)
     {
         wait.notified = true;

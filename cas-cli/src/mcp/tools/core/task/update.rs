@@ -631,25 +631,28 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let requested_status_is_active = req
+        let requested_status_is_nonterminal = req
             .status
             .as_deref()
             .and_then(|status| status.parse::<TaskStatus>().ok())
-            .is_some_and(|status| matches!(status, TaskStatus::InProgress | TaskStatus::Blocked));
-        let priority_touches_active_task = req.priority.is_some()
-            && (matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
-                || requested_status_is_active);
-        if priority_touches_active_task
-            && let Some(caller) = self
-                .get_registered_agent_id_read_only()
-                .ok()
-                .and_then(|caller_id| self.open_agent_store().ok()?.get(&caller_id).ok())
-            && caller.role == cas_types::AgentRole::Worker
-        {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on active tasks; a live registered supervisor must change it.",
-            ));
+            .is_some_and(|status| !matches!(status, TaskStatus::Closed | TaskStatus::Cancelled));
+        if req.priority.is_some() && (!task.is_terminal() || requested_status_is_nonterminal) {
+            // Priority controls shared build admission. A worker cannot evade
+            // this guard by reopening its task, and unavailable authority must
+            // refuse the entire update before ordinary fields are changed.
+            let caller_id = self.get_registered_agent_id_read_only()?;
+            let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("TASK PRIORITY UPDATE REJECTED: cannot read caller authority: {error}"),
+                )
+            })?;
+            if caller.role == cas_types::AgentRole::Worker {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                ));
+            }
         }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment

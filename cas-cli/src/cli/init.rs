@@ -516,6 +516,12 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     register_initialized_repo(cwd);
     let config = WizardConfig::with_detected_agents(cwd);
     let config_data = config.to_config();
+    // Provisioning can fail after the store is created. Persist the full new
+    // project config now, so a force retry preserves it rather than the
+    // placeholder written by init_cas_dir (cas-e149).
+    if !keep_config {
+        save_new_project_config(&config_data, &cas_dir)?;
+    }
     let mut hooks_configured = false;
     let mut claude_md_updated = false;
     let mut skill_generated = false;
@@ -575,10 +581,6 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // Setup factory tooling
     let factory_tooling_result = factory_tooling::setup_factory_tooling(cwd).unwrap_or_default();
-
-    if !keep_config {
-        save_new_project_config(&config_data, &cas_dir)?;
-    }
 
     let steps = next_steps_needed(cwd);
 

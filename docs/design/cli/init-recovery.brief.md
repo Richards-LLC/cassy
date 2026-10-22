@@ -14,6 +14,9 @@ its refusal. A valid existing file must still retain other servers. Recovery
 requires fixing the obstruction before retrying with `--force`.
 Force retries preserve existing configuration bytes in JSON, defaults and wizard
 modes. The explicit non-force wizard choice to reconfigure remains intentional.
+New JSON projects save their full configuration before fallible provisioning,
+so a failed run's force recovery keeps the same configuration as a clean init,
+including hooks, tasks and the enforce defaults for upkeep and the QA registry.
 Existing MCP roots and `mcpServers` fields must be JSON objects; arrays, null and
 scalars are refused without mutation or panic.
 

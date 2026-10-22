@@ -3,6 +3,7 @@
 
 import runpy
 import os
+import hashlib
 import json
 import subprocess
 import sys
@@ -93,7 +94,7 @@ Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
             self.assertEqual((destination / 'cas').read_bytes(), binary.read_bytes())
             self.assertEqual(result['version'], version)
             self.assertEqual(json.loads((destination / 'RECEIPT.json').read_text())['sha256'],
-                             candidate['sha256'](destination / 'cas'))
+                             hashlib.sha256((destination / 'cas').read_bytes()).hexdigest())
             self.assertTrue((destination / 'SHA256SUMS').is_file())
             self.assertEqual((legacy / 'review-only').read_bytes(), b'unmanaged output')
             help_output = subprocess.run(

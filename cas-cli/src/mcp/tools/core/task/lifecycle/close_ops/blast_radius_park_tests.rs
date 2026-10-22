@@ -408,6 +408,9 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let doc_path = "docs/design/cli/update-managed-files.brief.md";
     // An older receipt whose range includes this obvious source input must
     // be rejected without searching Rust source for its filename.
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(before_script)",
+    );
     std::fs::write(f.worker_path.join("operator.py"), "print('next')\n").unwrap();
     git(&f.worker_path, &["add", "operator.py"]);
     git(&f.worker_path, &["commit", "-q", "-m", "update operator script"]);
@@ -452,6 +455,7 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     assert!(closed.contains("Closed task"), "{closed}");
     let task = f.task();
     assert_eq!(task.status, TaskStatus::Closed);
+    assert!(!task.notes.contains("test(before_script)"), "the script invalidates its older receipt: {}", task.notes);
     assert!(
         task.notes
             .contains(&format!("rebound from {tested_tip} to {delivered_tip}")),

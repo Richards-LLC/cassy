@@ -10076,8 +10076,11 @@ impl CasCore {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
-            if let Some(head) = delivered_tip.as_deref() {
-                for receipt in crate::factory_worker_check::passing_test_receipts(&self.cas_root, proof_repo, head) {
+            let passing_tests = delivered_tip.as_deref().map(|head| {
+                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, proof_repo, head))
+            });
+            if let Some((_, tests)) = passing_tests.as_ref() {
+                for receipt in tests.receipts() {
                     if !task.notes.contains(&receipt) {
                         let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                         task.notes = format!("{}\n\n[{ts}] WORKER TEST {receipt}", task.notes);
@@ -10151,13 +10154,11 @@ impl CasCore {
             // diff. A delivered module whose crate the worker tested at the
             // delivered head is covered without a supervisor scope fix; a
             // crate with no test run still refuses.
-            let receipt_scoped_task = match receipt_scope::for_close(
-                &self.cas_root,
-                proof_repo,
-                &task,
-                &changed_paths,
-                delivered_tip.as_deref(),
-            ) {
+            let receipt_scoped_task = match passing_tests.as_ref().and_then(|(head, tests)| {
+                receipt_scope::for_tested_packages(
+                    proof_repo, &task, &changed_paths, head, &tests.packages(),
+                )
+            }) {
                 Some((judged, note)) => {
                     if !task.notes.contains(&note) {
                         let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");

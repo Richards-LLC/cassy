@@ -730,37 +730,67 @@ fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTe
     receipt_path(cas_root, repo, head).with_file_name(format!("{head}-test-{key}.json"))
 }
 
+/// One close's evidence at an immutable delivery. Construction does no I/O;
+/// package coverage and audit lines share the first read, including its Git
+/// classification work. A new close gets a fresh view of receipt files.
+pub(crate) struct PassingTests<'a> {
+    cas_root: &'a Path,
+    repo: &'a Path,
+    head: &'a str,
+    records: std::sync::OnceLock<Vec<(String, String, TestReceipt)>>,
+}
+
+impl<'a> PassingTests<'a> {
+    pub(crate) fn new(cas_root: &'a Path, repo: &'a Path, head: &'a str) -> Self {
+        Self {
+            cas_root,
+            repo,
+            head,
+            records: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn records(&self) -> &[(String, String, TestReceipt)] {
+        self.records
+            .get_or_init(|| passing_test_records(self.cas_root, self.repo, self.head))
+    }
+
+    pub(crate) fn receipts(&self) -> Vec<String> {
+        let mut receipts = self.records().iter()
+            .map(|(receipt_head, package, test)| {
+                let head = self.head;
+                let rebind = (receipt_head != head)
+                    .then(|| format!(" rebound from {receipt_head} to {head}"))
+                    .unwrap_or_default();
+                format!(
+                    "test: PASS {receipt_head} {package} {} {}{}{rebind}",
+                    test.filter, test.count, test.path_note()
+                )
+            }).collect::<Vec<_>>();
+        receipts.sort();
+        receipts.dedup();
+        receipts
+    }
+
+    pub(crate) fn packages(&self) -> Vec<String> {
+        let mut packages = self.records().iter()
+            .map(|(_, package, _)| package.clone()).collect::<Vec<_>>();
+        packages.sort();
+        packages.dedup();
+        packages
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
-    let mut receipts = passing_test_records(cas_root, repo, head)
-        .into_iter()
-        .map(|(receipt_head, package, test)| {
-            let rebind = (receipt_head != head)
-                .then(|| format!(" rebound from {receipt_head} to {head}"))
-                .unwrap_or_default();
-            format!(
-                "test: PASS {receipt_head} {package} {} {}{}{rebind}",
-                test.filter,
-                test.count,
-                test.path_note()
-            )
-        })
-        .collect::<Vec<_>>();
-    receipts.sort();
-    receipts.dedup();
-    receipts
+    PassingTests::new(cas_root, repo, head).receipts()
 }
 
 /// cas-b38a: the packages with at least one passing targeted test at `head`
 /// in this worktree, sorted and once each. The close gate counts a delivered
 /// crate as tested when its package is listed here.
 pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
-    let mut packages = passing_test_records(cas_root, repo, head)
-        .into_iter()
-        .map(|(_, package, _)| package)
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages.dedup();
-    packages
+    PassingTests::new(cas_root, repo, head).packages()
 }
 
 /// Exact test receipts plus ancestor receipts whose full commit range contains
@@ -802,10 +832,14 @@ fn passing_test_records(
         }
     }
 
+    let mut ranges = BTreeMap::new();
+    let mut named_sources = BTreeMap::new();
     for (receipt_head, package, test) in ancestors {
         let key = (package, test.harness.clone(), test.filter.clone());
         if exact.contains_key(&key)
-            || !receipt_range_has_no_proof_inputs(&repo, &receipt_head, head)
+            || !*ranges.entry(receipt_head.clone()).or_insert_with(|| {
+                receipt_range_has_no_proof_inputs(&repo, &receipt_head, head, &mut named_sources)
+            })
         {
             continue;
         }
@@ -864,6 +898,7 @@ fn receipt_range_has_no_proof_inputs(
     repo: &Path,
     receipt_head: &str,
     delivered_head: &str,
+    named_sources: &mut BTreeMap<String, bool>,
 ) -> bool {
     if !valid_git_oid(receipt_head)
         || !valid_git_oid(delivered_head)
@@ -892,7 +927,9 @@ fn receipt_range_has_no_proof_inputs(
         && changes.stdout.split(|byte| *byte == 0).all(|path| {
             path.is_empty()
                 || std::str::from_utf8(path)
-                    .is_ok_and(|path| !is_test_or_build_input_path(repo, path))
+                    .is_ok_and(|path| {
+                        !is_test_or_build_input_path(repo, delivered_head, path, named_sources)
+                    })
         })
 }
 
@@ -911,11 +948,15 @@ fn valid_git_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
+fn is_test_or_build_input_path(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
     let lower = path.to_ascii_lowercase();
     if is_workspace_crate_path(repo, path)
         || lower == ".env"
-        || is_named_by_tracked_rust_source(repo, path)
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
         || lower.starts_with("hub-web/dist/")
@@ -973,26 +1014,32 @@ fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
             | "exs" | "scala" | "clj" | "vue" | "svelte" | "toml" | "lock" | "json"
             | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
             | "proto" | "graphql" | "nix"
-    )
+    ) || is_named_by_tracked_rust_source(repo, delivered_head, path, named_sources)
 }
 
 /// A Rust source file can embed assets outside its crate directory with
 /// `include_str!` or `include_bytes!`. Detect those by filename so new assets do
 /// not need a hand-maintained path entry here. Treat git errors conservatively
 /// as proof inputs rather than reusing a receipt we could not validate.
-fn is_named_by_tracked_rust_source(repo: &Path, path: &str) -> bool {
+fn is_named_by_tracked_rust_source(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
     let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    let Ok(matches) = Command::new("git")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["grep", "-lF", "-e", name, "HEAD", "--", "*.rs"])
-        .current_dir(repo)
-        .output()
-    else {
-        return true;
-    };
-    matches.status.code() != Some(1)
+    // Cheap path checks already ran. Every range in this scan has the same
+    // repository and delivered head, and grep searches only the basename.
+    *named_sources.entry(name.to_owned()).or_insert_with(|| {
+        Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["grep", "-lF", "-e", name, delivered_head, "--", "*.rs"])
+            .current_dir(repo)
+            .output()
+            .map_or(true, |matches| matches.status.code() != Some(1))
+    })
 }
 
 /// Cargo inputs are not limited to source-code extensions: `include_str!`,

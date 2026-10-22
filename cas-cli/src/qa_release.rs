@@ -1055,8 +1055,8 @@ mod tests {
         let dir = release.path().join("a".repeat(40));
         std::fs::create_dir_all(dir.join("media")).unwrap();
         let mut pack = Pack::new("cassy", &"a".repeat(40), Vec::new());
-        let limit = 64;
-        for (name, size) in [("frame.png", 10), ("fits.mp4", 100), ("huge.mp4", 100), ("trace.zip", 100)] {
+        let limit = 4096;
+        for (name, size) in [("frame.png", 10), ("fits.mp4", 5000), ("huge.mp4", 5000), ("trace.zip", 5000)] {
             std::fs::write(dir.join("media").join(name), vec![b'x'; size]).unwrap();
             pack.add_media(&dir, &format!("media/{name}")).unwrap();
         }

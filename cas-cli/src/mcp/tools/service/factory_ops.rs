@@ -7929,7 +7929,7 @@ mod gc_report_render_tests {
     use super::*;
 
     #[test]
-    fn large_machine_status_is_bounded_and_records_omitted_cache_details() {
+    fn summary_bounds_inventory_and_preserves_opt_in_machine_status() {
         let caches = (0..1_000)
             .map(|index| {
                 serde_json::json!({
@@ -7955,7 +7955,7 @@ mod gc_report_render_tests {
             "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
         );
 
-        let report = format!("{report}\nPaths \u{00e9}:\n  - /{}\n", "a".repeat(200));
+        let report = format!("{report}\nPaths \u{00e9}:\n  - /{}\n\nNote: these are not auto-deleted. Inspect, then commit/salvage/discard.\n", "a".repeat(200));
         let summary = render_gc_report_response(&report, GcReportView::Summary);
         assert!(
             summary.is_ascii(),
@@ -7971,8 +7971,10 @@ mod gc_report_render_tests {
                 .any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")),
             "raw status belongs behind the explicit machine/full view"
         );
-        assert!(summary.starts_with("[INFO] GC review: 2 inventory categories\nPreview cleanup: cas factory gc cleanup\n"), "verdict and preview come first: {summary}");
+        assert!(summary.starts_with("[INFO] GC review: 2 inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n"), "verdict and accurate next action come first: {summary}");
         assert!(summary.contains("- Cargo target cache pressure: 1 items"));
+        assert!(summary.contains("Note: these are not auto-deleted."));
+        assert!(!summary.contains("- Note:"), "notes are not inventory categories");
         assert!(summary.contains("--full"));
         assert_eq!(
             render_gc_report_response(&report, GcReportView::Full),

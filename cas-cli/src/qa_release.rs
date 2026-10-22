@@ -1179,6 +1179,13 @@ mod tests {
         let record = std::fs::read_to_string(dir.join(pack::PRUNED_FILE)).unwrap();
         std::fs::write(dir.join(pack::PRUNED_FILE), record.replacen(&sealed.media[0].sha256, &"0".repeat(64), 1)).unwrap();
         assert!(matches!(Pack::load(&dir), Err(pack::PackError::Media(_))), "pruned.json claiming another digest");
+        std::fs::write(dir.join(pack::PRUNED_FILE), &record).unwrap();
+        let mut resealed = Pack::load(&dir).unwrap();
+        std::fs::write(dir.join("media/frame.png"), b"recaptured").unwrap();
+        resealed.add_media(&dir, "media/frame.png").unwrap();
+        resealed.seal(&dir).unwrap();
+        assert!(Pack::load(&dir).is_ok(), "a reseal (C6) reconciles pruned.json");
+        assert!(!pack::pruned(&dir).unwrap().iter().any(|p| p.path == "media/frame.png"));
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

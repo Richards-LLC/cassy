@@ -190,6 +190,7 @@ impl Pack {
     /// Verifies media, derives the gate, scans for secrets (the flag snapshot
     /// included) and writes `pack.json` atomically. Returns its path.
     pub fn seal(&mut self, dir: &Path) -> Result<PathBuf, PackError> {
+        self.reconcile_pruned(dir)?;
         self.verify_media(dir)?;
         self.gate = self.derive_gate();
         let text = serde_json::to_string_pretty(self).map_err(|e| PackError::Io(e.to_string()))?;
@@ -219,6 +220,30 @@ impl Pack {
             return Err(PackError::Gate { stored: pack.gate.verdict, derived: derived.verdict });
         }
         Ok(pack)
+    }
+
+    /// Sealing is the one writer that may forget a pruned record: a reseal
+    /// (C6 keeps earlier generations in `history/`) keeps only the records
+    /// whose entry it still lists with the same digest and whose file is still
+    /// gone. Loading never reconciles, so a stray record still refuses there.
+    fn reconcile_pruned(&self, dir: &Path) -> Result<(), PackError> {
+        let records = pruned(dir)?;
+        let keep: Vec<Pruned> = records
+            .iter()
+            .filter(|p| {
+                std::fs::symlink_metadata(dir.join(&p.path)).is_err()
+                    && self.media.iter().any(|m| m.path == p.path && m.sha256 == p.sha256 && m.bytes == p.bytes)
+            })
+            .cloned()
+            .collect();
+        if keep.len() == records.len() {
+            return Ok(());
+        }
+        let text = serde_json::to_string_pretty(&keep).map_err(|e| PackError::Io(e.to_string()))?;
+        let temp = dir.join(format!(".{PRUNED_FILE}.{}", std::process::id()));
+        std::fs::write(&temp, text)
+            .and_then(|()| std::fs::rename(&temp, dir.join(PRUNED_FILE)))
+            .map_err(|e| PackError::Io(e.to_string()))
     }
 
     /// A present file must match its digest. A missing one is accepted only

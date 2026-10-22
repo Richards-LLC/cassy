@@ -342,7 +342,7 @@ impl FactoryDaemon {
     }
 
     /// Parse client input, extracting control sequences
-    fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
+    pub(super) fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
         let mut input_data = Vec::new();
         let mut events = Vec::new();
         let mut i = 0;

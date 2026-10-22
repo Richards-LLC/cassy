@@ -384,9 +384,14 @@ struct CandidatePlan {
     path_command: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct CandidateReceipt {
+    // The caller owns these paths; the builder's disk manifest contains
+    // identity fields, not its stdout-only candidate_dir summary field.
+    #[serde(skip_deserializing)]
     candidate_dir: PathBuf,
+    #[serde(skip_deserializing)]
+    receipt_file: PathBuf,
     revision: String,
     version: String,
     sha256: String,
@@ -497,10 +502,11 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
     let script = project.join("scripts/qa-candidate-build.py");
     ensure!(
         script.is_file(),
-        "QA candidate builder missing: {}",
-        script.display()
+        "QA candidate builder missing: scripts/qa-candidate-build.py\n\
+         Use an up-to-date Cassy source checkout, then rerun:\n\
+           cas qa candidate build --task {task} \\\n    --rev {revision}"
     );
-    let output = Command::new("python3")
+    let status = Command::new("python3")
         .arg(script)
         .arg("--repo")
         .arg(&project)
@@ -508,30 +514,37 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         .arg(&revision)
         .arg("--candidate-dir")
         .arg(&layout.candidate_dir)
-        .stdout(Stdio::piped())
+        // Git and cleanup helpers may write progress to stdout. The
+        // published file, not that stream, is the receipt contract.
+        .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .output()
+        .status()
         .context("run QA candidate build")?;
     ensure!(
-        output.status.success(),
+        status.success(),
         "QA candidate build exited {}",
-        output.status
+        status
     );
-    let receipt: CandidateReceipt =
-        serde_json::from_slice(&output.stdout).context("read QA candidate build receipt")?;
+    let mut receipt: CandidateReceipt = serde_json::from_slice(
+        &std::fs::read(&layout.receipt_file)
+            .with_context(|| format!("read QA candidate build receipt {}", layout.receipt_file.display()))?,
+    ).context("read QA candidate build receipt")?;
     ensure!(
-        receipt.revision == revision && receipt.candidate_dir == layout.candidate_dir,
-        "candidate receipt does not match requested revision and path"
+        receipt.revision == revision,
+        "candidate receipt does not match requested revision"
     );
+    receipt.candidate_dir = layout.candidate_dir;
+    receipt.receipt_file = layout.receipt_file;
     if cli.json {
-        print!("{}", String::from_utf8(output.stdout)?);
+        println!("{}", serde_json::to_string(&receipt)?);
     } else {
         println!(
-            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}\nFind it: {}",
+            "Candidate: {}\nVersion: {}\nRevision: {}\nSHA-256: {}\nReceipt: {}\nFind it: {}",
             receipt.candidate_dir.display(),
             receipt.version,
             receipt.revision,
             receipt.sha256,
+            receipt.receipt_file.display(),
             layout.path_command
         );
     }

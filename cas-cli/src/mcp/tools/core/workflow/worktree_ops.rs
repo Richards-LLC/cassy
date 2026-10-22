@@ -6739,6 +6739,8 @@ mod tests {
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
                     "src/one.rs".to_string(),
                     "src/two.rs".to_string(),
+                    "src/bidi\u{202e}name.rs".to_string(),
+                    "src/line\u{2028}name.rs".to_string(),
                 ])),
                 source,
                 "epic/example",
@@ -6748,6 +6750,9 @@ mod tests {
             assert!(message.contains("CONTENT CONFLICT"));
             assert!(message.contains("src/one.rs"));
             assert!(message.contains("src/two.rs"));
+            assert!(message.contains("src/bidi\\u{202e}name.rs"), "{message:?}");
+            assert!(message.contains("src/line\\u{2028}name.rs"), "{message:?}");
+            assert!(!message.contains('\u{202e}'), "{message:?}");
             assert!(message.contains("restored"));
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
@@ -6795,7 +6800,7 @@ mod tests {
         assert!(dirty_message.contains("git worktree add --detach"));
 
         // The Git subprocess's text is untrusted even when branch names are safe.
-        let detail = "path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end";
+        let detail = "UU path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end\n M second\tfile.rs\n";
         for git_error in [
             GitError::MergeInProgress(detail.into()),
             GitError::MergeCheckoutDirty(detail.into()),
@@ -6805,7 +6810,8 @@ mod tests {
                 WorktreeError::Git(git_error), "factory/worker", "epic/example",
             ).message.into_owned();
             assert!(message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"), "{message:?}");
-            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}']), "{message:?}");
+            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}', '\t']), "{message:?}");
+            assert!(message.contains("end\n M second\\tfile.rs\n"), "{message:?}");
         }
     }
 

@@ -1,0 +1,47 @@
+Create a disposable task-owned detached checkout; print its absolute path
+
+Usage: cas factory scratch-checkout [OPTIONS]
+       --cas-root <ROOT> --task-id <TASK> --head <SHA>
+
+Options:
+      --cas-root <CAS_ROOT>
+          
+      --json
+          Output in JSON format
+      --full
+          Show complete JSON, service paths/definitions, or GC report details
+      --task-id <TASK_ID>
+          
+      --dispatch-id <DISPATCH_ID>
+          
+  -v, --verbose
+          Verbose output
+      --head <HEAD>
+          
+  -w, --workers <WORKERS>
+          Number of worker agents (default: 0 for supervisor-only startup)
+          [default: 0]
+  -n, --name <NAME>
+          Custom session name
+      --new
+          Start a new session instead of auto-attaching an existing one
+      --attach
+          Attach to an existing session without prompting (skip confirmation)
+      --no-worktrees
+          Disable worktree-based worker isolation (all agents share the same
+          directory)
+      --worktree-root <WORKTREE_ROOT>
+          Custom directory for worker worktrees (default: .cas/worktrees under
+          project)
+      --tabbed
+          Use tabbed worker view instead of side-by-side (default: side-by-side)
+      --record
+          Record terminal sessions for time-travel playback
+      --no-phone-home
+          Disable cloud phone-home (push factory state to Cassy Cloud)
+      --lane <LANE>
+          Use a named lane instead of explicit CLI/model/effort controls
+      --strict-cli
+          Refuse unavailable Codex instead of falling back to Claude
+  -h, --help
+          Print help

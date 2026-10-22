@@ -422,12 +422,13 @@ impl PeerClaims {
     /// claim. The per-task fence also waits out a release already in flight;
     /// cancellation alone cannot invalidate that release's earlier snapshot.
     /// Called on the blocking pool under the start request's peer budget.
+    /// The caller retains the returned guard until its local lease is published.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_for_start(
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
-    ) -> (Acquire, Option<std::fs::File>) {
+    ) -> (Acquire, Option<TaskClaimFence>) {
         let _fence = match lock_task_claim_release(cas_root, task_id) {
             Ok(fence) => fence,
             Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None),
@@ -440,7 +441,10 @@ impl PeerClaims {
         if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
             return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None);
         }
-        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), None)
+        // Cancellation remains intentional if Cloud becomes unavailable at
+        // this point: the caller publishes a local lease, and renewal repairs
+        // its Cloud mirror. Keep release fenced until that local publication.
+        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), Some(_fence))
     }
 
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
@@ -1149,9 +1153,26 @@ pub fn release_task_claim(cas_root: &Path, task_id: &str) {
 fn release_task_claim_with(
     claims: &PeerClaims, cas_root: &Path, task_id: &str, after_holder_read: impl Fn(),
 ) {
+    let _fence = match lock_task_claim_release(cas_root, task_id) {
+        Ok(fence) => fence,
+        Err(error) => {
+            tracing::warn!(task = %task_id, %error, "could not fence synchronous claim release; preserving claim");
+            return;
+        }
+    };
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {
         return;
     };
+    // A restart that won the fence first has already published its local
+    // lease. Its Cloud claim is no longer the old release's to discard.
+    match agents.get_lease(task_id) {
+        Ok(Some(lease)) if lease.is_valid() => return,
+        Ok(_) => {},
+        Err(error) => {
+            tracing::warn!(task = %task_id, %error, "could not check local lease; preserving Cloud claim");
+            return;
+        }
+    }
     let is_local = |id: &str| {
         after_holder_read();
         agents.get(id).is_ok()
@@ -1177,25 +1198,64 @@ fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<St
         .unwrap_or_default()
 }
 
-/// Serialize only this task's Cloud start/release, across processes. Keep
-/// these lock inodes: unlinking a held lock would allow a second lock owner.
-/// The shared records lock below never spans a network call.
-fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<std::fs::File> {
+/// Owns one task's Cloud start/release fence. It remains live through local
+/// lease publication or release settlement. Operations needing both locks take
+/// this fence before the global records lock; the latter never spans Cloud.
+pub(crate) struct TaskClaimFence {
+    _file: std::fs::File,
+    path: std::path::PathBuf,
+    generation: Vec<u8>,
+}
+
+impl Drop for TaskClaimFence {
+    fn drop(&mut self) {
+        // All acquisition paths validate the generation AFTER flock. A waiter
+        // that already opened this inode must reopen after it is unlinked.
+        if std::fs::read(&self.path).ok().as_deref() == Some(self.generation.as_slice()) {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                tracing::debug!(path = %self.path.display(), %error, "could not retire task claim fence");
+            }
+        }
+    }
+}
+
+fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<TaskClaimFence> {
     lock_task_claim_release_with(cas_root, task_id, |_| {})
 }
 
 fn lock_task_claim_release_with(
     cas_root: &Path, task_id: &str, mut after_open: impl FnMut(&std::fs::File),
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<TaskClaimFence> {
     use fs2::FileExt;
+    use std::io::{Read, Write};
     let directory = cas_root.join("claim-release-locks");
     std::fs::create_dir_all(&directory)?;
     let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
-        .open(directory.join(format!("{key}.lock")))?;
-    after_open(&file);
-    file.lock_exclusive()?;
-    Ok(file)
+    let path = directory.join(format!("{key}.lock"));
+    loop {
+        let mut file = std::fs::OpenOptions::new().create(true).truncate(false)
+            .read(true).write(true).open(&path)?;
+        after_open(&file);
+        file.lock_exclusive()?;
+        let mut generation = Vec::new();
+        file.read_to_end(&mut generation)?;
+        if generation.is_empty() {
+            // Empty files from the original persistent-lock protocol are
+            // adopted under their existing lock, without replacing the inode.
+            generation = uuid::Uuid::new_v4().to_string().into_bytes();
+            file.write_all(&generation)?;
+        }
+        match std::fs::read(&path) {
+            Ok(current) if current == generation => {
+                return Ok(TaskClaimFence { _file: file, path, generation });
+            }
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+        // The prior owner retired this handle while we waited. Drop its lock
+        // and reopen the current path before entering the critical section.
+    }
 }
 
 /// Read-modify-write the pending releases under an exclusive file lock; no
@@ -1658,7 +1718,7 @@ mod tests {
             let waiter = waiter.join().unwrap();
             let current = std::fs::metadata(&path).unwrap();
             assert!(removed, "settlement must remove the task-specific lock file");
-            let held = waiter.metadata().unwrap();
+            let held = waiter._file.metadata().unwrap();
             assert_eq!((held.dev(), held.ino()), (current.dev(), current.ino()),
                 "a waiter must lock the current path, not an unlinked inode");
             drop(waiter);

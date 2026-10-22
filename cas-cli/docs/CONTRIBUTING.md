@@ -1139,6 +1139,20 @@ the task before retrying. A failed lease acquisition leaves status unchanged;
 a failed status write releases only the lease generation acquired by that start.
 A sync-publication error after the local commit keeps the matching lease.
 
+Cloud acquisition and local lease publication share one per-task claim fence.
+Synchronous release and pending-release retry take that fence before inspecting
+a local lease or releasing its Cloud mirror. Operations needing both locks
+take the per-task fence before the global pending-records lock; the global lock
+never spans a network call. Settled fences retire their lock files. A generation check after
+locking makes pre-opened waiters reopen an unlinked file instead of entering
+under a different inode.
+
+If the peer budget expires just after start cancels a pending release, Cloud
+acquisition can still be unavailable. Start reports PEERS NOT CHECKED and takes
+the local lease; normal claim renewal reacquires the missing Cloud mirror. The
+cancellation protects the new local holder from the old release and is retained
+in this advisory fallback.
+
 ### Task lease release
 
 `task action=release` lets a live registered supervisor release a worker's

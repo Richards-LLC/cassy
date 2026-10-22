@@ -2642,6 +2642,8 @@ impl CasCore {
                     format!("Failed to claim task before start: {error}"),
                 )),
             };
+        // A delayed synchronous release now sees this lease under the same
+        // fence. Never expose the Cloud-first/local-later publication gap.
         drop(peer_claim_fence);
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed

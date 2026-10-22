@@ -1049,9 +1049,23 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
+    // Keep the new managed-merge fixture's transport entirely local while
+    // retaining a GitHub origin for its CI identity.
+    let remote = TempDir::new().unwrap();
+    if implicit {
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
+        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
+            "git@github.com:org/work-b.git"], &repo_b.root);
+        run_git(&["push", "origin", "main"], &repo_b.root);
+    }
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
     disable_system_a(&cas_root_a);
+    if implicit {
+        std::fs::write(cas_root_b.join("config.toml"),
+            "[project]\ncanonical_id = 'cas-be50-target'\n").unwrap();
+        cas::store::known_repos::register_repo_strict(&repo_b.root).unwrap();
+    }
 
     let task_store = open_task_store(&cas_root_a).expect("open repo A task store");
     let mut task = Task::new(
@@ -1060,7 +1074,9 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     );
     task.assignee = Some("alice".to_string());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "remote:github.com/org/work-b".to_string(),
+        repo_selector: if implicit { "project:cas-be50-target" } else {
+            "remote:github.com/org/work-b"
+        }.to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task binding");
@@ -1076,6 +1092,7 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
         task.deliverables.parked_branch = Some("factory/alice".into());
         let head = git_stdout(&repo_b.root, &["rev-parse", "factory/alice"]);
         task.deliverables.factory_branch_anchor = Some(head.clone());
+        run_git(&["push", "origin", "factory/alice"], &repo_b.root);
         task.demo_statement = "Read the delivered file in repo B".into();
         task_store.update(&task).unwrap();
         // Test-only review record: the exact source already has a verdict.

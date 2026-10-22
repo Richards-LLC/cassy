@@ -3600,7 +3600,7 @@ impl CasCore {
             if branch.starts_with("factory/") {
                 let cwd = cas_root.parent().unwrap_or(&cas_root);
                 if let Some(refusal) =
-                    crate::qa_pass::branch_merge_refusal(&cas_root, cwd, &branch)
+                    crate::qa_pass::worktree_branch_merge_refusal(&cas_root, cwd, &branch)
                 {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,

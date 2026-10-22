@@ -172,7 +172,8 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         help.contains(concat!(
             "Target-cache reclamation, orphan-process kills, and ",
             "journey-recording cleanup require both --force and --no-dry-run. ",
-            "Artifact cleanup requires both flags and artifacts=true."
+            "Artifact cleanup is available only through the MCP gc_cleanup action ",
+            "with artifacts=true."
         )),
         "{help}"
     );

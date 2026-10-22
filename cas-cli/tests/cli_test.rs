@@ -453,26 +453,50 @@ print(json.dumps(held))
 
 #[test]
 fn test_init_yes_flag() {
-    let temp = TempDir::new().unwrap();
-    assert!(!temp.path().join(".git").exists());
-
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"))
-        .stdout(predicate::str::contains("cas hub service install"));
-
-    assert!(temp.path().join(".cas").exists());
-    assert!(temp.path().join(".cas/cas.db").exists());
-    // Config is now saved as TOML (preferred format)
-    assert!(temp.path().join(".cas/config.toml").exists());
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .arg("status")
-        .assert()
-        .success();
+    let mut redraws = Vec::new();
+    // Both human entry paths share execute_step; exercise completion and an
+    // actual filesystem failure through their piped CLI, not a renderer copy.
+    for interactive in [false, true] {
+        for fail_gitignore in [false, true] {
+            let temp = TempDir::new().unwrap();
+            assert!(!temp.path().join(".git").exists());
+            std::fs::create_dir(temp.path().join(".claude")).unwrap();
+            if fail_gitignore {
+                std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+            }
+            let mut cmd = cas_cmd(temp.path());
+            cmd.current_dir(&temp)
+                .args(["init", "--no-integrations"])
+                .env("LC_ALL", "C")
+                .env("NO_COLOR", "1");
+            if interactive {
+                cmd.write_stdin("y\n");
+            } else {
+                cmd.arg("--yes");
+            }
+            let output = cmd.output().unwrap();
+            assert_eq!(output.status.success(), !fail_gitignore,
+                "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
+                String::from_utf8_lossy(&output.stderr));
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("Saving configuration"), "{text}");
+            assert!(text.contains("Updating .gitignore"), "{text}");
+            if text.bytes().any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
+                || text.matches("Saving configuration").count() != 1
+                || text.matches("Updating .gitignore").count() != 1
+            {
+                redraws.push(format!("interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"));
+            }
+            assert!(temp.path().join(".cas/cas.db").exists());
+            assert!(temp.path().join(".cas/config.toml").exists());
+            if !fail_gitignore {
+                assert!(text.contains("Cassy initialized"), "{text}");
+                assert!(text.contains("cas hub service install"), "{text}");
+                cas_cmd(temp.path()).current_dir(&temp).arg("status").assert().success();
+            }
+        }
+    }
+    assert!(redraws.is_empty(), "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}");
 }
 
 #[test]

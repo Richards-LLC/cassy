@@ -1178,13 +1178,19 @@ fn discard_shared_fingerprints(target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
+/// The fixed provider credential-free test profile; never an arbitrary env override.
+pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 6] = [
+    "VIKTOR_API_KEY", "VIKTOR_KEY", "NEON_API_KEY", "NEON_TOKEN", "VERCEL_TOKEN", "VERCEL_API_TOKEN",
+];
+
+pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
     execute_at_with_scope(
         cas_root,
         args,
         &std::env::current_dir()?,
         Path::new("cargo"),
         cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+        isolated_test_env,
     )
 }
 
@@ -1197,11 +1203,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
 /// session is outside that group. Its stdout and stderr both go to this
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
-pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args);
+    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env);
     let child = spawn_detached(command).context("starting the detached worker-check runner")?;
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
@@ -1213,15 +1219,17 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
 /// The detached runner, ending its log with `worker-check: EXIT <code>` so a
 /// refused or failed run is distinguishable from one still running (cas-6591).
 #[cfg(unix)]
-fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String]) -> Command {
+fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
         .arg(executable)
         .args(["factory", "worker-check", "--cas-root"])
-        .arg(cas_root)
-        .arg("--")
-        .args(args);
+        .arg(cas_root);
+    if let Some(directory) = isolated_test_env {
+        command.arg("--isolated-test-env").arg(directory);
+    }
+    command.arg("--").args(args);
     command
 }
 
@@ -1249,13 +1257,13 @@ fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String]) -> Result<()> {
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>) -> Result<()> {
     bail!("worker-check --detach needs a Unix session; run the check in the foreground")
 }
 
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
-    execute_at_with_scope(cas_root, args, cwd, cargo, None)
+    execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
 }
 
 /// cas-d95c: run a task's named tests at a verification's bound head under the
@@ -1288,7 +1296,7 @@ fn execute_verifier_at(
         );
     }
     let worktree = verifier_worktree(cas_root, cwd, head)?;
-    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner)
+    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner, None)
 }
 
 /// A detached checkout of `head` under the Cassy worktrees root, so the
@@ -1349,8 +1357,13 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
         .or_else(|_| git(repo, &["rev-parse", "HEAD"]))
 }
 
-fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>) -> Result<()> {
+fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {
     let test = targeted_test(args);
+    if let Some(directory) = isolated_test_env {
+        if test.is_none() || !directory.is_absolute() || !directory.is_dir() {
+            bail!("Isolated worker test environment needs a named targeted test and an existing absolute private XDG_CONFIG_HOME directory");
+        }
+    }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
         None => check_packages(args).context("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed")?,
@@ -1499,6 +1512,13 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+    // Bootstrap/admission keep their inherited identity and credentials. Only
+    // the final Cargo/test child receives this fixed isolation profile.
+    if let Some(directory) = isolated_test_env {
+        for key in ISOLATED_TEST_CREDENTIALS { command.env_remove(key); }
+        command.env("XDG_CONFIG_HOME", directory);
+        println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
+    }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
         config.worker_memory_high_gib,
@@ -1616,7 +1636,7 @@ mod tests {
     fn detached_runner_log_ends_with_the_runner_exit_code() {
         // `false` stands in for a runner that refuses: it exits 1.
         let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
-        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args)
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None)
             .output()
             .unwrap();
         let log = String::from_utf8(output.stdout).unwrap();
@@ -1929,7 +1949,7 @@ if [ -d /proc/self/fd ]; then
     [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 6
 fi
 printf '%s\n' "$@" > target/cargo-args"#);
-        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap();
+        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope), None).unwrap();
         let scope_args = std::fs::read_to_string(repo.join("target/scope-args")).expect("build must enter a memory-limited scope");
         assert!(scope_args.contains("--user\n--scope\n"), "{scope_args}");
         assert!(scope_args.contains("MemoryHigh=3221225472\n"), "{scope_args}");
@@ -1986,7 +2006,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
         for (name, runner) in [("no-session", Some(rejected.as_path())), ("missing", Some(missing.as_path())), ("other-platform", None)] {
             let repo = root.join("worktrees").join(name);
             fixture_commit(&repo);
-            execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, runner).unwrap();
+            execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, runner, None).unwrap();
             // pin: unavailable scopes must execute the external build once.
             assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1, "fallback must execute Cargo once: {name}");
             assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some(), "{name}");
@@ -2003,10 +2023,10 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, "echo run >> target/runs\nexit 7");
-        let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap_err();
+        let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope), None).unwrap_err();
         assert!(error.to_string().contains("FAIL"), "{error}");
         assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1);
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_none());
@@ -2022,14 +2042,14 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, r#"[ "$1" = nextest ] || exit 3
 [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 4
 [ -n "$CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER" ] || exit 5
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         let args = ["nextest", "run", "-p", "cas", "-E", "test(worker)"].map(str::to_string);
-        execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope)).unwrap();
+        execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope), None).unwrap();
         let receipts = passing_test_receipts(&root, &repo, &fixture_head(&repo));
         assert_eq!(receipts.len(), 1);
         assert!(receipts[0].ends_with("test(worker) 2"), "{receipts:?}");
@@ -2104,6 +2124,9 @@ fi"#);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        // A capped outer test already has a release runner. Observe only what
+        // this fixture's check/test invocation installs, not inherited state.
+        env.remove(&variable);
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,
@@ -2827,7 +2850,7 @@ PY"#);
     #[cfg(unix)]
     #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
-        let _env =
+        let mut env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
@@ -2849,7 +2872,59 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
             "test(worker)".into(),
         ];
         let head = fixture_head(&repo);
-        execute_at(&root, &args, &repo, &fake).unwrap();
+        // Real hook/CLI transport plus the normal capped runner, after the
+        // runtime has already inherited provider credentials.
+        let xdg = dir.path().join("private-xdg");
+        std::fs::create_dir(&xdg).unwrap();
+        for key in ISOLATED_TEST_CREDENTIALS { env.set(key, "fixture-provider-sentinel"); }
+        env.set("XDG_CONFIG_HOME", dir.path().join("inherited-xdg"));
+        env.set("CAS_SESSION_ID", "worker-env-fixture");
+        env.set("CAS_CLONE_PATH", &repo);
+        env.set("CAS_HOOK_HARNESS", "claude");
+        let request = cas_core::hooks::types::HookInput {
+            cwd: repo.display().to_string(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
+            tool_input: Some(serde_json::json!({"command": format!(
+                "env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME={} cargo nextest run -p cas -E 'test(worker)' > target/tests.log 2>&1 &", xdg.display())})),
+            ..Default::default()
+        };
+        let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+        let value = serde_json::to_value(output).unwrap();
+        let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command").and_then(|v| v.as_str()).expect("isolated request is rewritten");
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach }) = factory.command else { panic!("worker-check command") };
+        assert!(detach);
+        assert_eq!(cas_root, root);
+        assert_eq!(cargo_args, args);
+        assert_eq!(isolated_test_env.as_deref(), Some(xdg.as_path()));
+        let detached = detached_runner_command(Path::new("cas"), &root, &cargo_args, isolated_test_env.as_deref());
+        let detached_args = detached.get_args().collect::<Vec<_>>();
+        assert!(detached_args.windows(2).any(|pair| pair == [std::ffi::OsStr::new("--isolated-test-env"), xdg.as_os_str()]));
+        fake_cargo(&fake, &format!(r#"set -e
+python3 - <<'PYENV'
+import os
+from pathlib import Path
+for key in ['VIKTOR_API_KEY', 'VIKTOR_KEY', 'NEON_API_KEY', 'NEON_TOKEN', 'VERCEL_TOKEN', 'VERCEL_API_TOKEN']:
+    assert key not in os.environ, key + ' leaked into test child'
+assert os.environ.get('XDG_CONFIG_HOME') == {xdg:?}, 'private config directory lost'
+assert os.environ.get('CAS_SESSION_ID') == 'worker-env-fixture', 'runtime identity lost'
+assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target'), 'private target lost'
+(Path.cwd() / 'target' / 'environment-observed').write_text('credential-free private config')
+PYENV
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
+"#, xdg=xdg.to_str().unwrap()));
+        let scope = dir.path().join("scope");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
+        for scope in [None, Some(scope.as_path())] {
+            execute_at_with_scope(&root, &cargo_args, &repo, &fake, scope, isolated_test_env.as_deref()).unwrap();
+        }
+        assert!(repo.join("target/environment-observed").is_file(), "environment-checking child must execute");
+        for key in ISOLATED_TEST_CREDENTIALS { assert!(std::env::var_os(key).is_some(), "parent {key} changed"); }
+        assert_eq!(std::env::var_os("XDG_CONFIG_HOME"), Some(dir.path().join("inherited-xdg").into_os_string()));
+        fake_cargo(&fake, "printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\\n'");
         assert_eq!(
             passing_test_receipts(&root, &repo, &head),
             [format!("test: PASS {head} cas test(worker) 2")]

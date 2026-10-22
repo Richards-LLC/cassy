@@ -42,7 +42,7 @@ pub fn handle_pre_tool_use(
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap();
-        let (args, suffix) = worker_check_command(command).expect("route was selected");
+        let (args, suffix, isolated_test_env) = worker_check_command(command).expect("route was selected");
         let Some(root) = cas_root else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -78,10 +78,11 @@ pub fn handle_pre_tool_use(
         };
         let executable = std::env::current_exe()?;
         let rewritten = format!(
-            "{} factory worker-check --cas-root {}{} -- {}{}",
+            "{} factory worker-check --cas-root {}{}{} -- {}{}",
             shell_quote_path(&executable),
             shell_quote_path(root),
             if detach { " --detach" } else { "" },
+            isolated_test_env.as_ref().map(|path| format!(" --isolated-test-env {}", shell_quote_path(path))).unwrap_or_default(),
             args.iter()
                 .map(|arg| if arg.trim_start().starts_with("test(") {
                     format!("'{arg}'")
@@ -1344,9 +1345,38 @@ fn handle_pre_tool_use_inner(
     Ok(HookOutput::empty())
 }
 
-/// Accept a literal check/targeted nextest plus a simple log/background suffix, never compound
-/// commands, shell substitutions, toolchains, environment overrides or wrappers.
-fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
+/// Accept a literal check/targeted nextest plus a simple log/background suffix.
+/// The sole env prefix is the complete fixed provider-isolation profile; never
+/// accept general wrappers, shell substitutions, toolchains or build overrides.
+fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>)> {
+    let command = command.trim();
+    if command.contains(['\n', '\r']) { return None; }
+    let (cargo, isolated) = if command.starts_with("env ") {
+        let split = command.find(" cargo ")?;
+        let words = command[..split].split_whitespace().collect::<Vec<_>>();
+        let (assignment, prefix) = words.split_last()?;
+        let directory = assignment.strip_prefix("XDG_CONFIG_HOME=")?;
+        // A literal path, never a shell expansion or arbitrary assignment.
+        if !Path::new(directory).is_absolute()
+            || !directory.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_/.-".contains(&byte))
+            || prefix.first() != Some(&"env")
+        { return None; }
+        let mut removed = std::collections::BTreeSet::new();
+        for pair in prefix[1..].chunks(2) {
+            if pair.len() != 2 || pair[0] != "-u"
+                || !crate::factory_worker_check::ISOLATED_TEST_CREDENTIALS.contains(&pair[1])
+                || !removed.insert(pair[1])
+            { return None; }
+        }
+        if removed.len() != crate::factory_worker_check::ISOLATED_TEST_CREDENTIALS.len() { return None; }
+        (&command[split + 1..], Some(std::path::PathBuf::from(directory)))
+    } else { (command, None) };
+    let (args, suffix) = literal_worker_check_command(cargo)?;
+    if isolated.is_some() && args.first().map(String::as_str) != Some("nextest") { return None; }
+    Some((args, suffix, isolated))
+}
+
+fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
     let command = command.trim();
     if command.contains(['\n', '\r']) {
         return None;

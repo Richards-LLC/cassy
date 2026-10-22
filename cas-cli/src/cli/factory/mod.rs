@@ -746,6 +746,9 @@ pub enum FactoryCommands {
         /// Start the runner in its own session and return (backgrounded calls).
         #[arg(long)]
         detach: bool,
+        /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
+        #[arg(long)]
+        isolated_test_env: Option<std::path::PathBuf>,
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -1212,13 +1215,15 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: true,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::VerifierTest {
                 cas_root,
                 head,

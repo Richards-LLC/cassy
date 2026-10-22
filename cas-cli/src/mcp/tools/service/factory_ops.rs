@@ -7772,6 +7772,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             continue;
         }
         if heading.starts_with("Note:") {
+            summary.push('\n');
             summary.push_str(section);
             summary.push('\n');
             continue;

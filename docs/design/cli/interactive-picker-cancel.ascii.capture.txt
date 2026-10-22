@@ -1,0 +1,17 @@
+
+
+
+
+
+
+  Open project
+
+  > Alpha  stopped
+    Beta   stopped
+  up/down navigate | enter select | q cancel
+
+
+
+
+
+  x Open project: cancelled

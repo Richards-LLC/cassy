@@ -253,9 +253,9 @@ fn remove_config_document_key(
     key: &str,
 ) -> anyhow::Result<bool> {
     let (_, stored_path, alternate_path) = config_document_paths(document, key);
-    let stored_exists = config_document_item(document, stored_path).is_some();
+    let stored_exists = config_document_item(document.as_item(), stored_path).is_some();
     let alternate_exists = alternate_path
-        .is_some_and(|path| config_document_item(document, path).is_some());
+        .is_some_and(|path| config_document_item(document.as_item(), path).is_some());
     set_config_document_item(document, stored_path, None)?;
     if let Some(alternate_path) = alternate_path {
         set_config_document_item(document, alternate_path, None)?;
@@ -336,7 +336,7 @@ fn set_config_document_path(
 
 /// Remove the stored override without serializing defaults back into the file.
 /// Keep the same operator guard and atomic writer as other config mutations.
-pub(super) fn reset_config_value(
+pub(in crate::cli) fn reset_config_value(
     key: &str,
     cas_root: &Path,
 ) -> anyhow::Result<(String, String)> {
@@ -970,9 +970,9 @@ mod tests {
                 "registry key {key} did not resolve to TOML path {stored_path}"
             );
             assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
-            assert!(config_document_item(&document, stored_path).is_none(), "{key}");
+            assert!(config_document_item(document.as_item(), stored_path).is_none(), "{key}");
             if let Some(alternate_path) = alternate_path {
-                assert!(config_document_item(&document, alternate_path).is_none(), "{key}");
+                assert!(config_document_item(document.as_item(), alternate_path).is_none(), "{key}");
             }
         }
     }

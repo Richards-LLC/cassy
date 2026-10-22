@@ -1165,7 +1165,12 @@ where
             if is_tty {
                 print!("\r");
             }
-            write_step_success(&mut stdout, OutputMode::detect(), label, &result, None)?;
+            // Only a terminal wraps; a pipe keeps one completed line per phase.
+            let width = is_tty
+                .then(|| crossterm::terminal::size().ok())
+                .flatten()
+                .map(|(width, _)| usize::from(width));
+            write_step_success(&mut stdout, OutputMode::detect(), label, &result, width)?;
             info!(
                 phase = label,
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1196,20 +1201,57 @@ where
 }
 
 /// Write one completed phase row: mark, label padded to the detail column,
-/// then the detail.
+/// then the detail. With a terminal `width`, a detail that would overflow
+/// continues on rows aligned under the detail column. Rows break only between
+/// whitespace-separated items, so a path is never split or shortened. A pipe
+/// (`None`) keeps one line per phase.
 fn write_step_success(
     out: &mut impl Write,
     mode: OutputMode,
     label: &str,
     detail: &str,
-    _width: Option<usize>,
+    width: Option<usize>,
 ) -> anyhow::Result<()> {
-    write_colored(out, "  ✓ ", InitStyle::SuccessMark, mode)?;
+    use ratatui::text::Span;
+
+    let mark = "  ✓ ";
+    write_colored(out, mark, InitStyle::SuccessMark, mode)?;
     write_colored(out, label, InitStyle::Text, mode)?;
     // Pad to clear any remnants
     let padding = 40_usize.saturating_sub(label.len());
     write_colored(out, &" ".repeat(padding), InitStyle::Text, mode)?;
-    write_colored(out, detail, InitStyle::Text, mode)?;
+    let column = Span::raw(init_text_for_mode(mark, mode)).width()
+        + Span::raw(label).width()
+        + padding;
+    let cells = |text: &str| Span::raw(init_text_for_mode(text, mode)).width();
+    let budget = width
+        .map(|width| width.saturating_sub(column))
+        .filter(|budget| cells(detail) > *budget);
+    let rows = match budget {
+        None => vec![detail.to_string()],
+        Some(budget) => {
+            let mut rows = vec![String::new()];
+            for item in detail.split_whitespace() {
+                let row = rows.last_mut().expect("rows starts non-empty");
+                if row.is_empty() {
+                    row.push_str(item);
+                } else if cells(row) + 1 + cells(item) <= budget {
+                    row.push(' ');
+                    row.push_str(item);
+                } else {
+                    rows.push(item.to_string());
+                }
+            }
+            rows
+        }
+    };
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            writeln!(out)?;
+            write_colored(out, &" ".repeat(column), InitStyle::Text, mode)?;
+        }
+        write_colored(out, row, InitStyle::Text, mode)?;
+    }
     writeln!(out)?;
     Ok(())
 }

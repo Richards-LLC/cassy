@@ -51,7 +51,7 @@ baseline and candidate; this pre-existing defect remains **FAIL**, tracked as
 | Dimension | Changed phase scope | Full-command limitation |
 | --- | --- | --- |
 | Hierarchy | 4: each completed operation leads with its outcome and label | Overall init success remains after its phases. |
-| Fit | 4: pipe phases append once, without transient frames | Existing long tooling detail still overflows 80 columns. |
+| Fit | 4: pipe phases append once, without transient frames | On a terminal, a detail wider than the screen continues on rows under the detail column, breaking only between items; a pipe keeps one line. |
 | Craft | 4: aligned completion rows retain one consistent grammar | Existing Next steps box misalignment remains in cas-8bc8. |
 | Theme safety | 5 for plain pipe output, which has no color | Existing TTY light-theme contrast remains cas-f15f. |
 | Machine contract | 5 for phase controls and error exit behavior | Adjacent JSON MCP provisioning remains cas-7b8d. |

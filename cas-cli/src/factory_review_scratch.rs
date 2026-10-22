@@ -153,6 +153,55 @@ fn stale_owner_temp(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Worker worktrees inherit the main checkout's Cargo config in addition to
+/// their own copy. Review checkouts live outside that tree. Restore inherited
+/// flag arrays outside Git so Cargo keeps the same artifact identity, including
+/// its own target/cfg selection and environment override precedence.
+fn inherit_worker_rustflags(cas: &Path, directory: &Path) -> Result<()> {
+    let source = cas.parent().context("project root missing")?.join(".cargo/config.toml");
+    let mut inherited = toml::Table::new();
+    match fs::read_to_string(source) {
+        Ok(text) => {
+            let config: toml::Table = toml::from_str(&text)?;
+            for section in ["build", "target"] {
+                let Some(table) = config.get(section).and_then(toml::Value::as_table) else {
+                    continue;
+                };
+                let flags = |table: &toml::Table| -> toml::Table {
+                    ["rustflags", "rustdocflags"].into_iter().filter_map(|key| {
+                        table.get(key).map(|value| (key.to_owned(), value.clone()))
+                    }).collect()
+                };
+                let selected: toml::Table = if section == "build" {
+                    flags(table)
+                } else {
+                    table.iter().filter_map(|(target, value)| {
+                        let selected = flags(value.as_table()?);
+                        (!selected.is_empty()).then(|| (target.clone(), toml::Value::Table(selected)))
+                    }).collect()
+                };
+                if !selected.is_empty() {
+                    inherited.insert(section.to_owned(), toml::Value::Table(selected));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let config_dir = directory.join(".cargo");
+    let destination = config_dir.join("config.toml");
+    safe_path(&destination)?;
+    if inherited.is_empty() {
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+    } else {
+        private_dir(&config_dir)?;
+        fs::write(destination, toml::to_string(&inherited)?)?;
+    }
+    Ok(())
+}
+
 /// Create or reuse one detached, disposable checkout per task/dispatch/head.
 /// No legacy directory is adopted, and changed source is never reset.
 /// Callers retain this value while running tests; standalone creation releases
@@ -259,6 +308,7 @@ pub fn create(
             ],
         )?;
     }
+    inherit_worker_rustflags(&cas, &directory)?;
     // Successful reuse starts a new idle grace period; admission retries can
     // return to a checkout long after its original creation.
     let mut record = owner(&cas, &directory)?;

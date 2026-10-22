@@ -1522,6 +1522,22 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
 /// `supervisor_message_wakes::QUIET` is this constant.
 pub const QUIET_MESSAGE_MARKER: &str = "<cas-message-quiet/>";
 
+/// Split off a message's quiet marker: whether it was quiet, and its text
+/// without the marker (an optional `[CAS reply: …]` first line is kept).
+fn split_quiet_marker(text: &str) -> (bool, String) {
+    let strip = |rest: &str| rest.strip_prefix(QUIET_MESSAGE_MARKER).map(|rest| rest.strip_prefix('\n').unwrap_or(rest).to_string());
+    if let Some(rest) = strip(text) {
+        return (true, rest);
+    }
+    if text.starts_with("[CAS reply:")
+        && let Some((head, rest)) = text.split_once('\n')
+        && let Some(rest) = strip(rest)
+    {
+        return (true, format!("{head}\n{rest}"));
+    }
+    (false, text.to_string())
+}
+
 /// cas-d1e0: the most rows one received-message history scan reads. It
 /// holds the connection lock, so even a filter that rejects every row
 /// stops here; a hit is logged.
@@ -5689,42 +5705,68 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // fewer messages. Each superseded row's body travels in the newer
             // row, oldest first, so a question sent just before the worker's
             // next status still reaches the supervisor. A row whose body would
-            // push the combined message past the cap stays pending on its own.
-            const WORKER_ACTION_FOLD_CAP: usize = 8_000;
+            // push the combined message past the cap (in bytes) stays pending
+            // on its own.
+            //
+            // cas-6021 review: a pending row that is itself a fold keeps its
+            // labelled blocks as they are, and only its own text, after the
+            // fold's closing line, is labelled, so every label sits directly
+            // above its own body. A fold is quiet only when every message in
+            // it is; the marker is never left inside a body.
+            const WORKER_ACTION_FOLD_CAP_BYTES: usize = 8_000;
+            const FOLD_END: &str = "--- end of earlier undelivered messages ---";
+            // The text before the trailing action envelope; empty for an
+            // envelope-only message.
             let body_of = |text: &str| {
-                text.rsplit_once("\n\n<cas-worker-action")
-                    .map_or(text, |(body, _)| body)
+                text.rfind("<cas-worker-action")
+                    .map_or(text, |at| &text[..at])
                     .trim()
                     .to_string()
             };
-            let new_body = body_of(prompt);
-            let mut carried = Vec::new();
-            let mut carried_len = prompt.len();
+            let (new_quiet, new_prompt) = split_quiet_marker(prompt);
+            let new_body = body_of(&new_prompt);
+            let fold_end = format!("\n\n{FOLD_END}\n\n");
+            let mut blocks: Vec<String> = Vec::new();
+            let mut all_quiet = new_quiet;
+            let mut folded_len = new_prompt.len() + fold_end.len();
             let mut superseded = Vec::new();
             for (old_id, old_prompt, old_summary) in candidates {
+                let (old_quiet, old_prompt) = split_quiet_marker(&old_prompt);
                 let old_body = body_of(&old_prompt);
-                if old_body.is_empty() || old_body == new_body {
-                    superseded.push(old_id);
+                let (earlier, own) = match old_body.split_once(fold_end.as_str()) {
+                    Some((earlier, own)) => (Some(earlier.trim().to_string()), own.trim().to_string()),
+                    None => (None, old_body),
+                };
+                let mut pieces: Vec<String> = earlier.into_iter().collect();
+                if !own.is_empty() && own != new_body {
+                    let label = old_summary
+                        .filter(|summary| !summary.trim().is_empty())
+                        .map(|summary| format!(" ({})", summary.trim()))
+                        .unwrap_or_default();
+                    pieces.push(format!(
+                        "Earlier message #{old_id}{label}, not yet delivered when this one was sent:\n{own}"
+                    ));
+                }
+                let added: usize = pieces.iter().map(|piece| piece.len() + 2).sum();
+                if !pieces.is_empty() && folded_len + added > WORKER_ACTION_FOLD_CAP_BYTES {
                     continue;
                 }
-                let label = old_summary
-                    .filter(|summary| !summary.trim().is_empty())
-                    .map(|summary| format!(" ({})", summary.trim()))
-                    .unwrap_or_default();
-                let block = format!(
-                    "Earlier message #{old_id}{label}, not yet delivered when this one was sent:\n{old_body}"
-                );
-                if carried_len + block.len() + 7 > WORKER_ACTION_FOLD_CAP {
-                    continue;
+                if !pieces.is_empty() {
+                    all_quiet &= old_quiet;
                 }
-                carried_len += block.len() + 7;
-                carried.push(block);
+                folded_len += added;
+                blocks.extend(pieces);
                 superseded.push(old_id);
             }
-            let stored_prompt = if carried.is_empty() {
+            let stored_prompt = if blocks.is_empty() {
                 prompt.to_string()
             } else {
-                format!("{}\n\n---\n\n{prompt}", carried.join("\n\n---\n\n"))
+                let folded = format!("{}{fold_end}{new_prompt}", blocks.join("\n\n"));
+                if all_quiet {
+                    format!("{QUIET_MESSAGE_MARKER}\n{folded}")
+                } else {
+                    folded
+                }
             };
 
             let origin_kind = origin.kind_str();

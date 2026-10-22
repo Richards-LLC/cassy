@@ -1424,6 +1424,9 @@ mod tests {
             let second = resolve_repo_context(&cas_root, &renamed).unwrap();
             assert_eq!(second.repo_root, first.repo_root);
             assert_eq!(second.repo_selector, renamed.repo_selector);
+            let from_foreign = resolve_repo_context(&fixtures, &renamed)
+                .expect("a healthy known target must resolve despite an unrelated blocked root");
+            assert_eq!(from_foreign, second);
             let missing = WorkTarget {
                 repo_selector: "project:missing".to_string(),
                 ..renamed

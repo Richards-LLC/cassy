@@ -542,12 +542,13 @@ fn test_init_yes_flag() {
             String::from_utf8_lossy(&output.stderr)
         );
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("Saving configuration"), "{text}");
+        let config_phase = if existing_store { "Keeping existing configuration" } else { "Saving configuration" };
+        assert!(text.contains(config_phase), "{text}");
         assert!(text.contains("Updating .gitignore"), "{text}");
         if text
             .bytes()
             .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
-            || text.matches("Saving configuration").count() != 1
+            || text.matches(config_phase).count() != 1
             || text.matches("Updating .gitignore").count() != 1
         {
             redraws.push(format!(

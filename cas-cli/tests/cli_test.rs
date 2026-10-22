@@ -24,6 +24,8 @@ fn cas_cmd(root: &std::path::Path) -> Command {
 
 #[test]
 fn test_help() {
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    env.set("COLUMNS", "60");
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())
         .arg("--help")

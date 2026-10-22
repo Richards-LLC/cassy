@@ -351,6 +351,8 @@ mod tests {
 
     #[test]
     fn coordination_help_describes_flags_and_fits_eighty_columns() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("COLUMNS", "60");
         let mut command = Cli::command();
         command.build();
         let coordination = command.find_subcommand("coordination").unwrap();

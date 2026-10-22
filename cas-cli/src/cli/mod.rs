@@ -1117,6 +1117,9 @@ mod tests {
     #[test]
     fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
         let details = [
+            "Output in JSON format",
+            "Include full content in JSON output",
+            "Verbose output",
             "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
             "Render a PDF with Playwright after rendering the HTML",
             "Re-fetch sources and replace the Markdown source, including a manual source",

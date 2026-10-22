@@ -123,15 +123,17 @@ fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
 
     // No compiler runs: exercise the real wrapper with a builder boundary
     // that publishes the same manifest as the Python builder, plus Git chatter.
-    let build = || {
-        cas_cmd(root)
-            .current_dir(root)
+    let build = |json: bool| {
+        let mut command = cas_cmd(root);
+        command.current_dir(root)
             .env("CAS_AGENT_ROLE", "supervisor")
-            .args(["qa", "candidate", "build", "--task", "cas-0227", "--json"])
-            .output()
-            .unwrap()
+            .args(["qa", "candidate", "build", "--task", "cas-0227"]);
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
     };
-    let missing_builder = build();
+    let missing_builder = build(true);
     assert!(!missing_builder.status.success());
     let script = root.join("scripts/qa-candidate-build.py");
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
@@ -150,13 +152,18 @@ receipt = dict(revision=args.rev, version='cas 9.99.7', sha256='fixture-hash')
 print('HEAD is now at fixture')
 print(json.dumps(dict(receipt, candidate_dir=str(destination))))
 "#).unwrap();
-    let built = build();
+    let built = build(true);
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let receipt: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
     assert_eq!(receipt["revision"], plan["revision"]);
     assert_eq!(receipt["candidate_dir"], plan["candidate_dir"]);
     assert_eq!(receipt["receipt_file"], plan["receipt_file"]);
     assert!(!String::from_utf8_lossy(&built.stderr).contains("[ERROR]"));
+    let human = build(false);
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(String::from_utf8_lossy(&human.stdout).contains(&format!(
+        "Receipt: {}", candidate.join("RECEIPT.json").display()
+    )), "{human:?}");
 
     let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
     assert!(missing_error.contains("QA candidate builder missing"), "{missing_error}");

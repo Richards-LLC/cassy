@@ -440,7 +440,7 @@ fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs(
     write(
         repo,
         crate::qa_registry::DEFAULT_PATH,
-        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Audited, check: Read the run}\njourneys:\n  - id: AUDIT\n    status: live\n    entry: {url: /audit, trigger: Audit}\n    steps: [Submit]\n    owners: ['src/audit.ts']\n    invariants: [INV]\n    independence_key: post_audit_v2_runs.id\n",
+        "version: 1\nupdated: '2026-10-22'\ninvariants:\n  INV: {statement: Audited, check: Read the run}\njourneys:\n  - id: AUDIT\n    status: live\n    entry: {url: /audit, trigger: Audit}\n    steps: [Submit]\n    owners: ['src/audit.ts']\n    invariants: [INV]\n    traffic: {share_pct: 50, basis: audits}\n    independence_key: post_audit_v2_runs.id\n",
     );
     let head = commit(repo);
     let report = analyze(

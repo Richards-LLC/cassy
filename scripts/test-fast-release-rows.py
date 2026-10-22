@@ -189,6 +189,15 @@ class FastRows(unittest.TestCase):
         self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
         return result, proof
 
+    def test_design_docs_reject_absolute_home_paths(self):
+        self.write("docs/design/example.brief.md",
+                   "# Example\n\nEvidence: /home/alice/.cas/artifacts/cas-1234/report.json\n"
+                   "and /Users/bob/.cas/artifacts/cas-1234/report.json\n")
+        result = self.fast()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FAIL design-doc-paths", result.stdout)
+        self.assertIn("docs/design/example.brief.md:3", result.stdout)
+
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

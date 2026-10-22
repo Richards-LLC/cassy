@@ -3302,7 +3302,7 @@ PY"#);
         agents.init().unwrap();
         for (id, name, role) in [
             ("capacity-worker", "worker", AgentRole::Worker),
-            ("capacity-supervisor", "supervisor", AgentRole::Supervisor),
+            ("capacity-supervisor", "capacity-lead", AgentRole::Supervisor),
         ] {
             let mut agent = Agent::new_with_role(id.into(), name.into(), role);
             agent.factory_session = Some("capacity-fixture".into());
@@ -3368,7 +3368,7 @@ PY"#);
         let data = cas_factory::DirectorData::load_fast(&root).unwrap();
         let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
         let wake = FactoryDaemon::supervisor_wake_decision(
-            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt,
+            &data, "capacity-lead", "capacity-lead", &sender, &row.source, &row.prompt,
             PaneWakeState { composer_dirty: false, ready_for_injection: true,
                 silent_for: Some(std::time::Duration::from_secs(45)), tool_call: ToolCallEvidence::Idle },
             wait.since + chrono::Duration::minutes(30));
@@ -3382,38 +3382,78 @@ PY"#);
         // Explicit need uses the existing durable worker message immediately,
         // and consumes the same episode's later automatic escalation.
         let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
-        assert!(execute_at(&root, &args, &repo, &fake).is_err());
-        let mut explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
-        // The worker has not retried for six minutes. Admission no longer
-        // reserves a slot, but the live episode must consume its explicit page.
-        explicit.since -= chrono::Duration::minutes(6);
-        explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
-        let explicit_path = std::fs::read_dir(root.join("capacity-waits")).unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "json")).unwrap();
-        std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
-        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "gap exceeds admission freshness");
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("capacity-worker".into());
         let worker = CasService::new(core, None);
-        let need = "Need storage assistance to repair the scratch volume";
-        let delivered = worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
-            "action": "message", "target": "supervisor", "task_id": task.id,
-            "blocker": true, "summary": "Storage repair needed", "message": need,
-        })).unwrap())).await.unwrap();
-        assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
-        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
-            .iter().filter(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)).count(), 1,
-            "exactly one explicit assistance page is durably queued");
-        let after_need = notices.pending_count("capacity-supervisor").unwrap();
-        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
-        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+        let mut last_need = None;
+        for target in ["supervisor", "capacity-lead"] {
+            crate::factory_capacity_wait::admitted(&root, &repo).unwrap();
+            assert!(execute_at(&root, &args, &repo, &fake).is_err());
+            let mut explicit =
+                crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now())
+                    .unwrap()
+                    .unwrap();
+            // A stale admission reservation still belongs to the live episode.
+            explicit.since -= chrono::Duration::minutes(6);
+            explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
+            let explicit_path = std::fs::read_dir(root.join("capacity-waits"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .unwrap();
+            std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
+            assert!(
+                crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now())
+                    .unwrap()
+                    .is_none(),
+                "gap exceeds admission freshness"
+            );
+            let need = format!("Need storage assistance to repair the scratch volume ({target})");
+            let delivered = worker
+                .coordination(Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "message", "target": target, "task_id": task.id,
+                        "blocker": true, "summary": "Storage repair needed", "message": need,
+                    }))
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
+            assert_eq!(
+                crate::store::open_prompt_queue_store(&root)
+                    .unwrap()
+                    .peek_all(100)
+                    .unwrap()
+                    .iter()
+                    .filter(
+                        |prompt| prompt.target == "capacity-lead" && prompt.prompt.contains(&need)
+                    )
+                    .count(),
+                1,
+                "exactly one explicit assistance page is durably queued"
+            );
+            let after_need = notices.pending_count("capacity-supervisor").unwrap();
+            crate::factory_capacity_wait::reconcile(
+                &root,
+                Some("capacity-fixture"),
+                explicit.since + chrono::Duration::minutes(25),
+            )
+            .unwrap();
+            assert_eq!(
+                notices.pending_count("capacity-supervisor").unwrap(),
+                after_need,
+                "a blocker sent to {target} consumes the automatic notice"
+            );
+            last_need = Some((explicit.since, after_need));
+        }
+        let (explicit_since, after_need) = last_need.unwrap();
 
         // A replacement lease cannot inherit an earlier wait or its deadline.
         assert!(agents.release_lease_if_owner_epoch(&task.id, "capacity-worker", lease.epoch, "new ownership generation").unwrap());
         agents.try_claim(&task.id, "capacity-worker", 3600, Some("resumed")).unwrap();
         assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
-        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(30)).unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit_since + chrono::Duration::minutes(30)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
     }
 
@@ -3695,13 +3735,57 @@ PY"#);
 
     #[cfg(unix)]
     #[test]
+    fn capacity_binding_skips_missing_task_lease_cas_2083() {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Priority, TaskStatus};
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        register_capacity_worker(
+            &root,
+            "worker-id",
+            "worker",
+            "cas-live",
+            Priority::MEDIUM,
+            &repo,
+        );
+        let agents = open_agent_store(&root).unwrap();
+        agents
+            .try_claim("cas-missing", "worker-id", 3600, Some("orphaned lease"))
+            .unwrap();
+        let wait = crate::factory_capacity_wait::record_refusal(
+            &root,
+            &repo,
+            "fixture capacity refusal",
+            chrono::Utc::now(),
+        )
+        .expect("missing task leases are skipped")
+        .unwrap();
+        assert_eq!(wait.task_id, "cas-live");
+        assert!(
+            agents.get_lease("cas-missing").unwrap().is_some(),
+            "scanning does not mutate leases"
+        );
+        assert_eq!(
+            open_task_store(&root)
+                .unwrap()
+                .get("cas-live")
+                .unwrap()
+                .status,
+            TaskStatus::InProgress
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unresolved_capacity_wait_binding_does_not_abort_build() {
         use cas_types::Priority;
 
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
-            "CAS_FACTORY_BUILD_GUARD",
-            "off",
-        )]);
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = capacity_test_root(dir.path(), 1);
         let shared_repo = root.join("worktrees/shared");
@@ -3736,6 +3820,18 @@ PY"#);
         assert!(
             shared_repo.join("target/cargo-ran").exists(),
             "Cargo still runs when task ownership cannot be resolved"
+        );
+        std::fs::remove_file(shared_repo.join("target/cargo-ran")).unwrap();
+        std::fs::create_dir_all(root.join("capacity-waits")).unwrap();
+        std::fs::write(root.join("capacity-waits/broken.json"), b"{not json").unwrap();
+        let result = execute_at(&root, &args, &shared_repo, &fake);
+        assert!(
+            result.is_ok(),
+            "episode-clear failure must not abort an admitted build: {result:?}"
+        );
+        assert!(
+            shared_repo.join("target/cargo-ran").exists(),
+            "admitted Cargo still runs"
         );
     }
 

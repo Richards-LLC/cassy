@@ -76,7 +76,10 @@ issue severity remains `blocking` or `warning`.
 
 ## How to run
 
-Paste each close reason into a scratch `mcp__cas__task action=close` call on a
-throwaway task whose AC matches the stated AC, observe the verifier subagent's
-verdict, compare to expected. Or manually invoke the task-verifier agent with
-the close reason and task context and read its summary.
+Run a read-only prompt evaluation with the canonical verifier body and each
+case's task context, close reason and reviewer finding. Hide the Expected
+cells from the evaluated model. Capture its proposed `verification action=add`
+payload; compare `status`, summary verdict and issue severity with the table.
+This is a policy fixture, not an authenticated dispatch: do not record its
+synthetic verdict against a production task. No live PostgreSQL, credentials,
+or target deletion is needed to supply the stated reviewer evidence.

@@ -878,12 +878,12 @@ async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d6
     let dir = cas::qa_release::pack::pack_dir(&cas_root, &fx.staging).unwrap();
     let mut pack = cas::qa_release::pack::Pack::new("batch-project", &fx.staging, Vec::new());
     let pack_json = pack.seal(&dir).unwrap();
-    let mut request = serde_json::to_value(fx.request()).unwrap();
-    request["pack_path"] = pack_json.to_string_lossy().as_ref().into();
-    let recorded = fx.supervisor.verification(Parameters(serde_json::from_value(request).unwrap())).await;
-    let recorded = extract_text(recorded.unwrap());
-    assert!(recorded.contains("pack.json (OWED)"), "{recorded}");
     let sealed = std::fs::read(&pack_json).unwrap();
+    std::fs::write(&pack_json, b"{}").unwrap();
+    fx.reject(serde_json::json!({}), "release-gate pack for staging_sha").await;
+    std::fs::write(&pack_json, &sealed).unwrap();
+    let recorded = fx.record().await;
+    assert!(recorded.contains("pack.json (OWED)"), "{recorded}");
     std::fs::write(&pack_json, b"{}").unwrap();
     assert!(fx.close("cas-bq01").await.contains("no `qa-bundle:` note"));
     std::fs::write(&pack_json, sealed).unwrap();

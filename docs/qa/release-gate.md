@@ -187,10 +187,11 @@ whole pack (flag values included) and writes `pack.json` atomically. Reading
 a pack refuses missing or changed media, and a stored gate that its rows no
 longer derive.
 
-**Ledger.** The pack ledger is the batch QA ledger. `verification
-action=batch_receipt pack_path=<pack.json>` binds the sealed pack for
-`staging_sha` by its bytes and records its gate. A changed `pack.json` stops
-the receipt satisfying close, exactly as a changed `LEDGER.md` does.
+**Ledger.** The pack ledger is the batch QA ledger. When a sealed pack exists
+for `staging_sha`, `verification action=batch_receipt` binds it by its bytes
+and records its gate. If that pack exists but fails verification, the receipt
+is refused. A changed `pack.json` stops the receipt satisfying close, exactly
+as a changed `LEDGER.md` does.
 
 **Slack.** The Violet bundle posts `pack.json`, with the summary as its
 comment, and then each media file in that thread. Every file is rechecked

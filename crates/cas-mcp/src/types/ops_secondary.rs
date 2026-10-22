@@ -367,10 +367,6 @@ pub struct VerificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
     pub staging_sha: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "batch_receipt: optional sealed release-gate pack.json for staging_sha; the receipt binds its bytes")]
-    pub pack_path: Option<String>,
     /// Typed shadow-review operation, encoded as bounded JSON. These records
     /// never contribute verification verdicts to task or merge gates.
     #[schemars(

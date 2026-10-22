@@ -154,7 +154,6 @@ pub(crate) fn prepare_receipt(
     staging: &str,
     artifact_id: &str,
     ledger: &Path,
-    pack: Option<&Path>,
 ) -> Result<QaBatchReceipt, String> {
     if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("staging_sha must be a full 40-hex commit SHA".into());
@@ -164,7 +163,7 @@ pub(crate) fn prepare_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let (artifact, ledger) = validate_ledger(root, artifact_id, ledger)?;
-    let pack = pack.map(|path| bind_pack(root, path, staging)).transpose()?;
+    let pack = bind_pack(root, staging)?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     let mut heads = BTreeMap::new();
@@ -274,31 +273,31 @@ pub(crate) fn prepare_receipt(
     })
 }
 
-/// The release-gate pack ledger is this ledger (cas-e04d): a receipt binds the
-/// sealed `pack.json` for `staging` at its own location, after the pack's
-/// media and gate verify, by its exact bytes.
-pub(crate) fn bind_pack(root: &Path, path: &Path, staging: &str) -> Result<cas_store::QaBatchPack, String> {
+/// The release-gate pack ledger is this ledger (cas-e04d). When a sealed
+/// pack exists for `staging` at `<artifacts_root>/<project>/release/<sha>`,
+/// the receipt binds it by its exact bytes after its media and gate verify;
+/// a pack that exists but does not verify refuses the receipt.
+pub(crate) fn bind_pack(root: &Path, staging: &str) -> Result<Option<cas_store::QaBatchPack>, String> {
     use crate::qa_release::pack::{PACK_FILE, Pack, pack_dir};
     let dir = pack_dir(root, staging).map_err(|e| e.to_string())?;
-    let expected = dir.join(PACK_FILE);
-    let canonical = std::fs::canonicalize(&expected).map_err(|_| format!("no sealed pack at {}", expected.display()))?;
-    if std::fs::canonicalize(path).ok().as_ref() != Some(&canonical) {
-        return Err(format!("pack_path must be {}", expected.display()));
+    let path = dir.join(PACK_FILE);
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(None);
     }
-    let pack = Pack::load(&dir).map_err(|e| e.to_string())?;
+    let pack = Pack::load(&dir).map_err(|e| format!("release-gate pack for staging_sha: {e}"))?;
     if !pack.sha.eq_ignore_ascii_case(staging) {
-        return Err("pack sha differs from staging_sha".into());
+        return Err("release-gate pack sha differs from staging_sha".into());
     }
-    let (sha256, bytes) = pack_digest(&expected).ok_or("pack.json is unreadable")?;
-    Ok(cas_store::QaBatchPack {
-        path: expected.to_string_lossy().into_owned(),
+    let (sha256, bytes) = pack_digest(&path).ok_or("pack.json is unreadable")?;
+    Ok(Some(cas_store::QaBatchPack {
+        path: path.to_string_lossy().into_owned(),
         sha256,
         bytes,
         gate: serde_json::to_value(pack.gate.verdict)
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_default(),
-    })
+    }))
 }
 
 fn pack_digest(path: &Path) -> Option<(String, u64)> {

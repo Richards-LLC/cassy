@@ -444,6 +444,9 @@ fn plan(
             );
         }
     }
+    if let Some(bad) = rows.iter().find(|r| valid_row_id(&r.id).is_err()) {
+        bail!("{}", valid_row_id(&bad.id).unwrap_err());
+    }
     Ok(rows)
 }
 
@@ -622,6 +625,24 @@ fn record_target(cas_root: &Path, sha: Option<&str>) -> Result<String> {
     }
 }
 
+impl Record {
+    /// The verdict `--verdict` and `--reason` describe; validated before any
+    /// evidence is copied. A PASS is graded later, from its frames.
+    fn parse_verdict(&self) -> Result<RowVerdict> {
+        let reason = || self.reason.as_deref().map(printable).filter(|r| !r.trim().is_empty());
+        Ok(match self.verdict.to_ascii_uppercase().as_str() {
+            "PASS" => RowVerdict::Pass,
+            "FAIL" => RowVerdict::Fail { reason: reason().context("a FAIL needs --reason")? },
+            "NOT_A_ROUTE" => RowVerdict::NotARoute,
+            "NOT_EXERCISED" => not_exercised(
+                self.cause.unwrap_or(NotExercisedCause::OperatorSkip),
+                reason().context("NOT_EXERCISED needs --reason")?,
+            ),
+            other => bail!("--verdict {} is not PASS, FAIL, NOT_A_ROUTE or NOT_EXERCISED", printable(other)),
+        })
+    }
+}
+
 /// Records a manual row. On a live run it fills a planned manual row (or adds
 /// a row that covers a PR). On a sealed OWED run it replaces an owed row
 /// (BLOCKED_EXTERNAL, NOT_EXERCISED, SERVED_DRIFT…) and reseals as a new pack
@@ -630,6 +651,8 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
     let config = config(cas_root)?;
     let root = project_root(cas_root)?;
     let (registry, _) = registry(cas_root)?;
+    valid_row_id(&input.row)?;
+    let verdict = input.parse_verdict()?;
     let sha = record_target(cas_root, sha)?;
     let journey = {
         let run = load(cas_root, &sha)?.context("no release-gate run")?;
@@ -684,23 +707,18 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
         Ok(run.state == State::Sealed)
     };
     admit(&load(cas_root, &sha)?.context("no release-gate run")?)?;
-    let walked = walk_manual(cas_root, root, &config, &sha, &journey, input)?;
+    // Evidence is staged outside media/ and moved into media/<row>/ only
+    // under the run lock, after the write-step admit: a refused or racing
+    // record never touches a recorded row's files.
+    let dir = pack::pack_dir(cas_root, &sha).map_err(anyhow::Error::msg)?;
+    let staged = Staged::new(&dir, input.evidence.as_deref())?;
+    let walked = walk_manual(root, &config, &sha, &journey, input, verdict, &staged)?;
+    #[cfg(test)]
+    tests_hook::before_write();
     let mut reseal = false;
-    let frames = walked.frames.clone();
     let written = update(cas_root, &sha, |run| {
-        reseal = match admit(run) {
-            Ok(reseal) => reseal,
-            Err(error) => {
-                // Remove the evidence this refused record copied, unless a
-                // recorded row names the same file.
-                if let Ok(dir) = pack::pack_dir(cas_root, &sha) {
-                    for frame in frames.iter().filter(|f| !run.rows.iter().any(|r| r.frames.contains(f))) {
-                        let _ = fs::remove_file(dir.join(frame));
-                    }
-                }
-                return Err(error);
-            }
-        };
+        reseal = admit(run)?;
+        staged.commit(&dir, &input.row)?;
         run.put(walked);
         if reseal {
             run.note(format!("RECORD {} after seal; resealing", input.row));
@@ -715,22 +733,18 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
 }
 
 fn walk_manual(
-    cas_root: &Path,
     root: &Path,
     config: &ReleaseConfig,
     sha: &str,
     journey: &Journey,
     input: &Record,
+    verdict: RowVerdict,
+    staged: &Staged,
 ) -> Result<Row> {
-    let dir = pack::pack_dir(cas_root, sha).map_err(anyhow::Error::msg)?;
-    let frames = match &input.evidence {
-        Some(evidence) => copy_evidence(evidence, &dir, &input.row)?,
-        None => Vec::new(),
-    };
-    let reason = || input.reason.as_deref().map(printable).filter(|r| !r.trim().is_empty());
+    let frames = staged.frames(&input.row);
     let mut readbacks = Vec::new();
-    let verdict = match input.verdict.to_ascii_uppercase().as_str() {
-        "PASS" => {
+    let verdict = match verdict {
+        RowVerdict::Pass => {
             ensure!(!frames.is_empty(), "a PASS needs --evidence with at least one frame");
             let outcome = journey.readback.as_ref().map(|_| {
                 super::readback(root, config, &config.gate_env, sha, journey, &input.subjects)
@@ -739,13 +753,7 @@ fn walk_manual(
             readbacks.extend(readback_record(outcome.as_ref()));
             RowVerdict::grade(Ok(()), frames.len(), outcome)
         }
-        "FAIL" => RowVerdict::Fail { reason: reason().context("a FAIL needs --reason")? },
-        "NOT_A_ROUTE" => RowVerdict::NotARoute,
-        "NOT_EXERCISED" => not_exercised(
-            input.cause.unwrap_or(NotExercisedCause::OperatorSkip),
-            reason().context("NOT_EXERCISED needs --reason")?,
-        ),
-        other => bail!("--verdict {} is not PASS, FAIL, NOT_A_ROUTE or NOT_EXERCISED", printable(other)),
+        other => other,
     };
     let mut walked = row(&input.row, &journey.id, verdict);
     walked.frames = frames;
@@ -757,29 +765,123 @@ fn walk_manual(
     Ok(walked)
 }
 
-/// Copies regular files under `evidence` into `media/<row>/`; links are refused.
-fn copy_evidence(evidence: &Path, pack: &Path, row: &str) -> Result<Vec<String>> {
+/// A row id names one directory, `media/<row>/`: letters, digits, `_`, `.`
+/// or `-`, and never `.` or `..`.
+pub(crate) fn valid_row_id(row: &str) -> Result<()> {
     ensure!(
-        !row.is_empty() && row.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
-        "row id {} must be letters, digits, `_`, `.` or `-`",
+        !row.is_empty()
+            && row != "."
+            && row != ".."
+            && row.len() <= 200
+            && row.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)),
+        "row id {} must be letters, digits, `_`, `.` or `-`, and not `.` or `..`",
         printable(row)
     );
-    ensure!(fs::symlink_metadata(evidence).is_ok_and(|m| m.is_dir()), "--evidence must be a directory");
-    let mut frames = Vec::new();
-    for entry in walkdir::WalkDir::new(evidence).follow_links(false).sort_by_file_name() {
-        let entry = entry?;
-        let relative = entry.path().strip_prefix(evidence)?;
-        if entry.file_type().is_dir() {
-            continue;
+    Ok(())
+}
+
+/// Evidence copied into a private staging directory beside the pack's
+/// `media/`, moved into `media/<row>/` by [`Staged::commit`]. Dropping it
+/// removes whatever was not committed.
+struct Staged {
+    dir: Option<PathBuf>,
+    /// Plain relative paths of the staged regular files, sorted.
+    files: Vec<PathBuf>,
+}
+
+impl Staged {
+    fn new(pack: &Path, evidence: Option<&Path>) -> Result<Self> {
+        let Some(evidence) = evidence else {
+            return Ok(Self { dir: None, files: Vec::new() });
+        };
+        ensure!(fs::symlink_metadata(evidence).is_ok_and(|m| m.is_dir()), "--evidence must be a directory");
+        fs::create_dir_all(pack)?;
+        let dir = pack.join(format!(".staged-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir)?;
+        let mut staged = Self { dir: Some(dir.clone()), files: Vec::new() };
+        for entry in walkdir::WalkDir::new(evidence).follow_links(false).sort_by_file_name() {
+            let entry = entry?;
+            if entry.file_type().is_dir() {
+                continue;
+            }
+            ensure!(entry.file_type().is_file(), "{} is not a regular file", entry.path().display());
+            let relative = entry.path().strip_prefix(evidence)?.to_path_buf();
+            ensure!(
+                relative.to_str().is_some() && relative.components().all(|c| matches!(c, std::path::Component::Normal(_))),
+                "evidence path {} is not a plain UTF-8 relative path",
+                relative.display()
+            );
+            fs::create_dir_all(dir.join(&relative).parent().context("staged path")?)?;
+            fs::copy(entry.path(), dir.join(&relative))?;
+            staged.files.push(relative);
         }
-        ensure!(entry.file_type().is_file(), "{} is not a regular file", entry.path().display());
-        let target = Path::new(pack::MEDIA_DIR).join(row).join(relative);
-        let name = target.to_str().context("evidence path is not UTF-8")?.replace('\\', "/");
-        fs::create_dir_all(pack.join(&target).parent().context("media path")?)?;
-        fs::copy(entry.path(), pack.join(&target))?;
-        frames.push(name);
+        Ok(staged)
     }
-    Ok(frames)
+
+    /// The pack-relative frame names these files take under `media/<row>/`.
+    fn frames(&self, row: &str) -> Vec<String> {
+        self.files
+            .iter()
+            .filter_map(|f| f.to_str())
+            .map(|f| format!("{}/{row}/{}", pack::MEDIA_DIR, f.replace('\\', "/")))
+            .collect()
+    }
+
+    /// Moves every staged file into `media/<row>/`, refusing a target that a
+    /// link or non-directory would carry outside it.
+    fn commit(&self, pack: &Path, row: &str) -> Result<()> {
+        let Some(dir) = &self.dir else { return Ok(()) };
+        valid_row_id(row)?;
+        let media = pack.join(pack::MEDIA_DIR).join(row);
+        for relative in &self.files {
+            let target = media.join(relative);
+            let parent = target.parent().context("media path")?;
+            fs::create_dir_all(parent)?;
+            // Every directory from the pack down must be real, not a link.
+            let mut walk = pack.to_path_buf();
+            for component in parent.strip_prefix(pack)?.components() {
+                walk.push(component);
+                ensure!(
+                    fs::symlink_metadata(&walk).is_ok_and(|m| m.file_type().is_dir()),
+                    "{} is not a real directory under the pack",
+                    walk.display()
+                );
+            }
+            if fs::symlink_metadata(&target).is_ok_and(|m| !m.file_type().is_file()) {
+                bail!("{} is not a regular file", target.display());
+            }
+            fs::rename(dir.join(relative), &target)?;
+        }
+        for frame in self.frames(row) {
+            pack::media_path(pack, &frame).map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_hook {
+    use std::cell::RefCell;
+    thread_local! {
+        static BEFORE_WRITE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+    /// Runs `hook` once between `record`'s first admit and its write step.
+    pub(crate) fn set_before_write(hook: impl FnOnce() + 'static) {
+        BEFORE_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+    pub(super) fn before_write() {
+        if let Some(hook) = BEFORE_WRITE.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 fn readback_record(outcome: Option<&crate::qa_readback::Outcome>) -> Option<crate::qa_readback::Readback> {

@@ -1201,22 +1201,10 @@ fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<St
 /// Owns one task's Cloud start/release fence. It remains live through local
 /// lease publication or release settlement. Operations needing both locks take
 /// this fence before the global records lock; the latter never spans Cloud.
+/// Keep the file persistent: a pre-generation-check caller can already have
+/// opened it, and unlinking would let that caller lock a detached inode.
 pub(crate) struct TaskClaimFence {
     _file: std::fs::File,
-    path: std::path::PathBuf,
-    generation: Vec<u8>,
-}
-
-impl Drop for TaskClaimFence {
-    fn drop(&mut self) {
-        // All acquisition paths validate the generation AFTER flock. A waiter
-        // that already opened this inode must reopen after it is unlinked.
-        if std::fs::read(&self.path).ok().as_deref() == Some(self.generation.as_slice()) {
-            if let Err(error) = std::fs::remove_file(&self.path) {
-                tracing::debug!(path = %self.path.display(), %error, "could not retire task claim fence");
-            }
-        }
-    }
 }
 
 fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<TaskClaimFence> {
@@ -1247,7 +1235,7 @@ fn lock_task_claim_release_with(
         }
         match std::fs::read(&path) {
             Ok(current) if current == generation => {
-                return Ok(TaskClaimFence { _file: file, path, generation });
+                return Ok(TaskClaimFence { _file: file });
             }
             Ok(_) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
@@ -1712,7 +1700,31 @@ mod tests {
 
         #[cfg(unix)]
         #[test]
-        fn settled_claim_fences_are_removed_without_splitting_waiters_cas_923e() {
+        fn settled_claim_fences_preserve_legacy_waiter_exclusion_cas_d3b0() {
+            use fs2::FileExt;
+            use std::os::unix::fs::MetadataExt;
+            let dir = tempfile::tempdir().unwrap();
+            let owner = lock_task_claim_release(dir.path(), TASK).unwrap();
+            let path = dir.path().join("claim-release-locks")
+                .join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
+            // Pre-923e callers open before flock and never recheck the path
+            // or its generation. They can open a UUID-bearing file too.
+            let legacy = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            drop(owner);
+            let replacement = lock_task_claim_release(dir.path(), TASK).unwrap();
+            assert!(legacy.try_lock_exclusive().is_err(),
+                "a legacy waiter must not acquire a detached inode while a new caller holds the task fence");
+            drop(replacement);
+            legacy.lock_exclusive().unwrap();
+            let held = legacy.metadata().unwrap();
+            let current = std::fs::metadata(&path).unwrap();
+            assert_eq!((held.dev(), held.ino()), (current.dev(), current.ino()),
+                "old and new callers must retain the same per-task inode");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn claim_fences_reopen_after_an_unlinking_runtime_cas_923e() {
             use std::os::unix::fs::MetadataExt;
             let dir = tempfile::tempdir().unwrap();
             let owner = lock_task_claim_release(dir.path(), TASK).unwrap();
@@ -1733,6 +1745,9 @@ mod tests {
             });
             saw_open.recv_timeout(Duration::from_secs(10)).unwrap();
             drop(owner);
+            // A still-running 923e build can unlink its fence on settlement.
+            // Keep generation validation until those processes are reloaded.
+            std::fs::remove_file(&path).unwrap();
             let removed = !path.exists();
             // A new opener creates another inode while the waiter still has
             // the old inode open. That waiter must reopen before proceeding.
@@ -1741,12 +1756,12 @@ mod tests {
             resume.send(()).unwrap();
             let waiter = waiter.join().unwrap();
             let current = std::fs::metadata(&path).unwrap();
-            assert!(removed, "settlement must remove the task-specific lock file");
+            assert!(removed, "the older runtime removed the task-specific lock file");
             let held = waiter._file.metadata().unwrap();
             assert_eq!((held.dev(), held.ino()), (current.dev(), current.ino()),
                 "a waiter must lock the current path, not an unlinked inode");
             drop(waiter);
-            assert!(!path.exists(), "the final owner must remove its lock file too");
+            assert!(path.exists(), "new callers must keep the shared inode persistent");
         }
 
         #[tokio::test]

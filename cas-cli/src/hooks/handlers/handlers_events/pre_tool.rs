@@ -103,62 +103,105 @@ pub fn handle_pre_tool_use(
         &output.hook_specific_output,
         Some(crate::hooks::types::HookSpecificOutput::PreToolUse { permission_decision: Some(decision), .. }) if decision == "deny"
     );
-    if !denied
-        && let Some(note) = cas_root.and_then(|root| worker_file_lease_note(input, root))
-    {
-        output.append_pre_tool_context(&note);
+    if !denied && let Some(root) = cas_root {
+        let codex = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .is_ok_and(|harness| harness.eq_ignore_ascii_case("codex"));
+        for note in worker_file_lease_notes(input, root, codex) {
+            output.append_pre_tool_context(&note);
+        }
     }
     Ok(output)
 }
 
-/// cas-8dbe: a worker about to edit a repository file claims it through Cassy
-/// Cloud, and learns when another session's worker already holds it.
-fn worker_file_lease_note(input: &HookInput, cas_root: &Path) -> Option<String> {
-    if !crate::harness_policy::is_worker(input)
-        || !matches!(input.tool_name.as_deref(), Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit"))
-    {
-        return None;
+/// The files a worker's edit writes: Claude's Edit/Write/MultiEdit/NotebookEdit
+/// target, or every file a Codex `apply_patch` adds, updates, deletes or moves.
+fn worker_edit_targets(input: &HookInput) -> Vec<String> {
+    let Some(tool_input) = input.tool_input.as_ref() else {
+        return Vec::new();
+    };
+    match input.tool_name.as_deref() {
+        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("notebook_path"))
+            .and_then(|value| value.as_str())
+            .map(|file| vec![file.to_string()])
+            .unwrap_or_default(),
+        // Red: the pre-a30e9 behaviour, where apply_patch took no lease.
+        Some("apply_patch") => Vec::new(),
+        _ => Vec::new(),
     }
-    let tool_input = input.tool_input.as_ref()?;
-    let file = tool_input
-        .get("file_path")
-        .or_else(|| tool_input.get("notebook_path"))
-        .and_then(|value| value.as_str())?;
+}
+
+/// cas-8dbe: a worker about to edit repository files claims them through
+/// Cassy Cloud, and learns when another session's worker already holds one.
+/// Claude gets the returned notes as PreToolUse context. Codex rejects that
+/// context, so its worker is messaged instead, once per file per window
+/// (cas-a30e9), and no note is returned.
+fn worker_file_lease_notes(input: &HookInput, cas_root: &Path, codex: bool) -> Vec<String> {
+    if !crate::harness_policy::is_worker(input) {
+        return Vec::new();
+    }
+    let targets = worker_edit_targets(input);
+    if targets.is_empty() {
+        return Vec::new();
+    }
     let cwd = Path::new(&input.cwd);
-    let file = if Path::new(file).is_absolute() { std::path::PathBuf::from(file) } else { cwd.join(file) };
     let toplevel = std::process::Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
         .ok()
-        .filter(|output| output.status.success())?;
+        .filter(|output| output.status.success());
+    let Some(toplevel) = toplevel else {
+        return Vec::new();
+    };
     let repo = std::path::PathBuf::from(String::from_utf8_lossy(&toplevel.stdout).trim());
-    let relative = file.strip_prefix(&repo).ok()?.to_string_lossy().replace('\\', "/");
-    if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
-        return None;
-    }
     let agent_id = current_agent_id(input);
     let agent_name = std::env::var("CAS_AGENT_NAME")
         .ok()
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| agent_id.clone());
-    let task = crate::store::open_task_store(cas_root)
-        .ok()?
-        .list(Some(cas_types::TaskStatus::InProgress))
-        .ok()?
+    let Some(task) = crate::store::open_task_store(cas_root)
+        .ok()
+        .and_then(|store| store.list(Some(cas_types::TaskStatus::InProgress)).ok())
+        .unwrap_or_default()
         .into_iter()
         .find(|task| {
             task.assignee
                 .as_deref()
                 .is_some_and(|assignee| assignee == agent_id || assignee == agent_name)
-        })?;
-    match crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative) {
-        crate::cloud::file_leases::FileLease::HeldBy(holder) => {
-            Some(crate::cloud::file_leases::collision_note(&relative, &holder))
+        })
+    else {
+        return Vec::new();
+    };
+    let session = std::env::var("CAS_FACTORY_SESSION").ok().filter(|s| !s.trim().is_empty());
+    let mut notes = Vec::new();
+    for target in targets {
+        let file = if Path::new(&target).is_absolute() {
+            std::path::PathBuf::from(&target)
+        } else {
+            cwd.join(&target)
+        };
+        let Ok(relative) = file.strip_prefix(&repo) else { continue };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if relative.is_empty() || relative.starts_with(".cas/") || relative.starts_with("target/") {
+            continue;
         }
-        _ => None,
+        let crate::cloud::file_leases::FileLease::HeldBy(holder) =
+            crate::cloud::file_leases::claim(cas_root, &agent_id, &agent_name, &task.id, &relative)
+        else {
+            continue;
+        };
+        if codex {
+            crate::cloud::file_leases::notify_worker_of_holder(
+                cas_root, &agent_id, &agent_name, session.as_deref(), &relative, &holder,
+            );
+        } else {
+            notes.push(crate::cloud::file_leases::collision_note(&relative, &holder));
+        }
     }
+    notes
 }
 
 /// cas-d95c: the verifier's supported capped command for a task's named tests.
@@ -6454,6 +6497,20 @@ mod workspace_contract_tests {
         let output =
             handle_pre_tool_use_inner(&verifier("git log --oneline -3"), Some(root.path()), None).unwrap();
         assert!(!serde_json::to_string(&output).unwrap().contains("VERIFIER RUST BUILD"));
+    }
+
+    /// cas-a30e9: Codex edits through apply_patch, so its leases cover every
+    /// file the patch adds, updates, deletes or moves.
+    #[test]
+    fn codex_apply_patch_edits_claim_every_written_file_cas_a30e9() {
+        let input = tool_input(
+            "apply_patch",
+            serde_json::json!({"command": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Add File: src/b.rs\n+new\n*** End Patch\n"}),
+            Path::new("/repo"),
+        );
+        assert_eq!(worker_edit_targets(&input), ["src/a.rs", "src/b.rs"]);
+        let edit = tool_input("Edit", serde_json::json!({"file_path": "/repo/src/c.rs"}), Path::new("/repo"));
+        assert_eq!(worker_edit_targets(&edit), ["/repo/src/c.rs"]);
     }
 
     fn tool_input(tool: &str, payload: serde_json::Value, cwd: &Path) -> HookInput {

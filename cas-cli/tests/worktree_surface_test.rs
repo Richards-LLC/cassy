@@ -2241,7 +2241,17 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
     let mut env = test_env();
     let fixture_cwd = std::env::current_dir().unwrap();
-    for exact_sha in [false, true] {
+    // cas-4fe8: task identity, not the spelling of its delivery ref, owns the merge.
+    let long_task_id = "cas-c28b6df4a2b653af";
+    for (branch, exact_sha) in [
+        ("factory/peer-worker", false),
+        ("factory/peer-worker", true),
+        ("factory/peer-worker-cas-c28b6df4a2b653af", false),
+        ("factory/peer-worker-cas-c28b", false),
+        ("factory/peer-worker-cas-c28b-r2", false),
+        ("factory/peer-worker-cas-c28b-fix", false),
+        ("factory/peer-worker-cas-c28b-resume", false),
+    ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
         run_git(
@@ -2283,20 +2293,20 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             ],
             &peer,
         );
-        run_git(&["switch", "-c", "factory/peer-worker"], &peer);
+        run_git(&["switch", "-c", branch], &peer);
         std::fs::write(peer.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
         run_git(&["add", "delivery.rs"], &peer);
         run_git(&["commit", "-m", "peer delivery"], &peer);
         let anchor = git_stdout(&peer, &["rev-parse", "HEAD"]);
-        run_git(&["push", "origin", "factory/peer-worker"], &peer);
+        run_git(&["push", "origin", branch], &peer);
         // Neither a local source ref nor a worker checkout exists on the receiver.
         assert!(!cas_root.join("worktrees/peer-worker").exists());
         let tasks = open_task_store(&cas_root).unwrap();
-        let mut task = Task::new("cas-peer-delivery".into(), "Peer delivery".into());
+        let mut task = Task::new(long_task_id.into(), "Peer delivery".into());
         task.assignee = Some("peer-worker".into());
         task.status = TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        task.deliverables.parked_branch = Some("factory/peer-worker".into());
+        task.deliverables.parked_branch = Some(branch.into());
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:peer-delivery".into(),
             target_branch: "epic/peer".into(),
@@ -2316,7 +2326,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.id = Some(if exact_sha {
             anchor.clone()
         } else {
-            "factory/peer-worker".into()
+            branch.into()
         });
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
@@ -2353,7 +2363,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 &cas_store::NewQaPass {
                     task_id: &task.id,
                     implementer_agent_id: "peer-implementer",
-                    branch: "factory/peer-worker",
+                    branch,
                     bound_head: &anchor,
                     deadline_at: now + chrono::Duration::minutes(30),
                     max_rounds: 3,
@@ -2375,7 +2385,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
                 &task.id,
                 &supervisor.id,
                 "peer-implementer",
-                "factory/peer-worker",
+                branch,
                 &anchor,
                 "fixture: isolate merge routing after proving the pending-QA refusal",
                 now,
@@ -2391,7 +2401,12 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             .coordination(Parameters(request.clone()))
             .await
             .expect_err("normal CI must refuse remote-only code");
-        assert!(refused.message.contains("CI RED"), "{}", refused.message);
+        assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
+        let mut worker_request = request.clone();
+        worker_request.id = Some("peer-worker".into());
+        let refused = svc.coordination(Parameters(worker_request)).await
+            .expect_err("worker alias must reach the same delivery's CI gate");
+        assert!(refused.message.contains("CI RED"), "{branch}: {}", refused.message);
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
         env.set(
             cas::github_issue_attach::GH_BIN_ENV,

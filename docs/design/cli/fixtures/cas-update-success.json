@@ -14,10 +14,10 @@
   "stdout": "cas update: hub was running → verified at https://soundwave.tailf5a734.ts.net\n"
  },
  "refresh_ms": 4000,
- "user_level": "ok: migrated /home/pippenz/.cas; built-ins current",
+ "user_level": "ok: migrated <home>/.cas; built-ins current",
  "projects": [
   {
-   "project": "/home/pippenz/Petrastella/cassy",
+   "project": "<home>/Petrastella/cassy",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -28,7 +28,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petrastella/pantheon",
+   "project": "<home>/Petrastella/pantheon",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -39,7 +39,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petrastella/prospect_path",
+   "project": "<home>/Petrastella/prospect_path",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -50,7 +50,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petrastella/gabber-studio",
+   "project": "<home>/Petrastella/gabber-studio",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -61,7 +61,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petrastella/pulse-card",
+   "project": "<home>/Petrastella/pulse-card",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -72,7 +72,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petrastella/rocketship-template",
+   "project": "<home>/Petrastella/rocketship-template",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -83,7 +83,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Richards LLC/Accounting",
+   "project": "<home>/Richards LLC/Accounting",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -94,7 +94,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Petra Stella/Accounting",
+   "project": "<home>/Petra Stella/Accounting",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -105,7 +105,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Documents/Accounting",
+   "project": "<home>/Documents/Accounting",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -116,7 +116,7 @@
    }
   },
   {
-   "project": "/home/pippenz/Penguinz",
+   "project": "<home>/Penguinz",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -127,7 +127,7 @@
    }
   },
   {
-   "project": "/home/pippenz/ai-toolkit",
+   "project": "<home>/ai-toolkit",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",
@@ -138,7 +138,7 @@
    }
   },
   {
-   "project": "/home/pippenz/soundwave-config",
+   "project": "<home>/soundwave-config",
    "migration": "ok: migration",
    "search_index": "ok: no stray root",
    "skills": "ok: skills; managed files current",

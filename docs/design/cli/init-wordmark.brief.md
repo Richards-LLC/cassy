@@ -120,14 +120,14 @@ All tested C/plain/unset rawANSI is ASCII. Six styledUTF8 before/after captures
 are byte-identical outside the permitted box; no other normalization is used.
 The4published init captures use `<project>` rather than a machine scratch path.
 
-- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-utf8-scoped/report.json
-- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-c-scoped/report.json
-- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-unset-scoped/report.json
-- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 457 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/fresh-utf8-scoped/report.json
-- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-utf8-scoped/report.json
-- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-c-scoped/report.json
-- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-unset-scoped/report.json
-- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/root-help-unset/report.json
+- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-utf8-scoped/report.json
+- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-c-scoped/report.json
+- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/yes-unset-scoped/report.json
+- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 457 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/fresh-utf8-scoped/report.json
+- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-utf8-scoped/report.json
+- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-c-scoped/report.json
+- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/interactive-unset-scoped/report.json
+- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-8bc8/terminal-qa/root-help-unset/report.json
 
 These passes retain only the4exact inherited exception sets and tasks already
 approved4206333/4206384, reaffirmed4206624. All190entries remain byte-identical.
@@ -148,6 +148,8 @@ explicit inherited exceptions. Inspected80column dark/light PNGs and plain text
 for all3locales and both interactive entries. Task ledger lists every exception,
 binary identity, retained failures, readbacks and final reports. Targeted Rust
 proof is bound to the final documentation tip separately.
+
+Published evidence: `art-9712ab8d` (`cas-8bc8`).
 
 ## Palette contract (cas-f15f)
 
@@ -185,14 +187,14 @@ provides logo/header hierarchy. Only short UTF8 marks use mid-tones, measured
 minimum3.71:1 success,3.30:1 warning,3.59:1 error; ASCII status words stay in
 default foreground. The quick-start palette override belongs only to init.
 
-- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/fresh-utf8-scoped/report.json
-- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-c-scoped/report.json
-- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-unset-scoped/report.json
-- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-utf8-scoped/report.json
-- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/root-help-unset/report.json
-- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-c-scoped/report.json
-- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-unset-scoped/report.json
-- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-utf8-scoped/report.json
+- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/fresh-utf8-scoped/report.json
+- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/interactive-c-scoped/report.json
+- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/interactive-unset-scoped/report.json
+- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/interactive-utf8-scoped/report.json
+- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/root-help-unset/report.json
+- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/yes-c-scoped/report.json
+- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/yes-unset-scoped/report.json
+- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · &lt;artifacts&gt;/cas-f15f/terminal-qa/yes-utf8-scoped/report.json
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -211,3 +213,5 @@ No CLI gate was replayed for screenshot correction. [Actual welcome/choice
 capture](init-welcome.palette.capture.txt) uses a portable project placeholder.
 Task artifact LEDGER.md and qa/pairs hold the complete real-build evidence;
 final-tip Rust receipts are recorded separately.
+
+Published palette evidence: `art-01be6bdf` (`cas-f15f`).

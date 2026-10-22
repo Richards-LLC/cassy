@@ -11,7 +11,7 @@ New release found! v3.62.0 --> v9.9.9
 New release is *NOT* compatible
 
 cas release status:
-  * Current exe: "/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-06b0/build/cas"
+  * Current exe: "<artifacts>/cas-06b0/build/cas"
   * New exe release: "cas-x86_64-unknown-linux-gnu.tar.gz"
   * New exe download url: "http://127.0.0.1:36913/asset"
 

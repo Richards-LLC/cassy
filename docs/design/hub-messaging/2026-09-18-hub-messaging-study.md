@@ -17,6 +17,7 @@ The hub's conversation view (`hub-web/src/conversation-view.ts`) already draws t
 | `35cbdf1a` (2026-09-10) | 619 | 133 | 1,466 | 1,466 | 478 | 4,162 | 14.9 % |
 | Pooled | 769 | 169 | 1,826 | 1,826 | 565 | 5,155 | 14.9 % |
 | Pooled, by characters | 125,171 | 56,753 | 926,181 | 3,282,323 | 777,676 | 5,168,104 | 2.4 % |
+
 Table: Pane composition by author. Blocks are content blocks in the Claude Code transcript; 763 hidden thinking blocks are excluded. Source: `measure-pane.py` over the three transcripts, run 2026-09-18 16:05.
 
 Two caveats keep the number honest. The harness truncates tool output on screen, so the character share (2.4 %) overstates the noise; the block share (14.9 %) is the fair proxy for rows the pane prints. And "prose" includes the narration a supervisor emits between tool calls ("checking the worker status"), so 14.9 % is an upper bound on text actually addressed to the operator. Either way the operator's phone receives six or more parts of traffic for every part of message.
@@ -61,6 +62,7 @@ The captures above are the checked-in fixture states, not a mock: the `from-you`
 | 27 | Arc browser | unconventional | Arc's tinted space sidebar — pinned items, a folder, `+ New Tab`, the active tab highlighted, space dots below — beside the page (cropped to remove the site's promotional strip). | The sidebar is the whole navigation: spaces, folders, pinned and active in one column. | No state or counts in the sidebar; folders and tabs look alike. | The active conversation as the highlighted tab of a tinted workspace column. |
 | 28 | Zulip #design (live web-public) | team | A live channel chunked by green topic bars ("design › #9312 typeahead…") with messages beneath, a `SHOW MORE` collapser, a TODAY pill, a composer naming the topic. | Every message sits under a topic so one channel reads as many small threads; the composer names where the reply lands. | Repeated headers interrupt flow; a long truncated topic list. | Topic-bar chunking per task thread; a composer that names its target. |
 | 29 | Basecamp message board | team | A post with a byline ("Matthew Rogerson · FYI · Notified 24 people"), body with a highlight and a mention chip, a Comments tab beside a "1 reference to this message" tab, and comments with roles after names. | The byline encodes type and audience; roles next to names; comments counted and separated. | Static marketing image; no state or resolution on the post. | A type-and-audience byline (`Receipt · notified you`) and role tags after names. |
+
 Table: References — 28 real captures under `refs/` (`NN-slug.png`), one line each on what it does well, what it does badly, and the pattern worth stealing for a status-heavy agent↔human conversation. Live captures are noted; the rest are vendors' own product or documentation images.
 
 ### Patterns worth stealing
@@ -90,6 +92,7 @@ The hub conversation is asymmetric: one human sends short directives and questio
 | **Blocker** | something is held and needs the operator | `danger-tint` panel, 2 px `danger` rule, `■ BLOCKER` label — never colour alone | same | `danger` + glyph | pinned beside the ask; cleared by a receipt |
 | **Evidence** | a table or long output the operator asked for | caption + verdict line + ruled table that scrolls inside its own box with a sticky first column; `open full width ▸` | scroll box, then a full-width sheet with stacked rows | hairlines only | appended; collapsible |
 | *Working* (not a message) | always, while the session is live | hollow ring + mono sentence from the session phase and last output time, `Pane ▸` at the end | same, wraps to two lines | `ink-muted`; no spinner, nothing loops | refreshed in place; goes quiet when a turn lands |
+
 Table: The six message kinds and the working line, with a distinct treatment each. Tokens are hub-web/src/tokens.css names; `surface-hero` is the one house token the hub does not map yet.
 
 The four questions the brief set:
@@ -113,6 +116,7 @@ The components above are shared by all three options — the same ask panel, rec
 | Blocker | danger panel on the timeline, pinned beside the ask | a queue item, and attached under *Why* on the ask | the Held callout under Now |
 | Evidence | inline table with a sticky first column; a sheet on the phone | an attachment on the item; a sheet on the phone | inside the outcome's details |
 | *Working* | the line above the composer | the session rail on desktop; the item footer on the phone | the first line under Now |
+
 Table: Kind × option. Every option shows every kind; the treatment is shared, the placement is not.
 
 ## Three ways to draw the conversation
@@ -144,6 +148,7 @@ One page per session — Now, Decisions needed, Outcomes, Answers, Status — wh
 | **A · Ledger** | *what did the supervisor say to me, in order?* | complete, in place, elapsed times printed | a familiar thread; ledgers stack | one field: `kind` | low — it degrades to today's thread |
 | B · Desk | *what needs me right now?* | in Done, per item | a list, then one item | `kind` + a durable ask lifecycle + cross-machine aggregation | medium — an item model that drifts from the pane misleads |
 | C · Brief | *what is true right now?* | in a drawer, struck through | one reading page | `kind` + replace semantics held server-side | high — a latest-state page hides how a decision was reached |
+
 Table: The three options against the questions an operator opens the hub with. The recommended row is banded in the HTML.
 
 The Ledger is recommended. It is the surface the operator described in one sentence — *my messages and the supervisor messages to me* — it keeps every answer beside its question and prints how long the answer took, it reads as an ordinary thread on a phone, and it needs one new field on an envelope the hub already carries. Desk's two strengths — a pinned ask and a cross-machine *needs you* count — are folded into the Ledger's list row and context rail; Brief's *Now* line is the Ledger's working line. Desk stays the candidate if real use turns out to be decision-only check-ins; Brief stays the candidate if sessions come to run for days and the thread grows past a screenful of receipts.
@@ -178,13 +183,14 @@ The guard at `message.rs:894–906`: `target="operator"` is accepted only from a
 | hub-web | `ConversationHistory.reply()` stores `kind`; the branch at `conversation-view.ts:82` becomes a six-way class switch (`from-supervisor kind-<kind>`); statuses coalesce client-side | `hub-web/src/conversation-history.ts:38`, `conversation-view.ts:82` |
 | Attention | add `waiting_on_operator` (warning, action `reply`) to the template table so the list row and rail read from the same item; cleared when a `send` answers the ask | `hub-web/src/attention.ts:63`, `main.ts:522` |
 | Working line | no protocol change: `SessionCardSummary { phase, blocked_on }` plus the last `Output` frame time | `protocol.rs:358`, `hub-web/src/types.ts:79` |
+
 Table: Proposal ledger — the smallest set of changes that lets the hub know which turns are for the operator. Nothing here is implemented.
 
 ### Telling the supervisor to use it
 
 The supervisor skill already says how to answer a verified operator message (`cas-cli/src/builtins/skills/cas-supervisor.md:33`; `references/reference.md:23–33`). The rule grows by one sentence, mirrored verbatim in the Codex and Grok trees (`cas-cli/src/builtins/codex/skills/cas-supervisor.md:33`, `cas-cli/src/builtins/grok/skills/cas-supervisor.md:33`, and each flavour's `references/reference.md`), and pinned by the same substring tests that pin the rest of the skill:
 
-```
+```text
 Anything you would tell the operator goes through the hub as a typed turn, never
 as pane prose: mcp__cas__coordination action=message target=operator kind=<answer|
 status|receipt|ask|blocker|evidence> summary="…" message="…" (in_reply_to=N for an
@@ -204,6 +210,7 @@ Scored with `cas-ui-craft/references/critique-rubric.md` (1–5; 0 is a mechanic
 | B · Desk | 4 — a ruled queue with the selected item in sandstone; Done as a ledger | 3 — answers *what needs me*, not *what did you say to me*; the conversation is a click away | 5 — one selected item; everything else a step down | 4 — strict visual-qa PASS on both states in light and dark; the phone header stacks into two rows | 4 — same pairs; the queue rows are 44 px targets |
 | C · Brief | 5 — a page with dated margin notes is unlike any chat | 3 — state, not conversation; how a decision was reached lives in a drawer | 4 — Now, then Decisions; the outcome ledger competes with the ask | 4 — strict visual-qa PASS on both states in light and dark; margin notes fold inline at 390; the history drawer becomes a sheet | 4 — replaced statements are labelled *replaced*, not only struck through |
 | **This report** | 4 — serif verdict on sandstone over a waffle whose fifteen indigo squares are the argument; the seam drawn as a timeline; options as paired plates in the hub-mobile format | 4 — the waffle is the claim (a thin band of message in a field of traffic); the choice among options is carried by the comparison ledger, not the hero | 4 — verdict, why, figure, rule, then everything a step down; the document title sits above the eyebrow as a muted line | 4 — `node scripts/visual-qa.mjs --strict` PASS: light and dark at 1280 and 390, 0 findings, 0 allowlisted; 844×390 without overflow; print reflows the hero to one column; plates need enlarging at 390 | 4 — JS-off text identical (51,103 characters), one `h1`, `details` open in markup, 0 external requests, the viewer dialog is keyboard-reachable; physical phones untested; 2.3 MB is slow on a weak link |
+
 Table: Rubric scores per option and for this report. Floor for a public surface: distinctiveness, fit and hierarchy each ≥ 4, no 0. The Ledger and the report hold the floor; Desk and Brief fail *fit* by design — they answer a different first question — and are kept as live alternatives, not rejected work.
 
 ## Provenance
@@ -212,9 +219,9 @@ Table: Rubric scores per option and for this report. Floor for a public surface:
 - Pane measurement: `python3 docs/design/hub-messaging/measure-pane.py <three transcripts>` over the Claude Code transcripts of supervisor sessions `151fbf3a`, `2ebdfca9`, `35cbdf1a` in the operator's config directory; only counts left the machine, no content.
 - Today captures: `node docs/design/hub-messaging/capture-today.mjs` builds `hub-web/fixtures` with Vite and renders `conversation-replied`, `conversation` and `transcript` at 1280×800 and 390×844, light and dark (12 PNG under `refs/today-*.png`).
 - Reference captures: `node docs/design/hub-messaging/capture-refs.mjs refs/manifest-a.json` and `refs/manifest-b.json`; receipts with URL, mode, viewport and time in `refs/manifest-*.receipts.json`. Every frame is a real render or a vendor's own product image, saved as PNG; nothing is hotlinked. Captures were taken at device scale 2 and downscaled to at most 1,600 px wide and quantized to 256 colours before commit (`shrink-images.py`) to keep the repository small; the receipts record the original capture sizes.
-- Option renders: `docs/design/hub-messaging/mockups/{ledger,desk,brief}.html` on `hub-web/src/tokens.css` plus `mockups/shared.css`, rendered by `mockups/render.mjs` at 1280×800 and 390×844, light and dark, two screens each (24 PNG under `mockups/png/`). Screen states are CSS-only (`#state-…` targets), so the mocks need no JavaScript. Each of the six states passed `node scripts/visual-qa.mjs --strict` in light and dark at 1280 and 390 (receipt `mockups/visual-qa.md`; screenshots under `/home/pippenz/.cas/artifacts/cas-c3c5/visual-qa-mockups/`).
+- Option renders: `docs/design/hub-messaging/mockups/{ledger,desk,brief}.html` on `hub-web/src/tokens.css` plus `mockups/shared.css`, rendered by `mockups/render.mjs` at 1280×800 and 390×844, light and dark, two screens each (24 PNG under `mockups/png/`). Screen states are CSS-only (`#state-…` targets), so the mocks need no JavaScript. Each of the six states passed `node scripts/visual-qa.mjs --strict` in light and dark at 1280 and 390 (receipt `mockups/visual-qa.md`; screenshots under `<artifacts>/cas-c3c5/visual-qa-mockups/`).
 - Seam cites: every `path:line` in this report was read in the worktree on 2026-09-18; the eleven load-bearing lines are listed in the seam timeline.
 - Report build: `python3 docs/design/hub-messaging/build.py` converts this markdown and embeds the images as WebP data URIs; the HTML makes no network request.
-- Visual QA: `node scripts/visual-qa.mjs docs/design/hub-messaging/2026-09-18-hub-messaging-study.html --strict --artifact-dir /home/pippenz/.cas/artifacts/cas-c3c5/visual-qa` — PASS, 0 findings, 0 allowlisted; the receipt is `visual-qa.md` beside this file, screenshots and JSON under the artifacts root. Extra checks by `qa-extra.mjs`: JS disabled (same text, `details` open), 0 external requests, print media and A4 PDF, 844×390 landscape without horizontal overflow; four review renders by `render-report.mjs`.
+- Visual QA: `node scripts/visual-qa.mjs docs/design/hub-messaging/2026-09-18-hub-messaging-study.html --strict --artifact-dir <artifacts>/cas-c3c5/visual-qa` — PASS, 0 findings, 0 allowlisted; the receipt is `visual-qa.md` beside this file, screenshots and JSON under the artifacts root. Extra checks by `qa-extra.mjs`: JS disabled (same text, `details` open), 0 external requests, print media and A4 PDF, 844×390 landscape without horizontal overflow; four review renders by `render-report.mjs`.
 
 <!-- figure: main-end -->

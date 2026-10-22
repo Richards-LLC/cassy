@@ -40,7 +40,7 @@ fixture or snapshot evidence is not a substitute for that flow.
 
 Implementation receipt:
 
-`terminal-qa: PASS cas-31fa-version-final · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-31fa/terminal-qa-version-final/report.json`
+`terminal-qa: PASS cas-31fa-version-final · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-31fa/terminal-qa-version-final/report.json`
 
 The real built binary (`target/debug/cas`, revision
 `e9ae7c89b7ca0f347b7ff4b9da94ad1ff0c1618f`) was exercised at 80 and 120
@@ -49,7 +49,7 @@ factory TUI was also booted in a disposable 120x40 PTY. A hosted prompt could
 not be reached safely: the Linux headful target contains zero tests, strict
 Codex launch rejects the isolated account without `auth.json`, and the isolated
 Claude run timed out during boot before a hosted pane appeared. The durable
-capability record is `/home/pippenz/.cas/artifacts/cas-31fa/capability-work/capability-discovery.md`.
+capability record is `<artifacts>/cas-31fa/capability-work/capability-discovery.md`.
 The render tests remain fixture evidence and do not claim a live Codex
 observation. An exploratory `cas --help` capture was rejected by terminal QA
 for pre-existing help-surface overflow/locale output and is not used as

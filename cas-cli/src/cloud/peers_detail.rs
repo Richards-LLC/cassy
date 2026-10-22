@@ -644,12 +644,7 @@ fn in_flight_overlaps(
 }
 
 pub fn ascii_terminal() -> bool {
-    let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
-        .into_iter()
-        .find_map(|key| std::env::var(key).ok().filter(|s| !s.is_empty()))
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    !(locale.contains("utf-8") || locale.contains("utf8"))
+    !crate::ui::components::locale_is_utf8()
 }
 
 /// Plain text, with no terminal control sequences from untrusted metadata.

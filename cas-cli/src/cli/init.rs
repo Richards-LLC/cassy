@@ -1544,18 +1544,36 @@ mod integration_flag_tests {
     fn init_design_capture_uses_a_portable_project_path() {
         // The published transcript is a data artifact: its project path must
         // stay portable rather than naming the machine that captured it.
-        let capture = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../docs/design/cli/init-full-yes.ascii.capture.txt"
-        ));
-        let path = capture
-            .lines()
-            .find_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
-            .unwrap();
-        assert!(
-            !std::path::Path::new(path).is_absolute(),
-            "non-portable capture path: {path}"
-        );
+        for (name, capture) in [
+            (
+                "init-full-yes.ascii",
+                include_str!("../../../docs/design/cli/init-full-yes.ascii.capture.txt"),
+            ),
+            (
+                "init-full-interactive.ascii",
+                include_str!("../../../docs/design/cli/init-full-interactive.ascii.capture.txt"),
+            ),
+            (
+                "init-wordmark.ascii",
+                include_str!("../../../docs/design/cli/init-wordmark.ascii.capture.txt"),
+            ),
+            (
+                "init-wordmark.utf8",
+                include_str!("../../../docs/design/cli/init-wordmark.utf8.capture.txt"),
+            ),
+        ] {
+            let paths: Vec<_> = capture
+                .lines()
+                .filter_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
+                .collect();
+            assert!(!paths.is_empty(), "{name}: missing initialization path");
+            for path in paths {
+                assert!(
+                    !std::path::Path::new(path).is_absolute(),
+                    "{name}: non-portable capture path: {path}"
+                );
+            }
+        }
     }
 
     #[test]

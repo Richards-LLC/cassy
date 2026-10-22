@@ -26,8 +26,9 @@ const start = qaSource.indexOf('const PAGE_INSPECTION = ');
 const end = qaSource.indexOf('\n};\n', start) + 2;
 const inspection = new Function(`return (${qaSource.slice(start + 'const PAGE_INSPECTION = '.length, end)})`)();
 
-const playwrightDir = process.env.PLAYWRIGHT_MODULE || '/home/pippenz/.npm/_npx/e41f203b7505f1fb/node_modules/playwright';
-const pw = await import(join(playwrightDir, 'index.js'));
+const pw = await import(process.env.PLAYWRIGHT_MODULE
+  ? join(process.env.PLAYWRIGHT_MODULE, 'index.js')
+  : 'playwright');
 const chromium = pw.chromium ?? pw.default.chromium;
 const profile = mkdtempSync(join(tmpdir(), 'commander-before-'));
 const context = await chromium.launchPersistentContext(profile, {

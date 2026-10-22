@@ -670,6 +670,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locale_precedence_is_shared_by_peer_output_cas_64f7() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (all, ctype, lang, utf8) in [
+            (None, None, None, false),
+            (None, None, Some("en_US.UTF-8"), true),
+            (None, None, Some("C"), false),
+            (None, Some("C.UTF8"), None, true),
+            (None, Some("POSIX"), None, false),
+            (Some(""), None, Some("en_US.UTF-8"), true),
+            (Some(" "), Some("C.UTF-8"), Some("C"), true),
+            (None, Some("C"), Some("en_US.UTF-8"), false),
+            (Some("C"), Some("C.UTF-8"), Some("en_US.UTF-8"), false),
+            (Some("C.UTF-8"), Some("C"), Some("C"), true),
+        ] {
+            for (key, value) in [("LC_ALL", all), ("LC_CTYPE", ctype), ("LANG", lang)] {
+                match value {
+                    Some(value) => env.set(key, value),
+                    None => env.remove(key),
+                }
+            }
+            assert_eq!(locale_is_utf8(), utf8, "{all:?}/{ctype:?}/{lang:?}");
+            assert_eq!(
+                crate::cloud::peers_detail::ascii_terminal(),
+                !utf8,
+                "peer locale differs: {all:?}/{ctype:?}/{lang:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_output_mode_detect_respects_no_color() {
         let mode = OutputMode::detect();
         // In test (non-TTY), should be Plain

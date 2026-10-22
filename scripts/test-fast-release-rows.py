@@ -114,7 +114,7 @@ class FastRows(unittest.TestCase):
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
-                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
+                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
@@ -131,6 +131,7 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
         self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
@@ -188,6 +189,18 @@ class FastRows(unittest.TestCase):
         self.assertEqual(proof["tip"], command(self.repo, "git", "rev-parse", "HEAD").stdout.strip())
         self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
         return result, proof
+
+    def test_design_docs_reject_absolute_home_paths(self):
+        self.write("docs/design/example.brief.md",
+                   "# Example\n\nEvidence: /home/alice/.cas/artifacts/cas-1234/report.json\n"
+                   "and /Users/bob/.cas/artifacts/cas-1234/report.json\n"
+                   "and /root/.cas/artifacts/cas-1234/report.json\n")
+        result = self.fast()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FAIL markdown-lint", result.stdout)
+        self.assertIn("docs/design/example.brief.md:3", result.stdout)
+        self.assertIn("docs/design/example.brief.md:4", result.stdout)
+        self.assertIn("docs/design/example.brief.md:5", result.stdout)
 
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()

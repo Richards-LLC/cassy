@@ -4,7 +4,7 @@ Open `../index.html` directly: every image, style and interaction is embedded. N
 
 The proposed Hub screens are authored illustrations. The baseline is a real browser capture of the committed current Commander, with one actual read-only paired Hub and a clearly labeled simulated second host. Raw PNGs are embedded in the HTML; `current-state.json` records the eight capture times, viewports and source revisions. No credentials or browser storage are committed.
 
-The interaction receipts cover 390×844 portrait, 844×390 landscape and 1280×800, light and dark. Full browser artifacts (including PDF, screenshots, JSON and the eight-cell evidence ledger) live at `/home/pippenz/.cas/artifacts/cas-cc1b/`. The committed receipt files identify the exact HTML SHA-256. The browser run tests the real generated file; current-state transport fixtures do not participate in reader QA.
+The interaction receipts cover 390×844 portrait, 844×390 landscape and 1280×800, light and dark. Full browser artifacts (including PDF, screenshots, JSON and the eight-cell evidence ledger) live at `<artifacts>/cas-cc1b/`. The committed receipt files identify the exact HTML SHA-256. The browser run tests the real generated file; current-state transport fixtures do not participate in reader QA.
 
 ## Reproduce
 

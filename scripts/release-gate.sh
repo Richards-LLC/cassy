@@ -1695,6 +1695,7 @@ check_test_targets() {
 }
 
 check_markdown_lint() {
+    python3 scripts/check-design-paths.py || return $?
     python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}"
 }
 

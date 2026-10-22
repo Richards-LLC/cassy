@@ -18,4 +18,4 @@ The macOS terminal QA run used a task-local adapter for BSD `script` so all 80- 
 | Theme safety | 4 | All palettes and NO_COLOR pass; the existing global error mark under C locale has a documented allowlist entry. |
 | Machine contract | 5 | `--json` is one document with `state.kind`, PID, age, message, and remedy. |
 
-Terminal QA receipts (each 12 runs, zero failures and warnings): exited, starting, startup wedged, and unresponsive PASS with one documented global C-locale allowance each; running PASS with zero allowances. Captures and reports: `/Users/pippenz/.cas/artifacts/cas-c67c/terminal-*/report.md`. Scored by the implementing worker on 2026-09-23.
+Terminal QA receipts (each 12 runs, zero failures and warnings): exited, starting, startup wedged, and unresponsive PASS with one documented global C-locale allowance each; running PASS with zero allowances. Captures and reports: `<artifacts>/cas-c67c/terminal-*/report.md`. Scored by the implementing worker on 2026-09-23.

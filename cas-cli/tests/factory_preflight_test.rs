@@ -152,6 +152,7 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    assert!(!help.contains("--artifacts"), "{help}");
     // pin: CLI cleanup help documents each actual mutation tier.
     assert!(
         help.contains(concat!(

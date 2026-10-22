@@ -2545,6 +2545,13 @@ task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 64d1740bd7bb065049dea3b9c7eee2e712738e68 as its reviewed-drop receipt; anchor
 6ff3c4d6e and target held app.js blob 5bde1a1d1bf2b077538c054ee758bc8ffcdd4006.
 
+Epic status reports `anchor superseded by <sha> (<task>)` as information when
+an ordinary later commit retires still-owned anchor lines and its subject names
+another task, or it is that closed child's recorded delivery. Body references
+and path touches alone grant no authority. A merge-resolution loss remains
+`content dropped`; later task edits cannot revive ownership already lost there.
+This epic accounting rule does not relax the individual task close proof.
+
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and
 `reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit

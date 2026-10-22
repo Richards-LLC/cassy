@@ -13482,8 +13482,73 @@ fn target_identical_delivered_paths(
 /// Legacy anchors without task-attributed history retain their existing proof.
 /// The recorded anchor is the only accepted snapshot: a reused live lane
 /// cannot supply another task's final blob to this child's epic accounting.
+/// A foreign task's ordinary commit can deliberately retire delivered lines.
+/// Qualify immutable history first, then ask the same ownership walk which
+/// qualified commit actually removed a live owner. Path touches alone grant
+/// nothing, and a merge loss cannot be revived by a later ordinary edit.
+fn epic_anchor_supersession(
+    task: &Task,
+    children: &[Task],
+    repo: &std::path::Path,
+    anchor: &str,
+    target: &str,
+    paths: &[String],
+) -> Option<(DeliveryContentPresence, String)> {
+    let target = preferred_diff_target_ref(repo, target);
+    let target = resolve_branch_sha(repo, &target)?;
+    let parent = resolve_branch_sha(repo, &format!("{anchor}^1"))?;
+    let history = std::process::Command::new("git")
+        .args(["log", "--ancestry-path", "--reverse",
+            "--format=%H%x1f%P%x1f%s%x1e", &format!("{anchor}..{target}"), "--"])
+        .current_dir(repo).measurement_output().ok()?;
+    if !history.status.success() { return None; }
+    let history = String::from_utf8(history.stdout).ok()?;
+    let records: Vec<_> = history.split('\u{1e}').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let mut qualified = std::collections::BTreeMap::new();
+    for record in records {
+        let mut fields = record.splitn(3, '\u{1f}');
+        let sha = fields.next()?;
+        let parents = fields.next()?;
+        let subject = fields.next()?;
+        if parents.split_whitespace().count() != 1 { continue; }
+        let named = message_claims_other_task(subject, Some(&task.id)).then(|| {
+            subject.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .find(|word| message_claims_other_task(word, None))
+                .map(str::to_ascii_lowercase)
+        }).flatten();
+        let owner = named.or_else(|| children.iter().find(|child| {
+            child.id != task.id && child.status == TaskStatus::Closed
+                && child.deliverables.factory_branch_anchor.as_deref() == Some(sha)
+        }).map(|child| child.id.clone()));
+        if let Some(owner) = owner { qualified.insert(sha.to_string(), owner); }
+    }
+    if qualified.is_empty() { return None; }
+    let retirements: Vec<_> = qualified.keys().cloned().collect();
+    let mut evidence = std::collections::BTreeSet::new();
+    let mut commits = Vec::new();
+    for path in paths {
+        let Some(DeliveryContentPresence::Superseded { commits: owners, .. }) =
+            delivery_evolution::line_content_presence_with_retirements(
+                repo, &parent, anchor, &target, path, &retirements).ok()?
+        else { return None; };
+        let mut attributed = false;
+        for sha in owners {
+            if let Some(owner) = qualified.get(&sha) {
+                evidence.insert(format!("anchor superseded by {sha} ({owner})"));
+                attributed = true;
+            }
+            if !commits.contains(&sha) { commits.push(sha); }
+        }
+        if !attributed { return None; }
+    }
+    Some((DeliveryContentPresence::Superseded { paths: paths.to_vec(), commits },
+        format!("{}; later task's single-parent rewrite, not merge-resolution loss",
+            evidence.into_iter().collect::<Vec<_>>().join("; "))))
+}
+
 fn epic_anchor_content_presence(
     task: &Task,
+    children: &[Task],
     repo: &std::path::Path,
     anchor: &str,
     target: &str,
@@ -13519,6 +13584,9 @@ fn epic_anchor_content_presence(
         (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
         (note, ledger) => note.or(ledger),
     };
+    if let Some((presence, note)) = epic_anchor_supersession(task, children, repo, anchor, target, paths) {
+        return (presence, joined(Some(note)));
+    }
     match target_identical_delivered_paths(task, repo, anchor, target, None, &identity, paths, false) {
         Some((note, remaining)) if remaining.is_empty() => {
             (DeliveryContentPresence::Present { paths: paths.clone() }, joined(note))
@@ -19451,6 +19519,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 resolved_anchor.is_some(),
                 &fallback_branches,
                 &git_snapshot,
+                subtasks,
             )
         });
         if let Some(cached) = cache_key.as_deref().and_then(|key| verdict_cache.get(key)) {
@@ -19482,6 +19551,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     true,
                     &fallback_branches,
                     &git_snapshot,
+                    subtasks,
                 ));
             }
             if epic_measurement::expired() {
@@ -19653,7 +19723,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
         {
-            let (presence, snapshot_note) = epic_anchor_content_presence(t, repo_path, anchor, parent_branch);
+            let (presence, snapshot_note) = epic_anchor_content_presence(t, subtasks, repo_path, anchor, parent_branch);
             if let Some(note) = snapshot_note {
                 content_evolution_note = Some(format!(
                     "decision: recorded factory_branch_anchor `{anchor}` for child task `{}`: {note}.",
@@ -19678,7 +19748,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     // integrated exactly like a present one; later commits on
                     // the reusable live lane are another task's work.
                     unmerged_count = 0;
-                    content_evolution_note = Some(format!(
+                    content_evolution_note.get_or_insert_with(|| format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is merged and its delivered path(s) {} were intentionally evolved by \
                              later first-parent commit(s) {}. The original byte-identical patch no \
@@ -36581,6 +36651,8 @@ mod epic_status_gate_tests {
             task.deliverables.factory_branch_anchor = Some(anchor);
             let mut children = vec![task];
             if mode == "closed-child" {
+                let before = collect_epic_branch_statuses(&children, "main", p);
+                assert!(!before[0].dropped_paths.is_empty(), "no later task authority yet");
                 let mut later = child("cas-bbbb", TaskStatus::Closed, Some("worker"));
                 later.deliverables.factory_branch_anchor = Some(removal.clone());
                 children.push(later);

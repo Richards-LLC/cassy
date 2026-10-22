@@ -220,6 +220,10 @@ pub(crate) fn save_editor_changes(
     pending_resets: &HashSet<String>,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !pending_resets.contains("factory.write_roots"),
+        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it"
+    );
     let mut changes_by_root = BTreeMap::<PathBuf, Vec<(String, bool)>>::new();
     for (key, value) in edited.list() {
         if pending_resets.contains(&key) || original.get(&key).as_deref() == Some(value.as_str()) {

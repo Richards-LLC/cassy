@@ -418,13 +418,23 @@ impl PeerClaims {
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
-    /// Task-start seam: acquire before the local lease is taken.
+    /// Cancel an old pending release before task start takes a new Cloud
+    /// claim. The per-task fence also waits out a release already in flight;
+    /// cancellation alone cannot invalidate that release's earlier snapshot.
+    /// Called on the blocking pool under the start request's peer budget.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_for_start(
-        &self, _cas_root: &Path, task_id: &str, kind: ClaimKind,
+        &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
     ) -> Acquire {
+        let _fence = match lock_task_claim_release(cas_root, task_id) {
+            Ok(fence) => fence,
+            Err(error) => return Acquire::Unavailable(format!("task claim release fence: {error}")),
+        };
+        if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
+            return Acquire::Unavailable("pending claim releases could not be cancelled safely".into());
+        }
         self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
@@ -1153,31 +1163,62 @@ fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<St
         .unwrap_or_default()
 }
 
+/// Serialize only this task's Cloud start/release, across processes. Keep
+/// these lock inodes: unlinking a held lock would allow a second lock owner.
+/// The shared records lock below never spans a network call.
+fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt;
+    let directory = cas_root.join("claim-release-locks");
+    std::fs::create_dir_all(&directory)?;
+    let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(directory.join(format!("{key}.lock")))?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
 /// Read-modify-write the pending releases under an exclusive file lock; no
 /// Cloud call runs inside `change`.
 fn update_pending_claim_releases<R>(
     cas_root: &Path,
     change: impl FnOnce(&mut std::collections::BTreeMap<String, i64>) -> R,
-) -> R {
+) -> Option<R> {
     use fs2::FileExt;
     let path = pending_claim_releases_path(cas_root);
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(path.with_extension("lock"));
-    let _guard = lock.as_ref().ok().filter(|file| file.lock_exclusive().is_ok());
+        .open(path.with_extension("lock"))
+        .and_then(|file| { file.lock_exclusive()?; Ok(file) });
+    let _guard = match lock {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(%error, "could not lock pending claim releases; leaving records unchanged");
+            return None;
+        }
+    };
     let mut pending = read_pending_claim_releases(cas_root);
     let result = change(&mut pending);
-    if pending.is_empty() {
-        let _ = std::fs::remove_file(&path);
-    } else if let Ok(text) = serde_json::to_string(&pending) {
+    let saved = if pending.is_empty() {
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    } else {
+        let text = serde_json::to_string(&pending).expect("string-to-integer map serializes");
         let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+        let saved = std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path));
+        if saved.is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
+        saved
+    };
+    if let Err(error) = saved {
+        tracing::warn!(%error, "could not save pending claim releases");
+        return None;
     }
-    result
+    Some(result)
 }
 
 /// cas-978d: [`release_task_claim`] off the caller, for park, close and
@@ -1195,7 +1236,7 @@ pub(crate) fn release_task_claim_in_background_with(
 ) -> Option<std::thread::JoinHandle<()>> {
     let claims = claims?;
     let now = Utc::now().timestamp();
-    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now));
+    update_pending_claim_releases(cas_root, |pending| pending.insert(task_id.to_string(), now))?;
     let cas_root = cas_root.to_path_buf();
     std::thread::Builder::new()
         .name("cas-claim-release".into())
@@ -1224,15 +1265,32 @@ fn release_pending_task_claims_with(
     let is_local = |id: &str| agents.get(id).is_ok();
     let now = Utc::now().timestamp();
     let lifetime = i64::from(lease_duration_secs(cas_root));
-    let mut settled = Vec::new();
     for (task_id, asked) in pending {
         let restarted = agents
             .get_lease(&task_id)
             .ok()
             .flatten()
             .is_some_and(|lease| lease.is_valid());
-        let done = restarted || now - asked >= lifetime || {
+        let expired = now - asked >= lifetime;
+        if !restarted && !expired {
             before_release(&task_id);
+        }
+        let _fence = match lock_task_claim_release(cas_root, &task_id) {
+            Ok(fence) => fence,
+            Err(error) => {
+                tracing::warn!(task = %task_id, %error, "could not lock pending claim release; will retry");
+                continue;
+            }
+        };
+        // Start may have cancelled this snapshot before taking its Cloud
+        // claim. Recheck under the same fence used by acquisition, and hold
+        // it through release AND record settlement (not just the GET).
+        if read_pending_claim_releases(cas_root).get(&task_id) != Some(&asked) {
+            continue;
+        }
+        let restarted = agents.get_lease(&task_id).ok().flatten()
+            .is_some_and(|lease| lease.is_valid());
+        let done = restarted || expired || {
             let budgeted = claims.clone().with_budget(PeerBudget::new(CLAIM_RELEASE_BUDGET));
             match budgeted.release_local(&task_id, &is_local) {
                 Ok(_) => true,
@@ -1243,20 +1301,14 @@ fn release_pending_task_claims_with(
             }
         };
         if done {
-            settled.push((task_id, asked));
+            update_pending_claim_releases(cas_root, |pending| {
+                // A release asked again meanwhile keeps its newer record.
+                if pending.get(&task_id) == Some(&asked) {
+                    pending.remove(&task_id);
+                }
+            });
         }
     }
-    if settled.is_empty() {
-        return;
-    }
-    update_pending_claim_releases(cas_root, |pending| {
-        for (task_id, asked) in settled {
-            // A release asked again meanwhile keeps its newer record.
-            if pending.get(&task_id) == Some(&asked) {
-                pending.remove(&task_id);
-            }
-        }
-    });
 }
 
 /// What a spawn learns about peers before it queues anything (cas-0078).

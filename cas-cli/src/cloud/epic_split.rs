@@ -235,17 +235,17 @@ pub(crate) fn current_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, Str
 
 fn without_released_children(
     cas_root: &Path,
-    mut splits: Vec<EpicSplit>,
-) -> Result<Vec<EpicSplit>, String> {
+    splits: &mut Vec<EpicSplit>,
+) -> Result<(), String> {
     if splits.is_empty() {
-        return Ok(splits);
+        return Ok(());
     }
     let released: std::collections::HashSet<(String, String)> =
         list_epic_split_child_releases(cas_root)
             .map_err(|error| format!("epic split release store: {error}"))?
             .into_iter()
             .collect();
-    for split in &mut splits {
+    for split in splits.iter_mut() {
         let split_id = &split.id;
         split
             .mine
@@ -255,15 +255,15 @@ fn without_released_children(
             .retain(|id| !released.contains(&(split_id.clone(), id.clone())));
     }
     splits.retain(|split| !split.mine.is_empty() || !split.theirs.is_empty());
-    Ok(splits)
+    Ok(())
 }
 
 /// Overlap also reserves the original shares while claim cleanup is pending.
 /// Keep that historical coverage out of ordinary ownership/renewal projections.
 fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<EpicSplit>, String> {
-    let raw = list_epic_splits(cas_root)
+    let mut splits = list_epic_splits(cas_root)
         .map_err(|error| format!("epic split store: {error}"))?;
-    let splits = without_released_children(cas_root, raw)?;
+    without_released_children(cas_root, &mut splits)?;
     if splits.is_empty() {
         return Ok(splits);
     }
@@ -320,10 +320,12 @@ fn projected_epic_splits(cas_root: &Path, include_cleanup: bool) -> Result<Vec<E
 fn guarded_epic_splits(cas_root: &Path) -> Result<Vec<EpicSplit>, String> {
     current_epic_splits(cas_root).or_else(|error| {
         tracing::warn!(%error, "could not project epic splits; retaining historical bindings");
-        let raw = list_epic_splits(cas_root)
+        let mut raw = list_epic_splits(cas_root)
             .map_err(|raw_error| format!("{error}; epic split fallback: {raw_error}"))?;
-        without_released_children(cas_root, raw)
-            .map_err(|release_error| format!("{error}; epic split fallback: {release_error}"))
+        if let Err(release_error) = without_released_children(cas_root, &mut raw) {
+            tracing::warn!(%release_error, "could not read epic split releases; retaining historical bindings");
+        }
+        Ok(raw)
     })
 }
 

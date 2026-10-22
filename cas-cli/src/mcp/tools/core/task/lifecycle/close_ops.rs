@@ -6243,7 +6243,32 @@ impl CasCore {
         } else {
             freshest_target_ref(repo_path, parent_branch)
         };
-        if rebased_delivery_has_same_patches(repo_path, recorded, &candidate, &rebase_target, &task.id) {
+        let unchanged_rebase = !git_commit_is_ancestor(repo_path, recorded, &candidate)
+            && rebased_delivery_has_same_patches(
+                repo_path, recorded, &candidate, &rebase_target, &task.id,
+            );
+        // Prediction and persistence share the same ownership fences. A
+        // proven identical rebase preserves a handed-off delivery; changed
+        // continuations still require exclusive ownership.
+        let same_worker = |other: &Task| {
+            other.id != task.id
+                && task.assignee.as_deref().is_some_and(|assignee| {
+                    other.assignee.as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+                })
+        };
+        if !unchanged_rebase && task_store.list(Some(TaskStatus::InProgress)).ok()?
+            .iter().any(same_worker)
+        {
+            return None;
+        }
+        if task_store.list(Some(TaskStatus::AwaitingMerge)).ok()?.iter().any(|other| {
+            same_worker(other)
+                && other.deliverables.factory_branch_anchor.as_deref() == Some(candidate.as_str())
+        }) {
+            return None;
+        }
+        if unchanged_rebase {
             return Some(candidate);
         }
         // cas-749f: a rebase may be followed by a correction before the
@@ -6581,43 +6606,6 @@ impl CasCore {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
             return Ok(());
         };
-        let target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
-            parent_branch.to_string()
-        } else {
-            freshest_target_ref(repo_path, parent_branch)
-        };
-        let unchanged_rebase = task.deliverables.factory_branch_anchor.as_deref().is_some_and(|recorded| {
-            !git_commit_is_ancestor(repo_path, recorded, factory_branch_anchor)
-                && rebased_delivery_has_same_patches(repo_path, recorded, factory_branch_anchor, &target, &task.id)
-        });
-        // A worker can have a parked task while doing a later task. Changed
-        // continuations still require exclusive ownership; a proven identical
-        // rebase preserves the earlier delivery even after that handoff.
-        let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
-            return Ok(());
-        };
-        let same_worker = |other: &Task| {
-            other.id != task.id
-                && task.assignee.as_deref().is_some_and(|assignee| {
-                    other
-                        .assignee
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
-                })
-        };
-        if !unchanged_rebase && in_progress.iter().any(|other| same_worker(other)) {
-            return Ok(());
-        }
-        let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {
-            return Ok(());
-        };
-        if other_parked.iter().any(|other| {
-            same_worker(other)
-                && other.deliverables.factory_branch_anchor.as_deref()
-                    == Some(factory_branch_anchor)
-        }) {
-            return Ok(());
-        }
         // cas-ba4a: retain attribution checks for changed continuations. A
         // rewritten delivery additionally needs positive patch equivalence.
         let Some(factory_branch_anchor) = self.eligible_awaiting_merge_advance(
@@ -6660,6 +6648,12 @@ impl CasCore {
             });
             let reason = if equivalent_rebase {
                 " Rebase preserved the complete parked delivery patch set."
+            } else if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|recorded| {
+                rebased_delivery::equivalent_prefix(
+                    repo_path, recorded, factory_branch_anchor, &target, &task.id,
+                ).is_some()
+            }) {
+                " Rebase preserved the complete parked delivery patch set before attributable same-task corrections."
             } else {
                 " The prior anchor was never on origin, so this close re-anchored to the pushed tip."
             };
@@ -8536,11 +8530,24 @@ impl CasCore {
                     // cas-ba4a: bind the round to the delivery anchor the park
                     // or a guarded advance recorded, not to a live tip that
                     // may be another task's work.
-                    let qa_anchor = task_store
-                        .get(&task.id)
-                        .ok()
-                        .and_then(|stored| stored.deliverables.factory_branch_anchor)
-                        .or(anchor);
+                    let qa_anchor = match task_store.get(&task.id) {
+                        Ok(stored) => stored.deliverables.factory_branch_anchor,
+                        Err(error) => return Ok(Self::tool_error(format!(
+                            "PARK REFUSED: cannot read persisted delivery anchor: {error}. Re-run close for {}.",
+                            task.id,
+                        ))),
+                    };
+                    // A declined or concurrent advance must not dispatch QA
+                    // for a retired anchor absent from the pushed source.
+                    if !qa_anchor.as_deref().zip(anchor.as_deref()).is_some_and(|(boundary, tip)| {
+                        git_commit_is_ancestor(&close_project_root, boundary, tip)
+                    }) {
+                        return Ok(Self::tool_error(format!(
+                            "PARK REFUSED: persisted delivery anchor {:?} is absent from the pushed source at {:?}. Re-run `{}task action=close id={}` at that tip; ask the supervisor to request changes if attribution prevents the advance.",
+                            qa_anchor, anchor,
+                            crate::mcp::tools::core::guidance::caller_prefix(), task.id,
+                        )));
+                    }
                     // G7 never refuses a park. Snapshot the attributed delivery
                     // before QA dispatch, even if independent QA is disabled.
                     let impact_warning = qa_anchor.as_deref().and_then(|head| {

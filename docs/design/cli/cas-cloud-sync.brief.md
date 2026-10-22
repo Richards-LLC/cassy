@@ -2,9 +2,9 @@
 
 | Field | Sentence |
 | --- | --- |
-| First two lines | Whether the pull completed, how many errors need attention, and the first concrete sync error when the pull is incomplete. |
+| First two lines | Whether the pull completed across both personal and team scopes, how many errors need attention, and which peer close was skipped when local lifecycle authority retains the row. |
 | Scannable | One verdict line with the error count and sync counts, followed by one indented row per pull error in non-verbose mode. |
-| Readable | Each error remains the sync layer's concrete entity and cause; `--verbose` keeps the existing detailed count rows and conflict diagnostics. |
+| Readable | A skipped peer close names the task, remote and retained statuses, guard, and `cas cloud conflicts --json` remedy; `--verbose` keeps the existing detailed count rows and conflict diagnostics. |
 | Machine output | `--json` remains the existing single sync receipt; human error rows are not emitted into the machine document. |
 | Omitted | Successful per-kind rows and conflict details stay collapsed in the default view and remain available under `--verbose`. |
 
@@ -15,7 +15,10 @@
   rerunning with `--verbose`.
 - Error rows use the existing muted formatter and four-space hanging indent; the
   summary's warning mark and error count remain the only verdict signals.
-- The JSON path and successful summary path are unchanged.
+- `nothing newer` appears only when neither scope applied rows and neither
+  scope reported an error; incomplete zero-count pulls omit that clause to
+  keep the verdict, conflict count and scope within 80 columns.
+- The existing JSON `errors` array carries skipped peer-close diagnostics.
 
 ## Critique
 

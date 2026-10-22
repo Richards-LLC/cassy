@@ -2273,6 +2273,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         (TaskStatus::InProgress, TaskStatus::Cancelled),
         (TaskStatus::Blocked, TaskStatus::InProgress),
         (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
+        (TaskStatus::AwaitingMerge, TaskStatus::Closed),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
@@ -2311,6 +2312,49 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         assert_eq!(result.pulled_tasks, 1);
         assert_eq!(store.get(&local.id).unwrap().status, after);
         assert_eq!(result.task_status_transitions.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn team_pull_reports_peer_close_blocked_by_local_lifecycle_cas_33bc() {
+    for (offset, reason) in [
+        (-1, "lifecycle_timestamp"),
+        (60, "local_mutation_or_delivery_or_live_execution"),
+    ] {
+        let project = "peer-close-owner";
+        let mut local = Task::new("cas-peer-closed".into(), "peer delivery".into());
+        local.status = TaskStatus::AwaitingMerge;
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        local.deliverables.parked_branch = Some("factory/replay".into());
+        let remote = team_task_fixture(
+            &local.id,
+            TaskStatus::Closed,
+            project,
+            project,
+            local.updated_at + chrono::Duration::seconds(offset),
+        );
+        let (_temp, result, store, _queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![remote],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            Some(cas_types::WorkerDeliveryState::AwaitingMerge),
+            None,
+        )
+        .await;
+
+        assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(result.errors.iter().any(|error| {
+            error.contains(&local.id)
+                && error.contains("closed")
+                && error.contains("awaiting_merge")
+                && error.contains(reason)
+                && error.contains("cas cloud conflicts --json")
+        }), "peer close must name the skipped row and guard: {:?}", result.errors);
     }
 }
 

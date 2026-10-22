@@ -17,8 +17,27 @@ const PROVENANCE_BLOCKS: &[(&str, &str)] = &[
     ),
 ];
 
+/// A release gate override decision line (cas-bfc7):
+/// `[YYYY-MM-DD HH:MM] ✅ DECISION RELEASE-GATE OVERRIDE sha=<40-hex>: <reason>`.
+/// It passes a promotion status for hours, so only the live-supervisor note
+/// path writes it, through the trusted append.
+pub const RELEASE_GATE_OVERRIDE: &str = "] ✅ DECISION RELEASE-GATE OVERRIDE";
+
+/// `(stamp, rest after the marker)` for a line shaped like an override. Every
+/// line the release gate could accept matches, so reserving these lines
+/// reserves every grant.
+pub fn release_gate_override(line: &str) -> Option<(&str, &str)> {
+    let (stamp, rest) = line.strip_prefix('[')?.split_once(RELEASE_GATE_OVERRIDE)?;
+    Some((stamp, rest))
+}
+
+/// Reserved lines that stand alone (not part of a provenance block).
+fn is_single_line_marker(line: &str) -> bool {
+    line.starts_with("ARTIFACT_PROOF:") || release_gate_override(line).is_some()
+}
+
 pub fn is_reserved_line(line: &str) -> bool {
-    line.starts_with("ARTIFACT_PROOF:")
+    is_single_line_marker(line)
         || PROVENANCE_BLOCKS
             .iter()
             .any(|(begin, end)| line.starts_with(begin) || line.starts_with(end))
@@ -82,7 +101,7 @@ pub fn neutralize_new_markers<'a>(notes: &'a str, previous: Option<&str>) -> Cow
     let prior_markers: HashSet<&str> = previous
         .into_iter()
         .flat_map(str::lines)
-        .filter(|line| line.starts_with("ARTIFACT_PROOF:"))
+        .filter(|line| is_single_line_marker(line))
         .collect();
     let preserved_blocks = provenance_blocks(notes)
         .into_iter()

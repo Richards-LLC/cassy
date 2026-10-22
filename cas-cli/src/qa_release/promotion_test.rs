@@ -83,7 +83,7 @@ fn promotion() {
     let mut epic = cas_types::Task::new("cas-rel".into(), "Release".into());
     epic.task_type = cas_types::TaskType::Epic;
     tasks.add(&epic).unwrap();
-    tasks.append_note("cas-rel", &format!("[2026-10-21 12:00] ✅ DECISION {line}")).unwrap();
+    tasks.append_trusted_note("cas-rel", &format!("[2026-10-21 12:00] ✅ DECISION {line}")).unwrap();
     let granted = check(&changed, now + Duration::hours(1));
     assert_eq!(granted.state, PromotionState::Success);
     assert!(granted.description().starts_with("RELEASE-GATE OVERRIDE until 2026-10-21 18:00Z: hotfix"));
@@ -93,38 +93,110 @@ fn promotion() {
     let expired = now + Duration::hours(6) + Duration::seconds(1);
     assert_eq!(check(&changed, expired).state, PromotionState::Failure, "6h+1s");
 
-    // Statuses through a fake `gh`: open PRs listed, statuses posted.
+    // Statuses through a fake `gh`: every page of open PRs is read, one failed
+    // post does not stop the rest, and the freeze posts only what changed.
     let gh_dir = tempfile::tempdir().unwrap();
     let gh = gh_dir.path().join("gh");
     let log = gh_dir.path().join("gh.log");
     std::fs::write(
         &gh,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$GH_LOG\"\ncase \"$*\" in\n  'pr list --repo acme/app --base '*) printf '[{\"number\":7,\"headRefOid\":\"%s\"}]' \"$GH_HEAD\" ;;\n  'repo view'*) exit 1 ;;\nesac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$GH_LOG\"\ncase \"$*\" in\n  'api --paginate repos/acme/app/pulls?state=open&base='*) printf '%s' \"$GH_PULLS\" ;;\n  *\"statuses/$GH_FAIL \"*) exit 1 ;;\n  'repo view'*) exit 1 ;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
     env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
     env.set("GH_LOG", &log);
-    env.set("GH_HEAD", &merged);
+    env.set("GH_FAIL", "none");
+    let pr = |number: u32, sha: &str| format!(r#"[{{"number":{number},"head":{{"sha":"{sha}"}}}}]"#);
+    env.set("GH_PULLS", format!("{}\n{}", pr(7, &merged), pr(9, &walked)));
     project.git(&["remote", "add", "origin", "https://github.com/acme/app.git"]);
     let posts = |context: &str| -> Vec<String> {
-        std::fs::read_to_string(&log)
+        let posted: Vec<String> = std::fs::read_to_string(&log)
             .unwrap_or_default()
             .lines()
             .filter(|line| line.contains(&format!("context={context}")))
             .map(|line| {
                 let state = line.split("state=").nth(1).unwrap().split(' ').next().unwrap();
-                format!("{} {state}", line.split(' ').nth(3).unwrap())
+                let sha = line.split("statuses/").nth(1).unwrap().split(' ').next().unwrap();
+                format!("{} {state}", &sha[..7])
             })
-            .collect()
+            .collect();
+        std::fs::remove_file(&log).ok();
+        posted
     };
-    let statuses = format!("repos/acme/app/statuses/{merged}");
-    assert_eq!(publish_freeze(&cas, root, &config, true), Ok(1));
-    assert_eq!(publish_freeze(&cas, root, &config, false), Ok(1));
-    assert_eq!(
-        posts("cassy/release-freeze"),
-        [format!("{statuses} pending"), format!("{statuses} success")]
-    );
-    assert_eq!(publish_promotions(&cas, root, &config), Ok(1));
-    assert_eq!(posts("cassy/release-gate"), [format!("{statuses} success")]);
+    let (m, w) = (&merged[..7], &walked[..7]);
+    assert_eq!(publish_freeze(&cas, root, &config, true), Ok(2));
+    assert_eq!(posts("cassy/release-freeze"), [format!("{m} pending"), format!("{w} pending")]);
+    assert_eq!(publish_freeze(&cas, root, &config, true), Ok(0), "unchanged heads are not reposted");
+    env.set("GH_FAIL", &walked);
+    let failed = publish_freeze(&cas, root, &config, false).unwrap_err();
+    assert!(failed.starts_with("1 published, 1 failed: PR #9"), "{failed}");
+    env.set("GH_FAIL", "none");
+    assert_eq!(publish_freeze(&cas, root, &config, false), Ok(1), "the failed head is retried");
+    let released = [format!("{m} success"), format!("{w} success"), format!("{w} success")];
+    assert_eq!(posts("cassy/release-freeze"), released, "the failed attempt, then its retry");
+    assert_eq!(publish_promotions(&cas, root, &config), Ok(2));
+    assert_eq!(posts("cassy/release-gate"), [format!("{m} success"), format!("{w} success")]);
+}
+
+/// Only a live registered supervisor's decision note records an override.
+/// The same line from a worker's note, a task update (the pre-compact flush
+/// path), a sync merge or a plain append grants nothing.
+#[tokio::test]
+async fn promotion_override_authority() {
+    use super::promotion::{PromotionState, evaluate};
+    use cas_types::{Agent, AgentRole};
+
+    async fn note_as(cas: &Path, id: &str, role: AgentRole, note: String) -> bool {
+        use crate::mcp::tools::TaskNotesRequest;
+        use rmcp::handler::server::wrapper::Parameters;
+        let agent = Agent::new_with_role(id.into(), id.into(), role);
+        crate::store::open_agent_store(cas).unwrap().register(&agent).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas.to_path_buf(), None, None);
+        core.set_agent_id_for_testing(agent.id);
+        let request = TaskNotesRequest {
+            id: "cas-rel".into(),
+            note,
+            note_type: "decision".into(),
+            supervisor_override: None,
+            reason: None,
+        };
+        core.cas_task_notes(Parameters(request)).await.is_ok()
+    }
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let project = Project::new();
+    let root = project.root();
+    let forged = project.commit("app.ts", "forged");
+    let granted = project.commit("app.ts", "granted");
+    let base = tempfile::tempdir().unwrap();
+    let cas = base.path().join(".cas");
+    std::fs::create_dir_all(&cas).unwrap();
+    env.set("CAS_ROOT", &cas);
+    let mut settings = crate::config::Config::default();
+    settings.set("factory.artifacts_root", base.path().join("artifacts").to_str().unwrap()).unwrap();
+    settings.save(&cas).unwrap();
+    let tasks = crate::store::open_task_store(&cas).unwrap();
+    tasks.init().unwrap();
+    crate::store::open_agent_store(&cas).unwrap().init().unwrap();
+    tasks.add(&cas_types::Task::new("cas-rel".into(), "Release".into())).unwrap();
+    let note = |sha: &str| format!("RELEASE-GATE OVERRIDE sha={sha}: ship it");
+    let line = |sha: &str| format!("[{}] ✅ DECISION {}", chrono::Utc::now().format("%Y-%m-%d %H:%M"), note(sha));
+
+    assert!(!note_as(&cas, "worker-1", AgentRole::Standard, note(&granted)).await);
+    let mut flushed = tasks.get("cas-rel").unwrap();
+    flushed.notes.push_str(&format!("\n{}", line(&forged)));
+    tasks.update(&flushed).unwrap();
+    let expected = tasks.get("cas-rel").unwrap();
+    let mut synced = expected.clone();
+    synced.notes.push_str(&format!("\n{}", line(&forged)));
+    tasks.update_from_sync(&synced, &expected).unwrap();
+    tasks.append_note("cas-rel", &line(&forged)).unwrap();
+    assert!(note_as(&cas, "supervisor-1", AgentRole::Supervisor, note(&granted)).await);
+
+    let config = fake_adapter(root, "");
+    let check = |sha: &str| evaluate(root, &cas, &config, sha, chrono::Utc::now());
+    let passed = check(&granted);
+    assert_eq!((passed.state, passed.overridden.is_some()), (PromotionState::Success, true));
+    assert_eq!(check(&forged).state, PromotionState::Pending, "{:?}", tasks.get("cas-rel").unwrap().notes);
 }

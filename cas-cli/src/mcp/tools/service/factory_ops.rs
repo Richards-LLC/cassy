@@ -3894,6 +3894,9 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
+            .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
+            .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         let (scoped_worker_count, outside_scope_worker_count) =
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
@@ -3904,6 +3907,7 @@ impl CasService {
                 scoped_worker_count,
                 outside_scope_worker_count,
             );
+            summary.push_str(&format!("\n{binary_versions}"));
             let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
                 factory_session.as_deref(), chrono::Utc::now());
             if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
@@ -4328,6 +4332,7 @@ impl CasService {
                     "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
                 ));
             }
+            msg.push_str(&format!("\n{binary_versions}\n"));
             return Ok(Self::success(msg));
         }
 
@@ -5322,6 +5327,7 @@ impl CasService {
             ));
         }
 
+        output.push_str(&format!("\n{binary_versions}\n"));
         output.push_str(&crate::supervisor_continuity::status_section(&self.inner.cas_root));
         Ok(Self::success(output))
     }

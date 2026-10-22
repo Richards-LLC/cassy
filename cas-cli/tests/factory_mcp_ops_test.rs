@@ -6684,12 +6684,12 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    cleanup.full = Some(true);
     let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
     assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
     assert_eq!(std::fs::read(trash.join("target/output")).unwrap(), b"queued-output");
     FileExt::unlock(&collector).unwrap();
 
+    cleanup.full = Some(true);
     let result = get_text(&env.service.factory_request(Parameters(cleanup)).await.unwrap());
     let status: serde_json::Value = serde_json::from_str(result.lines()
         .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))

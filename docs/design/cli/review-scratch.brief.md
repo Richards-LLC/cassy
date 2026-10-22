@@ -33,6 +33,11 @@ Measurement and unlinking run in the background under the existing build lane;
 GC/admission recover interrupted trash. A project collector lock serializes bulk
 deletion, and pending trash remains counted until it is actually removed.
 Source and ownership records remain available while trash still needs collection.
+The collector also reclaims other eligible checkouts' `repo/target`, under the
+same guards. It deletes payload before marker before directory. Interrupted
+legacy trash without a marker remains counted and collectable when its private
+parent owner validates; malformed markers are retained. Cleanup with a busy or
+unavailable collector says deletion is deferred in the default context line.
 
 ## Original delivery critique
 

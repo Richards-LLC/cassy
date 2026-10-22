@@ -319,17 +319,38 @@ fn eligible(cas: &Path, record: &Owner) -> Result<()> {
 /// Its marker precedes the rename, so a crashed handoff is recoverable by GC.
 fn trash(cas: &Path, directory: &Path) -> Result<Option<PathBuf>> {
     let path = directory.join("trash");
-    if !path.exists() {
-        return Ok(None);
-    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    safe_path(&path)?;
+    ensure!(metadata.is_dir(), "review trash is not a directory");
     let source = owner(cas, directory)?;
-    let queued = read_owner(cas, &path)?;
-    ensure!(
-        queued.task_id == source.task_id
-            && queued.dispatch_id == source.dispatch_id
-            && queued.head == source.head,
-        "trash owner does not match checkout"
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "review trash must be private and owned by this user"
+        );
+    }
+    match fs::symlink_metadata(path.join("owner.json")) {
+        Ok(_) => {
+            let queued = read_owner(cas, &path)?;
+            ensure!(
+                queued.task_id == source.task_id
+                    && queued.dispatch_id == source.dispatch_id
+                    && queued.head == source.head,
+                "trash owner does not match checkout"
+            );
+        }
+        // Older collectors could remove the marker before their process exited.
+        // The private parent still proves ownership; corrupt markers never do.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     for entry in fs::read_dir(&path)? {
         let name = entry?.file_name();
         ensure!(
@@ -537,7 +558,19 @@ fn reclaim(
         .as_ref()
         .map_or(0, |path| bytes(&path.join("target"), None));
     if clean && let Some(path) = &queued {
-        fs::remove_dir_all(path)?;
+        // Keep ownership durable until every payload byte is gone. A verifier
+        // process can exit during recursive deletion, or between these steps.
+        if let Err(error) = fs::remove_dir_all(path.join("target"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        if let Err(error) = fs::remove_file(path.join("owner.json"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        fs::remove_dir(path)?;
     }
     if targets_only || !source_is_old(&record) {
         let target = checkout.join("target");
@@ -731,8 +764,13 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
         }
     }
     let pending = pending_reclaim_bytes(cas);
+    let deferred = if clean && collector.is_none() {
+        "; deletion deferred (collector busy or unavailable)"
+    } else {
+        ""
+    };
     let mut out = format!(
-        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes\n",
+        "\nManaged review scratch: {} checkouts; reclaimed {reclaimed} bytes\nReclaimable: {reclaimable} bytes; pending deletion: {pending} bytes{deferred}\n",
         rows.len()
     );
     for row in &rows {

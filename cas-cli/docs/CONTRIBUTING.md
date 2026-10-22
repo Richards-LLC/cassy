@@ -1612,7 +1612,12 @@ the dispatch resolves, times out or is invalidated, or a task is Closed/Cancelle
 provided no Pending/Claimed dispatch remains for that task.
 Verdict recording and task close await only a guarded atomic rename into private
 trash; measurement and deletion run in the background under the build-lane lock.
-GC and disk-pressure admission recover interrupted trash. Each pass visits at most 16 checkouts.
+The collector also reclaims other eligible checkouts' `repo/target` under those
+same guards. GC and disk-pressure admission recover interrupted trash, including
+legacy trash missing its marker when the private parent owner validates. Deletion
+removes the target first, then its marker, then the empty trash directory, so a
+process exit leaves recoverable state. Cleanup reports deletion as deferred when
+the project collector lock is busy or unavailable. Each pass visits at most 16 checkouts.
 The small source checkout and Git registration retain the two-hour idle grace period.
 `REVIEW_SCRATCH_STATUS_JSON` reports total and per-checkout `reclaimable_bytes`; a
 young terminal checkout contributes its disposable target bytes, not its source bytes.

@@ -1146,9 +1146,39 @@ Cloud acquisition and local lease publication share one per-task claim fence.
 Synchronous release and pending-release retry take that fence before inspecting
 a local lease or releasing its Cloud mirror. Operations needing both locks
 take the per-task fence before the global pending-records lock; the global lock
-never spans a network call. Settled fences retire their lock files. A generation check after
-locking makes pre-opened waiters reopen an unlinked file instead of entering
-under a different inode.
+never spans a network call. Settled fences release their OS lock but retain
+`.cas/claim-release-locks/<task-hash>.lock`: one small file per encountered task.
+Do not unlink, replace or truncate these files during normal operation.
+
+Before the persistent-fence fix, a generation check protected only new callers.
+An older process (for example a long-running 3.71 `cas serve`) could open the file
+before settlement deleted it, then lock that detached inode while another
+process held a replacement. A version marker alone cannot protect a caller that
+ignores it. Keeping the same inode prevents that mixed-version split.
+
+`cas update` replaces the binary and can restart the managed hub; it does not
+restart harness-owned stdio `cas serve` processes or pinned factory sessions.
+Reload those MCP servers and relaunch pinned sessions when upgrading from a
+build that deleted settled fences. Generation checks remain as a defense for
+waiters while such processes drain, but cannot repair an already detached old
+handle. Retire all unlinking processes to end that existing window.
+
+Fence-file removal belongs only to offline GC after explicit quiescence.
+Prevent every operation from holding or reopening these files throughout
+collection. Verify that no live process uses an older fence protocol, or reload
+every `cas serve`, hub and pinned session on the persistent-fence build before
+collecting. Prevent older executables from starting again during collection.
+Age, an idle agent row or a file version marker is not proof. There is no
+automatic online fence-file GC; retained files are intentional compatibility
+state.
+
+Windows concurrent-open/delete behavior has not been exercised here. Persistent
+files avoid normal deletion while another process has the file open. An older
+unlinking process or external cleanup can still cause a sharing/open error:
+acquisition reports PEERS NOT CHECKED and continues with the local lease, while
+synchronous release preserves the Cloud claim and a pending release stays queued
+for retry. Do not treat this advisory fallback as verified cross-machine
+exclusion; restart old processes and retry after the sharing conflict clears.
 
 If the peer budget expires just after start cancels a pending release, Cloud
 acquisition can still be unavailable. Start reports PEERS NOT CHECKED and takes

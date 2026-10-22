@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — task claims stay exclusive across upgrades
+
+- **Persistent claim fences** — Was: settling a claim fence could delete a file already opened by an older Cassy process, allowing old and new callers to lock different files for the same task. → Now: settlement retains the shared file and releases only its OS lock. Small per-task files intentionally remain until offline GC can prove quiescence. After upgrading from a build that deleted fences, reload every MCP server and relaunch pinned sessions; binary replacement and a hub restart alone do not retire those running builds. Windows sharing/open failures remain an advisory local-lease fallback and are documented as unverified.
+
 ## [3.71.0] - 2026-10-21
 
 ### Added — QA checks describe what good looks like

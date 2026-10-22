@@ -3238,7 +3238,8 @@ PY"#);
         assert!(
             crate::factory_capacity_wait::view(&root, "higher-worker", chrono::Utc::now())
                 .unwrap()
-                .is_none()
+                .is_some(),
+            "an admission-expired wait remains visible while its task lease is live"
         );
         crate::factory_capacity_wait::reconcile(
             &root,
@@ -3246,7 +3247,10 @@ PY"#);
             chrono::Utc::now(),
         )
         .unwrap();
-        assert!(!wait_path.exists(), "reconciliation removes the expired wait record");
+        assert!(
+            wait_path.exists(),
+            "reconciliation must retain escalation history for a live task lease"
+        );
     }
 
     #[cfg(unix)]

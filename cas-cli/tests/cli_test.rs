@@ -46,7 +46,7 @@ fn test_version() {
 }
 
 #[test]
-fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
+fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     assert!(std::process::Command::new("git")
@@ -120,6 +120,47 @@ fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
     let found = path("worker");
     assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
     assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
+
+    // No compiler runs: exercise the real wrapper with a builder boundary
+    // that publishes the same manifest as the Python builder, plus Git chatter.
+    let build = || {
+        cas_cmd(root)
+            .current_dir(root)
+            .env("CAS_AGENT_ROLE", "supervisor")
+            .args(["qa", "candidate", "build", "--task", "cas-0227", "--json"])
+            .output()
+            .unwrap()
+    };
+    let missing_builder = build();
+    assert!(!missing_builder.status.success());
+    let script = root.join("scripts/qa-candidate-build.py");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, r#"
+import argparse, json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument('--repo')
+parser.add_argument('--rev')
+parser.add_argument('--candidate-dir')
+args = parser.parse_args()
+destination = Path(args.candidate_dir)
+destination.mkdir(parents=True, exist_ok=True)
+receipt = dict(revision=args.rev, version='cas 9.99.7', sha256='fixture-hash')
+(destination / 'RECEIPT.json').write_text(json.dumps(receipt))
+print('HEAD is now at fixture')
+print(json.dumps(dict(receipt, candidate_dir=str(destination))))
+"#).unwrap();
+    let built = build();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert_eq!(receipt["revision"], plan["revision"]);
+    assert_eq!(receipt["candidate_dir"], plan["candidate_dir"]);
+    assert_eq!(receipt["receipt_file"], plan["receipt_file"]);
+    assert!(!String::from_utf8_lossy(&built.stderr).contains("[ERROR]"));
+
+    let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
+    assert!(missing_error.contains("QA candidate builder missing"), "{missing_error}");
+    assert!(missing_error.contains("source checkout") && missing_error.contains("rerun"), "{missing_error}");
 }
 
 #[test]

@@ -5,7 +5,6 @@
 //!   At least one share is required; omit the other for a request or grant.
 //! - answer: `id=<split> decision=accept|reject [reason]`
 //! - cancel: `id=<split> decision=cancel [reason]`
-//! - release: `id=<split> decision=release task_id=<moved child>` (owner only)
 //! - status: `id=<split> [decision=status]`
 //! - list: no arguments
 //!
@@ -49,7 +48,6 @@ impl CasService {
         let decision = trimmed(&req.decision).map(|d| d.to_ascii_lowercase());
         let target = trimmed(&req.target);
         let reason = trimmed(&req.reason);
-        let task_id = trimmed(&req.task_id);
         let (mine, theirs) = (
             req.mine.as_deref().map(epic_split::parse_ids),
             req.theirs.as_deref().map(epic_split::parse_ids),
@@ -62,13 +60,9 @@ impl CasService {
                     "accept" => epic_split::answer(&cas_root, &caller, &id, true, reason.as_deref()),
                     "reject" => epic_split::answer(&cas_root, &caller, &id, false, reason.as_deref()),
                     "cancel" => epic_split::cancel(&cas_root, &caller, &id, reason.as_deref()),
-                    "release" => match task_id.as_deref() {
-                        Some(task_id) => epic_split::release_moved_child(&cas_root, &caller, &id, task_id),
-                        None => Err("decision=release needs task_id=<moved child>".to_string()),
-                    },
                     "status" => epic_split::status(&cas_root, &id),
                     other => Err(format!(
-                        "decision must be accept, reject, cancel or release, or status (got '{other}')"
+                        "decision must be accept, reject or cancel, or status (got '{other}')"
                     )),
                 },
                 (Some(_), None) => Err("decision needs id=<split id>".to_string()),

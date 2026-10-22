@@ -44,3 +44,23 @@ transfer budget. Existing destination normalization, protocol restrictions,
 glob suppression and option separation remain in place. Clearing the URL stays
 a quiet no-op. Successful edits remain unsaved until the existing save action,
 including its operator-only policy check.
+
+### Webhook validation critique
+
+terminal-qa: PASS notification-webhook-refusal-capture · 11 runs · 0 fail · 0 warn · 0 allowed
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Actual TUI captures retain the setting, input, URL cause and Enter/Esc controls inside one dialog; the hook warning names the refused channel and setting. |
+| Fit | 4 | Real 80/120-column dialogs show the wrapped cause and recovery controls; the captured warning is 74 columns and passes both widths. |
+| Craft | 4 | Invalid HTTP, whitespace and malformed URL edits remain editable; correction stays unsaved and the adjacent operator-only save refusal remains intact. |
+| Theme safety | 4 | The new default-foreground ASCII warning passes four palettes, pipe, NO_COLOR and C locale; TUI styles remain inherited, with actual dark/light text inspected. |
+| Machine contract | 5 | Refused stored URL keeps hook stdout `{}`, emits one redacted stderr warning, and invokes no curl; empty URL remains quiet. |
+
+Scored by wise-sparrow-74 on 2026-10-22 against supervisor candidate
+`f079e45bd117eebf56693e9aa65ad07971f0604d`. The gate replays the actual hook
+stderr retained in `notification-webhook-refusal.capture.txt`; it is not eleven
+fresh hook sends. The real candidate also sent exactly one POST to the intended
+loopback path with a hostile HOME/.curlrc adding another URL/header: neither
+addition took effect. Curl argv began with `-q` and included `--max-time 10`.
+The full inherited TUI theme/locale matrix is not newly claimed by this gate.

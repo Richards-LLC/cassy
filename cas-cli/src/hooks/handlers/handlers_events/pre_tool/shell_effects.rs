@@ -394,8 +394,10 @@ fn collect_script(
                 let base = directory.as_deref();
                 for raw in bash_write_targets(&command) {
                     for raw in expand_factory_shell_word(&raw, &values) {
-                        let redirection = relative_redirections.contains(&raw).then(|| raw.clone());
-                        effects.writes.push((rooted(&raw, base, original)?, redirection));
+                        let path = rooted(&raw, base, original)?;
+                        let redirection = (!Path::new(&path).is_absolute()
+                            && relative_redirections.contains(&raw)).then(|| raw.clone());
+                        effects.writes.push((path, redirection));
                     }
                 }
                 for raw in bash_in_place_edit_targets(&command) {

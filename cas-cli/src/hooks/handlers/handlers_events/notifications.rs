@@ -222,6 +222,10 @@ pub fn handle_notification(
 
 /// Send a webhook notification (blocking, for use in spawned thread)
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
+    // Config files can predate URL validation or be edited outside the CLI;
+    // enforce the destination policy at the last point before sending data.
+    crate::config::validate_notification_webhook_url(url)?;
+
     // Simple HTTP POST with JSON payload
     let payload = serde_json::json!({
         "text": message,

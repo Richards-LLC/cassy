@@ -1,5 +1,36 @@
 use crate::config::*;
 
+/// Only allow secure webhook destinations, except HTTP services bound to
+/// localhost/loopback for development.
+pub(crate) fn validate_notification_webhook_url(value: &str) -> Result<(), MemError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    let url = url::Url::parse(value).map_err(|_| {
+        MemError::Parse(
+            "notifications.webhook_url must be a valid HTTPS URL or an HTTP localhost URL"
+                .into(),
+        )
+    })?;
+    let is_https = url.scheme() == "https" && url.host().is_some();
+    let is_loopback_http = url.scheme() == "http"
+        && match url.host() {
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+    if !is_https && !is_loopback_http {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must use HTTPS; HTTP is allowed only for localhost"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 impl Config {
     /// GH #1182: replace `[factory] write_roots`. Only the operator CLI path
     /// (`cas config set factory.write_roots`) calls this, after resolving
@@ -39,7 +70,15 @@ impl Config {
                 ""
             } else {
                 meta.validate(value).map_err(MemError::Parse)?;
-                value
+                if meta.value_type == ConfigType::Bool {
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "1" => "true",
+                        "false" | "no" | "0" => "false",
+                        _ => unreachable!("registry validation accepted a non-boolean value"),
+                    }
+                } else {
+                    value
+                }
             }
         } else {
             value
@@ -1148,6 +1187,7 @@ impl Config {
                 }
             }
             "notifications.webhook_url" => {
+                validate_notification_webhook_url(value)?;
                 let notifications = self
                     .notifications
                     .get_or_insert_with(NotificationConfig::default);

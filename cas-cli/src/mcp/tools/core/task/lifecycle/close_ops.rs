@@ -11157,15 +11157,14 @@ impl CasCore {
         // the same durable task identity/work-cycle evidence as the gates;
         // merge-base(HEAD, stale-local-main)..HEAD attributed every commit
         // inherited from a fresher origin/main to whichever task closed next.
-        // cas-0908: when an explicit commit_receipt is provided, pass it through
-        // so the diff stat uses the exact commit the close validation accepted,
-        // not a potentially-contaminated identity anchor from a shared worker lane.
+        // Use the same explicit or parked receipt accepted by close validation
+        // so a reused worker checkout cannot attribute a later task's changes.
         let diff_stat_msg = if let Some(worker_wt) = worker_worktree_path.as_ref() {
             render_close_diff_stat(
                 worker_wt,
                 &resolved_parent_branch,
                 commit_receipt_window.as_ref(),
-                req.commit_receipt.as_deref(),
+                delivery_receipt,
             )
         } else {
             String::new()

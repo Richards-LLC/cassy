@@ -78,7 +78,8 @@ build `a8c1d0041`, not an asserted exact immediate-base build.
 These passes use explicit supervisor approvals 4206333 and 4206384 for four
 inherited findings: palette `cas-f15f`, factory-tooling overflow `cas-0ba9`,
 piped phase redraws `cas-3075`, and the exact unchanged progress sentence
-`  Reconfiguring Cassy...` falsely reported as truncation (`cas-592b`).
+`Reconfiguring Cassy...` (with two leading spaces) falsely reported as
+truncation (`cas-592b`).
 All 190 exact distinct exception entries and their tasks are listed in the
 ledger. Unfiltered reports remain FAIL; no blanket visual-quality pass is
 claimed. The old 76-cell maximum applied only to R1's incomplete entry walk;

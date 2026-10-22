@@ -240,11 +240,29 @@ fn run_preflight_refusals() {
     // Row ids and arguments are refused before any evidence is copied.
     let mut bad = run::Record { row: "..".into(), verdict: "PASS".into(), evidence: Some(gate.evidence("bad")), ..run::Record::default() };
     let refusal = run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string();
-    assert!(refusal.contains("and not `.` or `..`"), "{refusal}");
+    assert!(refusal.contains("must start with a letter or digit"), "{refusal}");
     bad.row = "support".into();
     bad.verdict = "FAIL".into();
     assert_eq!(run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string(), "a FAIL needs --reason");
     assert!(!pack.join("media/support").exists() && staged(&pack) == 0, "a refused record copies nothing");
+    bad.row = ".slack".into();
+    assert!(run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string().contains("must start with a letter or digit"));
+    // A link in the evidence, or a linked media/<row>, is refused, and
+    // nothing is created or written through the link.
+    let outside = tempfile::tempdir().unwrap();
+    let linked = gate.evidence("linked");
+    std::os::unix::fs::symlink(outside.path(), linked.join("escape")).unwrap();
+    let walk = run::Record { row: "support".into(), verdict: "PASS".into(), evidence: Some(linked.clone()), ..run::Record::default() };
+    let refusal = run::record(&gate.cas, Some(&gate.sha), &walk).unwrap_err().to_string();
+    assert!(refusal.ends_with("escape is not a regular file"), "{refusal}");
+    std::fs::remove_file(linked.join("escape")).unwrap();
+    std::fs::create_dir_all(pack.join("media")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), pack.join("media/support")).unwrap();
+    let refusal = run::record(&gate.cas, Some(&gate.sha), &walk).unwrap_err().to_string();
+    assert!(refusal.contains("media/support is not a real directory under the pack"), "{refusal}");
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0, "nothing reached the link target");
+    assert!(staged(&pack) == 0 && std::fs::symlink_metadata(pack.join("media/support")).unwrap().file_type().is_symlink());
+    std::fs::remove_file(pack.join("media/support")).unwrap();
     // The TTL tick times support out between record's two admits: the write
     // step refuses and the staged evidence is removed.
     let race = path.clone();

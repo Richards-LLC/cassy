@@ -50,7 +50,14 @@ class CandidateVersionTests(unittest.TestCase):
             revision = git("rev-parse", "HEAD")
             version = f"cas 9.99.7 ({revision[:7]} 2026-10-21)"
             binary = root / "binary"
-            binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+            binary.write_text(f"#!{sys.executable}\n" + f"print({version!r})\n" + """
+import json, os
+from pathlib import Path
+source = Path(json.loads(Path(os.environ['FIXTURE_TARGET_RECORD']).read_text())['target']) / 'debug/cas'
+replacement = source.with_name('cas-replacement')
+replacement.write_bytes(b'concurrent build replaced the source binary')
+os.replace(replacement, source)
+""")
             binary.chmod(0o700)
             target_record = root / "target-record"
             compiler = tools / "cargo"
@@ -85,8 +92,16 @@ Path(os.environ['FIXTURE_TARGET_RECORD']).write_text(json.dumps({
             self.assertFalse(target.exists(), 'candidate output must be pruned after artifact copy')
             self.assertEqual((destination / 'cas').read_bytes(), binary.read_bytes())
             self.assertEqual(result['version'], version)
+            self.assertEqual(json.loads((destination / 'RECEIPT.json').read_text())['sha256'],
+                             candidate['sha256'](destination / 'cas'))
             self.assertTrue((destination / 'SHA256SUMS').is_file())
             self.assertEqual((legacy / 'review-only').read_bytes(), b'unmanaged output')
+            help_output = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name('qa-candidate-build.py')), '--help'],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertIn('--candidate-dir', help_output.stdout)
+            self.assertNotIn('--task', help_output.stdout)
 
 
 if __name__ == "__main__":

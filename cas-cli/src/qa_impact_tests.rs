@@ -535,6 +535,8 @@ fn codemap_freshness_agrees_across_qa_impact_status_and_journeys_gh_1340() {
         (impact, status, journeys)
     };
     assert_eq!(counts(), (None, Some(0), Some(0)));
+    // `commit` stages everything; drop the debris so only src/new.ts lands.
+    std::fs::remove_dir_all(repo.join(".playwright-mcp")).unwrap();
     write(repo, "src/new.ts", "new");
     commit(repo);
     publish();

@@ -964,6 +964,8 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
     };
     let is_local = |id: &str| agents.get(id).is_ok();
     let duration = lease_duration_secs(cas_root);
+    // cas-c55f: retry file-lease releases that did not reach the Cloud.
+    crate::cloud::file_leases::release_pending(&claims, cas_root);
     for (task_id, lease_backed) in targets {
         match claims.renew(&task_id, agent_id, duration) {
             Ok(()) => {
@@ -1476,7 +1478,9 @@ mod tests {
             // cas-8dbe review: on the factory path the worker's close parks
             // the task and the supervisor closes it. The park releases by
             // task, as worker-a, so session B can take the file.
-            release_for_task_with(Some(&a), &root_a, "cas-ac47");
+            if let Some(cloud) = release_for_task_with(Some(a.clone()), &root_a, "cas-ac47") {
+                cloud.join().unwrap();
+            }
             let after_park = claim_with(&b, &root_b, "worker-b", "bright-cobra-44", "cas-9f01", path_edited);
             (first, second, again, after_park)
         })
@@ -1503,6 +1507,136 @@ mod tests {
             "a parked task frees its files for the other session"
         );
         assert_eq!(claims, 3, "session A's repeat edit reuses its own lease without asking");
+    }
+
+    /// cas-c55f: a park releases the finished task's file leases while the
+    /// same worker already edits a file for its next task. The release must
+    /// not overwrite that claim, so the repeat edit reuses it.
+    #[tokio::test]
+    async fn a_claim_made_while_a_release_is_in_flight_survives_cas_c55f() {
+        use std::sync::{Arc, Mutex, mpsc};
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        type Locks = Arc<Mutex<HashMap<String, String>>>;
+        fn key_of(request: &Request) -> String {
+            request.url.path().split('/').nth(4).unwrap_or_default().to_string()
+        }
+        fn agent_of(request: &Request) -> String {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            body["agent_id"].as_str().unwrap_or_default().to_string()
+        }
+        fn lock(key: &str, agent: &str) -> serde_json::Value {
+            serde_json::json!({
+                "id": format!("lock-{key}"), "task_id": key, "agent_id": agent, "status": "active",
+                "expires_at": (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                "renewed_at": Utc::now().to_rfc3339(), "renewal_count": 0,
+            })
+        }
+        /// One lock per key: the first agent to claim it holds it.
+        struct Claim(Locks);
+        impl Respond for Claim {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let (key, agent) = (key_of(request), agent_of(request));
+                let owner = self.0.lock().unwrap().entry(key.clone()).or_insert(agent).clone();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "status": "success", "result": "claimed", "lock": lock(&key, &owner),
+                }))
+            }
+        }
+        struct Lock(Locks);
+        impl Respond for Lock {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let key = key_of(request);
+                let held = self.0.lock().unwrap().get(&key).map(|agent| lock(&key, agent));
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "lock": held }))
+            }
+        }
+        /// A slow Cloud: it says when a release arrives, then answers late.
+        struct Release(Locks, Mutex<mpsc::Sender<()>>);
+        impl Respond for Release {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let (key, agent) = (key_of(request), agent_of(request));
+                let mut locks = self.0.lock().unwrap();
+                if locks.get(&key) == Some(&agent) {
+                    locks.remove(&key);
+                }
+                let _ = self.1.lock().unwrap().send(());
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"status": "success"}))
+                    .set_delay(Duration::from_millis(800))
+            }
+        }
+
+        let server = MockServer::start().await;
+        let locks: Locks = Arc::default();
+        let (asked, release_asked) = mpsc::channel();
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+            .respond_with(Claim(locks.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+            .respond_with(Release(locks.clone(), Mutex::new(asked)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+            .respond_with(Lock(locks.clone()))
+            .mount(&server)
+            .await;
+        let claims = PeerClaims {
+            config: CloudConfig {
+                endpoint: server.uri(),
+                token: Some("sandbox-token".into()),
+                ..Default::default()
+            },
+            project: "github.com/acme/widgets".into(),
+            label: "soundwave".into(),
+            retired_local: HashMap::new(),
+            budget: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            use crate::cloud::file_leases::{FileLease, claim_with, release_for_task_with};
+            let park = {
+                let (claims, root) = (claims.clone(), root.clone());
+                move || {
+                    if let Some(cloud) = release_for_task_with(Some(claims), &root, "cas-ac47") {
+                        cloud.join().unwrap();
+                    }
+                }
+            };
+            let edit = |task: &str, file: &str| {
+                claim_with(&claims, &root, "worker-a", "fierce-koala-22", task, file)
+            };
+            assert_eq!(edit("cas-ac47", "src/done.rs"), FileLease::Mine);
+            // The park runs in another process than the worker's edit hook.
+            let park = std::thread::spawn(park);
+            release_asked
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the park asks the Cloud to release src/done.rs");
+            // While the Cloud is still answering, the worker edits next.
+            assert_eq!(edit("cas-b002", "src/next.rs"), FileLease::Mine);
+            park.join().unwrap();
+            assert_eq!(edit("cas-b002", "src/next.rs"), FileLease::Mine);
+        })
+        .await
+        .unwrap();
+        let claim_requests = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/claim"))
+            .count();
+        assert_eq!(
+            claim_requests, 2,
+            "the repeat edit of src/next.rs reuses the lease the release left in place"
+        );
     }
 
     /// cas-0078 (f): cloud work runs on the blocking pool, and one budget

@@ -62,6 +62,11 @@ struct Ledger {
     /// When this agent was last sent the contended-file notice, by lease id.
     #[serde(default)]
     notified: BTreeMap<String, i64>,
+    /// cas-c55f: leases whose task ended, by lease id, with when the release
+    /// was asked. Each stays until Cassy Cloud confirms its release, so a
+    /// release that could not reach the Cloud is retried later.
+    #[serde(default)]
+    releasing: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,14 +97,17 @@ fn ledger_path(cas_root: &Path, agent_id: &str) -> PathBuf {
 }
 
 fn load(cas_root: &Path, agent_id: &str) -> Ledger {
-    std::fs::read_to_string(ledger_path(cas_root, agent_id))
+    load_at(&ledger_path(cas_root, agent_id))
+}
+
+fn load_at(path: &Path) -> Ledger {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
 
-fn save(cas_root: &Path, agent_id: &str, ledger: &Ledger) {
-    let path = ledger_path(cas_root, agent_id);
+fn save_at(path: &Path, ledger: &Ledger) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -110,6 +118,51 @@ fn save(cas_root: &Path, agent_id: &str, ledger: &Ledger) {
     if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
+}
+
+/// cas-c55f: read-modify-write the ledger at `path` under an exclusive lock
+/// on its sibling `.lock` file, so a claim and a release by the same worker
+/// (an edit hook and a park, in two processes) never overwrite each other.
+/// No Cloud call runs inside `change`. An emptied ledger is removed.
+fn update_at<R>(path: &Path, change: impl FnOnce(&mut Ledger) -> R) -> R {
+    use fs2::FileExt;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"));
+    // An unlockable ledger is still updated: the lease is advisory.
+    let _guard = lock.as_ref().ok().filter(|file| file.lock_exclusive().is_ok());
+    let mut ledger = load_at(path);
+    let result = change(&mut ledger);
+    if ledger.leases.is_empty() && ledger.releasing.is_empty() && ledger.notified.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else {
+        save_at(path, &ledger);
+    }
+    result
+}
+
+fn update<R>(cas_root: &Path, agent_id: &str, change: impl FnOnce(&mut Ledger) -> R) -> R {
+    update_at(&ledger_path(cas_root, agent_id), |ledger| {
+        ledger.agent_id = agent_id.to_string();
+        change(ledger)
+    })
+}
+
+fn ledger_files(cas_root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(cas_root.join("file-leases"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Claim `relative_path` for `agent` working `task_id` before it edits.
@@ -143,7 +196,7 @@ pub(crate) fn claim_with(
 ) -> FileLease {
     let id = lease_id(relative_path);
     let now = chrono::Utc::now().timestamp();
-    let mut ledger = load(cas_root, agent_id);
+    let ledger = load(cas_root, agent_id);
     if let Some(entry) = ledger.leases.get(&id) {
         let age = now - entry.at_unix_secs;
         if entry.mine && age < OWN_CLAIM_REUSE_SECS {
@@ -191,8 +244,13 @@ pub(crate) fn claim_with(
         }
         Acquire::Unavailable(_) => (FileLease::Unchecked, Some(false)),
     };
-    match record {
+    // The Cloud was asked outside the lock; record its answer under it.
+    update(cas_root, agent_id, |ledger| match record {
         Some(mine) => {
+            if mine {
+                // Claimed afresh, so an older release must not drop it.
+                ledger.releasing.remove(&id);
+            }
             ledger.leases.insert(
                 id,
                 Entry {
@@ -206,9 +264,7 @@ pub(crate) fn claim_with(
         None => {
             ledger.leases.remove(&id);
         }
-    }
-    ledger.agent_id = agent_id.to_string();
-    save(cas_root, agent_id, &ledger);
+    });
     lease
 }
 
@@ -235,7 +291,7 @@ pub fn notify_worker_of_holder(
 ) -> bool {
     let id = lease_id(relative_path);
     let now = chrono::Utc::now().timestamp();
-    let mut ledger = load(cas_root, agent_id);
+    let ledger = load(cas_root, agent_id);
     if ledger
         .notified
         .get(&id)
@@ -253,9 +309,7 @@ pub fn notify_worker_of_holder(
     {
         return false;
     }
-    ledger.notified.insert(id, now);
-    ledger.agent_id = agent_id.to_string();
-    save(cas_root, agent_id, &ledger);
+    update(cas_root, agent_id, |ledger| ledger.notified.insert(id, now));
     true
 }
 
@@ -284,53 +338,79 @@ mod tests {
 }
 
 /// Release the file leases taken for `task_id` by whichever agent took them,
-/// when the task parks, closes or is cancelled. On the factory path the
-/// worker's close only parks the task and the supervisor closes it, so the
-/// release runs by task, not by the calling agent.
+/// when the task parks, closes, is cancelled, released or reset. On the
+/// factory path the worker's close only parks the task and the supervisor
+/// closes it, so the release runs by task, not by the calling agent.
+///
+/// cas-c55f: the local ledgers change at once; the Cloud releases run on a
+/// background thread, so a slow Cloud never delays the caller. A release
+/// that does not reach the Cloud stays recorded and is retried by the next
+/// release sweep or the daemon's claim renewal.
 pub fn release_for_task(cas_root: &Path, task_id: &str) {
     let claims = PeerClaims::for_project(cas_root)
         .map(|claims| claims.with_budget(super::peer_claims::PeerBudget::new(RELEASE_BUDGET)));
-    release_for_task_with(claims.as_ref(), cas_root, task_id);
+    let _ = release_for_task_with(claims, cas_root, task_id);
 }
 
-pub(crate) fn release_for_task_with(claims: Option<&PeerClaims>, cas_root: &Path, task_id: &str) {
-    let Ok(entries) = std::fs::read_dir(cas_root.join("file-leases")) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let ledger_file = entry.path();
-        if ledger_file.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(mut ledger) = std::fs::read_to_string(&ledger_file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Ledger>(&text).ok())
-        else {
-            continue;
-        };
-        let held: Vec<String> = ledger
-            .leases
-            .iter()
-            .filter(|(_, lease)| lease.task_id.as_deref() == Some(task_id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        if held.is_empty() {
-            continue;
-        }
-        for id in &held {
-            if let (Some(claims), Some(lease)) = (claims, ledger.leases.get(id))
-                && lease.mine
-                && !ledger.agent_id.is_empty()
-            {
-                let _ = claims.release_own(id, &ledger.agent_id);
+/// [`release_for_task`] with the given claims; returns the background
+/// thread running the Cloud releases, when there are claims to ask.
+pub(crate) fn release_for_task_with(
+    claims: Option<PeerClaims>,
+    cas_root: &Path,
+    task_id: &str,
+) -> Option<std::thread::JoinHandle<()>> {
+    let now = chrono::Utc::now().timestamp();
+    for ledger_file in ledger_files(cas_root) {
+        update_at(&ledger_file, |ledger| {
+            let ended: Vec<String> = ledger
+                .leases
+                .iter()
+                .filter(|(_, lease)| lease.task_id.as_deref() == Some(task_id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ended {
+                if ledger.leases.remove(&id).is_some_and(|lease| lease.mine) {
+                    ledger.releasing.insert(id, now);
+                }
             }
-            ledger.leases.remove(id);
+        });
+    }
+    let claims = claims?;
+    let cas_root = cas_root.to_path_buf();
+    std::thread::Builder::new()
+        .name("cas-file-lease-release".into())
+        .spawn(move || release_pending(&claims, &cas_root))
+        .ok()
+}
+
+/// Ask Cassy Cloud to release every recorded pending file lease of this
+/// database, as the agent that took it. Released or no-longer-held leases
+/// leave the record; failures stay for the next attempt. A pending release
+/// older than a lease's lifetime is dropped: the Cloud claim has run out.
+pub(crate) fn release_pending(claims: &PeerClaims, cas_root: &Path) {
+    let now = chrono::Utc::now().timestamp();
+    let lifetime = i64::from(super::peer_claims::lease_duration_secs(cas_root));
+    for ledger_file in ledger_files(cas_root) {
+        let ledger = load_at(&ledger_file);
+        if ledger.releasing.is_empty() || ledger.agent_id.is_empty() {
+            continue;
         }
-        if ledger.leases.is_empty() {
-            let _ = std::fs::remove_file(&ledger_file);
-        } else {
-            let agent = ledger.agent_id.clone();
-            save(cas_root, &agent, &ledger);
+        let mut released = Vec::new();
+        for (id, asked) in &ledger.releasing {
+            if now - asked >= lifetime || claims.release_own(id, &ledger.agent_id).is_ok() {
+                released.push((id.clone(), *asked));
+            }
         }
+        if released.is_empty() {
+            continue;
+        }
+        update_at(&ledger_file, |ledger| {
+            for (id, asked) in released {
+                // A release asked again meanwhile keeps its newer record.
+                if ledger.releasing.get(&id) == Some(&asked) {
+                    ledger.releasing.remove(&id);
+                }
+            }
+        });
     }
 }

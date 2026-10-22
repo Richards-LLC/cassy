@@ -175,7 +175,7 @@ pub(crate) fn update_config_in_place<T>(
     let ConfigKeyDocument {
         path,
         raw,
-        document,
+        mut document,
         serialized_path,
         stored_path,
         alternate_path,
@@ -1090,7 +1090,10 @@ mod tests {
                 config_document_item(document.as_item(), stored_path).is_some(),
                 "registry key {key} did not resolve to TOML path {stored_path}"
             );
-            assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
+            assert!(
+                remove_config_document_key(&mut document, stored_path, alternate_path).unwrap(),
+                "{key}"
+            );
             assert!(
                 config_document_item(document.as_item(), stored_path).is_none(),
                 "reset did not remove the serialized TOML path {stored_path} for {key}"

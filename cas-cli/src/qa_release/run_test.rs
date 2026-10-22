@@ -233,14 +233,32 @@ fn run_preflight_refusals() {
     };
     run::start(&gate.cas, &gate.sha).unwrap();
     let path = gate.cas.join("release-gate").join(format!("{}.json", gate.sha));
-    let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    // The TTL tick has timed support out but not sealed yet.
-    file["rows"].as_array_mut().unwrap().push(serde_json::json!({"id": "support", "journey": "support",
-        "verdict": {"verdict": "NOT_EXERCISED", "cause": "timed_out", "detail": "not walked before the freeze ended"}}));
-    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let pack = pack::pack_dir(&gate.cas, &gate.sha).unwrap();
+    let staged = |pack: &Path| {
+        std::fs::read_dir(pack).map_or(0, |d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".staged-")).count())
+    };
+    // Row ids and arguments are refused before any evidence is copied.
+    let mut bad = run::Record { row: "..".into(), verdict: "PASS".into(), evidence: Some(gate.evidence("bad")), ..run::Record::default() };
+    let refusal = run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string();
+    assert!(refusal.contains("and not `.` or `..`"), "{refusal}");
+    bad.row = "support".into();
+    bad.verdict = "FAIL".into();
+    assert_eq!(run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string(), "a FAIL needs --reason");
+    assert!(!pack.join("media/support").exists() && staged(&pack) == 0, "a refused record copies nothing");
+    // The TTL tick times support out between record's two admits: the write
+    // step refuses and the staged evidence is removed.
+    let race = path.clone();
+    run::tests_hook::set_before_write(move || {
+        let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&race).unwrap()).unwrap();
+        file["rows"].as_array_mut().unwrap().push(serde_json::json!({"id": "support", "journey": "support",
+            "verdict": {"verdict": "NOT_EXERCISED", "cause": "timed_out", "detail": "not walked before the freeze ended"}}));
+        std::fs::write(&race, serde_json::to_vec(&file).unwrap()).unwrap();
+    });
     let early = run::Record { row: "support".into(), verdict: "PASS".into(), evidence: Some(gate.evidence("early")), ..run::Record::default() };
     let refusal = run::record(&gate.cas, Some(&gate.sha), &early).unwrap_err().to_string();
     assert_eq!(refusal, "the TTL timed row support out; retry after the run seals to reseal it");
+    assert!(!pack.join("media/support").exists() && staged(&pack) == 0, "the write-step refusal leaves no evidence");
+    let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     file["freeze_until"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::minutes(1));
     std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     let before = runs(&gate);

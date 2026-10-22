@@ -725,6 +725,11 @@ impl Config {
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
                 release.timeout_secs = secs;
             }
+            "qa.release.retention_days" => {
+                let days = value.trim().parse().ok().filter(|days| *days > 0).ok_or_else(|| MemError::Parse("Expected a positive number of days".into()))?;
+                let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);
+                release.retention_days = days;
+            }
             "qa.release.components" => {
                 let components = crate::qa_release::ReleaseConfig::parse_components(value).map_err(MemError::Parse)?;
                 let release = self.qa.get_or_insert_with(QaConfig::default).release.get_or_insert_with(Default::default);

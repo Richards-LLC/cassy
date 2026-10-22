@@ -37,6 +37,7 @@ env = "staging"
 | `adapter` | Project-relative adapter executable. Empty leaves the gate off. |
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
+| `retention_days` | Days evidence-pack media stay on disk (default 30); `pack.json` is kept. |
 | `components` | Served component name to the repository paths it is built from. |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
@@ -120,7 +121,9 @@ journeys:
 ```
 
 `cas qa journeys --check` rejects an entry that is not 1–128 letters, digits
-or `._-:/`. Cassy never reads project config itself. The adapter's `flags`
+or `._-:/`. Name only non-secret flags: values are stored verbatim in the
+ledger and the pack, must be scalars (a list or object is refused), and the
+pack's secret scan refuses a token-shaped value. Cassy never reads project config itself. The adapter's `flags`
 verb receives the union of the walked journeys' flags and answers every
 requested key, reporting an unset flag as `null`:
 
@@ -141,6 +144,67 @@ environment once and compares the two. Every declared flag whose values
 differ, or that either side lacks, is
 `CONFIG_MISMATCH <flag>: test=<value> target=<value> (<journeys>)`, and the
 named journeys' evidence does not prove the target.
+
+## Evidence pack
+
+Each gate run writes one pack, which is the only input promotion reads:
+`<artifacts_root>/<project>/release/<sha>/pack.json`. The pack holds:
+
+- the served components at start and end;
+- the flag snapshot;
+- the rows, PR coverage, fixture receipts and resource use;
+- the suite timings;
+- media `{path, sha256, bytes}`.
+
+Media are local files under the pack's `media/` directory. They are never
+committed to git or uploaded to Cloud by default.
+
+Rows use one vocabulary in the CLI, MCP, pack, PR comment and status:
+
+| Row verdict | Meaning |
+|---|---|
+| `PASS` | A runner PASS, at least one frame, and every declared invariant read back. |
+| `FAIL` | A product defect, including a failed read-back. |
+| `NOT_A_ROUTE` | The journey does not exist on this build. |
+| `NOT_EXERCISED{fixture_setup\|automation\|timed_out\|operator_skip}` | Not walked, or no frame or read-back. |
+| `BLOCKED_EXTERNAL{provider, error}` | A provider failed, throttled (429) or ran out (402). |
+| `CONFIG_MISMATCH{flag, test, target}` | The evidence ran under another flag value. |
+| `SERVED_DRIFT` | The served components changed during the row. |
+
+The gate is `FAILED` on any FAIL. It is `CLEAN` only when every row is PASS or
+NOT_A_ROUTE and every PR is exercised. Anything else, including no rows at
+all, is `OWED`, and the gate names each owed row or PR and its cause.
+
+**Per-PR coverage.** At preflight Cassy lists the PRs on the candidate's
+first-parent history: `Merge pull request #N` merges and squash subjects
+ending in `(#N)`. It maps each PR's diff to journeys through `cas qa impact`.
+A PR that no row exercises keeps the gate OWED until a manual row records
+`covers_prs: [N]`.
+
+**Sealing.** Sealing rehashes every media file and refuses a link or any path
+outside `media/`. It derives the gate, runs the evidence secret scan over the
+whole pack (flag values included) and writes `pack.json` atomically. Reading
+a pack refuses missing or changed media, and a stored gate that its rows no
+longer derive.
+
+**Ledger.** The pack ledger is the batch QA ledger. `verification
+action=batch_receipt pack_path=<pack.json>` binds the sealed pack for
+`staging_sha` by its bytes and records its gate. A changed `pack.json` stops
+the receipt satisfying close, exactly as a changed `LEDGER.md` does.
+
+**Slack.** The Violet bundle posts `pack.json`, with the summary as its
+comment, and then each media file in that thread. Every file is rechecked
+against the pack digest and is at most 25 MiB. Video over the limit is
+re-encoded with `ffmpeg`: H.264, at most 720p, no audio, at a bitrate that
+fits. If re-encoding fails or the video is still too large, it stays
+local-only and the row's frames carry the evidence.
+
+**PR comment.** Cassy keeps one comment per PR, marked
+`<!-- cassy:release-gate -->`, and edits it in place.
+
+**Retention.** `qa.release.retention_days` (default 30) deletes old media
+files only inside each pack's own `media/`. Links are never followed or
+deleted, and `pack.json` stays as the record.
 
 ## Deploy failure alerts
 

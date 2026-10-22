@@ -25,7 +25,8 @@ impl CasService {
             req.task_ids.as_deref().ok_or_else(|| reject("task_ids is required".into()))?,
             required(req.staging_sha.as_deref(), "staging_sha")?,
             required(req.ledger_artifact_id.as_deref(), "ledger_artifact_id")?,
-            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?))
+            std::path::Path::new(required(req.ledger_path.as_deref(), "ledger_path")?),
+            req.pack_path.as_deref().map(std::path::Path::new))
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
@@ -36,7 +37,8 @@ impl CasService {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
         }
-        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+        let pack = receipt.pack.as_ref().map(|pack| format!(" Pack: {} ({}).", pack.path, pack.gate)).unwrap_or_default();
+        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).{pack}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path)))
     }

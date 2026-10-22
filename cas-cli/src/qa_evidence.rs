@@ -1594,7 +1594,7 @@ fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
 /// Largest single text or trace entry the secret scan reads.
 const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-fn first_secret(text: &str) -> Option<&'static str> {
+pub(crate) fn first_secret(text: &str) -> Option<&'static str> {
     secret_patterns()
         .iter()
         .find(|(_, pattern)| {

@@ -30,6 +30,20 @@ pub struct QaBatchReceipt {
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
     pub recorded_at: String,
+    /// The release-gate evidence pack this receipt attests (cas-e04d). The
+    /// pack ledger is this ledger: absent on receipts without a pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<QaBatchPack>,
+}
+
+/// A sealed `pack.json`, bound by its bytes and the gate verdict it states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QaBatchPack {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    /// `CLEAN`, `FAILED` or `OWED`.
+    pub gate: String,
 }
 
 fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
@@ -232,6 +246,7 @@ mod tests {
             staging_sha: "b".repeat(40),
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
+            pack: None,
             task_heads: tasks
                 .iter()
                 .map(|id| ((*id).into(), "c".repeat(40)))

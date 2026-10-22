@@ -16,6 +16,11 @@ use std::time::Duration;
 pub mod blocked;
 pub mod fixtures;
 pub mod flags;
+pub mod comment;
+pub mod coverage;
+pub mod media;
+pub mod pack;
+pub mod verdict;
 
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -42,6 +47,8 @@ pub struct ReleaseConfig {
     /// Pending-migration refusal for merges into `integration_branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migrations: Option<MigrationsConfig>,
+    /// Days evidence-pack media stay on disk (`pack.json` is kept).
+    pub retention_days: u32,
 }
 
 /// `[qa.release.migrations]`: which added files are migrations, and the
@@ -66,6 +73,7 @@ impl Default for ReleaseConfig {
             timeout_secs: 120,
             components: BTreeMap::new(),
             migrations: None,
+            retention_days: 30,
         }
     }
 }
@@ -919,6 +927,225 @@ mod tests {
         env.set("FAKE_FLAGS_PROD", r#"{"audit.mode":"a|b"}"#);
         let refusal = read("prod").unwrap_err().to_string();
         assert!(refusal.contains("omits post_audit.audio_evidence.enabled"), "{refusal}");
+        env.set("FAKE_FLAGS_PROD", r#"{"post_audit.audio_evidence.enabled":{"token":"x"},"audit.mode":"a"}"#);
+        assert!(read("prod").unwrap_err().to_string().contains("is not a scalar"));
+        for (env, sha) in [("stag ing", sha.as_str()), ("staging", "HEAD@{1}")] {
+            assert!(flags::read(project.path(), &config, env, sha, journeys).is_err(), "{env} {sha}");
+        }
+    }
+
+    fn row(id: &str, journey: &str, verdict: verdict::RowVerdict) -> pack::Row {
+        pack::Row {
+            id: id.into(),
+            journey: journey.into(),
+            cell: None,
+            run: None,
+            verdict,
+            frames: Vec::new(),
+            readbacks: Vec::new(),
+            manual_minutes: None,
+            covers_prs: Vec::new(),
+        }
+    }
+
+    /// The evidence pack: gate verdicts derive from row mixes, an unexercised
+    /// PR keeps the gate OWED, and a sealed pack round-trips only while its
+    /// media, gate and secrets hold.
+    #[test]
+    fn pack() {
+        use blocked::BlockedExternal;
+        use pack::{PACK_FILE, Pack, PackError};
+        use verdict::{GateVerdict, NotExercisedCause, RowVerdict, gate};
+        let blocked = RowVerdict::BlockedExternal(BlockedExternal { provider: "stripe".into(), error: "429".into() });
+        let fail = RowVerdict::Fail { reason: "checkout total wrong".into() };
+        let timed_out = RowVerdict::NotExercised { cause: NotExercisedCause::TimedOut, detail: "suite clock".into() };
+        for (rows, want) in [
+            (vec![], GateVerdict::Owed),
+            (vec![("a", &RowVerdict::Pass), ("b", &RowVerdict::NotARoute)], GateVerdict::Clean),
+            (vec![("a", &RowVerdict::Pass), ("b", &blocked)], GateVerdict::Owed),
+            (vec![("a", &RowVerdict::Pass), ("b", &timed_out)], GateVerdict::Owed),
+            (vec![("a", &fail), ("b", &blocked)], GateVerdict::Failed),
+        ] {
+            assert_eq!(gate(rows.clone(), Vec::new()).verdict, want, "{rows:?}");
+        }
+        let owed = gate([("a", &RowVerdict::Pass), ("b", &blocked)], Vec::new()).owed;
+        assert_eq!(owed[0].subject, "b");
+        assert_eq!(owed[0].cause, "BLOCKED_EXTERNAL{provider=stripe, error=429}");
+        assert!(matches!(
+            RowVerdict::grade(Ok(()), 0, None),
+            RowVerdict::NotExercised { cause: NotExercisedCause::Automation, .. }
+        ));
+        assert_eq!(RowVerdict::grade(Ok(()), 2, None), RowVerdict::Pass);
+
+        // Per-PR coverage over a squash PR and a merged PR.
+        let project = Project::new();
+        let base = project.commit("README.md", "base");
+        project.commit("apps/web/checkout/pay.ts", "v1");
+        project.git(&["commit", "-q", "--amend", "-m", "Fix promo race (#12)"]);
+        project.git(&["checkout", "-qb", "feature"]);
+        project.commit("apps/api/promo.ts", "v1");
+        project.git(&["checkout", "-q", "main"]);
+        project.git(&["merge", "-q", "--no-ff", "feature", "-m", "Merge pull request #13 from acme/feature"]);
+        let head = project.git(&["rev-parse", "HEAD"]);
+        let prs = coverage::candidate_prs(project.root(), &base, &head).unwrap();
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), [12, 13]);
+        let registry: crate::qa_registry::Registry =
+            serde_yaml::from_str("journeys:\n  - id: checkout\n    status: live\n    owners: ['apps/web/checkout/**']\n").unwrap();
+        let qa = crate::config::QaConfig::default();
+        let mut pack = Pack::new("cassy", &head, Vec::new());
+        pack.rows = vec![row("checkout", "checkout", RowVerdict::Pass)];
+        pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
+        assert_eq!(pack.coverage[0].rows, ["checkout"]);
+        let gate = pack.derive_gate();
+        assert_eq!((gate.verdict, gate.owed[0].subject.as_str()), (GateVerdict::Owed, "PR #13"));
+        let mut manual = row("promo-manual", "promo", RowVerdict::Pass);
+        manual.covers_prs = vec![13];
+        pack.rows.push(manual);
+        pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
+        assert_eq!(pack.derive_gate().verdict, GateVerdict::Clean);
+
+        // Seal and load: media, flag snapshot, gate.
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::create_dir_all(dir.join("media")).unwrap();
+        std::fs::write(dir.join("media/checkout.png"), b"frame").unwrap();
+        pack.add_media(dir, "media/checkout.png").unwrap();
+        pack.rows[0].frames = vec!["media/checkout.png".into()];
+        pack.flags = Some(flags::FlagSnapshot {
+            env: "staging".into(),
+            sha: head.clone(),
+            values: [("post_audit.audio_evidence.enabled".to_string(), serde_json::json!(true))].into(),
+        });
+        pack.seal(dir).unwrap();
+        assert_eq!(Pack::load(dir).unwrap(), pack);
+        assert!(pack.add_media(dir, "../escape.png").is_err());
+
+        let sealed = std::fs::read_to_string(dir.join(PACK_FILE)).unwrap();
+        std::fs::write(dir.join(PACK_FILE), sealed.replace("\"PASS\"", "\"FAIL\", \"reason\": \"x\"")).unwrap();
+        assert!(matches!(Pack::load(dir), Err(PackError::Gate { .. })), "a stored gate its rows don't derive");
+        std::fs::write(dir.join(PACK_FILE), &sealed).unwrap();
+        std::fs::write(dir.join("media/checkout.png"), b"edited").unwrap();
+        assert!(matches!(Pack::load(dir), Err(PackError::Media(_))));
+        std::fs::write(dir.join("media/checkout.png"), b"frame").unwrap();
+
+        let mut leaky = pack.clone();
+        leaky.flags.as_mut().unwrap().values.insert("api.key".into(), serde_json::json!("sk_live_abcdefghijklmnop"));
+        assert!(matches!(leaky.seal(dir), Err(PackError::Secret(_))));
+        assert_eq!(Pack::load(dir).unwrap(), pack, "a refused seal leaves the sealed pack");
+    }
+
+    /// Pack media for people: a Violet bundle within the size limit (through a
+    /// fake transcoder and a fake Violet), one PR comment edited in place, and
+    /// retention that deletes only old files inside the pack's own media dir.
+    #[test]
+    fn pack_media() {
+        use crate::artifacts::slack::{PostError, PostOptions, VioletPoster};
+        use media::{Transcoder, post_pack, prune_media, slack_bundle};
+        use pack::Pack;
+        use std::sync::Mutex;
+
+        struct FakeTranscoder;
+        impl Transcoder for FakeTranscoder {
+            fn transcode(&self, input: &Path, output: &Path, max: u64) -> Result<(), String> {
+                let size = if input.ends_with("fits.mp4") { max / 2 } else { max + 1 };
+                std::fs::write(output, vec![b'v'; size as usize]).map_err(|e| e.to_string())
+            }
+        }
+        let release = tempfile::tempdir().unwrap();
+        let dir = release.path().join("a".repeat(40));
+        std::fs::create_dir_all(dir.join("media")).unwrap();
+        let mut pack = Pack::new("cassy", &"a".repeat(40), Vec::new());
+        let limit = 64;
+        for (name, size) in [("frame.png", 10), ("fits.mp4", 100), ("huge.mp4", 100), ("trace.zip", 100)] {
+            std::fs::write(dir.join("media").join(name), vec![b'x'; size]).unwrap();
+            pack.add_media(&dir, &format!("media/{name}")).unwrap();
+        }
+        let mut walked = row("checkout", "checkout", verdict::RowVerdict::Pass);
+        walked.frames = vec!["media/frame.png".into()];
+        pack.rows.push(walked);
+        pack.seal(&dir).unwrap();
+        let bundle = slack_bundle(&dir, limit, &FakeTranscoder).unwrap();
+        assert!(bundle.files.iter().all(|f| f.bytes <= limit), "{bundle:?}");
+        let sources: Vec<&str> = bundle.files.iter().map(|f| f.source.as_str()).collect();
+        assert_eq!(sources, ["pack.json", "media/frame.png", "media/fits.mp4 (transcoded)"]);
+        let local: Vec<&str> = bundle.local_only.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(local, ["media/huge.mp4", "media/trace.zip"]);
+
+        // Violet is a fake; only the Slack upload URL is a loopback double.
+        struct FakeViolet {
+            upload: String,
+            calls: Mutex<Vec<serde_json::Value>>,
+        }
+        impl VioletPoster for FakeViolet {
+            fn violet_post(
+                &self,
+                args: serde_json::Value,
+            ) -> impl std::future::Future<Output = Result<serde_json::Value, PostError>> + Send {
+                let n = self.calls.lock().unwrap().len();
+                self.calls.lock().unwrap().push(args.clone());
+                let reply = if args["step"] == "begin" {
+                    serde_json::json!({"ok": true, "upload_url": self.upload, "file_id": format!("F{n}")})
+                } else {
+                    serde_json::json!({"ok": true,
+                        "file": {"file_id": args["file_id"], "size_bytes": args["size_bytes"], "sha256": args["sha256"]},
+                        "message": {"message_id": format!("m{n}"), "permalink": "https://slack.test/p"}})
+                };
+                async move { Ok(reply) }
+            }
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let receipts = runtime.block_on(async {
+            let slack = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200))
+                .mount(&slack)
+                .await;
+            let violet = FakeViolet { upload: format!("{}/upload", slack.uri()), calls: Mutex::default() };
+            let options = PostOptions { channel: "qa".into(), ..Default::default() };
+            let receipts = post_pack(&violet, &bundle, "gate OWED", &options).await.unwrap();
+            let calls = violet.calls.lock().unwrap().clone();
+            assert_eq!(calls[0]["initial_comment"], "gate OWED");
+            assert!(calls[2..].iter().all(|call| call["reply_to"] == "m1"), "{calls:?}");
+            receipts
+        });
+        assert_eq!(receipts.len(), bundle.files.len());
+
+        // One PR comment, edited in place.
+        struct FakeComments(Mutex<Vec<(u64, String)>>);
+        impl comment::PrComments for FakeComments {
+            fn list(&self, _: &str, _: u64) -> Result<Vec<(u64, String)>, String> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn create(&self, _: &str, _: u64, body: &str) -> Result<u64, String> {
+                let mut comments = self.0.lock().unwrap();
+                comments.push((comments.len() as u64 + 1, body.into()));
+                Ok(comments.len() as u64)
+            }
+            fn update(&self, _: &str, id: u64, body: &str) -> Result<(), String> {
+                self.0.lock().unwrap().iter_mut().find(|c| c.0 == id).ok_or("no comment")?.1 = body.into();
+                Ok(())
+            }
+        }
+        let github = FakeComments(Mutex::new(vec![(1, "LGTM".into())]));
+        let first = comment::publish_comment(&github, "acme/app", 7, &pack).unwrap();
+        pack.rows[0].verdict = verdict::RowVerdict::Fail { reason: "total".into() };
+        pack.gate = pack.derive_gate();
+        assert_eq!(comment::publish_comment(&github, "acme/app", 7, &pack).unwrap(), first);
+        let comments = github.0.lock().unwrap().clone();
+        assert_eq!(comments.len(), 2);
+        assert!(comments[1].1.contains("release gate: FAILED"), "{}", comments[1].1);
+
+        // Retention touches only regular files under each pack's media dir.
+        let outside = tempfile::tempdir().unwrap();
+        let kept = outside.path().join("kept.png");
+        std::fs::write(&kept, b"x").unwrap();
+        std::os::unix::fs::symlink(&kept, dir.join("media/link.png")).unwrap();
+        assert!(prune_media(release.path(), 30, chrono::Utc::now()).is_empty(), "nothing is 30 days old yet");
+        let later = chrono::Utc::now() + chrono::Duration::days(31);
+        let deleted = prune_media(release.path(), 30, later);
+        assert!(deleted.iter().any(|p| p.ends_with("media/frame.png")), "{deleted:?}");
+        assert!(kept.exists() && dir.join("media/link.png").symlink_metadata().is_ok());
+        assert!(dir.join("pack.json").exists());
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

@@ -246,6 +246,34 @@ pub async fn post_verified(
     bytes: Vec<u8>,
     options: &PostOptions,
 ) -> Result<PostReceipt, PostError> {
+    let artifact = &view.artifact;
+    let file = UploadFile {
+        id: &artifact.id,
+        name: &artifact.name,
+        size_bytes: artifact.size_bytes,
+        sha256: &artifact.sha256,
+    };
+    post_bytes(violet, file, bytes, options).await
+}
+
+/// What Violet is told about bytes Cassy has already verified: a published
+/// artifact, or a release-gate pack file checked against the pack digest.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadFile<'a> {
+    /// Recorded in the receipt: an `art-…` id or a pack media path.
+    pub id: &'a str,
+    pub name: &'a str,
+    pub size_bytes: u64,
+    pub sha256: &'a str,
+}
+
+/// [`post_verified`] for bytes that are not a Cloud artifact.
+pub async fn post_bytes(
+    violet: &(impl VioletPoster + Sync),
+    artifact: UploadFile<'_>,
+    bytes: Vec<u8>,
+    options: &PostOptions,
+) -> Result<PostReceipt, PostError> {
     let channel = options.channel.trim();
     if channel.is_empty() {
         return Err(PostError::new(
@@ -253,7 +281,6 @@ pub async fn post_verified(
             "artifact post requires 'channel', a Slack channel name or id",
         ));
     }
-    let artifact = &view.artifact;
     let sha256 = artifact.sha256.to_ascii_lowercase();
     let mut metadata = json!({
         "channel": channel,
@@ -293,7 +320,7 @@ pub async fn post_verified(
         let complete = envelope(violet.violet_post(metadata).await?)?;
         receipt(
             &complete,
-            artifact.id.clone(),
+            artifact.id.to_owned(),
             &file_id,
             artifact.size_bytes,
             &sha256,

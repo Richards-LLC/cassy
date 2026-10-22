@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.72.0] - 2026-10-22
+
 ### Fixed — task claims stay exclusive across upgrades
 
 - **Persistent claim fences** — Was: released 3.71 had no per-task claim fence, while unreleased v57 development builds introduced fences but deleted settled files, allowing callers to lock different files for the same task. → Now: settlement retains the shared file and releases only its OS lock. Small per-task files intentionally remain until offline GC can prove quiescence.

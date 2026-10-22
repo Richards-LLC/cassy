@@ -298,7 +298,11 @@ A row recorded by hand carries `manual_minutes`. At seal the pack records
 
 The PR comment and `cas qa release-gate status` show the total and the three
 costliest journeys, for example:
-`75 manual minutes over 3 rows; top: `checkout` 45 min (owner qa-team, task cas-1234), `promo` 30 min (unowned)`.
+
+```text
+75 manual minutes over 3 rows; top: `checkout` 45 min (owner qa-team, task cas-1234), `promo` 30 min (unowned)
+```
+
 This is debt only and never changes a row or gate verdict. The registry side
 is [hand-walk debt](journey-registry.md#hand-walk-debt).
 

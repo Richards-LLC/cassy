@@ -1273,6 +1273,11 @@ impl CasCore {
                 }
             }
         }
+        if super::qa_evidence_gate::approved_receipt_bundle(
+            &self.cas_root, task, repo, target_branch, commit_receipt,
+        ).is_some() {
+            return QaCloseGate::Clear;
+        }
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
                 repo,

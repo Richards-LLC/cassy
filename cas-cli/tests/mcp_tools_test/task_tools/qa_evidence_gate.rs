@@ -211,10 +211,14 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         let cas_dir = fx.repo.join(".cas");
         let config = cas_dir.join("config.toml");
         let body = std::fs::read_to_string(&config).unwrap();
-        std::fs::write(&config, format!(
-            "{}\n[project]\ncanonical_id = \"receipt-fixture\"\n",
-            body.replace("independent_pass = false", "independent_pass = true"),
-        )).unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[project]\ncanonical_id = \"receipt-fixture\"\n",
+                body.replace("independent_pass = false", "independent_pass = true"),
+            ),
+        )
+        .unwrap();
         std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
         // Local managed setup is deliberately absent from the landed history.
         let base = commit_file(&fx.repo, ".claude/settings.json", "{}\n");
@@ -241,21 +245,43 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         let ledger = round.join("LEDGER.md");
         std::fs::write(&ledger, "# Independent real-build QA\n").unwrap();
         let bundle = round.join("bundle.json");
-        std::fs::write(&bundle, serde_json::json!({
-            "schema": 1, "producer": "independent-qa", "task_id": TASK,
-            "head_sha": reviewed,
-        }).to_string()).unwrap();
+        std::fs::write(
+            &bundle,
+            serde_json::json!({
+                "schema": 1, "producer": "independent-qa", "task_id": TASK,
+                "head_sha": reviewed,
+            })
+            .to_string(),
+        )
+        .unwrap();
         task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
         tasks.update(&task).unwrap();
         let now = chrono::Utc::now();
-        cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
-            task_id: TASK, implementer_agent_id: "test-agent", branch: "factory/test-agent",
-            bound_head: &reviewed, deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
-        }, now).unwrap();
+        cas_store::open_qa_pass(
+            &cas_dir,
+            &cas_store::NewQaPass {
+                task_id: TASK,
+                implementer_agent_id: "test-agent",
+                branch: "factory/test-agent",
+                bound_head: &reviewed,
+                deadline_at: now + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
         cas_store::claim_qa_pass(&cas_dir, TASK, "independent-reviewer", now).unwrap();
-        cas_store::resolve_qa_pass(&cas_dir, TASK, "independent-reviewer",
-            cas::types::QaVerdict::Approved, "Reviewed delivery", None,
-            ledger.to_str().unwrap(), now).unwrap();
+        cas_store::resolve_qa_pass(
+            &cas_dir,
+            TASK,
+            "independent-reviewer",
+            cas::types::QaVerdict::Approved,
+            "Reviewed delivery",
+            None,
+            ledger.to_str().unwrap(),
+            now,
+        )
+        .unwrap();
         git(&fx.repo, &["checkout", "-q", "main"]);
         commit_file(&fx.repo, "unrelated.txt", "another task\n");
         git(&fx.repo, &["cherry-pick", &format!("{first}^..{reviewed}")]);
@@ -277,7 +303,10 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
         };
         if changed_diff {
             assert_ne!(fx.status(), TaskStatus::Closed, "{output}");
-            assert!(output.contains("QA evidence") || output.contains("INDEPENDENT QA"), "{output}");
+            assert!(
+                output.contains("QA evidence") || output.contains("INDEPENDENT QA"),
+                "{output}"
+            );
         } else {
             assert_eq!(fx.status(), TaskStatus::Closed, "{output}");
             assert!(fx.notes().contains(bundle.to_str().unwrap()));

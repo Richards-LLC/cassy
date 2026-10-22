@@ -830,8 +830,15 @@ fn handle_pre_tool_use_inner(
                     && super::docs_freshness::git(&measurement.root,
                         &["merge-base", "--is-ancestor", &measurement.reference, "HEAD"]).is_none()
                 {
-                    format!("Sync this checkout: `git merge {0}` or `git rebase {0}`.\n",
-                        measurement.reference)
+                    match crate::worktree::GitOperations::git_remedies([
+                        &["merge", &measurement.reference],
+                        &["rebase", &measurement.reference],
+                    ]) {
+                        Ok([merge, rebase]) => {
+                            format!("Sync this checkout: `{merge}` or `{rebase}`.\n")
+                        }
+                        Err(refusal) => format!("{refusal}\n"),
+                    }
                 } else {
                     String::new()
                 };
@@ -2397,11 +2404,21 @@ fn check_worker_git_commit_scope_at_target(
         if !inside_worktree {
             let worker_name =
                 std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
+            let lane = format!("factory/{worker_name}");
+            let [change_dir, switch] = match crate::worktree::GitOperations::shell_remedies([
+                ("cd", &[clone_path][..]),
+                ("git", &["switch", &lane]),
+            ]) {
+                Ok(commands) => commands,
+                Err(refusal) => return Some(refusal),
+            };
+            let cwd = crate::worktree::GitOperations::visible_git_label(&cwd);
+            let clone_path = crate::worktree::GitOperations::visible_git_label(clone_path);
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: Your current directory ({cwd}) is outside \
                 your assigned worktree ({clone_path}).\n\n\
                 Workers MUST commit inside their worktree. Switch first:\n  \
-                cd {clone_path}\n  git switch factory/{worker_name}\n\n\
+                {change_dir}\n  {switch}\n\n\
                 Then retry your commit from there.\n\n\
                 Note: --no-verify does NOT bypass this guard (it only skips git hooks,\n\
                 not the Claude Code PreToolUse harness)."
@@ -2422,10 +2439,16 @@ fn check_worker_git_commit_scope_at_target(
         .or_else(|| get_branch_at_rebase_git_target(target))
     {
         None => {
+            let lane = format!("factory/{worker_name}");
+            let [switch] = match crate::worktree::GitOperations::git_remedies([&["switch", &lane]])
+            {
+                Ok(commands) => commands,
+                Err(refusal) => return Some(refusal),
+            };
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: HEAD is detached — cannot determine branch.\n\n\
                 Commits require a named branch. Switch to your work branch first:\n  \
-                git switch factory/{worker_name}   # or your feature/fix branch\n\n\
+                {switch}   # or your feature/fix branch\n\n\
                 Your staged changes are preserved — only the branch matters.\n\n\
                 Note: --no-verify does NOT bypass this guard (it only skips git hooks,\n\
                 not the Claude Code PreToolUse harness)."
@@ -2440,10 +2463,37 @@ fn check_worker_git_commit_scope_at_target(
             // non-isolated case the remedy must preserve shared HEAD (own
             // worktree), and the in-place fallback must say: restore trunk
             // after pushing.
+            let lane = format!("factory/{worker_name}");
+            let path = format!("../factory-{worker_name}");
+            let [
+                switch,
+                commit,
+                add,
+                change_dir,
+                create,
+                push,
+                trunk,
+                trunk_push,
+                ff,
+            ] = match crate::worktree::GitOperations::shell_remedies([
+                ("git", &["switch", &lane][..]),
+                ("git", &["commit", "..."]),
+                ("git", &["worktree", "add", &path, "-b", &lane]),
+                ("cd", &[&path]),
+                ("git", &["switch", "-c", &lane]),
+                ("git", &["push", "-u", "origin", &lane]),
+                ("git", &["switch", &branch]),
+                ("git", &["push", "origin", &branch]),
+                ("git", &["merge", "--ff-only"]),
+            ]) {
+                Ok(commands) => commands,
+                Err(refusal) => return Some(refusal),
+            };
+            let branch = crate::worktree::GitOperations::visible_git_label(&branch);
             let remedy = if is_isolated {
                 format!(
                     "Switch to your work branch and commit there:\n  \
-                    git switch factory/{worker_name}   # or: git switch <your-feature-branch>\n  \
+                    {switch}   # or your feature branch\n  \
                     git commit ...\n"
                 )
             } else {
@@ -2453,13 +2503,13 @@ fn check_worker_git_commit_scope_at_target(
                     Its HEAD is read by every other agent here and by the supervisor's \
                     merge/tag sequence — do NOT leave it pointing at a factory branch.\n\n\
                     PREFERRED — keep shared HEAD on '{branch}' and work in your own worktree:\n  \
-                    git worktree add ../factory-{worker_name} -b factory/{worker_name}\n  \
-                    cd ../factory-{worker_name}   # commit and push from there\n\n\
+                    {add}\n  \
+                    {change_dir}   # commit and push from there\n\n\
                     FALLBACK — if you must branch in place, RESTORE TRUNK AFTER PUSH:\n  \
-                    git switch -c factory/{worker_name}\n  \
-                    git commit ... && git push -u origin factory/{worker_name}\n  \
-                    git switch {branch}   # MANDATORY: a shared checkout left on factory/* \
-                    makes `git merge --ff-only` and `git push origin {branch}` silently \
+                    {create}\n  \
+                    {commit} && {push}\n  \
+                    {trunk}   # MANDATORY: a shared checkout left on factory/* \
+                    makes `{ff}` and `{trunk_push}` silently \
                     misfire (GH #120)\n"
                 )
             };

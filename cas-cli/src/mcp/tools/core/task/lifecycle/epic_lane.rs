@@ -272,6 +272,13 @@ pub(crate) fn stale_base_note(
         return String::new();
     };
     let short = &tip[..tip.len().min(12)];
+    let [merge] =
+        match crate::worktree::GitOperations::git_remedies([&["merge", "--no-ff", &source]]) {
+            Ok(commands) => commands,
+            Err(refusal) => return format!("\nSTALE BASE: {refusal}\n"),
+        };
+    let branch = crate::worktree::GitOperations::visible_git_label(branch);
+    let predecessor_branch = crate::worktree::GitOperations::visible_git_label(predecessor_branch);
     let probe = std::process::Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["merge-tree", "--write-tree", "--name-only", "--no-messages", &successor, &tip])
@@ -281,7 +288,7 @@ pub(crate) fn stale_base_note(
         Ok(output) if output.status.code() == Some(0) => format!(
             "\n⚠️ STALE BASE (cas-fd4c): stacked on open epic {predecessor_id} ({predecessor_branch}), \
              which has advanced to {short}; {branch} lacks {lacking} of its commit(s). It merges \
-             cleanly: run `git merge --no-ff {source}` on {branch} and push, so work here builds \
+             cleanly: run `{merge}` on {branch} and push, so work here builds \
              on it.\n"
         ),
         Ok(output) if output.status.code() == Some(1) => {

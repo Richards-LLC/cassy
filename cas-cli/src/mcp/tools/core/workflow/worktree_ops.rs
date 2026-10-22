@@ -1104,6 +1104,25 @@ pub(crate) fn describe_target_push_state(
 ) -> String {
     use crate::worktree::git::TargetPushOutcome;
 
+    let remote_branch = format!("origin/{target_branch}");
+    let [push, fetch, merge] = if matches!(
+        outcome,
+        TargetPushOutcome::ProtectedDefaultBranch { .. }
+            | TargetPushOutcome::NonFastForward { .. }
+            | TargetPushOutcome::NotPushed { .. }
+    ) {
+        match crate::worktree::GitOperations::git_remedies([
+            &["push", "origin", target_branch],
+            &["fetch", "origin", target_branch],
+            &["merge", &remote_branch],
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return refusal,
+        }
+    } else {
+        Default::default()
+    };
+    let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
     match outcome {
         // Local-only repository: there is no remote ref for anything
         // downstream to disagree with, so the local ref IS authoritative.
@@ -1135,7 +1154,7 @@ pub(crate) fn describe_target_push_state(
             format!(
                 "\n\nPROTECTED_DEFAULT_BRANCH_REQUIRES_PR: GitHub rules rejected the direct \
                  push of {target_branch} at {} (origin/{target_branch}: {remote}). Retry the \
-                 landing through a pull request; repeating `git push origin {target_branch}` \
+                 landing through a pull request; repeating `{push}` \
                  cannot satisfy the ruleset.\nGitHub evidence: {reason}",
                 short_sha(sha)
             )
@@ -1154,10 +1173,9 @@ pub(crate) fn describe_target_push_state(
                  Local {target_branch} is at {}; origin/{target_branch} is at {remote} and is \
                  AHEAD — it carries commits this merge does not contain, which is why the push \
                  was rejected.\n\
-                 `git push origin {target_branch}` CANNOT succeed until the two are \
+                 `{push}` CANNOT succeed until the two are \
                  reconciled.\n\
-                 REQUIRED NEXT STEP: git fetch origin {target_branch} && git merge \
-                 origin/{target_branch}   (from a checkout on {target_branch}), then re-run \
+                 REQUIRED NEXT STEP: {fetch} && {merge}   (from a checkout on {target_branch}), then re-run \
                  worktree_merge or push. Never force-push {target_branch}.\n\
                  git's rejection: {reason}",
                 short_sha(sha)
@@ -1181,7 +1199,7 @@ pub(crate) fn describe_target_push_state(
                  origin/{target_branch}, and other checkouts only ever see origin. Until this \
                  is published, closes for work delivered by this merge can be rejected with \
                  \"commit(s) from this task not on {target_branch}\".\n\
-                 REQUIRED NEXT STEP: git push origin {target_branch}\n\
+                 REQUIRED NEXT STEP: {push}\n\
                  Automatic push did not land: {reason}"
             )
         }
@@ -1209,6 +1227,15 @@ fn target_diverged_error(
     ahead: u32,
     behind: u32,
 ) -> String {
+    let remote_branch = format!("origin/{target}");
+    let [fetch, merge] = match crate::worktree::GitOperations::git_remedies([
+        &["fetch", "origin", target],
+        &["merge", &remote_branch],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
+    let target = crate::worktree::GitOperations::visible_git_label(target);
     format!(
         "{ci_prefix}TARGET_DIVERGED_FROM_ORIGIN: local {target} is at {} with \
          {ahead} commit(s) origin does not have, while origin/{target} is at {} \
@@ -1216,8 +1243,8 @@ fn target_diverged_error(
          A merge now would produce a push that origin rejects, leaving an \
          unpublished merge commit on your local {target}.\n\n\
          Reconcile first, from a checkout on {target}:\n\
-         1. `git fetch origin {target}`\n\
-         2. `git merge origin/{target}`   (resolve any conflicts)\n\
+         1. `{fetch}`\n\
+         2. `{merge}`   (resolve any conflicts)\n\
          3. re-run this worktree_merge\n\n\
          Never force-push {target}: the {behind} remote commit(s) belong to \
          someone else's landed work.",
@@ -1312,22 +1339,61 @@ fn protected_default_branch_pr_error(
         return None;
     };
     let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
-    let task_flag = task_id.map(|id| format!(" --task {id}")).unwrap_or_default();
 
+    let remote_branch = format!("origin/{target_branch}");
+    let mut body_args = vec!["worktree", "pr-body"];
+    if let Some(id) = task_id {
+        body_args.extend(["--task", id]);
+    }
+    body_args.extend([
+        "--base",
+        &remote_branch,
+        "--head",
+        source_branch,
+        "--output",
+        "pr-body.md",
+    ]);
+    let title = format!("Review {source_branch}");
+    let [repeat_push, push, body, create, fetch] =
+        match crate::worktree::GitOperations::shell_remedies([
+            ("git", &["push", "origin", target_branch][..]),
+            ("git", &["push", "-u", "origin", source_branch]),
+            ("cas", body_args.as_slice()),
+            (
+                "gh",
+                &[
+                    "pr",
+                    "create",
+                    "--base",
+                    target_branch,
+                    "--head",
+                    source_branch,
+                    "--title",
+                    &title,
+                    "--body-file",
+                    "pr-body.md",
+                ],
+            ),
+            ("git", &["fetch", "origin", target_branch]),
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return Some(refusal),
+        };
+    let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
     Some(format!(
         "PROTECTED_DEFAULT_BRANCH_REQUIRES_PR\n\n\
          The local merge completed, but GitHub rules rejected the direct push to the \
          protected default branch `{target_branch}`. Local {target_branch}: {}; \
-         origin/{target_branch}: {remote}. Repeating `git push origin {target_branch}` \
+         origin/{target_branch}: {remote}. Repeating `{repeat_push}` \
          cannot satisfy this ruleset. Use the source branch for the PR route.\n\n\
          Run these commands from the repository root:\n\
-         1. `git push -u origin {source_branch}`\n\
-         2. `cas worktree pr-body{task_flag} --base origin/{target_branch} --head {source_branch} --output pr-body.md`\n\
-         3. `PR_URL=$(gh pr create --base {target_branch} --head {source_branch} --title \"Review {source_branch}\" --body-file pr-body.md)`\n\
+         1. `{push}`\n\
+         2. `{body}`\n\
+         3. `PR_URL=$({create})`\n\
          4. `gh pr view \"$PR_URL\" --json url,number,statusCheckRollup`\n\
          5. Surface that PR URL and required-check status to the supervisor.\n\
          6. After the required checks are green: `gh pr merge \"$PR_URL\" --merge`\n\
-         7. `git fetch origin {target_branch}`, then retry this `worktree_merge` so Cassy \
+         7. `{fetch}`, then retry this `worktree_merge` so Cassy \
          can reconcile and close the delivery.\n\n\
          GitHub evidence:\n{reason}",
         short_sha(sha)
@@ -1345,6 +1411,27 @@ fn worktree_merge_mcp_error(
 ) -> McpError {
     use crate::worktree::{GitError, WorktreeError};
 
+    let [abort, add, merge, remove] = match crate::worktree::GitOperations::git_remedies([
+        &["merge", "--abort"],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "/tmp/cas-merge",
+            target_branch,
+        ],
+        &["merge", source_branch],
+        &["worktree", "remove", "/tmp/cas-merge"],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => {
+            return McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::Owned(refusal),
+                data: None,
+            };
+        }
+    };
     let message = match error {
         WorktreeError::Git(GitError::MergeConflictPaths(paths)) => format!(
             "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}. \
@@ -1371,7 +1458,7 @@ fn worktree_merge_mcp_error(
             "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Resolve and commit the \
-             existing merge, or run `git merge --abort` in the shared target checkout, \
+             existing merge, or run `{abort}` in the shared target checkout, \
              before retrying the merge into {target_branch}."
         ),
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
@@ -1385,9 +1472,8 @@ fn worktree_merge_mcp_error(
              1. Commit, stash, or move just the listed paths, then retry the merge into \
              {target_branch}.\n\
              2. Or merge out of band without touching the shared checkout: \
-             `git worktree add --detach /tmp/cas-merge {target_branch}`, merge \
-             {source_branch} there, then move the branch ref and \
-             `git worktree remove /tmp/cas-merge`.\n\n\
+             `{add}`, run `{merge}` there, then move the branch ref and \
+             `{remove}`.\n\n\
              `force=true` does not bypass shared-checkout residue."
         ),
         WorktreeError::Git(GitError::TargetTipChanged {

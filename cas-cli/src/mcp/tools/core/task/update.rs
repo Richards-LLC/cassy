@@ -553,8 +553,13 @@ impl CasCore {
                     if factory_config.block_stale_assignment
                         && behind_count >= factory_config.stale_threshold_commits
                     {
+                        let [rebase] =
+                            crate::worktree::GitOperations::git_remedies([&["rebase", &branch]])?;
+                        let branch = crate::worktree::GitOperations::visible_git_label(&branch);
+                        let worker_name =
+                            crate::worktree::GitOperations::visible_git_label(worker_name);
                         return Err(format!(
-                            "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `git rebase {branch}`",
+                            "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
                             factory_config.stale_threshold_commits,
                         ));
                     }

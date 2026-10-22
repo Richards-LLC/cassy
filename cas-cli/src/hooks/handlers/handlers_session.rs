@@ -1316,9 +1316,15 @@ pub(crate) fn build_worker_worktree_assertion(cwd: &str, context: String) -> Str
     let cwd_path = std::path::Path::new(cwd);
     let worktree_path = std::path::Path::new(&clone_path);
     if !cwd_path.starts_with(worktree_path) {
+        let change_dir =
+            crate::worktree::GitOperations::shell_remedies([("cd", &[clone_path.as_str()][..])])
+                .map(|[command]| command)
+                .unwrap_or_else(|refusal| refusal);
+        let cwd = crate::worktree::GitOperations::visible_git_label(cwd);
+        let clone_path = crate::worktree::GitOperations::visible_git_label(&clone_path);
         warnings.push(format!(
             "⚠️  CWD MISMATCH: Session cwd ({cwd}) is outside your assigned worktree \
-            ({clone_path}).\n   Run: cd {clone_path}"
+            ({clone_path}).\n   Run: {change_dir}"
         ));
     }
 
@@ -1332,18 +1338,24 @@ pub(crate) fn build_worker_worktree_assertion(cwd: &str, context: String) -> Str
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let lane = format!("factory/{worker_name}");
+    let switch =
+        crate::worktree::GitOperations::git_remedies([&["switch", &lane]]).map(|[switch]| switch);
     match branch_result {
         None => {
+            let switch = switch.clone().unwrap_or_else(|refusal| refusal);
             warnings.push(format!(
                 "⚠️  DETACHED HEAD: Cannot determine current branch — DO NOT commit here!\n   \
-                Switch first: git switch factory/{worker_name}"
+                Switch first: {switch}"
             ));
         }
         Some(ref branch) if !branch.starts_with("factory/") => {
+            let switch = switch.unwrap_or_else(|refusal| refusal);
+            let branch = crate::worktree::GitOperations::visible_git_label(branch);
             warnings.push(format!(
                 "⚠️  WRONG BRANCH: HEAD is on '{branch}' — DO NOT commit here!\n   \
                 Workers may only commit on factory/<name>. Switch first:\n   \
-                git switch factory/{worker_name}"
+                {switch}"
             ));
         }
         Some(_) => {} // factory/* — allowed

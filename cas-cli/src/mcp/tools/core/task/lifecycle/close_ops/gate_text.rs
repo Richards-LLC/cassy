@@ -108,11 +108,19 @@ pub(crate) fn commit_receipt_recovery_steps(
     parent_branch: &str,
     caller_prefix: &str,
 ) -> String {
+    let [log, show, ancestry] = match crate::worktree::GitOperations::git_remedies([
+        &["log", "--oneline", "--all"],
+        &["show", "--stat", "<sha>"],
+        &["merge-base", "--is-ancestor", "<sha>", parent_branch],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
         "find the SHA of the worker task commit OR the merge commit that carried this \
-         task's work (never an unrelated historical commit; `git log --oneline --all` \
-         lists candidates), verify it with `git show --stat <sha>` and \
-         `git merge-base --is-ancestor <sha> {parent_branch}`, then retry \
+         task's work (never an unrelated historical commit; `{log}` \
+         lists candidates), verify it with `{show}` and \
+         `{ancestry}`, then retry \
          `{caller_prefix}task action=close id={task_id} commit_receipt=<sha>` \
          (full SHA or an unambiguous abbreviation)."
     )
@@ -452,8 +460,8 @@ mod tests {
             "worker task commit OR the merge commit",
             "never an unrelated historical commit",
             "git log --oneline --all",
-            "git show --stat <sha>",
-            "git merge-base --is-ancestor <sha> epic/x",
+            "git show --stat '<sha>'",
+            "git merge-base --is-ancestor '<sha>' epic/x",
             "`mcp__cs__task action=close id=cas-r1 commit_receipt=<sha>`",
             "unambiguous abbreviation",
         ] {

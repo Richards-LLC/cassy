@@ -1378,6 +1378,14 @@ pub fn qa_task_description(
             delivery.id, ledger_dir.display(),
         );
     }
+    let [baseline] = match crate::worktree::GitOperations::git_remedies([&[
+        "merge-base",
+        parent_branch,
+        &pass.bound_head,
+    ]]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {
@@ -1405,7 +1413,7 @@ pub fn qa_task_description(
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
          screenshots. When a check fails, repeat it on the base build \
-         (git merge-base {parent} {head}) before you count it: a failure the base shares is \
+         ({baseline}) before you count it: a failure the base shares is \
          pre-existing. For visual QA, run the base build over the same pages into \
          visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
          files.visual_qa_baseline_json; only findings the base lacks count. Every finding \
@@ -1431,9 +1439,9 @@ pub fn qa_task_description(
         round = pass.round,
         implementer = pass.implementer_agent_id,
         title = delivery.title.trim(),
-        branch = pass.branch,
+        branch = crate::worktree::GitOperations::visible_git_label(&pass.branch),
         head = pass.bound_head,
-        parent = parent_branch,
+        parent = crate::worktree::GitOperations::visible_git_label(parent_branch),
         reasons = reasons.join(", "),
         ledger = ledger_dir.display(),
         deadline = pass.deadline_at.to_rfc3339(),

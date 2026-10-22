@@ -4307,14 +4307,20 @@ fn github_origin_check(project: &Path) -> Option<Check> {
     let binary = crate::github_repo::gh_binary();
     Some(
         match crate::github_repo::resolve_slug(&origin, project, &binary, timeout) {
-            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => Check::new(
-                "GitHub origin",
-                CheckStatus::Warning,
-                format!(
-                    "origin repository moved: {} -> {}; CI uses the canonical repository. Run `git remote set-url origin https://github.com/{}.git`",
-                    repo.origin, repo.canonical, repo.canonical
-                ),
-            ),
+            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => {
+                Check::new("GitHub origin", CheckStatus::Warning, {
+                    let url = format!("https://github.com/{}.git", repo.canonical);
+                    let remedy = crate::worktree::GitOperations::git_remedies([&[
+                        "remote", "set-url", "origin", &url,
+                    ]])
+                    .map(|[command]| command)
+                    .unwrap_or_else(|refusal| refusal);
+                    format!(
+                        "origin repository moved: {} -> {}; CI uses the canonical repository. Run:\n{remedy}",
+                        repo.origin, repo.canonical
+                    )
+                })
+            }
             Ok(repo) => Check::new(
                 "GitHub origin",
                 CheckStatus::Ok,

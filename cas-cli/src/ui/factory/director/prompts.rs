@@ -1064,17 +1064,25 @@ fn merge_alert_evidence_line(e: &MergeAlertEvidence, target: &str) -> String {
 }
 
 fn merge_alert_action_line(factory_branch: &str, target: &str, push_required: bool) -> String {
+    let factory_label = crate::worktree::GitOperations::visible_git_label(factory_branch);
+    let target_label = crate::worktree::GitOperations::visible_git_label(target);
     if push_required {
-        format!(
-            "2. Push required: the local {target} already contains {factory_branch}, \
-             but origin does not. Push {target} to origin; do not repeat the local merge."
-        )
-    } else {
-        format!(
-            "2. Merge {factory_branch} into {target} (FF preferred; else \
-             `git merge --no-ff {factory_branch}` on {target})"
-        )
+        return format!(
+            "2. Push required: the local {target_label} already contains {factory_label}, \
+             but origin does not. Push {target_label} to origin; do not repeat the local merge."
+        );
     }
+    // The checkout context is a ref too, even when only named in prose.
+    let [merge, _switch] = match crate::worktree::GitOperations::git_remedies([
+        &["merge", "--no-ff", factory_branch], &["switch", target],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
+    format!(
+        "2. Merge {factory_label} into {target_label} (FF preferred; else \
+         `{merge}` on {target_label})"
+    )
 }
 
 /// Build the released signal from the original tip and live target/task state.

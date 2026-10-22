@@ -270,6 +270,7 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let control_ref = branch.chars().any(char::is_control);
             if control_ref {
                 // pin: control-bearing refs require visible identity and manual action, never a command.
+                assert_eq!(error, include_str!("../../../../../../docs/design/cli/epic-control-ref.capture.txt").trim_end());
                 if !error.contains("contains control characters") || !error.contains("\\u{85}")
                     || error.lines().any(|line| line.starts_with("git "))
                     || error.chars().any(|c| c.is_control() && c != '\n')
@@ -312,6 +313,10 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                     .to_string();
             if !control_ref && normalized != expected {
                 failures.push(format!("diagnostic capture mismatch: {normalized:?}"));
+            }
+            if branch == "epic/{a,b}" {
+                // pin: the displayed quoted command comes from actual peer preparation.
+                assert_eq!(error.replace(&host, "soundwave"), include_str!("../../../../../../docs/design/cli/epic-brace-ref.capture.txt").trim_end());
             }
             if control_ref {
                 // The source operator may push by hand; the refusal prints no command.

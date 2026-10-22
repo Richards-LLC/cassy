@@ -988,6 +988,8 @@ fn ensure_local_spawn_parent(
     }
     let remote = format!("origin/{local}");
     let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
+        let parent_label = crate::worktree::GitOperations::visible_git_label(parent);
+        let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
         let [fetch] = match crate::worktree::GitOperations::git_remedies([
             &["fetch", "origin", local],
         ]) {
@@ -995,7 +997,7 @@ fn ensure_local_spawn_parent(
             Err(refusal) => return refusal,
         };
         format!(
-            "spawn base '{parent}' does not resolve locally or as '{remote}' after fetch{}; fetch and create a local branch from '{remote}' before retrying:\n{fetch}",
+            "spawn base '{parent_label}' does not resolve locally or as '{remote_label}' after fetch{}; fetch and create a local branch from '{remote_label}' before retrying:\n{fetch}",
             fetch_error
                 .map(|error| format!(" ({error})"))
                 .unwrap_or_default()
@@ -1004,8 +1006,10 @@ fn ensure_local_spawn_parent(
     git.create_branch_from(local, &remote).map_err(|error| {
         format!("could not create local spawn base '{local}' from '{remote}': {error}")
     })?;
+    let local_label = crate::worktree::GitOperations::visible_git_label(local);
+    let remote_label = crate::worktree::GitOperations::visible_git_label(&remote);
     Ok(Some(format!(
-        "SPAWN BASE MATERIALIZED: local '{local}' created from '{remote}' ({}) for worker checkout and merge-back.",
+        "SPAWN BASE MATERIALIZED: local '{local_label}' created from '{remote_label}' ({}) for worker checkout and merge-back.",
         &remote_sha[..remote_sha.len().min(12)]
     )))
 }

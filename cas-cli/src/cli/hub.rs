@@ -2038,7 +2038,16 @@ fn serve_foreground_logged(
         // machine-lock owner with no listener to diagnose or stop.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
-        let mut lock = paths.acquire_instance_lock()?;
+        let lock = paths.try_acquire_instance_lock()?;
+        if lock.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_STARTUP_LOCK_BARRIER",
+                "startup-lock-waiter",
+                "release-startup-lock",
+                std::process::id(),
+            )?;
+        }
+        let mut lock = lock.context("another cas hub instance already holds the machine lock")?;
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
             .or_else(|| paths.read_process_record().ok().and_then(|previous| {

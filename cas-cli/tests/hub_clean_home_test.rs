@@ -2377,6 +2377,73 @@ fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
 fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
     use cas::hub::HubRuntimePaths;
 
+    // cas-036b: a stop can acquire the machine lock between the launcher
+    // releasing it and the new foreground hub acquiring it. Force a real
+    // failed first acquisition, then finish cleanup before allowing retry.
+    {
+        let home = private_home();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let barrier = home.path().join("startup-lock-barrier");
+        fs::create_dir(&barrier).unwrap();
+        let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let mut command = cas_process_command(home.path(), bin.as_os_str());
+        let mut start = command
+            .env("CAS_TEST_HUB_LAUNCH_BARRIER", &barrier)
+            .env("CAS_TEST_HUB_STARTUP_LOCK_BARRIER", &barrier)
+            .args([
+                "--json", "hub", "--no-tailscale-serve", "start", "--port", "0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start hub at lock handoff barrier");
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        let launcher = loop {
+            let launcher = fs::read_dir(&barrier).unwrap().filter_map(Result::ok)
+                .find_map(|entry| entry.file_name().to_string_lossy()
+                    .strip_prefix("launcher-").and_then(|pid| pid.parse::<u32>().ok()));
+            if launcher.is_some() || Instant::now() >= deadline {
+                break launcher;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if launcher.is_none() {
+            let _ = fs::write(barrier.join("release-launchers"), b"release\n");
+            let _ = fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = fs::write(barrier.join("release-startup-lock"), b"release\n");
+            let output = start.wait_with_output().unwrap();
+            panic!("launcher did not reach lock handoff: {output:?}");
+        }
+        let launcher = launcher.unwrap();
+        let mut cleanup_lock = paths.acquire_instance_lock().unwrap();
+        cleanup_lock.set_phase("stopping").unwrap();
+        fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
+        let contention = barrier.join(format!("startup-lock-waiter-{launcher}"));
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        while !contention.exists() && start.try_wait().unwrap().is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(cleanup_lock);
+        fs::write(barrier.join("release-startup-lock"), b"release\n").unwrap();
+        fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+        let output = start.wait_with_output().unwrap();
+        assert!(contention.exists(), "hub did not attempt the contended lock: {output:?}");
+        assert!(output.status.success(), "hub abandoned a transient cleanup lock: {output:?}");
+        let started: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(started["pid"], launcher);
+        let status = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "status"]).output().unwrap();
+        let running: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(running["running"], true, "{running}");
+        assert_eq!(running["record"]["pid"], launcher, "{running}");
+        let stop = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "stop"]).output().unwrap();
+        assert!(stop.status.success());
+    }
+
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();

@@ -1685,6 +1685,25 @@ mod tests {
                         "status":"success", "result":"claimed", "lock":fresh,
                     }))
                 }).mount(&server).await;
+            // Starts now require a confirmed renewal rather than silently
+            // accepting the fixture's unmatched-route 404 as a claimed lock.
+            let renewed = held.clone();
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/api/agents/tasks/[^/]+/renew$"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let mut current = renewed.lock().unwrap();
+                    let Some(lock) = current.as_mut()
+                        .filter(|lock| lock["agent_id"] == body["agent_id"])
+                    else {
+                        return ResponseTemplate::new(404);
+                    };
+                    lock["renewal_count"] = serde_json::json!(lock["renewal_count"].as_u64().unwrap_or(0) + 1);
+                    lock["renewed_at"] = serde_json::json!(Utc::now());
+                    let seconds = body["duration_secs"].as_i64().unwrap_or(600).clamp(1, 3600);
+                    lock["expires_at"] = serde_json::json!(Utc::now() + chrono::Duration::seconds(seconds));
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"lock": lock}))
+                }).mount(&server).await;
             let claims = PeerClaims {
                 config: CloudConfig {
                     endpoint: server.uri(), token: Some("sandbox-token".into()),

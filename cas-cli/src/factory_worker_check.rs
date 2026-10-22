@@ -1803,6 +1803,48 @@ mod tests {
         assert!(!super::flock_held_on_inode(locks, 555), "a waiter does not hold the lock");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn worker_check_lane_refusal_reports_live_and_stale_owner() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(waiting)"]
+            .map(str::to_string);
+
+        let path = lane_lock_path(&root, &repo).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let lock = lock_file(&path).unwrap();
+        lock.lock_exclusive().unwrap();
+        let started = chrono::Utc::now() - chrono::Duration::minutes(3);
+        std::fs::write(&path, serde_json::json!({
+            "pid": std::process::id(),
+            "command": "cargo nextest run -p cas --lib -E test(waiting)",
+            "started_at": started.to_rfc3339(),
+        }).to_string()).unwrap();
+
+        let live = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(live.contains(&format!("pid {}", std::process::id())), "{live}");
+        assert!(live.contains("cargo nextest run -p cas --lib -E test(waiting)"), "{live}");
+        assert!(live.contains("started 3m ago"), "{live}");
+
+        std::fs::write(&path, serde_json::json!({
+            "pid": u32::MAX,
+            "command": "cargo nextest run -p cas --lib -E test(waiting)",
+            "started_at": started.to_rfc3339(),
+        }).to_string()).unwrap();
+        let stale = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+        assert!(stale.contains("stale"), "{stale}");
+        assert!(stale.contains("cargo nextest run -p cas --lib -E test(waiting)"), "{stale}");
+        drop(lock);
+    }
+
     /// cas-3d04: Codex SIGKILLs the calling shell's process group when an
     /// exec_command shell exits, so the detached runner must lead its own
     /// session (and therefore its own process group).

@@ -130,6 +130,13 @@ fn test_lease_renewal_under_contention() {
         .unwrap();
     assert!(matches!(claim, cas::types::ClaimResult::Success(_)));
 
+    // Claiming alone does not start a task. Renewal is allowed only after the
+    // task is running and assigned to the lease owner.
+    let mut task = task_store.get(&task_id).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(agent_id.clone());
+    task_store.update(&task).unwrap();
+
     let cas_dir = Arc::new(cas_dir);
     let task_id = Arc::new(task_id);
     let agent_id = Arc::new(agent_id);

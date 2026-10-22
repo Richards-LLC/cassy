@@ -2403,6 +2403,9 @@ fn refresh_project_files(cli: &Cli, cas_root: &Path, dry_run: bool) -> ProjectPh
         Ok(report) if report.outcome == "staged" => {
             ProjectPhase::Warning("managed changes staged; commit pending".into())
         }
+        Ok(report) if report.outcome == "committed" => ProjectPhase::Warning(
+            "managed commit is local-only; push to origin and open a PR".into()
+        ),
         Ok(report) => ProjectPhase::Ok(format!("skills; managed files {}", report.outcome)),
     }
 }
@@ -5407,6 +5410,9 @@ fn report_managed_files(
             )
         };
         println!("{message}");
+        if report.outcome == "committed" {
+            println!("Next: commit is local-only; push to origin and open a PR.");
+        }
     }
     Ok(())
 }

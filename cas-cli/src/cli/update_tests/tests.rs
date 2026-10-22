@@ -2833,6 +2833,13 @@ fn managed_commit_names_local_only_pr_next_step_cas_3b812() {
     });
     assert_eq!(result.unwrap().outcome, "current");
     assert!(!current.contains("local-only"), "{current}");
+    // The multi-project sweep must not hide a pending PR in successful details.
+    let sweep_project = cas_6718_drifted_project(&env.home().join("sweep"));
+    let sweep_root = sweep_project.join(".cas");
+    env.set("CAS_ROOT", &sweep_root);
+    let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(false), &sweep_root, false));
+    assert!(matches!(phase, ProjectPhase::Warning(_)), "{phase:?}");
+    assert!(phase.detail().contains("local-only") && phase.detail().contains("PR"), "{phase:?}");
 }
 
 #[test]

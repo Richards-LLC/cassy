@@ -638,7 +638,7 @@ impl Reconcile {
                     "user.email=cassy@localhost",
                     "commit",
                     "-m",
-                    "chore(cassy): reconcile managed project files",
+                    crate::worktree::git::MANAGED_RECONCILE_SUBJECT,
                 ],
             ) {
                 Ok(_) => {

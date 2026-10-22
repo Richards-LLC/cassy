@@ -284,7 +284,13 @@ Cassy author identity. It never auto-commits on `main`, `master`, `staging`,
 also leaves the repair staged. These cases report `outcome: "staged"` with no
 commit; review with `git diff --cached` and move the repair to a dedicated work
 branch before committing through the project's normal review process. It never
-pushes. A second update does not create another commit.
+pushes. A committed repair prints a local-only next step: push it to origin and
+open a normal PR. Doctor checks the default branch against its configured
+upstream and warns about unpublished Cassy-authored reconcile commits, including
+when invoked from a worker branch. Spawn/lane divergence refusals name these
+commits only when every local-only commit on the implicated side is a Cassy
+repair; their existing ancestry and preservation rules remain unchanged.
+A second update does not create another commit.
 
 ### Recovering an already-diverged trunk
 

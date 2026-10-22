@@ -30,7 +30,10 @@ operator recovery procedure in ARCHITECTURE.md.
 A committed repair keeps the managed-files verdict and adds one ASCII next-step
 line: the commit is local-only; push it to origin and open a PR. It fits 80
 columns without hiding the action. Staged/current/conflict outcomes do not get
-this line. JSON retains the existing `managed_files` outcome and commit fields.
+this line. The compact multi-project sweep keeps a committed repair as a warning
+with the same pending-PR action, so successful-phase elision cannot hide it.
+JSON retains the existing `managed_files` outcome and commit fields and carries
+the sweep warning in its existing skills phase shape.
 Doctor checks the default branch against its configured upstream, even from a
 worker checkout, and warns on Cassy-authored reconcile commits still ahead.
 Its existing check JSON carries the same cause and PR remedy. Spawn and lane

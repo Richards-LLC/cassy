@@ -277,7 +277,8 @@ impl CheckGroup {
             | "sync target"
             | "models"
             | "git hooks path"
-            | "sessionstart budget" => Self::Config,
+            | "sessionstart budget"
+            | "managed commits" => Self::Config,
             "issue repositories" | "shipped issues" | "journey registry" => Self::Config,
             "integrations" | "violet" | "violet wake" | "violet claims" | "github origin" => {
                 Self::Integrations
@@ -2504,6 +2505,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("GitHub origin", &checks);
     checks.extend(git_hooks::checks(project_root));
     recorder.mark("Git hooks path", &checks); // doctor-snapshot: no default row (core.hooksPath unset)
+    // doctor-snapshot: no default row (no unpublished reconcile commits)
     if let Some(check) = managed_commits_check(project_root) { checks.push(check); }
     checks.push(managed_file_drift_check(project_root));
     recorder.mark("managed file drift", &checks);
@@ -12760,9 +12762,29 @@ fn managed_file_drift_check(root: &Path) -> Check {
     }
 }
 
-// Publication diagnostic seam; implemented after the real-Git regression is red.
-fn managed_commits_check(_root: &Path) -> Option<Check> {
-    None
+fn managed_commits_check(root: &Path) -> Option<Check> {
+    let git = crate::worktree::GitOperations::new(root.to_path_buf());
+    let branch = git.detect_default_branch();
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).args([
+        "for-each-ref", "--format=%(upstream)", &format!("refs/heads/{branch}"),
+    ]);
+    let output = crate::worktree::GitOperations::run_command_bounded(command, Duration::from_secs(2)).ok()?;
+    if !output.status.success() { return None; }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if upstream.is_empty() { return None; }
+    let commits = match git.reconcile_commits_ahead(&format!("refs/heads/{branch}"), &upstream) {
+        Ok(commits) => commits,
+        Err(_) => return Some(Check::new("managed commits", CheckStatus::Warning, "Could not inspect default-branch publication; review its Git upstream")),
+    };
+    if commits.count == 0 { return None; }
+    let branch = crate::worktree::GitOperations::visible_git_label(&branch);
+    let upstream = crate::worktree::GitOperations::visible_git_label(
+        upstream.strip_prefix("refs/remotes/").or_else(|| upstream.strip_prefix("refs/heads/")).unwrap_or(&upstream)
+    );
+    Some(Check::new("managed commits", CheckStatus::Warning, format!(
+        "{} local-only reconcile commit(s): {branch} ahead of {upstream}. Review and push to origin, then open a PR.", commits.count,
+    )))
 }
 
 #[cfg(test)]

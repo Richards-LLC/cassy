@@ -149,8 +149,7 @@ pub fn observe_rule_candidate(
         ));
     }
     let conn = connection(root)?;
-    let mut guard = crate::shared_db::lock_connection(&conn)?;
-    let tx = guard.transaction()?;
+    let tx = crate::shared_db::begin_immediate_pooled(&conn)?;
     let id = match candidate_id {
         Some(id) => tx
             .query_row("SELECT id FROM rule_candidates WHERE id=?1", [id], |row| row.get(0))

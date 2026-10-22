@@ -2010,6 +2010,7 @@ mod tests {
                 .env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "60")
                 .env("PID_FILE", root.join("pids"))
                 .env("CARGO", root.join("fake-cargo.py"))
+                .env("PYTHONPATH", &root)
                 .stdout(Stdio::null()).stderr(Stdio::null());
             command.process_group(0);
             let signals = WorkerWaitSignals::install().unwrap();
@@ -2023,6 +2024,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let fake = root.path().join("fake-cargo.py");
         std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
+        std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
+real_killpg = os.killpg
+def slow_group_term(group, signum):
+    if signum == signal.SIGTERM:
+        time.sleep(1.2)
+    return real_killpg(group, signum)
+os.killpg = slow_group_term
+"#).unwrap();
         std::fs::write(&fake, r#"#!/usr/bin/env python3
 import os, pathlib, subprocess, sys
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
@@ -2064,14 +2073,21 @@ child.wait()
             unsafe { libc::killpg(parent.id() as i32, libc::SIGKILL) };
             status = Some(parent.wait().unwrap());
         }
-        let survivors: Vec<_> = pids.into_iter().filter(|pid| {
+        let survivors: Vec<_> = pids.into_iter().enumerate().filter(|(_, pid)| {
             let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])
                 .output().unwrap();
             let state = String::from_utf8_lossy(&output.stdout);
             !state.trim().is_empty() && !state.trim().starts_with('Z')
         }).collect();
-        for pid in &survivors {
-            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        for (index, pid) in &survivors {
+            let output = Command::new("ps").args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+                .output().unwrap();
+            let command = String::from_utf8_lossy(&output.stdout);
+            let owned = if *index == 0 { command.contains(fake.to_str().unwrap()) }
+                        else { command.contains("time.sleep(60)") };
+            if owned {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
         }
         assert!(marker.exists(), "fake Cargo never reached discovery");
         assert_eq!(status.unwrap().code(), Some(0), "parent signal fixture failed");

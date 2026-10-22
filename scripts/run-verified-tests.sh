@@ -64,6 +64,7 @@ if [[ "${1:-}" == nextest && "${2:-}" == run && -n "${CAS_WORKER_NEXTEST_DISCOVE
     (cd "${REPO_ROOT}" && exec python3 - "${CARGO}" "$@" <<'PY'
 import os
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -139,11 +140,44 @@ def capture_sample(pid):
             emit(f"nextest discovery sample failed for PID {pid}: {error}")
 
 watched_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+exit_queue = None
+exit_seen = False
+last_ps_probe = 0.0
 
 def leader_exited():
+    global exit_queue, exit_seen, last_ps_probe
     if child.returncode is not None:
         return True
-    return os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    # macOS system Python 3.9 lacks waitid. kqueue observes exit without
+    # reaping, leaving the child PID/PGID reserved until group cleanup ends.
+    if exit_seen:
+        return True
+    if exit_queue is not None:
+        try:
+            if exit_queue.control(None, 1, 0):
+                exit_seen = True
+                return True
+        except OSError:
+            exit_queue.close()
+            exit_queue = None
+        else:
+            return False
+    # Other Python/OS combinations can still observe the unreaped zombie.
+    now = time.monotonic()
+    if now - last_ps_probe < 0.2:
+        return False
+    last_ps_probe = now
+    try:
+        state = subprocess.run(
+            ["ps", "-p", str(child.pid), "-o", "stat="],
+            capture_output=True, text=True, timeout=1,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    exit_seen = state.startswith("Z")
+    return exit_seen
 
 def signal_group(signum):
     # An unreaped session leader reserves its PID/PGID until group cleanup ends.
@@ -197,6 +231,17 @@ child = subprocess.Popen(
     [cargo, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT, start_new_session=True,
 )
+if not hasattr(os, "waitid") and hasattr(select, "kqueue"):
+    try:
+        exit_queue = select.kqueue()
+        exit_queue.control([
+            select.kevent(child.pid, filter=select.KQ_FILTER_PROC,
+                          flags=select.KQ_EV_ADD, fflags=select.KQ_NOTE_EXIT)
+        ], 0, 0)
+    except (OSError, AttributeError):
+        if exit_queue is not None:
+            exit_queue.close()
+        exit_queue = None
 if pending_signal is not None:
     forward_signal(pending_signal, None)
 selector.register(child.stdout, selectors.EVENT_READ)
@@ -249,6 +294,8 @@ finally:
     selector.close()
     if child.returncode is None:
         stop_child(signal.SIGTERM)
+    if exit_queue is not None:
+        exit_queue.close()
 sys.exit(status)
 PY
     ) 3>>"${log}" &

@@ -539,9 +539,9 @@ function checkWordSplit(lines, columns, run, referenceText) {
 }
 
 function isLiteralProgressEllipsis(text) {
-  // A concise gerund status ending in ASCII dots is conventional progress copy
-  // (for example, "Reconfiguring Cassy..."), not an omitted value.
-  return /^\s*[A-Z][a-z]+ing(?:\s+[A-Za-z][A-Za-z0-9'_\-]*){1,4}\.\.\.\s*$/.test(text);
+  // Only known complete progress copy proves the final word is not cut off.
+  // Keep the interior space literal so table column gaps cannot match.
+  return /^ *Reconfiguring Cassy\.\.\. *$/.test(text);
 }
 
 function checkTruncation(lines, run, escapeFlag) {

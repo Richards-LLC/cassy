@@ -231,13 +231,18 @@ fn separator(cells: &[&str]) -> bool {
 
 /// Whether a header cell names `name`: exactly, or followed by a separator
 /// (`Verdict / label`, `Result/source`, `Run (n)`, `Status: prod`), so
-/// `Status page` or `Result before run` does not. Emphasis is ignored.
+/// `Status page`, `Result before run` or `Run id` does not. `verdict` is
+/// unambiguous, so any `Verdict <qualifier>` counts (`verdict t1`).
+/// Emphasis is ignored.
 fn names_column(cell: &str, name: &str) -> bool {
     let cell = cell
         .trim_matches(|c: char| c == '*' || c == '_')
         .to_ascii_lowercase();
-    cell.strip_prefix(name)
-        .is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with(['/', '(', ':']))
+    cell.strip_prefix(name).is_some_and(|rest| {
+        rest.is_empty()
+            || rest.trim_start().starts_with(['/', '(', ':'])
+            || (name == "verdict" && rest.starts_with(char::is_whitespace))
+    })
 }
 
 /// The verdict-named columns of a header row, in [`VERDICT_HEADERS`] order.

@@ -94,16 +94,17 @@ A bare ID, a similar ID, an empty reason or an example inside a code fence does
 not count. The journey ID must be the row's first cell, and only verdict columns
 count. A table header (the row above a `|---|` separator) names them: `Verdict`,
 `Run` (the independent-QA journeys table), `Result` or `Status`, alone or
-followed by `/`, `(` or `:`, so `Verdict / label` counts but `Status page` does
-not. A row reads the first of them, in that order, whose cell holds a verdict,
-so a `Run` column of run ids beside `Result` still counts; a headed table
-without one records no verdict. Bold verdicts such as `**PASS**` read as plain.
-Only a row with no header falls back by position: the fifth cell of a row with
-five or more cells, else the second. A verdict word in another column, such as
-an observed `FAIL: 502`, does not count. A `BLOCKED_EXTERNAL` verdict with
-`blocked: provider=<provider> error=<error>` is neither PASS nor FAIL: the
-journey stays owed and approval is refused, naming the journey, cell and
-provider. A journey that declares `independence_key` (see [release
+followed by `/`, `(` or `:`, so `Result / source` counts but `Status page` does
+not; any `Verdict <qualifier>` header such as `Verdict t1` counts. A row reads
+the first of them, in that order, whose cell holds a verdict, so a `Run` column
+of run ids beside `Result` still counts; a headed table without one records no
+verdict. Bold verdicts such as `**PASS**` read as plain. Only a row with no
+header falls back by position: the fifth cell of a row with five or more cells,
+else the second. A verdict word in another column, such as an observed `FAIL:
+502`, does not count. A `BLOCKED_EXTERNAL` verdict with `blocked:
+provider=<provider> error=<error>` is neither PASS nor FAIL: the journey stays
+owed and approval is refused, naming the journey, cell and provider. A journey
+that declares `independence_key` (see [release
 gate](release-gate.md#independent-runs-independence_key)) needs a distinct
 `<key>=<id>` in each PASS or FAIL row; a duplicate or missing identity is
 refused by name. Rejections remain recordable without these rows. Dark/dead

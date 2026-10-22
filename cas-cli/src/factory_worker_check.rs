@@ -994,7 +994,7 @@ fn is_test_or_build_input_path(
     named_sources: &mut BTreeMap<String, bool>,
 ) -> bool {
     let lower = path.to_ascii_lowercase();
-    if is_workspace_crate_path(repo, path)
+    if is_workspace_crate_path(repo, delivered_head, path)
         || lower == ".env"
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
@@ -1057,9 +1057,9 @@ fn is_test_or_build_input_path(
 }
 
 /// A Rust source file can embed assets outside its crate directory with
-/// `include_str!` or `include_bytes!`. Detect those by filename so new assets do
-/// not need a hand-maintained path entry here. Treat git errors conservatively
-/// as proof inputs rather than reusing a receipt we could not validate.
+/// `include_str!` or `include_bytes!`. Use the basename to find candidate
+/// sources, then confirm the repo-relative or source-relative path. Treat git
+/// errors conservatively as proof inputs rather than reusing an unvalidated receipt.
 fn is_named_by_tracked_rust_source(
     repo: &Path,
     delivered_head: &str,
@@ -1069,22 +1069,82 @@ fn is_named_by_tracked_rust_source(
     let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    // Cheap path checks already ran. Every range in this scan has the same
-    // repository and delivered head, and grep searches only the basename.
-    *named_sources.entry(name.to_owned()).or_insert_with(|| {
-        Command::new("git")
+    // The basename only discovers possible source files. Confirm the full
+    // repo-relative path or its spelling relative to each source file; matching
+    // only a basename makes unrelated assets invalidate each other's receipts.
+    *named_sources.entry(path.to_owned()).or_insert_with(|| {
+        let sources = Command::new("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["grep", "-lF", "-e", name, delivered_head, "--", "*.rs"])
+            .args(["grep", "-lF", "-z", "-e", name, delivered_head, "--", "*.rs"])
             .current_dir(repo)
-            .output()
-            .map_or(true, |matches| matches.status.code() != Some(1))
+            .output();
+        let Ok(sources) = sources else {
+            return true;
+        };
+        if !sources.status.success() {
+            return sources.status.code() != Some(1);
+        }
+        let sources = sources.stdout.split(|byte| *byte == 0);
+        for source in sources {
+            if source.is_empty() {
+                continue;
+            }
+            let Ok(source) = std::str::from_utf8(source) else {
+                return true;
+            };
+            let tree_prefix = format!("{delivered_head}:");
+            let source = source.strip_prefix(&tree_prefix).unwrap_or(source);
+            let Some(relative_path) = relative_path_from_source(source, path) else {
+                return true;
+            };
+            let matches = Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .arg("grep")
+                .arg("-lF")
+                .arg("-e")
+                .arg(path)
+                .arg("-e")
+                .arg(&relative_path)
+                .arg(delivered_head)
+                .arg("--")
+                .arg(source)
+                .current_dir(repo)
+                .output();
+            match matches {
+                Ok(matches) if matches.status.success() => return true,
+                Ok(matches) if matches.status.code() == Some(1) => {}
+                Ok(_) | Err(_) => return true,
+            }
+        }
+        false
     })
+}
+
+fn relative_path_from_source(source: &str, target: &str) -> Option<String> {
+    let mut source_dir = source.split('/').collect::<Vec<_>>();
+    source_dir.pop()?;
+    let target = target.split('/').collect::<Vec<_>>();
+    if source_dir
+        .iter()
+        .chain(&target)
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return None;
+    }
+    let shared = source_dir
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = vec![".."; source_dir.len() - shared];
+    relative.extend_from_slice(&target[shared..]);
+    Some(relative.join("/"))
 }
 
 /// Cargo inputs are not limited to source-code extensions: `include_str!`,
 /// `include_bytes!`, and package build scripts can consume any file beneath a
 /// crate directory. Treat those files as proof inputs regardless of suffix.
-fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
+fn is_workspace_crate_path(repo: &Path, delivered_head: &str, path: &str) -> bool {
     let path = Path::new(path);
     let Some(parent) = path.parent() else {
         return false;
@@ -1092,8 +1152,20 @@ fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
     let mut prefix = PathBuf::new();
     for component in parent.components() {
         prefix.push(component.as_os_str());
-        if prefix != Path::new(".") && repo.join(&prefix).join("Cargo.toml").is_file() {
-            return true;
+        if prefix != Path::new(".") {
+            let prefix_for_git = prefix.to_string_lossy().replace('\\', "/");
+            let manifest = format!("{delivered_head}:{prefix_for_git}/Cargo.toml");
+            match Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["cat-file", "-e", &manifest])
+                .stderr(std::process::Stdio::null())
+                .current_dir(repo)
+                .status()
+            {
+                Ok(status) if status.success() => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
         }
     }
     false
@@ -1809,6 +1881,113 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+    }
+
+    #[test]
+    fn ancestor_test_receipt_uses_delivered_manifest_after_head_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/widget\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/widget/assets")).unwrap();
+        std::fs::write(
+            repo.join("crates/widget/Cargo.toml"),
+            "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("crates/widget/assets/theme.brief.md"), "old\n").unwrap();
+        fixture_commit_as(&repo, "workspace fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        std::fs::write(repo.join("crates/widget/assets/theme.brief.md"), "new\n").unwrap();
+        fixture_commit_as(&repo, "delivered asset");
+        let delivered_head = fixture_head(&repo);
+        std::fs::remove_file(repo.join("crates/widget/Cargo.toml")).unwrap();
+        fixture_commit_as(&repo, "later manifest removal");
+        let later_head = fixture_head(&repo);
+        git(&repo, &["checkout", "--detach", &later_head]).unwrap();
+        assert_ne!(fixture_head(&repo), delivered_head, "the worktree must be on a later HEAD");
+
+        assert!(
+            passing_test_receipts(&root, &repo, &delivered_head).is_empty(),
+            "the delivered tree still has a crate manifest, so its changed asset invalidates the old test receipt"
+        );
+    }
+
+    #[test]
+    fn ancestor_test_receipt_ignores_same_basename_outside_delivered_include_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/widget/Cargo.toml"),
+            "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("docs/maintenance")).unwrap();
+        std::fs::create_dir_all(repo.join("docs/release")).unwrap();
+        std::fs::write(
+            repo.join("docs/maintenance/update-managed-files.brief.md"),
+            "maintenance\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/release/update-managed-files.brief.md"),
+            "release v1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("crates/widget/src/lib.rs"),
+            "const MAINTENANCE: &str = include_str!(\"../../../docs/maintenance/update-managed-files.brief.md\");\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "include fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        std::fs::write(
+            repo.join("docs/release/update-managed-files.brief.md"),
+            "release v2\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "unreferenced same-name asset");
+        let delivered_head = fixture_head(&repo);
+        std::fs::write(
+            repo.join("docs/maintenance/update-managed-files.brief.md"),
+            "maintenance v2\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "referenced asset change");
+        let referenced_head = fixture_head(&repo);
+        assert!(
+            passing_test_receipts(&root, &repo, &referenced_head).is_empty(),
+            "a change to the exact included repo-relative path invalidates the old test receipt"
+        );
+        std::fs::write(
+            repo.join("crates/widget/src/lib.rs"),
+            "const MAINTENANCE: &str = include_str!(\"../../../docs/maintenance/update-managed-files.brief.md\");\nconst RELEASE: &str = include_str!(\"../../../docs/release/update-managed-files.brief.md\");\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "later include change");
+        let later_head = fixture_head(&repo);
+        git(&repo, &["checkout", "--detach", &later_head]).unwrap();
+        assert_ne!(fixture_head(&repo), delivered_head, "the worktree must be on a later HEAD");
+
+        assert_eq!(
+            passing_test_receipts(&root, &repo, &delivered_head),
+            [format!(
+                "test: PASS {receipt_head} cas test(cached) 1 rebound from {receipt_head} to {delivered_head}"
+            )],
+            "the delivered source refers to a different repo-relative path with the same basename"
+        );
     }
 
     #[cfg(unix)]
@@ -2607,6 +2786,23 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
                 "-q",
                 "-m",
                 "fixture",
+            ],
+        )
+        .unwrap();
+    }
+
+    fn fixture_commit_as(repo: &Path, message: &str) {
+        git(repo, &["add", "-A"]).unwrap();
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                message,
             ],
         )
         .unwrap();

@@ -10,7 +10,7 @@ use super::blocked::BlockedExternal;
 use super::{CallError, ErrorKind, ReleaseConfig, Request, Verb, call, printable};
 use crate::qa_registry::{Journey, Limit, Resource};
 use cas_store::{ResourceGrant, ResourceTake};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,7 +34,7 @@ pub struct PlannedRow<'a> {
 }
 
 /// What preflight measured and granted, for the evidence pack.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResourcePlan {
     pub env: String,
     /// Σ consumes × runs × cells per resource.

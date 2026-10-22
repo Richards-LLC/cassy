@@ -200,6 +200,7 @@ impl Config {
             "qa.release.adapter" => Some(qa.release.clone().unwrap_or_default().adapter),
             "qa.release.env" => Some(qa.release.clone().unwrap_or_default().env.join(",")),
             "qa.release.timeout_secs" => Some(qa.release.clone().unwrap_or_default().timeout_secs.to_string()),
+            "qa.release.retention_days" => Some(qa.release.clone().unwrap_or_default().retention_days.to_string()),
             "qa.release.components" => Some(serde_json::to_string(&qa.release.clone().unwrap_or_default().components).expect("serializable components")),
             "qa.release.grant_envs" => Some(qa.release.clone().unwrap_or_default().grant_envs.join(",")),
             "qa.release.migrations.paths" => Some(qa.release.clone().unwrap_or_default().migrations.unwrap_or_default().paths.join(",")),

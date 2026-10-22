@@ -37,13 +37,14 @@ pub struct ConfigMismatch {
 impl std::fmt::Display for ConfigMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let show = |value: &Option<Value>| value.as_ref().map_or("absent".into(), Value::to_string);
+        let journeys: Vec<String> = self.journeys.iter().map(|j| printable(j)).collect();
         write!(
             f,
             "CONFIG_MISMATCH {}: test={} target={} ({})",
-            self.flag,
-            show(&self.test),
-            show(&self.target),
-            self.journeys.join(", ")
+            printable(&self.flag),
+            printable(&show(&self.test)),
+            printable(&show(&self.target)),
+            journeys.join(", ")
         )
     }
 }
@@ -55,7 +56,9 @@ pub fn declared(journeys: &[Journey]) -> BTreeSet<String> {
 
 /// Reads the declared flags' values in `env` through the adapter's `flags`
 /// verb with `args: {keys}`. No declared flag means no call. Every requested
-/// key must be answered; extra keys are dropped, never stored.
+/// key must be answered with a scalar (flags must not carry secrets or
+/// documents); extra keys are dropped, never stored. `env` is a plain name
+/// and `sha` a hex commit, so the ledger line round-trips.
 pub fn read(
     project_root: &Path,
     config: &ReleaseConfig,
@@ -63,12 +66,17 @@ pub fn read(
     sha: &str,
     journeys: &[Journey],
 ) -> Result<FlagSnapshot, CallError> {
+    let name = Verb::Flags.as_str();
+    let plain_env = !env.is_empty() && env.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
+    let hex_sha = (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    if !plain_env || !hex_sha {
+        return Err(CallError::Protocol(name, "flags needs a plain env name and a hex commit sha".into()));
+    }
     let keys = declared(journeys);
     let mut snapshot = FlagSnapshot { env: env.into(), sha: sha.into(), values: BTreeMap::new() };
     if keys.is_empty() {
         return Ok(snapshot);
     }
-    let name = Verb::Flags.as_str();
     let data = call(
         project_root,
         config,
@@ -82,6 +90,9 @@ pub fn read(
     let mut missing = Vec::new();
     for key in keys {
         match answered.remove(&key) {
+            Some(Value::Array(_) | Value::Object(_)) => {
+                return Err(CallError::Protocol(name, format!("flag {} is not a scalar", printable(&key))));
+            }
             Some(value) => {
                 snapshot.values.insert(key, value);
             }

@@ -872,7 +872,24 @@ async fn batch_qa_authority_and_no_self_review_cas_d697() {
 async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);
-    fx.record().await;
+    // cas-e04d: the release-gate pack ledger is this ledger. A receipt binds
+    // the sealed pack.json for staging_sha; changed pack bytes void it too.
+    let cas_root = fx.repo.join(".cas");
+    let dir = cas::qa_release::pack::pack_dir(&cas_root, &fx.staging).unwrap();
+    let mut pack = cas::qa_release::pack::Pack::new("batch-project", &fx.staging, Vec::new());
+    let pack_json = pack.seal(&dir).unwrap();
+    let sealed = std::fs::read(&pack_json).unwrap();
+    std::fs::write(&pack_json, b"{}").unwrap();
+    fx.reject(serde_json::json!({}), "release-gate pack for staging_sha").await;
+    std::fs::write(&pack_json, &sealed).unwrap();
+    let recorded = fx.record().await;
+    assert!(recorded.contains("pack.json (OWED)"), "{recorded}");
+    std::fs::write(&pack_json, b"{}").unwrap();
+    assert!(fx.close("cas-bq01").await.contains("no `qa-bundle:` note"));
+    std::fs::write(&pack_json, sealed).unwrap();
+    let bound = fx.close("cas-bq02").await;
+    let tasks = open_task_store(&cas_root).unwrap();
+    assert_eq!(tasks.get("cas-bq02").unwrap().status, TaskStatus::Closed, "{bound}");
     let original = std::fs::read(&fx.ledger).unwrap();
     std::fs::write(&fx.ledger, "tampered ledger\n").unwrap();
     assert!(fx.close("cas-bq01").await.contains("no `qa-bundle:` note"));
@@ -882,7 +899,6 @@ async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d6
     git(&fx.repo, &["commit", "-qm", "cas-bq01: later change"]);
     let head = git(&fx.repo, &["rev-parse", "HEAD"]);
     git(&fx.repo, &["branch", "-f", "main", &head]);
-    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
     let mut task = tasks.get("cas-bq01").unwrap();
     task.deliverables.factory_branch_anchor = Some(head);
     tasks.update(&task).unwrap();
@@ -897,6 +913,8 @@ async fn batch_qa_changed_ledger_and_advanced_anchor_cannot_reuse_receipt_cas_d6
         2,
         "duplicate task IDs collapse"
     );
+    let bound = receipts[0].pack.as_ref().expect("receipt binds the pack");
+    assert_eq!((bound.gate.as_str(), bound.path.as_str()), ("OWED", pack_json.to_str().unwrap()));
     receipts[0].staging_sha = "0".repeat(40);
     assert!(
         cas_store::record_qa_batch_receipt(&fx.repo.join(".cas"), &receipts[0]).is_err(),

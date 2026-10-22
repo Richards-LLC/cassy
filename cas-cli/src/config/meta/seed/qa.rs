@@ -91,6 +91,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         ("qa.release.adapter", "Release adapter", "Project-relative QA adapter executable, called as `<adapter> <verb>` with protocol v1 JSON on stdin and stdout; no shell. Empty leaves the gate off.", ConfigType::String, "", Constraint::None),
         ("qa.release.env", "Release adapter env", "Environment variable names allowed into the adapter.", ConfigType::StringList, "", Constraint::None),
         ("qa.release.timeout_secs", "Release adapter timeout secs", "Per-call adapter timeout.", ConfigType::Int, "120", Constraint::Min(1)),
+        ("qa.release.retention_days", "Release media retention days", "Days evidence-pack media stay on local disk; pack.json is kept.", ConfigType::Int, "30", Constraint::Min(1)),
         ("qa.release.components", "Release served components", "JSON object of served component name to repository paths, for served-SHA equivalence.", ConfigType::String, "{}", Constraint::None),
         ("qa.release.grant_envs", "Release grant envs", "Environments where release-gate preflight may call the adapter's `grant` verb to cover a balance shortfall; elsewhere a shortfall refuses.", ConfigType::StringList, "staging", Constraint::None),
         ("qa.release.migrations.paths", "Release migration paths", "Repository-relative patterns with exactly one `*` (the migration id). A merge into integration_branch that adds a match needs the adapter's `migrations` verb to report it applied.", ConfigType::StringList, "", Constraint::None),

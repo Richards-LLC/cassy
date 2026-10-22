@@ -148,7 +148,7 @@ pub use qa_pass_store::{
     satisfying_qa_passes, set_qa_task,
     waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
-pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
+pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchPack, QaBatchReceipt, record_qa_batch_receipt,
     list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
 pub use qa_fixture_store::{QA_FIXTURE_SCHEMA_STATEMENTS, FixtureCleanup, fixture_cleanups,
     record_fixture_cleanup, settle_fixture_cleanup};

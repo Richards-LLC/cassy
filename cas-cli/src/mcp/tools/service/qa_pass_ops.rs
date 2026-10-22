@@ -36,7 +36,8 @@ impl CasService {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
             }
         }
-        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).",
+        let pack = receipt.pack.as_ref().map(|pack| format!(" Pack: {} ({}).", pack.path, pack.gate)).unwrap_or_default();
+        Ok(Self::success(format!("Batch QA receipt {} recorded: {} tasks at staging {}. Ledger: {} ({}).{pack}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path)))
     }

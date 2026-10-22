@@ -163,6 +163,7 @@ pub(crate) fn prepare_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let (artifact, ledger) = validate_ledger(root, artifact_id, ledger)?;
+    let pack = bind_pack(root, staging)?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let agents = crate::store::open_agent_store(root).map_err(|e| e.to_string())?;
     let mut heads = BTreeMap::new();
@@ -268,7 +269,40 @@ pub(crate) fn prepare_receipt(
         task_heads: heads,
         recorder_agent_id: recorder.id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339(),
+        pack,
     })
+}
+
+/// The release-gate pack ledger is this ledger (cas-e04d). When a sealed
+/// pack exists for `staging` at `<artifacts_root>/<project>/release/<sha>`,
+/// the receipt binds it by its exact bytes after its media and gate verify;
+/// a pack that exists but does not verify refuses the receipt.
+pub(crate) fn bind_pack(root: &Path, staging: &str) -> Result<Option<cas_store::QaBatchPack>, String> {
+    use crate::qa_release::pack::{PACK_FILE, Pack, pack_dir};
+    let dir = pack_dir(root, staging).map_err(|e| e.to_string())?;
+    let path = dir.join(PACK_FILE);
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(None);
+    }
+    let pack = Pack::load(&dir).map_err(|e| format!("release-gate pack for staging_sha: {e}"))?;
+    if !pack.sha.eq_ignore_ascii_case(staging) {
+        return Err("release-gate pack sha differs from staging_sha".into());
+    }
+    let (sha256, bytes) = pack_digest(&path).ok_or("pack.json is unreadable")?;
+    Ok(Some(cas_store::QaBatchPack {
+        path: path.to_string_lossy().into_owned(),
+        sha256,
+        bytes,
+        gate: serde_json::to_value(pack.gate.verdict)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+    }))
+}
+
+fn pack_digest(path: &Path) -> Option<(String, u64)> {
+    let bytes = std::fs::read(path).ok()?;
+    Some((format!("{:x}", Sha256::digest(&bytes)), bytes.len() as u64))
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
@@ -315,8 +349,13 @@ pub(crate) fn satisfying_receipt(
         ) else {
             continue;
         };
+        // A bound pack must still be the exact sealed bytes it attested.
+        let pack_intact = receipt.pack.as_ref().is_none_or(|pack| {
+            pack_digest(Path::new(&pack.path)) == Some((pack.sha256.clone(), pack.bytes))
+        });
         if artifact.sha256 == receipt.ledger_sha256
             && artifact.size_bytes == receipt.ledger_size_bytes
+            && pack_intact
         {
             return Ok(Some(receipt));
         }

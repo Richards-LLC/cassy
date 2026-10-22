@@ -15,7 +15,7 @@ pub enum SetupError {
     NotExercised(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureReceipt {
     pub cleanup_id: String,
     pub handle: String,

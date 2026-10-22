@@ -958,7 +958,12 @@ async fn a_refused_local_claim_leaves_the_cloud_claim_with_its_holder() {
     let mut task = open_task_store(&alpha.cas_dir).unwrap().get("cas-pa01").unwrap();
     task.assignee = Some("delta-sup".into());
     open_task_store(&alpha.cas_dir).unwrap().update(&task).unwrap();
+    // An old pending release must be cancelled by this actual manual entry
+    // even when local arbitration preserves the existing holder.
+    let pending = alpha.cas_dir.join("claim-releases.json");
+    std::fs::write(&pending, serde_json::json!({"cas-pa01": Utc::now().timestamp()}).to_string()).unwrap();
     let claimed = claim(&delta, "cas-pa01").await.unwrap_or_else(|error| error);
+    assert!(!pending.exists(), "manual claim left an old pending release behind");
     assert!(claimed.contains("already claimed"), "{claimed}");
     let (_, lock) = cloud.active_lock("cas-pa01").expect("the claim survives a refused claim");
     assert_eq!(lock.agent_id, alpha.agent_id, "{claimed}");

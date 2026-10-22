@@ -418,6 +418,17 @@ impl PeerClaims {
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
+    /// Acquire the Cloud mirror before a manual local lease claim. The
+    /// returned guard is retained by the caller through local publication.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn acquire_for_local_lease(
+        &self, _cas_root: &Path, task_id: &str, kind: ClaimKind,
+        agent_id: &str, agent_name: &str, duration_secs: u32,
+        is_local: &dyn Fn(&str) -> bool,
+    ) -> (Acquire, Option<TaskClaimFence>) {
+        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), None)
+    }
+
     /// Cancel an old pending release before task start takes a new Cloud
     /// claim. The per-task fence also waits out a release already in flight;
     /// cancellation alone cannot invalidate that release's earlier snapshot.
@@ -1612,6 +1623,30 @@ mod tests {
                 pending.insert(TASK.into(), Utc::now().timestamp());
             });
             (server, dir, claims, held)
+        }
+
+        #[tokio::test]
+        async fn manual_claim_between_retry_check_and_release_keeps_fresh_claim_cas_f535() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                release_pending_task_claims_with(&claims, dir.path(), |task| {
+                    // The same helper wired to cas_task_claim: Cloud before
+                    // local try_claim. Delay local publication to force the gap.
+                    assert!(crate::store::open_agent_store(dir.path()).unwrap()
+                        .get_lease(task).unwrap().is_none());
+                    let (answer, fence) = claims.acquire_for_local_lease(
+                        dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    );
+                    assert!(matches!(answer, Acquire::Claimed));
+                    drop(fence);
+                });
+                assert_eq!(held.lock().unwrap().as_ref().map(|lock| lock["id"].clone()),
+                    Some(serde_json::json!("fresh-lock")),
+                    "the pending release removed the manual claimant's fresh Cloud claim");
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(server.received_requests().await.unwrap().iter()
+                .all(|request| !request.url.path().ends_with("/release")));
         }
 
         #[tokio::test]

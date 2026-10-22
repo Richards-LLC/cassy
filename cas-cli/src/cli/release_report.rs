@@ -2368,6 +2368,12 @@ fn is_release_note_section_label(line: &str) -> bool {
         || lower.starts_with("dev reply")
 }
 
+/// The report's "Markdown source" and "Print edition" link targets.
+fn report_link_hrefs(_github_repo: Option<&str>, _tag: &str, source: &str, pdf: &str) -> (String, String) {
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    (name(source), name(pdf))
+}
+
 fn render_html(
     script: &Path,
     source: &Path,
@@ -3156,6 +3162,21 @@ fn playwright_module_missing(detail: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// cas-692a: Chromium prints a relative link as a file:// URL into the
+    /// generating checkout, so a report names its source and print edition
+    /// by their GitHub URLs at the release tag.
+    #[test]
+    fn report_links_name_the_tagged_github_files_not_the_checkout_cas_692a() {
+        let (source, pdf) = report_link_hrefs(
+            Some("Richards-LLC/cassy"),
+            "v3.72.0",
+            "docs/release-reports/v3.72.0.md",
+            "docs/release-reports/v3.72.0.pdf",
+        );
+        assert_eq!(source, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.md");
+        assert_eq!(pdf, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.pdf");
+    }
+
     /// cas-7860: issues are closed by hand minutes after the release PR
     /// merges, so a report generated at merge+10s must still count the
     /// issues that close at merge+30s, and must not recount an issue a
@@ -3226,6 +3247,10 @@ mod tests {
     /// with every stage's earlier releases read from their receipts.
     #[test]
     fn pipeline_latency_section_fails_an_over_budget_stage_with_its_trend() {
+        // cas-692a: with no latency receipt there is nothing it "records".
+        let absent = pipeline_latency_section(&ReleaseEvidence::default());
+        assert!(absent.contains("no latency receipt was found"), "{absent}");
+        assert!(!absent.contains("records"), "{absent}");
         let root = tempfile::tempdir().unwrap();
         for (dir, receipt) in [
             (

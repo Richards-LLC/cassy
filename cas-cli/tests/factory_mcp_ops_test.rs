@@ -33,9 +33,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+// The grouped integration harness owns the process-wide env/cwd lock.
+use crate::test_env_guard::TestEnvGuard;
 
 // =============================================================================
 // Test Fixture

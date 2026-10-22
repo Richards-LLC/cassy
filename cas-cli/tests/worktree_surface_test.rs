@@ -28,9 +28,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+// The grouped integration harness owns the process-wide env/cwd lock.
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
@@ -89,22 +88,15 @@ fn authority_boundary_test_is_hermetic_against_inherited_factory_env() {
 }
 
 /// Initialize a project fixture while keeping the host-level known-repo
-/// registry inside this test binary's private HOME. Several System-A tests
+/// registry inside this test's private HOME. Several System-A tests
 /// intentionally exercise registry resolution, so simply suppressing the
 /// registration would make the fixture less realistic.
 fn test_env() -> TestEnvGuard {
-    use std::sync::OnceLock;
-
-    static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
-    let home = TEST_HOME.get_or_init(|| TempDir::new().expect("isolated worktree test HOME"));
-    let home = home
-        .path()
-        .canonicalize()
-        .expect("canonical isolated worktree test HOME");
+    let mut env = TestEnvGuard::temp_home();
+    let home = env.home().canonicalize().expect("canonical isolated worktree test HOME");
     let xdg = home.join("xdg");
-    let mut env = TestEnvGuard::with_optional_vars(&[
-        ("HOME", home.to_str()),
-        ("XDG_CONFIG_HOME", xdg.to_str()),
+    env.set("XDG_CONFIG_HOME", &xdg);
+    for (key, value) in [
         // Close-time verification policy derives the factory harness from the
         // ambient environment (harness_policy::worker_harness_from_env): under
         // an inherited CAS_FACTORY_WORKER_CLI=codex, task verification is
@@ -124,7 +116,12 @@ fn test_env() -> TestEnvGuard {
         ("CAS_SESSION_ID", None),
         ("CAS_FACTORY_SESSION", None),
         ("CAS_FACTORY_MODE", None),
-    ]);
+    ] {
+        match value {
+            Some(value) => env.set(key, value),
+            None => env.remove(key),
+        }
+    }
     // cas-a9bd: code merges need successful code CI even when this fixture
     // is testing worktree routing, cleanup or task authority instead of CI.
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&home));

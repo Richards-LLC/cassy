@@ -144,8 +144,8 @@ api_request() {
         status=$?
     fi
 
-    if (( status == 124 || status == 137 )); then
-        failure_reason="timeout (exit $status)"
+    if (( status == 124 )); then
+        failure_reason='timeout (exit 124)'
     else
         http_status="$(grep -oE 'HTTP [0-9]{3}' "$api_failure_file" | head -n1 || true)"
         if [[ -n "$http_status" ]]; then
@@ -185,7 +185,7 @@ has_pending_run() {
 complete_run_id=""
 find_complete_run() {
     local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
-    local artifact_query_ok artifact_attempt artifact_retry_limit
+    local artifact_query_ok artifact_attempt artifact_retry_backoff artifact_retry_cap
     local remaining sleep_for failure_reason
     complete_run_id=""
     mapfile -t run_ids < <(jq -r \
@@ -196,9 +196,8 @@ find_complete_run() {
         artifacts_json=""
         artifact_query_ok=false
         artifact_attempt=0
-        # Allow one transient retry without spending the whole poll's deadline
-        # on a single run when another completed run may have usable artifacts.
-        artifact_retry_limit=2
+        artifact_retry_backoff=1
+        artifact_retry_cap=30
         while :; do
             artifact_attempt=$((artifact_attempt + 1))
             if artifacts_json="$(api_request "$deadline" \
@@ -219,19 +218,20 @@ find_complete_run() {
                     "$artifact_attempt" "$run_id" "$failure_reason" >&2
                 break
             fi
-            if (( artifact_attempt >= artifact_retry_limit )); then
-                printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s); checking remaining runs this poll\n' \
-                    "$artifact_attempt" "$run_id" "$failure_reason" >&2
-                break
-            fi
             printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s); retrying within the remaining deadline\n' \
                 "$artifact_attempt" "$run_id" "$failure_reason" >&2
-            sleep_for=1
+            sleep_for="$artifact_retry_backoff"
             if (( sleep_for > remaining )); then
                 sleep_for="$remaining"
             fi
             if (( sleep_for > 0 )); then
                 sleep "$sleep_for"
+            fi
+            if (( artifact_retry_backoff < artifact_retry_cap )); then
+                artifact_retry_backoff=$((artifact_retry_backoff * 2))
+                if (( artifact_retry_backoff > artifact_retry_cap )); then
+                    artifact_retry_backoff="$artifact_retry_cap"
+                fi
             fi
             (( SECONDS < deadline )) || break
         done

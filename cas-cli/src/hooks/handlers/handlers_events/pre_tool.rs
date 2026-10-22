@@ -630,16 +630,18 @@ fn handle_pre_tool_use_inner(
     if cas_root.is_none() && is_factory_agent {
         let worktree_root = std::env::var_os("CAS_CLONE_PATH")
             .filter(|value| !value.is_empty())
-            .map(std::path::PathBuf::from);
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| turn_cwd.to_path_buf());
         // Without a store identity, sanction only the bound worktree and
-        // harness scratchpad; the shared artifact base is not a write root.
-        let artifacts_root = Some(worktree_root.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
+        // harness scratchpad. An unbound root comes from the turn cwd, never
+        // the supplied execution workdir; neither may widen the artifact root.
+        let artifacts_root = Some(worktree_root.display().to_string());
         if let Some(violation) = factory_write_violation(
             input,
             &artifacts_root,
             None,
             crate::harness_policy::is_supervisor(input),
-            worktree_root.as_deref(),
+            Some(&worktree_root),
         ) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -648,7 +650,7 @@ fn handle_pre_tool_use_inner(
                     &violation,
                     artifacts_root.as_deref(),
                     None,
-                    worktree_root.as_deref(),
+                    Some(&worktree_root),
                 ),
             ));
         }

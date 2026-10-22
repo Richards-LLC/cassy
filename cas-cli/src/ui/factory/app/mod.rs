@@ -7189,7 +7189,7 @@ mod spawn_isolation_tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
         without_spawn_disk_floor(&repo);
-        let worktree_path = repo.join(".cas").join("worktrees").join("clever-panther-60");
+        let worktree_path = repo.join(".cas").join("worktrees").join("clever panther's 60");
         std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -7273,6 +7273,9 @@ mod spawn_isolation_tests {
         assert!(error.contains("uncommitted tracked changes"), "{error}");
         assert!(error.contains("factory/clever-panther-60-cas-9db0b"), "{error}");
         assert!(error.contains("checkout -- ."), "{error}");
+        // pin: a real kept-worktree path with spaces and apostrophe must be one argument.
+        let quoted_path = format!("'{}'", worktree_path.to_string_lossy().replace('\'', r"'\''"));
+        assert!(error.contains(&format!("git -C {quoted_path} checkout -- .")), "{error}");
         assert_eq!(
             std::fs::read_to_string(worktree_path.join("lane.txt")).unwrap(),
             "unsaved\n",

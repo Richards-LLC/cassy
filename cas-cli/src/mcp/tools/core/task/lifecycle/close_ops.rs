@@ -26483,9 +26483,9 @@ mod merge_state_gate_tests {
 
     #[test]
     fn worker_task_close_rejects_when_factory_branch_unmerged() {
-        // Worker committed two new files on factory/worker that never
+        // Worker committed two new files on factory/worker{a,b}!e that never
         // landed on main. The gate must reject with stranded count + remediation.
-        let dir = init_factory_repo("worker");
+        let dir = init_factory_repo("worker{a,b}!e");
         std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
         git(dir.path(), &["add", "a.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: a"]);
@@ -26493,9 +26493,9 @@ mod merge_state_gate_tests {
         git(dir.path(), &["add", "b.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: b"]);
         let target_tip = rev_parse_local(dir.path(), "main");
-        let unreachable_tip = rev_parse_local(dir.path(), "factory/worker");
+        let unreachable_tip = rev_parse_local(dir.path(), "factory/worker{a,b}!e");
 
-        let task = worker_task("worker");
+        let task = worker_task("worker{a,b}!e");
         let req = base_req(&task.id);
         let mut env =
             TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("claude"))]);
@@ -26513,6 +26513,8 @@ mod merge_state_gate_tests {
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    // pin: the live close gate quotes the worker delivery ref.
+                    assert!(msg.contains("git push origin 'factory/worker{a,b}!e'"), "{msg}");
                     let prefix = coord.strip_suffix("coordination").unwrap();
                     assert!(msg.contains(&format!("{prefix}task action=close")), "{msg}");
                     assert!(
@@ -26520,7 +26522,7 @@ mod merge_state_gate_tests {
                         "{msg}"
                     );
                     assert!(
-                        msg.contains("factory/worker"),
+                        msg.contains("factory/worker{a,b}!e"),
                         "missing factory branch name: {msg}"
                     );
                     assert!(msg.contains("main"), "missing parent branch name: {msg}");
@@ -26566,7 +26568,7 @@ mod merge_state_gate_tests {
                          (cas-90e8): {msg}"
                     );
                     let poll = msg.find("action=inbox_poll").expect("poll step");
-                    let push = msg.find("Push factory/worker").expect("push step");
+                    let push = msg.find("Push factory/worker{a,b}!e").expect("push step");
                     let pr = msg.find("Open a PR targeting main").expect("PR step");
                     assert!(
                         poll < push && poll < pr,
@@ -38092,8 +38094,8 @@ mod epic_status_gate_tests {
     fn epic_close_still_prints_the_merge_command_for_genuinely_absent_work() {
         // Regression guard on the fix itself: real unmerged work must still get
         // actionable remediation.
-        let dir = init_epic_repo(&[("worker", 1)]);
-        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker"));
+        let dir = init_epic_repo(&[("worker{a,b}!e", 1)]);
+        let unmerged = child("cas-real", TaskStatus::Closed, Some("worker{a,b}!e"));
         let task = epic("cas-epic-real");
         let req = base_req(&task.id);
         match run_epic_close_merge_gate(
@@ -38105,7 +38107,7 @@ mod epic_status_gate_tests {
         ) {
             EpicCloseGateOutcome::Reject(message) => {
                 assert!(
-                    message.contains("git merge --no-ff factory/worker"),
+                    message.contains("git merge --no-ff 'factory/worker{a,b}!e'"),
                     "genuine unmerged work must still be mergeable: {message}"
                 );
                 assert!(
@@ -41703,6 +41705,17 @@ mod merge_reality_tests {
     /// argument-less `git rebase --onto`).
     #[test]
     fn merge_reality_refusal_follows_epic_merge_model_with_complete_commands() {
+        let special = init_repo_worker_branch_empty();
+        git(special.path(), &["branch", "-m", "factory/test-worker", "factory/test{a,b}!e"]);
+        git(special.path(), &["branch", "epic/quote"]);
+        let special_outcome = check_factory_branch_merge_reality_with_delivery_mode(
+            special.path(), "test{a,b}!e", "epic/quote",
+            cas_types::DeliveryMode::PushBranch, Some("cas-dc1b"));
+        let MergeRealityOutcome::Refuse(special_message) = special_outcome else {
+            panic!("expected real merge-reality refusal");
+        };
+        // pin: the second live merge gate also emits copyable quoted Git advice.
+        assert!(special_message.contains("git push origin 'factory/test{a,b}!e'"), "{special_message}");
         let dir = init_repo_worker_branch_empty();
         git(dir.path(), &["branch", "epic/wave-a"]);
         let outcome = check_factory_branch_merge_reality_with_delivery_mode(

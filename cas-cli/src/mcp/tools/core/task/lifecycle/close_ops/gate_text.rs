@@ -441,6 +441,12 @@ mod tests {
 
     #[test]
     fn commit_receipt_steps_find_verify_and_retry_with_a_complete_command() {
+        let special = commit_receipt_recovery_steps("cas-r1", "epic/{a,b}!e", "mcp__cs__");
+        // pin: ancestry instructions are copyable argv, including the SHA placeholder.
+        assert!(special.contains("git merge-base --is-ancestor '<sha>' 'epic/{a,b}!e'"), "{special}");
+        let unsafe_ref = commit_receipt_recovery_steps("cas-r1", "epic/control\u{85}label", "mcp__cs__");
+        assert!(unsafe_ref.contains("\\u{85}") && !unsafe_ref.contains("git ")
+            && !unsafe_ref.contains("mcp__cs__task"), "{unsafe_ref:?}");
         let steps = commit_receipt_recovery_steps("cas-r1", "epic/x", "mcp__cs__");
         for required in [
             "worker task commit OR the merge commit",

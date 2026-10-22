@@ -9990,12 +9990,12 @@ mod worker_commit_guard_tests {
         let p = tmp.path().to_string_lossy().to_string();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_CLONE_PATH", Some(&p)),
-            ("CAS_AGENT_NAME", Some("iso-worker")),
+            ("CAS_AGENT_NAME", Some("iso{a,b}!e")),
         ]);
 
         let msg = check_worker_git_commit_scope(&p).expect("isolated worker on main is denied");
         assert!(
-            msg.contains("git switch factory/iso-worker"),
+            msg.contains("git switch 'factory/iso{a,b}!e'"),
             "isolated workers keep the direct switch remedy: {msg}"
         );
         assert!(
@@ -10132,7 +10132,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps)), ("CAS_AGENT_NAME", Some("worker{a,b}!e"))]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -10140,6 +10140,8 @@ mod worker_commit_guard_tests {
             "detached HEAD must be denied, got: {result:?}"
         );
         let msg = result.unwrap();
+        // pin: detached-head switch advice quotes the worker ref.
+        assert!(msg.contains("git switch 'factory/worker{a,b}!e'"), "{msg}");
         assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("detached"));
     }
@@ -10299,7 +10301,7 @@ mod worker_commit_guard_tests {
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(worktree_path.as_str())),
-            ("CAS_AGENT_NAME", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker{a,b}!e")),
             ("CAS_FACTORY_SESSION", Some("cas-93e8-pre-tool")),
         ]);
 
@@ -10309,6 +10311,8 @@ mod worker_commit_guard_tests {
         );
         let output = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
         let value = serde_json::to_value(output).unwrap();
+        // pin: outside-worktree remedy quotes the intended worker ref.
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("git switch 'factory/worker{a,b}!e'"), "{value}");
         assert_eq!(
             value["hookSpecificOutput"]["permissionDecision"], "deny",
             "outside-worktree history mutation must be denied: {value}"
@@ -10667,6 +10671,7 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_AGENT_NAME", Some("worker{a,b}!e")),
             ("CAS_CLONE_PATH", None), // no isolated worktree
         ]);
 
@@ -10678,6 +10683,11 @@ mod worker_commit_guard_tests {
 
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
+        let reason = val["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+        // pin: actual handler worktree/create/switch/push advice preserves shell argv.
+        for command in ["git worktree add '../factory-worker{a,b}!e' -b 'factory/worker{a,b}!e'", "git switch -c 'factory/worker{a,b}!e'", "git push -u origin 'factory/worker{a,b}!e'"] {
+            assert!(reason.contains(command), "{reason}");
+        }
         let decision = val
             .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))

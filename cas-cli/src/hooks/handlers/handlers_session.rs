@@ -2681,9 +2681,12 @@ mod worker_worktree_assertion_tests {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", Some("worker{a,b}!e")),
         ]);
 
         let result = build_worker_worktree_assertion(&p, String::new());
+        // pin: session-start switch advice preserves the worker branch as one argument.
+        assert!(result.contains("git switch 'factory/worker{a,b}!e'"), "{result}");
         assert!(
             result.contains("WRONG BRANCH"),
             "expected WRONG BRANCH warning for 'main': {result}"

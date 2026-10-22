@@ -5685,6 +5685,21 @@ mod tests {
     /// succeed. Both halves are asserted here, positively and negatively.
     #[test]
     fn merge_receipt_names_origin_as_ahead_and_gives_a_remedy_that_can_work() {
+        for target in ["epic/{a,b}!e", "epic/control\u{85}label"] {
+            let outcome = TargetPushOutcome::NonFastForward {
+                sha: "42d81bd9aaaabbbbccccddddeeeeffff00001111".into(),
+                remote_sha: Some("c2698df216cd9abe7db530ec1d035f6a378d1d06".into()),
+                reason: "fetch first".into(),
+            };
+            let advice = describe_target_push_state(target, &outcome);
+            // pin: printed commands must preserve the target as one shell argument.
+            if target.chars().any(char::is_control) {
+                assert!(advice.contains("\\u{85}") && !advice.contains("git "), "{advice:?}");
+            } else {
+                assert!(advice.contains("git fetch origin 'epic/{a,b}!e'")
+                    && advice.contains("git merge 'origin/epic/{a,b}!e'"), "{advice}");
+            }
+        }
         let note = describe_target_push_state(
             "staging",
             &TargetPushOutcome::NonFastForward {
@@ -5789,6 +5804,10 @@ mod tests {
     /// there, so narrowing the classification did not weaken the guard.
     #[test]
     fn a_truly_diverged_target_still_refuses_before_merging() {
+        let advice = target_diverged_error("", "epic/{a,b}!e", "aaaa", "bbbb", 2, 3);
+        // pin: the real divergence renderer must quote both recovery commands.
+        assert!(advice.contains("git fetch origin 'epic/{a,b}!e'")
+            && advice.contains("git merge 'origin/epic/{a,b}!e'"), "{advice}");
         let error = target_diverged_error(
             "",
             "main",
@@ -5828,6 +5847,27 @@ mod tests {
 
     #[test]
     fn protected_default_branch_error_names_the_interactive_pr_route() {
+        for (source, target) in [
+            ("factory/{a,b}!e", "main"),
+            ("factory/safe", "epic/{a,b}!e"),
+            ("factory/safe", "epic/control\u{85}label"),
+            ("factory/control\u{85}label", "main"),
+        ] {
+            let advice = protected_default_branch_pr_error(source, target,
+                &TargetPushOutcome::ProtectedDefaultBranch {
+                    sha: "42d81bd9aaaabbbbccccddddeeeeffff00001111".into(),
+                    remote_sha: None, reason: "GH013".into(),
+                }, None).unwrap();
+            // pin: one unsafe ref suppresses the whole Git/gh/cas command group.
+            if source.chars().chain(target.chars()).any(char::is_control) {
+                assert!(advice.contains("\\u{85}") && !advice.contains("git ")
+                    && !advice.contains("gh pr ") && !advice.contains("cas worktree"), "{advice:?}");
+            } else if source.contains('{') {
+                assert!(advice.contains("git push -u origin 'factory/{a,b}!e'"), "{advice}");
+            } else {
+                assert!(advice.contains("git fetch origin 'epic/{a,b}!e'"), "{advice}");
+            }
+        }
         let error = protected_default_branch_pr_error(
             "factory/warm-cheetah-6",
             "main",

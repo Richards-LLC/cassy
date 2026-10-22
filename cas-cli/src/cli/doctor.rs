@@ -6973,7 +6973,7 @@ mod tests {
         assert_eq!(json[0]["status"], "warning");
         assert_eq!(
             json[0]["remediation"],
-            "Run `git remote set-url origin https://github.com/Richards-LLC/cassy.git`"
+            "Run:\ngit remote set-url origin 'https://github.com/Richards-LLC/cassy.git'"
         );
         crate::test_paths::warm_stub(
             &gh,

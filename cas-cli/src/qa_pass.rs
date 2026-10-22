@@ -1957,6 +1957,10 @@ mod tests {
     /// supervisor brief and no installed skill reference to decide.
     #[test]
     fn qa_task_description_states_the_rejection_bar_and_evidence_path() {
+        let special = qa_task_description(&task(), &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".into()], Path::new("/artifacts/qa"), "epic/{a,b}!e");
+        // pin: the baseline command must preserve the configured parent ref.
+        assert!(special.contains("git merge-base 'epic/{a,b}!e' aaaa1111"), "{special}");
         let round = pass("aaaa1111", cas_types::QaPassState::Pending);
         let text = qa_task_description(
             &task(),

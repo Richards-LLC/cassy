@@ -19251,7 +19251,7 @@ effort = "high"
             head_sha: "0bd4a26".to_string(),
             ahead: 1,
             behind: 0,
-            base_branch: "origin/main".to_string(),
+            base_branch: "origin/main{a,b}!e".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
             pr_url: WorkerPrUrl::None,
@@ -19267,11 +19267,11 @@ effort = "high"
             "the callout must name the parked branch: {out}"
         );
         assert!(
-            out.contains("'main'"),
+            out.contains("'main{a,b}!e'"),
             "the callout must name the trunk it is not on: {out}"
         );
         assert!(
-            out.contains("git switch main"),
+            out.contains("git switch 'main{a,b}!e'"),
             "the callout must state the remedy: {out}"
         );
         assert!(
@@ -20172,6 +20172,8 @@ mod sync_safety_tests {
         );
 
         let line = failure.report_line();
+        // pin: the disambiguating ^0 stash suffix requires shell quoting.
+        assert!(line.contains(&format!("git stash apply '{stash_ref}'")), "{line}");
         assert!(
             line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
             "report line must carry recovery instructions with the ref: {line}"

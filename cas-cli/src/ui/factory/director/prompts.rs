@@ -3923,7 +3923,7 @@ mod tests {
     #[test]
     fn test_c145_awaiting_merge_idle_is_actionable_merge_queue_prompt() {
         let event = DirectorEvent::WorkerIdle {
-            worker: "recipe-be".to_string(),
+            worker: "recipe{a,b}!e".to_string(),
             active_task: Some(ActiveLeaseSummary {
                 task_id: "cas-8eff".to_string(),
                 task_title: "Backend recipes API".to_string(),
@@ -3934,16 +3934,16 @@ mod tests {
         };
         let mut data = make_data(0);
         // make_data seeds a single agent named swift-fox; re-point it so the
-        // live-worker session-id guard accepts recipe-be.
-        data.agents[0].name = "recipe-be".to_string();
+        // live-worker session-id guard accepts recipe{a,b}!e.
+        data.agents[0].name = "recipe{a,b}!e".to_string();
         data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "recipe-be".to_string());
+            .insert("sess-id-abc123".to_string(), "recipe{a,b}!e".to_string());
         data.in_progress_tasks = vec![TaskSummary {
             id: "cas-8eff".to_string(),
             title: "Backend recipes API".to_string(),
             status: TaskStatus::AwaitingMerge,
             priority: Priority::MEDIUM,
-            assignee: Some("recipe-be".to_string()),
+            assignee: Some("recipe{a,b}!e".to_string()),
             task_type: TaskType::Task,
             epic: Some("cas-4c77".to_string()),
             branch: None,
@@ -3983,7 +3983,7 @@ mod tests {
         assert!(prompt.text.contains("cas-8eff"), "{}", prompt.text);
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("factory/recipe-be"),
+            prompt.text.contains("factory/recipe{a,b}!e"),
             "must name source factory branch: {}",
             prompt.text
         );
@@ -3996,7 +3996,7 @@ mod tests {
         );
         assert!(
             prompt.text.contains(
-                "git merge --no-ff factory/recipe-be` on epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77"
+                "git merge --no-ff 'factory/recipe{a,b}!e'"
             ),
             "epic-target relay must retain its epic branch merge command: {}",
             prompt.text
@@ -4027,11 +4027,11 @@ mod tests {
         );
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("git merge --no-ff factory/recipe-be")
+            prompt.text.contains("git merge --no-ff 'factory/recipe{a,b}!e'")
                 || prompt
                     .text
                     .to_lowercase()
-                    .contains("merge factory/recipe-be"),
+                    .contains("merge factory/recipe{a,b}!e"),
             "must include merge next action: {}",
             prompt.text
         );

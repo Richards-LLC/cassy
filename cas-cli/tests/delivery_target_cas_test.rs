@@ -589,7 +589,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         if row == "fresh-branch" {
             task.status = TaskStatus::Open;
             task.deliverables.work_target = Some(WorkTarget {
-                repo_selector: format!("remote:github.com/org/{slug}"),
+                repo_selector: format!("project:github.com/org/{slug}"),
                 target_branch: "main".into(),
             });
             let agents = open_agent_store(&cas_root).unwrap();
@@ -608,7 +608,12 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         std::fs::create_dir_all(worker_path.join("docs")).unwrap();
         std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
         run_git(&["add", delivered_path], &worker_path);
-        run_git(&["commit", "-m", &format!("{}: parked delivery", task.id)], &worker_path);
+        let subject = if row == "fresh-branch" {
+            format!("{}: parked delivery", task.id)
+        } else {
+            "parked delivery".to_string()
+        };
+        run_git(&["commit", "-m", &subject], &worker_path);
 
         let mut delivery_branch = format!("factory/{worker}");
         if row == "fresh-branch" {

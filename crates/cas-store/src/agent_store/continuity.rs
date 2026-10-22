@@ -6,6 +6,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// One project/host-scoped lane snapshot. IDs and original ownership are evidence,
 /// not an instruction to transfer live workers or overwrite current assignments.
@@ -103,7 +104,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         return Ok(());
     }
     let mut handoff = SupervisorHandoff {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: format!("{:x}", Sha256::digest(format!("{id}\0{epoch}").as_bytes())),
         agent_id: id.into(),
         name: name.clone(),
         reason: reason.into(),

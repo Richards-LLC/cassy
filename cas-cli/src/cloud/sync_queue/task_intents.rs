@@ -679,7 +679,7 @@ impl SyncQueue {
         let conn = self.lock_queue_conn()?;
         let mut after_validation = Some(after_validation);
         let mut attempt = 0;
-        let (tx, canonical, _reconcile_lease) = loop {
+        let (tx, canonical, _reconcile_lease, revision) = loop {
             attempt += 1;
             // cas-0e57: load the canonical task BEFORE taking the write lock.
             // The load runs on the task store's pooled connection, whose
@@ -802,7 +802,7 @@ impl SyncQueue {
                 Some(canonical) => canonical,
                 None => load_canonical()?,
             };
-            break (tx, canonical, reconcile_lease);
+            break (tx, canonical, reconcile_lease, revision);
         };
         let payload = canonical.payload;
         let local_project = crate::cloud::resolve_canonical_id(&self.cas_dir);

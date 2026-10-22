@@ -2346,6 +2346,8 @@ impl WorkerSpawnContext {
                         .filter(|parent| !parent.is_empty() && *parent != parent_branch);
                     let observation = spawn_git.observe_epic_publication(&parent_branch, refresh_parent);
                     let existing_remote = matches!(observation.remote, Ok(Some(true)));
+                    let lane_origin = recorded_epic.as_ref()
+                        .and_then(|epic| epic.deliverables.epic_branch_origin.as_ref());
                     if !ref_exists(&repo_root, &parent_branch) && !existing_remote {
                         if let Err(error) = &observation.remote {
                             anyhow::bail!(
@@ -2353,14 +2355,16 @@ impl WorkerSpawnContext {
                             );
                         }
                         anyhow::bail!(
-                            "spawn base '{parent_branch}' doesn't resolve; refusing to recreate a deleted epic lane from trunk"
+                            "{}", crate::worktree::GitOperations::missing_epic_branch_message(
+                                &parent_branch, lane_origin, observation.previous_remote,
+                            )
                         );
                     }
                     // Reconcile a verified existing epic once before preparing from
                     // its parent, so a stale local copy cannot omit origin's work.
                     let preserve = if existing_remote {
                         let readiness = spawn_git
-                            .ensure_epic_published_observed(&parent_branch, refresh_parent, &observation)
+                            .ensure_epic_published_observed(&parent_branch, refresh_parent, &observation, lane_origin)
                             .map_err(|error| anyhow::anyhow!("{}", epic_base_refresh_refusal(&error)))?;
                         if let Some(notice) = readiness.notice {
                             notices.push(notice);
@@ -2419,6 +2423,7 @@ impl WorkerSpawnContext {
                             &parent_branch,
                             refresh_parent,
                             &observation,
+                            lane_origin,
                         ) {
                             Ok(readiness) => {
                                 if let Some(notice) = readiness.notice {

@@ -42,9 +42,10 @@ impl GitOperations {
         &self,
         branch: &str,
         base: Option<&str>,
+        origin: Option<&cas_types::EpicBranchOrigin>,
     ) -> Result<EpicBranchReadiness, String> {
         let observation = self.observe_epic_publication(branch, base);
-        self.ensure_epic_published_observed(branch, base, &observation)
+        self.ensure_epic_published_observed(branch, base, &observation, origin)
     }
 
     pub(crate) fn observe_epic_publication(
@@ -142,6 +143,7 @@ impl GitOperations {
         branch: &str,
         base: Option<&str>,
         observation: &EpicPublicationObservation,
+        origin: Option<&cas_types::EpicBranchOrigin>,
     ) -> Result<EpicBranchReadiness, String> {
         let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         let refname = format!("refs/heads/{branch}");
@@ -212,9 +214,9 @@ impl GitOperations {
                 "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
             ));
         }
-        let local = self.resolve_commit(&refname).ok_or_else(|| format!(
-            "'{branch}' doesn't resolve locally or on origin; refusing to recreate a deleted epic lane"
-        ))?;
+        let local = self
+            .resolve_commit(&refname)
+            .ok_or_else(|| Self::missing_epic_branch_message(branch, origin, false))?;
         if let Some(base) = base {
             if !observation.base_fetched {
                 return Err(format!(
@@ -282,6 +284,33 @@ impl GitOperations {
             "EPIC BRANCH READY: {} (CAS_PUSH_EPIC_BRANCH={setting}; publication deferred until first use when disabled at create).",
             receipts.join("; ")
         ))))
+    }
+
+    /// Missing refs do not prove deletion. Origin metadata only supplies an
+    /// actionable host label; it never authorizes recreating or moving a ref.
+    pub(crate) fn missing_epic_branch_message(
+        branch: &str,
+        origin: Option<&cas_types::EpicBranchOrigin>,
+        previously_published: bool,
+    ) -> String {
+        if previously_published {
+            return format!(
+                "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
+            );
+        }
+        if let Some(origin) =
+            origin.filter(|origin| origin.branch == branch && !origin.host.trim().is_empty())
+        {
+            return format!(
+                "spawn refused: epic branch not published by {}\nNo local/origin ref; publish on {}, then retry:\n`git push origin {}`",
+                origin.host,
+                origin.host,
+                shell_words::quote(branch),
+            );
+        }
+        format!(
+            "spawn base '{branch}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
+        )
     }
 
     /// Move only an ancestor ref, protecting every checkout that holds it.

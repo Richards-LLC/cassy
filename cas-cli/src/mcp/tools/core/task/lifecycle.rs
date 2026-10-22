@@ -1617,6 +1617,7 @@ impl CasCore {
             let task_store = self.open_task_store()?;
             if let Ok(mut updated_task) = task_store.get(&id) {
                 updated_task.branch = Some(lane.to_string());
+                updated_task.deliverables.epic_branch_origin = epic_lane::branch_origin(lane);
                 let _ = task_store.update(&updated_task);
             }
             Some(receipt)
@@ -1730,6 +1731,7 @@ impl CasCore {
                             if let Ok(mut updated_task) = task_store.get(&id) {
                                 if updated_task.branch.as_deref().unwrap_or("").is_empty() {
                                     updated_task.branch = Some(branch_name.clone());
+                                    updated_task.deliverables.epic_branch_origin = epic_lane::branch_origin(&branch_name);
                                 }
                                 // A newly-created epic owns its coordination
                                 // branch. Persist that same canonical ref as

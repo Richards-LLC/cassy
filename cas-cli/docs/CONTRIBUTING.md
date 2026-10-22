@@ -337,6 +337,17 @@ The session's `daemon.log` captures daemon stderr and can be empty or sparse
 while runtime tracing is active. Preflight diagnostics live in `launch.log`;
 an empty `daemon.log` does not indicate that preflight passed or tracing stopped.
 
+## Epic lanes shared across hosts
+
+With `CAS_PUSH_EPIC_BRANCH` disabled, epic creation keeps the Git lane local;
+sharing the task through Cloud does not transfer its ref. Task deliverables
+retain the originating host and branch so a peer's missing-lane spawn refusal
+names that host and prints `git push origin <epic-branch>` to run there before
+retrying. First focus or spawn on the source host still publishes the lane.
+The peer never reconstructs the lane from trunk. Missing legacy provenance
+produces a neutral unavailable-lane message; failed origin verification and
+previously published refs retain their separate refusal paths.
+
 ## Factory cloud client (disabled by default)
 
 The factory daemon ships with a live-stream WebSocket client

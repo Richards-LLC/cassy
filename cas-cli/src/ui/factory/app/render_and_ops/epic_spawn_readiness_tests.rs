@@ -135,6 +135,152 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
 }
 
 #[test]
+fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
+    // Two repositories share task JSON and a real bare origin, but not refs.
+    // Cover both creation routes; neither may lose the originating host in sync.
+    for adopted in [false, true] {
+        with_fixture(|f| {
+            let core = crate::mcp::CasCore::with_daemon(f.root.clone(), None, None);
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            core.register_agent("peer-lane-creator".into(), "peer-lane-creator".into(), None)
+                .unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "title": "Peer-only epic", "task_type": "epic", "risk": "none"
+            }))
+            .unwrap();
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(core.cas_task_create_with_target(
+                    request,
+                    if adopted { f.repo.to_str() } else { None },
+                    if adopted {
+                        Some("epic/peer-only")
+                    } else {
+                        None
+                    },
+                    true,
+                ))
+                .unwrap();
+            let epic = core
+                .open_task_store()
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.title == "Peer-only epic")
+                .unwrap();
+            let branch = epic.branch.as_deref().unwrap();
+            git(&f.repo, &["checkout", branch]);
+            commit(&f.repo, "unpublished-work");
+            git(&f.repo, &["checkout", "main"]);
+            let tip = git(&f.repo, &["rev-parse", branch]);
+            assert!(
+                git(
+                    &f.origin,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        &format!("refs/heads/{branch}")
+                    ]
+                )
+                .is_empty()
+            );
+            let peer = f.repo.parent().unwrap().join("peer clone");
+            git(
+                f.repo.parent().unwrap(),
+                &[
+                    "clone",
+                    "--branch",
+                    "main",
+                    f.origin.to_str().unwrap(),
+                    peer.to_str().unwrap(),
+                ],
+            );
+            let peer_root = crate::store::init_cas_dir(&peer).unwrap();
+            std::fs::copy(f.root.join("config.toml"), peer_root.join("config.toml")).unwrap();
+            let peer_tasks = open_task_store_cached(&peer_root).unwrap();
+            let wire = serde_json::to_vec(&epic).unwrap();
+            let shared: cas_types::Task = serde_json::from_slice(&wire).unwrap();
+            peer_tasks.add(&shared).unwrap();
+            peer_tasks
+                .add(&cas_types::Task::new(
+                    "cas-peer-child".into(),
+                    "Peer child".into(),
+                ))
+                .unwrap();
+            peer_tasks
+                .add_dependency(&cas_types::Dependency {
+                    from_id: "cas-peer-child".into(),
+                    to_id: epic.id.clone(),
+                    dep_type: cas_types::DependencyType::ParentChild,
+                    created_at: chrono::Utc::now(),
+                    created_by: None,
+                })
+                .unwrap();
+            let error = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
+                .err()
+                .expect("unpublished peer lane must not be recreated")
+                .to_string();
+            let host = crate::cloud::device::DeviceConfig::hostname().unwrap();
+            assert!(
+                error.contains(&format!("epic branch not published by {host}")),
+                "{error}"
+            );
+            assert!(!error.contains("deleted epic lane"), "{error}");
+            for repo in [&peer, &f.origin] {
+                assert!(
+                    git(
+                        repo,
+                        &[
+                            "for-each-ref",
+                            "--format=%(refname)",
+                            &format!("refs/heads/{branch}")
+                        ]
+                    )
+                    .is_empty(),
+                    "refusal changed a ref"
+                );
+            }
+            // pin: the terminal fixture is the actual spawn diagnostic after
+            // normalizing host/ref identity, not a separately authored renderer.
+            assert_eq!(
+                format!(
+                    "{}\n",
+                    error
+                        .replace(&host, "soundwave")
+                        .replace(branch, "epic/peer")
+                ),
+                include_str!("../../../../../../docs/design/cli/epic-peer-publication.capture.txt")
+            );
+            let command = error
+                .split("publish on ")
+                .nth(1)
+                .unwrap()
+                .split('`')
+                .nth(1)
+                .unwrap();
+            let published = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(&f.repo)
+                .output()
+                .unwrap();
+            assert!(
+                published.status.success(),
+                "printed publish remedy failed: {}",
+                String::from_utf8_lossy(&published.stderr)
+            );
+            assert_eq!(git(&f.origin, &["rev-parse", branch]), tip);
+            let prep = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
+                .expect("published remedy must make peer spawn ready");
+            let work = prep.worktree_info.unwrap();
+            let checkout = work.base_ref.as_deref().unwrap_or(&work.parent_branch);
+            assert_eq!(git(&peer, &["rev-parse", checkout]), tip);
+            assert_eq!(git(&f.repo, &["rev-parse", branch]), tip);
+        });
+    }
+}
+
+#[test]
 fn cas_bfa1_spawn_first_use_publishes_and_checks_out_current_base() {
     // Equal, behind and ahead lanes need no delivery inventory. An unrelated
     // malformed backlog row must not prevent preparing their current base.
@@ -460,7 +606,7 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
             .to_string();
         assert!(
             error.contains("spawn base 'epic/round2' doesn't resolve")
-                && error.contains("refusing to recreate a deleted epic lane from trunk"),
+                && error.contains("no lane was recreated"),
             "{error}"
         );
         assert!(

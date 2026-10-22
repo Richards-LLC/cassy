@@ -535,9 +535,21 @@ pub struct FactoryBranchStart {
     pub base_sha: String,
 }
 
+/// Host where a recorded epic lane was bound to its task. Diagnostic provenance
+/// only: current publication is always observed from Git, never from this row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpicBranchOrigin {
+    pub branch: String,
+    pub host: String,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    /// Sync-safe origin for an unpublished lane; no host-local checkout path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_branch_origin: Option<EpicBranchOrigin>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_takeover: Option<SplitTakeoverAuthorization>,
 
@@ -692,6 +704,8 @@ pub struct TaskDeliverables {
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
     #[serde(default)]
+    epic_branch_origin: Option<EpicBranchOrigin>,
+    #[serde(default)]
     split_takeover: Option<SplitTakeoverAuthorization>,
     #[serde(default)]
     integration_batch: Option<IntegrationBatchEvidence>,
@@ -742,6 +756,7 @@ struct TaskDeliverablesObject {
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            epic_branch_origin: value.epic_branch_origin,
             split_takeover: value.split_takeover,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
@@ -1119,7 +1134,8 @@ impl TaskDeliverables {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.split_takeover.is_none()
+        self.epic_branch_origin.is_none()
+            && self.split_takeover.is_none()
             && self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
@@ -1599,6 +1615,7 @@ mod tests {
     #[test]
     fn legacy_deliverables_json_defaults_to_no_work_target() {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(deliverables.epic_branch_origin.is_none());
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
     }
@@ -1631,6 +1648,17 @@ mod tests {
         encoded["deliverables"] = serde_json::json!({"split_takeover": authorization});
         let task: Task = serde_json::from_value(encoded).unwrap();
         assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["split_takeover"], authorization);
+
+        // Origin may be the only deliverable and must survive object and
+        // legacy string transport without a machine-local checkout path.
+        let origin = serde_json::json!({"branch": "epic/peer", "host": "soundwave"});
+        for value in [serde_json::json!({"epic_branch_origin": origin}),
+            serde_json::json!(serde_json::json!({"epic_branch_origin": origin}).to_string())] {
+            let mut encoded = serde_json::to_value(Task::new("cas-peer".into(), "peer".into())).unwrap();
+            encoded["deliverables"] = value;
+            let task: Task = serde_json::from_value(encoded).unwrap();
+            assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["epic_branch_origin"], origin);
+        }
     }
 
     #[test]

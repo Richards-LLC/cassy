@@ -673,8 +673,16 @@ mod tests {
                 Some("task_blocked"), None, 86_400 * 30, Some("old-factory"), None, true, None,
             )
             .unwrap();
+        let time = |due| {
+            reminders.create(
+                "pruned", Some("pruned"), "deadline", cas_store::ReminderTriggerType::Time,
+                Some(due), None, None, 0, None,
+            ).unwrap()
+        };
+        let due_time = time(now - chrono::Duration::hours(1));
+        let future_time = time(now + chrono::Duration::hours(1));
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [missing_old, dead_ci, director_event, director_with_ttl] {
+        for id in [missing_old, dead_ci, director_event, director_with_ttl, due_time, future_time] {
             conn.execute(
                 "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
                 rusqlite::params![(now - chrono::Duration::hours(25)).to_rfc3339(), id],
@@ -685,12 +693,12 @@ mod tests {
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
         // cas-c634: the never-expiring internal-event reminder of a retired
         // worker (director_event) is expired with the external ones.
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 4);
+        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 5);
         assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 0);
         assert_eq!(
             orphaned_reminder_count(&cas_dir, now, &process_alive),
-            1,
-            "the TTL'd internal reminder of a retired worker is counted"
+            2,
+            "the TTL'd event and future time reminder are still counted"
         );
 
         let mut pending: Vec<i64> = reminders
@@ -702,10 +710,55 @@ mod tests {
         pending.sort_unstable();
         assert_eq!(
             pending,
-            vec![restarted, live, recent, live_target, process_backed, director_with_ttl]
+            vec![restarted, live, recent, live_target, process_backed, director_with_ttl, future_time]
         );
-        for expired in [dead_self, missing_old, dead_ci, director_event] {
+        for expired in [dead_self, missing_old, dead_ci, director_event, due_time] {
             assert!(!pending.contains(&expired));
         }
+    }
+
+    #[test]
+    fn ttl_orphan_notice_is_logged_only_when_the_scan_count_changes() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let create = || {
+            let id = reminders.create(
+                "gone", None, "wait", cas_store::ReminderTriggerType::Event,
+                None, Some("task_blocked"), None, 86_400 * 30, None,
+            ).unwrap();
+            conn.execute("UPDATE reminders SET created_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339(), id],
+            ).unwrap();
+        };
+        create();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = logs.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(capture.clone())).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut backoff = ExternalWakeBackoff::default();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
+            create();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
+        });
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.matches("they end at their TTL").count(), 2,
+            "one notice per count change, not per scan: {logs}");
     }
 }

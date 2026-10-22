@@ -481,10 +481,17 @@ fn codemap_freshness_agrees_across_qa_impact_status_and_journeys_gh_1340() {
     let repo = temp.path();
     let origin = tempfile::tempdir().unwrap();
     git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
-    git(repo, &["remote", "add", "origin", &origin.path().to_string_lossy()]);
+    git(
+        repo,
+        &["remote", "add", "origin", &origin.path().to_string_lossy()],
+    );
     write(repo, ".claude/CODEMAP.md", "- `src/` - Source\n");
     commit(repo);
-    write(repo, ".claude/CODEMAP.md", "- `src/` - Source\n- `docs/` - Docs\n");
+    write(
+        repo,
+        ".claude/CODEMAP.md",
+        "- `src/` - Source\n- `docs/` - Docs\n",
+    );
     write(repo, "docs/PRODUCT_OVERVIEW.md", "overview");
     write(repo, "docs/qa/notes.md", "notes");
     commit(repo);
@@ -497,19 +504,34 @@ fn codemap_freshness_agrees_across_qa_impact_status_and_journeys_gh_1340() {
     write(repo, ".playwright-mcp/page.yml", "untracked debris");
     let store = repo.join(".cas");
     let counts = || {
-        let impact = analyze(repo, &QaConfig::default(), &[Change::modified("src/a.ts")], None, None)
+        let impact = analyze(
+            repo,
+            &QaConfig::default(),
+            &[Change::modified("src/a.ts")],
+            None,
+            None,
+        )
+        .unwrap()
+        .warnings
+        .iter()
+        .find_map(|w| {
+            w.strip_prefix("CODEMAP is stale (")
+                .map(|rest| rest.split(' ').next().unwrap().to_owned())
+        });
+        let status = match evaluate_codemap_at(&Measurement::at(repo, &store))
             .unwrap()
-            .warnings
-            .iter()
-            .find_map(|w| w.strip_prefix("CODEMAP is stale (").map(|rest| rest.split(' ').next().unwrap().to_owned()));
-        let status = match evaluate_codemap_at(&Measurement::at(repo, &store)).unwrap().staleness {
+            .staleness
+        {
             None => Some(0),
             Some(CodemapStaleness::Stale { total_changes, .. }) => Some(total_changes),
             other => panic!("unexpected status {other:?}"),
         };
-        let journeys = UpkeepReport::at(&Measurement::integration_at(repo, &store), &QaConfig::default())
-            .codemap
-            .drift_count;
+        let journeys = UpkeepReport::at(
+            &Measurement::integration_at(repo, &store),
+            &QaConfig::default(),
+        )
+        .codemap
+        .drift_count;
         (impact, status, journeys)
     };
     assert_eq!(counts(), (None, Some(0), Some(0)));

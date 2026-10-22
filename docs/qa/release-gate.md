@@ -82,9 +82,9 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `readback`,
-`migrations` and fixture setup/teardown are implemented; later slices add the
-remaining verbs.
+`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `flags`,
+`readback`, `migrations` and fixture setup/teardown are implemented; later
+slices add the remaining verbs.
 
 ### `served`
 
@@ -107,6 +107,40 @@ pass. Each of the following refuses with `SERVED MISMATCH`:
 A failed `served` call refuses with `SERVED UNKNOWN` and keeps its error kind.
 A served backend can therefore lag the staging tip, as long as no commit since
 then touched its paths.
+
+## Config drift: `depends_on_flags`
+
+Evidence proves only the configuration it ran under. A journey names the
+flags whose values its result depends on:
+
+```yaml
+journeys:
+  - id: audit
+    depends_on_flags: [post_audit.audio_evidence.enabled]
+```
+
+`cas qa journeys --check` rejects an entry that is not 1–128 letters, digits
+or `._-:/`. Cassy never reads project config itself. The adapter's `flags`
+verb receives the union of the walked journeys' flags and answers every
+requested key, reporting an unset flag as `null`:
+
+```json
+{"v":1,"verb":"flags","env":"staging","sha":"<candidate>","args":{"keys":["post_audit.audio_evidence.enabled"]}}
+{"v":1,"ok":true,"data":{"post_audit.audio_evidence.enabled":false}}
+```
+
+If no journey declares a flag, there is no call. If a requested key is
+missing from the answer, the read is refused, because "not reported" is not
+"unset". Unrequested keys are dropped and never stored.
+
+Each check runs once. The snapshot is taken at gate preflight on the tested
+environment, and the ledger stores it as one header line:
+`Flags: staging@<sha> {"post_audit.audio_evidence.enabled":false}`. `|` is
+escaped, so a value cannot form a ledger row. Promotion reads the target
+environment once and compares the two. Every declared flag whose values
+differ, or that either side lacks, is
+`CONFIG_MISMATCH <flag>: test=<value> target=<value> (<journeys>)`, and the
+named journeys' evidence does not prove the target.
 
 ## Deploy failure alerts
 

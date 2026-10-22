@@ -4,6 +4,8 @@
 #   served:     echoes FAKE_SERVED_SHA as the backend component.
 #   readback:   answers FAKE_READBACK_DATA, the {invariant: {ok, observed}} map.
 #   migrations: answers FAKE_MIGRATIONS, the {id: applied|pending|unknown} map.
+#   flags:      answers FAKE_FLAGS_STAGING or FAKE_FLAGS_PROD, the {flag: value}
+#               map of the request's env (the only verb that accepts prod).
 # FAKE_CALL_LOG records each request; FAKE_SLEEP delays the answer;
 # FAKE_ERROR_KIND answers any verb with that classified error instead.
 set -eu
@@ -13,7 +15,7 @@ request=$(cat)
 [ -z "${FAKE_CALL_LOG:-}" ] || printf '%s\n' "$request" >>"$FAKE_CALL_LOG"
 case "$request" in *'"v":1'*) ;; *) exit 1 ;; esac
 case "$request" in *"\"verb\":\"$1\""*) ;; *) exit 1 ;; esac
-case "$request" in *'"env":"staging"'*) ;; *) exit 1 ;; esac
+case "$1:$request" in *'"env":"staging"'*) env=staging ;; flags:*'"env":"prod"'*) env=prod ;; *) exit 1 ;; esac
 [ -z "${FAKE_SLEEP:-}" ] || sleep "$FAKE_SLEEP"
 if [ -n "${FAKE_ERROR_KIND:-}" ]; then
   printf '{"v":1,"ok":false,"error":{"kind":"%s","provider":"fake-health","status":429,"retry_after_s":30,"message":"slow down"}}\n' "$FAKE_ERROR_KIND"
@@ -27,5 +29,8 @@ case "$1" in
     printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_READBACK_DATA" ;;
   migrations)
     printf '{"v":1,"ok":true,"data":%s}\n' "$FAKE_MIGRATIONS" ;;
+  flags)
+    if [ "$env" = prod ]; then data=$FAKE_FLAGS_PROD; else data=$FAKE_FLAGS_STAGING; fi
+    printf '{"v":1,"ok":true,"data":%s}\n' "$data" ;;
   *) exit 1 ;;
 esac

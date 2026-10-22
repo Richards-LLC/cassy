@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod fixtures;
+pub mod flags;
 
 /// Adapter protocol version written to and required from every envelope.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -863,6 +864,60 @@ mod tests {
             run(&journey, &subjects).unwrap(),
             Outcome::BlockedExternal { provider: Some(p), .. } if p == "fake-health"
         ));
+    }
+
+    /// Journeys' `depends_on_flags` are read through the `flags` verb, stored
+    /// in the LEDGER.md `Flags:` header and diffed once against the target env
+    /// as CONFIG_MISMATCH naming each flag and both values.
+    #[test]
+    fn flag_drift() {
+        use flags::{FlagSnapshot, compare, read};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let calls = tempfile::tempdir().unwrap();
+        let log = calls.path().join("calls.log");
+        let config = fake_adapter(project.path(), "FAKE_FLAGS_STAGING,FAKE_FLAGS_PROD,FAKE_CALL_LOG");
+        env.set("FAKE_CALL_LOG", &log);
+        let registry: crate::qa_registry::Registry = serde_yaml::from_str(
+            "journeys:\n  - id: signup\n  - id: audit\n    depends_on_flags: [post_audit.audio_evidence.enabled, audit.mode]\n",
+        )
+        .unwrap();
+        let journeys = &registry.journeys;
+        let sha = "a".repeat(40);
+        let read = |env: &str| read(project.path(), &config, env, &sha, journeys);
+
+        let undeclared = flags::read(project.path(), &config, "staging", &sha, &journeys[..1]);
+        assert!(undeclared.unwrap().values.is_empty() && !log.exists(), "no declared flag, no call");
+
+        env.set(
+            "FAKE_FLAGS_STAGING",
+            r#"{"post_audit.audio_evidence.enabled":false,"audit.mode":"a|b","undeclared":1}"#,
+        );
+        env.set("FAKE_FLAGS_PROD", r#"{"post_audit.audio_evidence.enabled":true,"audit.mode":"a|b"}"#);
+        let snapshot = read("staging").unwrap();
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains(r#""args":{"keys":["audit.mode","post_audit.audio_evidence.enabled"]}"#)
+        );
+        assert!(!snapshot.values.contains_key("undeclared"));
+        let line = snapshot.ledger_line();
+        assert!(!line.contains('|'), "a value must not form a ledger cell: {line}");
+        let ledger = format!("# Ledger\n{line}\n| id | cell | expected | observed | verdict |\n");
+        assert_eq!(FlagSnapshot::from_ledger(&ledger).as_ref(), Some(&snapshot));
+
+        let target = read("prod").unwrap();
+        let mismatches: Vec<String> =
+            compare(&snapshot, &target, journeys).iter().map(ToString::to_string).collect();
+        assert_eq!(
+            mismatches,
+            ["CONFIG_MISMATCH post_audit.audio_evidence.enabled: test=false target=true (audit)"]
+        );
+        assert!(compare(&snapshot, &snapshot, journeys).is_empty());
+
+        env.set("FAKE_FLAGS_PROD", r#"{"audit.mode":"a|b"}"#);
+        let refusal = read("prod").unwrap_err().to_string();
+        assert!(refusal.contains("omits post_audit.audio_evidence.enabled"), "{refusal}");
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

@@ -148,7 +148,10 @@ fake.write_text('''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-Path(os.environ['PID_FILE']).write_text(json.dumps([os.getpid(), child.pid]))
+marker = Path(os.environ['PID_FILE'])
+ready = marker.with_suffix('.ready')
+ready.write_text(json.dumps([os.getpid(), child.pid]))
+ready.replace(marker)
 print('    Finished `test` profile in 0.01s', flush=True)
 child.wait()
 ''')

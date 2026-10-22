@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::cli::Cli;
@@ -48,7 +48,7 @@ fn execute_edit_line_based_with_input(
     let reg = registry();
 
     // Get all current values
-    let items: HashMap<String, String> = config.list().into_iter().collect();
+    let items = crate::cli::config::editor_config_values(&config);
 
     // Collect configs to edit
     let mut configs_to_edit: Vec<&crate::config::ConfigMeta> = Vec::new();
@@ -234,14 +234,14 @@ mod tests {
         )
         .unwrap();
 
-        let registry = registry();
+        let reg = registry();
         let mut answers = String::new();
-        for section in registry.sections() {
-            for meta in registry.configs_in_section(section) {
+        for section in reg.sections() {
+            for meta in reg.configs_in_section(section) {
                 let answer = match meta.key {
                     "hub.transport_mode" => "d\n",
                     "sync.enabled" => "true\n",
-                    _ => "\n",
+                    _ => continue,
                 };
                 answers.push_str(answer);
             }

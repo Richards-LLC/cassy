@@ -98,7 +98,7 @@ impl ConfigTuiApp {
         let original_config = config.clone();
         let registry = registry();
 
-        let values: HashMap<String, String> = config.list().into_iter().collect();
+        let values = crate::cli::config::editor_config_values(&config);
 
         // Build section info
         let mut sections = Vec::new();
@@ -596,7 +596,7 @@ impl ConfigTuiApp {
     }
 
     fn refresh_sections(&mut self) {
-        self.values = self.config.list().into_iter().collect();
+        self.values = crate::cli::config::editor_config_values(&self.config);
 
         // Rebuild section info
         self.sections.clear();
@@ -798,7 +798,7 @@ mod tests {
         std::fs::create_dir_all(&host_root).unwrap();
         std::fs::write(
             host_root.join("config.toml"),
-            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n\n[viktor]\nenabled = false\n",
         )
         .unwrap();
         let project = env.home().join("projects/config-tui-editor");
@@ -814,6 +814,11 @@ mod tests {
             app.values.get("hub.transport_mode").map(String::as_str),
             Some("required"),
             "the editor should show the host-scoped value"
+        );
+        assert_eq!(
+            app.values.get("viktor.enabled").map(String::as_str),
+            Some("false"),
+            "the editor should show the host-scoped Viktor value"
         );
         app.current_section = Some("sync".into());
         app.option_keys = vec!["sync.enabled".into()];

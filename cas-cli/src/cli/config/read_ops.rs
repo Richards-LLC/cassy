@@ -31,12 +31,32 @@ fn config_root_for_key(key: &str, cas_root: &Path) -> PathBuf {
 pub(crate) fn load_editor_config(cas_root: &Path) -> anyhow::Result<Config> {
     let mut config = Config::load(cas_root)?;
     let host_config = Config::load(&crate::config::host_config_dir())?;
-    for (key, value) in host_config.list() {
-        if host_scoped_key(&key) {
-            config.set(&key, &value)?;
+    for key in host_scoped_config_keys() {
+        if let Some(value) = host_config.get(key) {
+            config.set(key, &value)?;
         }
     }
     Ok(config)
+}
+
+pub(crate) fn editor_config_values(config: &Config) -> HashMap<String, String> {
+    let mut values = config.list().into_iter().collect::<HashMap<_, _>>();
+    for key in host_scoped_config_keys() {
+        if let Some(value) = config.get(key) {
+            values.insert(key.to_owned(), value);
+        }
+    }
+    values
+}
+
+fn host_scoped_config_keys() -> Vec<&'static str> {
+    let mut keys = registry()
+        .all_keys()
+        .into_iter()
+        .filter(|key| host_scoped_key(key))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
 }
 
 // Plain `get` stays a machine-readable scalar for `gh --repo "$(cas config get
@@ -266,6 +286,11 @@ pub(crate) fn save_editor_changes(
         }
     }
     let edited_document = toml_edit::Document::parse(toml::to_string(&saved_config)?)?.into_mut();
+    // BTreeMap key order gives every multi-file edit the same lock order.
+    let _locks = changes_by_root
+        .keys()
+        .map(|root| crate::config::lock_project_config(root))
+        .collect::<std::io::Result<Vec<_>>>()?;
     let mut written_paths = Vec::new();
     for (config_root, mut changes) in changes_by_root {
         changes.sort_by(|left, right| left.0.cmp(&right.0));
@@ -294,8 +319,8 @@ pub(crate) fn save_editor_changes(
     Ok(())
 }
 
-/// Apply all editor writes and resets for one config file under one stable
-/// lock, keeping comments and unknown keys intact until the atomic replace.
+/// Apply all editor writes and resets for one config file while the caller
+/// holds its stable write lock, preserving comments and unknown keys.
 fn persist_editor_changes_for_root(
     config_root: &Path,
     fallback: &Config,
@@ -303,7 +328,6 @@ fn persist_editor_changes_for_root(
     changes: &[(String, Option<String>)],
     written_paths: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
-    let _lock = crate::config::lock_project_config(config_root)?;
     let path = config_root.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,

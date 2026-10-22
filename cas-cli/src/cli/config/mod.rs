@@ -11,7 +11,8 @@ mod read_ops;
 mod util;
 
 pub(super) use read_ops::{
-    config_key_has_override, load_editor_config, reset_config_value, save_editor_changes,
+    config_key_has_override, editor_config_values, load_editor_config, reset_config_value,
+    save_editor_changes,
 };
 
 use std::path::Path;

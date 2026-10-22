@@ -695,6 +695,7 @@ sleep 2
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
+        # pin: FAIL plus the row id is the gate's public diagnostic protocol.
         self.assertIn("FAIL ci-script-tests-changed", (logs / "gate.log").read_text())
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
@@ -724,6 +725,7 @@ sleep 2
         later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
         self.assertIsNotNone(later, missing.stderr)
         self.assertNotEqual(Path(later.group(1)), logs)
+        # pin: retaining evidence means its bytes survive later attempts unchanged.
         self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
     def test_hook_installer_preserves_existing_authority_and_refuses_workers_cas_edb0(self):

@@ -170,7 +170,8 @@ impl GitOperations {
         }
     }
 
-    /// Read only the local-only range. Subject alone does not establish Cassy ownership.
+    /// Read the commits unique to the first ref. Neither ref must be local.
+    /// Subject alone does not establish Cassy ownership.
     pub(crate) fn reconcile_commits_ahead(
         &self, local: &str, upstream: &str,
     ) -> Result<super::ReconcileCommits, String> {
@@ -202,7 +203,8 @@ impl GitOperations {
     pub(crate) fn reconcile_commit_cause(&self, local: &str, upstream: &str) -> String {
         match self.reconcile_commits_ahead(local, upstream) {
             Ok(commits) if commits.count > 0 && commits.count == commits.total => format!(
-                "\nCause: {} local-only Cassy reconcile commit(s).\nNext: push the reconcile commits to origin and open a PR.", commits.count,
+                "\nCause: {} Cassy reconcile commit(s) not on '{}'.\nNext: push the reconcile commits to origin and open a PR.",
+                commits.count, Self::visible_git_label(upstream),
             ),
             _ => String::new(),
         }

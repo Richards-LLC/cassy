@@ -12773,6 +12773,12 @@ fn managed_commits_check(root: &Path) -> Option<Check> {
     if !output.status.success() { return None; }
     let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if upstream.is_empty() { return None; }
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).args(["show-ref", "--verify", "--quiet", &upstream]);
+    // A deleted configured upstream cannot establish unpublished local work.
+    // Other inspection failures retain the diagnostic below.
+    if crate::worktree::GitOperations::run_command_bounded(command, Duration::from_secs(2))
+        .is_ok_and(|output| output.status.code() == Some(1)) { return None; }
     let commits = match git.reconcile_commits_ahead(&format!("refs/heads/{branch}"), &upstream) {
         Ok(commits) => commits,
         Err(_) => return Some(Check::new("managed commits", CheckStatus::Warning, "Could not inspect default-branch publication; review its Git upstream")),
@@ -12829,6 +12835,8 @@ mod managed_commits_tests {
         assert_eq!(git(&["rev-parse", "main"]), main, "doctor must not move local history");
         git(&["update-ref", "refs/remotes/origin/main", &main]);
         assert!(managed_commits_check(&repo).is_none(), "published repairs are no longer pending");
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert!(managed_commits_check(&repo).is_none(), "deleted configured upstream is not proof of an unpushed repair");
         git(&["config", "--unset", "branch.main.remote"]);
         git(&["config", "--unset", "branch.main.merge"]);
         assert!(managed_commits_check(&repo).is_none(), "no upstream is not proof of an unpushed repair");

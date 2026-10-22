@@ -410,30 +410,6 @@
       "reason": "Existing team_show_never_shows_not_resolved_for_active_project invokes CasRootGuard::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
     },
     {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::EnvGuard::drop::unguarded-mutation::0a131be927da1673::1",
-      "reason": "Existing fixture owner EnvGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact EnvGuard::drop std::env::remove_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::EnvGuard::drop::unguarded-mutation::b2c71b6ed25dd042::1",
-      "reason": "Existing fixture owner EnvGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact EnvGuard::drop std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::EnvGuard::set::unguarded-mutation::b2c71b6ed25dd042::1",
-      "reason": "Existing fixture owner EnvGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact EnvGuard::set std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::hold_and_release_update_session_state_and_worker_status_cas_60dd::unguarded-helper-call::5e374e79369dfa0b::1",
-      "reason": "Existing hold_and_release_update_session_state_and_worker_status_cas_60dd invokes EnvGuard::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::supervisor_cannot_hold_foreign_session_worker_cas_60dd::unguarded-helper-call::5e374e79369dfa0b::1",
-      "reason": "Existing supervisor_cannot_hold_foreign_session_worker_cas_60dd invokes EnvGuard::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/worker_hold_mcp_test.rs::worker_cannot_change_hold_state_cas_60dd::unguarded-helper-call::32ca4de0095c8897::1",
-      "reason": "Existing worker_cannot_change_hold_state_cas_60dd invokes EnvGuard::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
       "id": "crates/cas-factory/tests/concurrent_factory_session_isolation.rs::EnvGuard::drop::unguarded-mutation::279e704836bb52aa::1",
       "reason": "Existing fixture owner EnvGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact EnvGuard::drop std::env::remove_var site from epic175f78c5; no claim that the legacy pattern is safe."
     },

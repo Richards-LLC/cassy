@@ -81,3 +81,37 @@ unchanged. One existing CLI init regression covers defaults and wizard input,
 new and existing stores, real malformed Codex configuration, unchanged obstructing
 bytes, and the complete parser cause at 80/120 columns. Terminal QA uses the
 supervisor-built candidate; its receipt and critique follow after execution.
+
+
+## Generic failure critique and proof
+
+Supervisor candidate `9cdc308d33fe23a353cde166f12c4ef11ebbed29`,
+`cas 3.72.0 (9cdc308 2026-10-22)`, SHA-256
+`61c748722f950b6aab76391dc7981b142b1e816f518a6fee326b86768a810d85`.
+
+- `terminal-qa: PASS init-phase-yes-new · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-phase-wizard-new · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-phase-yes-existing · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-phase-wizard-existing · 11 runs · 0 fail · 0 warn · 0 allowed`
+- `terminal-qa: PASS init-phase-short-failure · 11 runs · 0 fail · 0 warn · 0 allowed`
+
+Every gate covers 80/120 columns, dark/light/Solarized palettes, C locale,
+NO_COLOR and pipe. All 56 fixture read-backs preserve the obstructing file,
+created store and any existing configuration. Adjacent failed JSON init keeps
+stdout empty, exits 1 and reports the full cause and recovery remedy on stderr.
+The [pipe capture](init-phase-error.pipe.capture.txt) shows the actual candidate.
+The task's portable proof contains complete reports, raw captures and `LEDGER.md`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The failed phase names the operation; the final diagnostic starts with incomplete-init status and its force-retry remedy when applicable. The existing init banner remains outside this change. |
+| Fit | 4 | One cause is on stderr, with phase context on stdout; all prose fits at 80/120 without dropping or splitting tokens. |
+| Craft | 4 | The existing phase column and error mark stay consistent; final stderr reserves space for the widest ASCII mark. |
+| Theme safety | 5 mechanical | All four palette checks pass with no exception; NO_COLOR/C and pipe checks pass. Rendered HTML inspection was not exercised. |
+| Machine contract | 5 | Error exit1, existing empty JSON stdout on failure, no human phase rows in JSON, and unchanged config/obstruction read-backs. |
+
+Scored by warm-tiger-88 on 2026-10-22 from actual captures and mechanical gates.
+HTML visual inspection is **NOT EXERCISED**: the browser runtime reported no
+browser available after documented troubleshooting. Supervisor #542582 accepted
+the computed palette/contrast and layout checks as the substitute for this
+plain-text error change; no rendered PNG review is claimed.

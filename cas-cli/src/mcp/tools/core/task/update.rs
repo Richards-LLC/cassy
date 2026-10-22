@@ -631,25 +631,28 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let requested_status_is_active = req
+        let requested_status_is_nonterminal = req
             .status
             .as_deref()
             .and_then(|status| status.parse::<TaskStatus>().ok())
-            .is_some_and(|status| matches!(status, TaskStatus::InProgress | TaskStatus::Blocked));
-        let priority_touches_active_task = req.priority.is_some()
-            && (matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
-                || requested_status_is_active);
-        if priority_touches_active_task
-            && let Some(caller) = self
-                .get_registered_agent_id_read_only()
-                .ok()
-                .and_then(|caller_id| self.open_agent_store().ok()?.get(&caller_id).ok())
-            && caller.role == cas_types::AgentRole::Worker
-        {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on active tasks; a live registered supervisor must change it.",
-            ));
+            .is_some_and(|status| !matches!(status, TaskStatus::Closed | TaskStatus::Cancelled));
+        if req.priority.is_some() && (!task.is_terminal() || requested_status_is_nonterminal) {
+            // Priority controls shared build admission. A worker cannot evade
+            // this guard by reopening its task, and unavailable authority must
+            // refuse the entire update before ordinary fields are changed.
+            let caller_id = self.get_registered_agent_id_read_only()?;
+            let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("TASK PRIORITY UPDATE REJECTED: cannot read caller authority: {error}"),
+                )
+            })?;
+            if caller.role == cas_types::AgentRole::Worker {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                ));
+            }
         }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
@@ -2613,6 +2616,22 @@ mod status_transition_tests {
             error.message
         );
         assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
+
+        // Taking the real update path back to Open must not unlock a P0
+        // promotion before the worker starts its task again.
+        let reopen: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "status": "open",
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(reopen)).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        let promotion: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0,
+        }))
+        .unwrap();
+        let result = core.cas_task_update(Parameters(promotion)).await;
+        assert!(result.is_err(), "reopen -> P0 must be refused: {result:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
     }
 
     #[tokio::test]
@@ -2677,6 +2696,60 @@ mod status_transition_tests {
         let unchanged = tasks.get(&blocked.id).unwrap();
         assert_eq!(unchanged.status, TaskStatus::Blocked);
         assert_eq!(unchanged.priority, Priority::MEDIUM);
+
+        // Cover every other non-terminal state without a combined status
+        // update; those states were previously outside the priority guard.
+        let mut failures = Vec::new();
+        for status in [TaskStatus::Open, TaskStatus::AwaitingMerge] {
+            let mut task = Task::new(format!("cas-priority-{status}"), "parked task".into());
+            task.status = status;
+            task.assignee = Some("priority-transition-worker".into());
+            task.priority = Priority::MEDIUM;
+            tasks.add(&task).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": 0, "title": "must not change",
+            })).unwrap();
+            let result = core.cas_task_update(Parameters(request)).await;
+            let stored = tasks.get(&task.id).unwrap();
+            if result.is_ok() || stored.priority != Priority::MEDIUM || stored.title != task.title {
+                failures.push(format!("{status}: result={result:?}, priority={}, title={}", stored.priority.0, stored.title));
+            }
+        }
+        assert!(failures.is_empty(), "non-terminal priority bypass: {}", failures.join("; "));
+    }
+
+    #[tokio::test]
+    async fn priority_update_refuses_unreadable_agent_store_before_mutating_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let worker = Agent::new_with_role(
+            "unreadable-priority-worker".into(), "unreadable-worker".into(), AgentRole::Worker,
+        );
+        agents.register(&worker).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let mut task = Task::new("cas-priority-unreadable".into(), "original title".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name);
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+
+        // A real SQLite read failure at the existing cached store boundary,
+        // while the task store remains usable. No mock authority can grant it.
+        rusqlite::Connection::open(temp.path().join("cas.db")).unwrap()
+            .execute("ALTER TABLE agents RENAME TO unavailable_agents", []).unwrap();
+        assert!(agents.get(&worker.id).is_err());
+        let request = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0, "title": "must not change",
+        })).unwrap();
+        let result = core.cas_task_update(Parameters(request)).await;
+        let stored = tasks.get(&task.id).unwrap();
+        assert!(result.is_err(), "unreadable authority must refuse: {result:?}");
+        assert_eq!(stored.priority, Priority::MEDIUM, "refusal must precede task writes");
+        assert_eq!(stored.title, task.title);
     }
 
     #[tokio::test]

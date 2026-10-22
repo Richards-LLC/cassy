@@ -314,6 +314,86 @@ pub(crate) fn execute_revoke_write(args: &ConfigRevokeWriteArgs, cli: &Cli, cas_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn non_default_roundtrip_value(
+        key: &str,
+        meta: &crate::config::ConfigMeta,
+        before: &crate::config::Config,
+    ) -> String {
+        let mut candidates = Vec::new();
+        match meta.value_type {
+            crate::config::ConfigType::Bool => {
+                candidates.extend(["true".to_owned(), "false".to_owned()]);
+            }
+            crate::config::ConfigType::Int => {
+                if let Ok(default) = meta.default.parse::<i64>() {
+                    for delta in [1, -1, 2, -2] {
+                        if let Some(value) = default.checked_add(delta) {
+                            candidates.push(value.to_string());
+                        }
+                    }
+                }
+                candidates.extend(["0", "1", "2", "5", "10", "60", "100"].into_iter().map(str::to_owned));
+            }
+            crate::config::ConfigType::Float => {
+                if let Ok(default) = meta.default.parse::<f64>() {
+                    candidates.extend([default + 0.25, default - 0.25].into_iter().map(|value| value.to_string()));
+                }
+                candidates.extend(["0.25", "0.5", "0.75", "1.25"].into_iter().map(str::to_owned));
+            }
+            crate::config::ConfigType::String => {}
+            crate::config::ConfigType::StringList => {
+                candidates.extend(["roundtrip-one", "roundtrip-one,roundtrip-two"].into_iter().map(str::to_owned));
+            }
+        }
+        if let crate::config::Constraint::OneOf(values) = &meta.constraint {
+            candidates.extend(values.iter().cloned());
+        }
+        candidates.extend(
+            [
+                "roundtrip-value",
+                "roundtrip-model",
+                "roundtrip/path",
+                "example/repo",
+                "/tmp/cas-config-roundtrip",
+                "https://example.com",
+                "auto",
+                "enabled",
+                "disabled",
+                "claude",
+                "codex",
+                "low",
+                "medium",
+                "high",
+                "required",
+                "loopback",
+                "cloud",
+                "warn",
+                "retrieval,helpful",
+                "[]",
+                r#"[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":60,"mode":"warn"}]"#,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        candidates.dedup();
+
+        let before_value = before.get(key);
+        for candidate in &candidates {
+            if before_value.as_deref() == Some(candidate.as_str()) || meta.validate(candidate).is_err() {
+                continue;
+            }
+            let mut probe = before.clone();
+            if probe.set(key, candidate).is_ok() && probe.get(key) != before_value {
+                return candidate.clone();
+            }
+        }
+
+        candidates
+            .into_iter()
+            .find(|candidate| before_value.as_deref() != Some(candidate.as_str()) && meta.validate(candidate).is_ok())
+            .unwrap_or_else(|| panic!("no valid non-default round-trip value for {key}"))
+    }
     use crate::cli::config::read_ops::set_config_value;
     use crate::config::Config;
     use crate::config::operator_policy::{
@@ -523,25 +603,14 @@ worker_build_jobs = \"4\"\n";
 
     #[test]
     fn config_registry_keys_round_trip_through_set_and_get() {
-        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &[
-            "hooks.stop.duplicate_detection_enabled",
-            "hooks.stop.duplicate_detection_threshold",
-            "hooks.stop.learning_review_enabled",
-            "hooks.stop.learning_review_threshold",
-            "hooks.stop.rule_review_enabled",
-            "hooks.stop.rule_review_threshold",
-            "notifications.on_auth_success",
-            "notifications.on_idle_prompt",
-            "notifications.on_permission_prompt",
-            "notifications.webhook_url",
-        ];
-
         let env = operator_in_agent_pane();
         let home = env.home().to_path_buf();
         let project = home.join("projects/roundtrip");
         let cas_root = crate::store::init_cas_dir(&project).unwrap();
         let downloads = home.join("Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
+        let documents = home.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
 
         let original = format!(
             "# existing aliases\n\
@@ -562,42 +631,66 @@ large_artifact_dir = \"before\"\n",
         keys.dedup();
 
         for key in keys {
+            let mut config = Config::load(&cas_root).unwrap();
+            let meta = registry
+                .get(key)
+                .or_else(|| match key {
+                    "factory.cargo_build_jobs" => registry.get("factory.worker_build_jobs"),
+                    "staging.large_artifact_dir" => registry.get("staging.staging_dir"),
+                    _ => None,
+                })
+                .expect("registered key metadata or alias");
             let value = match key {
-                "factory.worker_build_jobs" => "8",
-                "factory.cargo_build_jobs" => "9",
-                "staging.staging_dir" => "roundtrip-staging-dir",
-                "staging.large_artifact_dir" => "roundtrip-large-artifact-dir",
-                "factory.write_roots" => "~/Downloads",
-                "llm.supervisor.harness" => "codex",
-                "llm.supervisor.model" => "roundtrip-supervisor-model",
-                "llm.supervisor.reasoning_effort" => "medium",
-                "llm.worker.harness" => "claude",
-                "llm.worker.model" => "roundtrip-worker-model",
-                "llm.worker.reasoning_effort" => "high",
-                _ => registry.get(key).expect("registered key metadata").default,
+                "factory.worker_build_jobs" => "8".to_owned(),
+                "factory.cargo_build_jobs" => "9".to_owned(),
+                "staging.staging_dir" => "roundtrip-staging-dir".to_owned(),
+                "staging.large_artifact_dir" => "roundtrip-large-artifact-dir".to_owned(),
+                "factory.write_roots" => "~/Documents".to_owned(),
+                // The registry intentionally permits only `low` for the
+                // shared worker, so assert its serialized path instead of
+                // inventing an invalid non-default value.
+                "factory.ai_enrichment.effort" => "low".to_owned(),
+                "llm.supervisor.harness" => "codex".to_owned(),
+                "llm.supervisor.model" => "roundtrip-supervisor-model".to_owned(),
+                "llm.supervisor.reasoning_effort" => "medium".to_owned(),
+                "llm.worker.harness" => "claude".to_owned(),
+                "llm.worker.model" => "roundtrip-worker-model".to_owned(),
+                "llm.worker.reasoning_effort" => "high".to_owned(),
+                _ => non_default_roundtrip_value(key, meta, &config),
             };
 
             if key == "factory.write_roots" {
-                let before = Config::load(&cas_root).unwrap();
-                let change = set_project_write_roots(value, &cas_root, PANE_CGROUP).unwrap();
-                let mut expected = before;
+                let before = config.clone();
+                let change = set_project_write_roots(&value, &cas_root, PANE_CGROUP).unwrap();
+                let mut expected = before.clone();
                 expected.set_factory_write_roots(change.stored.clone());
                 let actual = Config::load(&cas_root).unwrap();
+                assert_ne!(actual.get(key), before.get(key), "{key} must use a non-default value");
                 assert_eq!(actual.get(key), expected.get(key), "{key}");
                 continue;
             }
 
-            let mut config = Config::load(&cas_root).unwrap();
+            let before_value = config.get(key);
             let mut expected = config.clone();
-            let result = expected.set(key, value);
-            if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
-                assert!(result.is_err(), "{key} is no longer rejected by Config::set");
-                continue;
+            expected
+                .set(key, &value)
+                .unwrap_or_else(|error| panic!("unexpected set rejection for {key}: {error}"));
+            if key != "factory.ai_enrichment.effort" {
+                assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
             }
-            result.unwrap_or_else(|error| panic!("unexpected set rejection for {key}: {error}"));
-            set_config_value(&mut config, key, value, &cas_root, operator).unwrap();
+            set_config_value(&mut config, key, &value, &cas_root, operator).unwrap();
             let actual = Config::load(&cas_root).unwrap();
             assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");
+            if key == "factory.ai_enrichment.effort" {
+                let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+                assert!(saved.contains("[factory.ai_enrichment]"), "{saved}");
+                assert!(saved.contains("effort = \"low\""), "{saved}");
+            }
+            if key == "factory.worker_build_jobs" {
+                let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+                assert!(saved.contains("worker_build_jobs = \"8\""), "{saved}");
+                assert!(!saved.contains("cargo_build_jobs ="), "{saved}");
+            }
         }
     }
 

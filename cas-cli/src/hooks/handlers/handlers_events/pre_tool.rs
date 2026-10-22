@@ -213,7 +213,7 @@ fn verifier_rust_build_denial(what: &str, cas_root: Option<&Path>) -> String {
     format!(
         "🚫 VERIFIER RUST BUILD: `{what}` would build outside the host builder cap and PSI admission. \
          Run the task's named tests at the verification's bound head through the counted verifier lane: \
-         `cas factory verifier-test --cas-root {root} --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. \
+         `cas factory verifier-test --cas-root {root} --task-id <task-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. \
          A \"Waiting for build admission\" refusal means retry later; it is not a test failure."
     )
 }

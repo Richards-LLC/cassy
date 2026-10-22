@@ -5702,17 +5702,19 @@ impl CasService {
         // supervisor's live workers; every other target names exactly one.
         let recipients: Vec<cas_types::Agent> = if target == "all_workers" {
             live_agents
-                .into_iter()
+                .iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
                         && agent.visible_to_factory_session(factory_session.as_deref())
                         && owned.as_ref().is_none_or(|set| set.contains(&agent.name))
                 })
+                .cloned()
                 .collect()
         } else {
             let found = live_agents
-                .into_iter()
+                .iter()
                 .find(|agent| agent.name == target)
+                .cloned()
                 .ok_or_else(|| {
                     Self::error(
                         ErrorCode::INVALID_PARAMS,
@@ -5760,7 +5762,7 @@ impl CasService {
         // real agent row or omitted entirely.
         let source_agent = agent_store.get(&source).ok();
         let resume_source =
-            resume_brief_sender(agent_store.as_ref(), caller.as_deref(), factory_session.as_deref());
+            resume_brief_sender(source_agent.as_ref(), &live_agents, factory_session.as_deref());
         let queue_origin = source_agent
             .map(|agent| cas_store::QueueOrigin::RegisteredAgent { agent_id: agent.id });
 
@@ -6650,6 +6652,8 @@ impl CasService {
         out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
         out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
+        out.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
+        out.push_str(&crate::factory_review_scratch::unmanaged_large(&self.inner.cas_root));
         out.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
@@ -7498,6 +7502,7 @@ impl CasService {
         }
 
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -7948,62 +7953,57 @@ fn gc_report_short_line(line: &str) -> String {
 }
 
 /// cas-d1e0: who a context-reset resume brief says it is from.
+/// cas-e13c: `live_agents` is the handler's active agent list, so naming
+/// the session's supervisor costs no second, unfiltered registry load.
 fn resume_brief_sender(
-    agents: &dyn cas_store::AgentStore,
-    caller: Option<&str>,
+    caller: Option<&cas_types::Agent>,
+    live_agents: &[cas_types::Agent],
     factory_session: Option<&str>,
 ) -> String {
     // The caller's own name when it has an agent record.
-    if let Some(agent) = caller.and_then(|id| agents.get(id).ok()) {
-        return agent.name;
+    if let Some(agent) = caller {
+        return agent.name.clone();
     }
     // Otherwise the factory session's supervisor, the identity it acts for.
     let Some(session) = factory_session else {
         return "supervisor".to_string();
     };
-    agents
-        .list(None)
-        .unwrap_or_default()
-        .into_iter()
+    live_agents
+        .iter()
         .filter(|agent| {
             agent.role == cas_types::AgentRole::Supervisor
                 && agent.factory_session.as_deref() == Some(session)
-                && agent.status != cas_types::AgentStatus::Shutdown
         })
         .max_by_key(|agent| agent.last_heartbeat)
-        .map(|agent| agent.name)
+        .map(|agent| agent.name.clone())
         .unwrap_or_else(|| format!("supervisor (factory session {session})"))
 }
 
 #[cfg(test)]
 mod resume_brief_sender_tests {
     use super::resume_brief_sender;
-    use cas_store::AgentStore;
 
     /// cas-d1e0: a caller with no agent record is not "unknown": the brief
     /// names its factory session's supervisor, or at least the session.
     #[test]
     fn a_caller_without_a_record_sends_as_the_session_supervisor_cas_d1e0() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let agents = cas_store::SqliteAgentStore::open(temp.path()).unwrap();
-        agents.init().unwrap();
         let mut lead = cas_types::Agent::new_with_role(
             "lead-id".into(),
             "swift-octopus-83".into(),
             cas_types::AgentRole::Supervisor,
         );
         lead.factory_session = Some("session-a".into());
-        agents.register(&lead).unwrap();
+        let live = vec![lead.clone()];
 
-        assert_eq!(resume_brief_sender(&agents, Some("lead-id"), Some("session-a")), "swift-octopus-83");
-        assert_eq!(resume_brief_sender(&agents, Some("unregistered"), Some("session-a")), "swift-octopus-83");
-        assert_eq!(resume_brief_sender(&agents, None, Some("session-a")), "swift-octopus-83");
-        for sender in [
-            resume_brief_sender(&agents, None, Some("session-b")),
-            resume_brief_sender(&agents, None, None),
-        ] {
-            assert!(!sender.contains("unknown"), "{sender}");
-        }
+        assert_eq!(resume_brief_sender(Some(&lead), &live, Some("session-a")), "swift-octopus-83");
+        assert_eq!(resume_brief_sender(None, &live, Some("session-a")), "swift-octopus-83");
+        // cas-e13c: the exact fallbacks, so another session's supervisor
+        // can never stand in for this one.
+        assert_eq!(
+            resume_brief_sender(None, &live, Some("session-b")),
+            "supervisor (factory session session-b)"
+        );
+        assert_eq!(resume_brief_sender(None, &live, None), "supervisor");
     }
 }
 

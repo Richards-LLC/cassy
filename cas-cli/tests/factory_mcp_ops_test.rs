@@ -6502,6 +6502,230 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 // gc_cleanup tests
 // =============================================================================
 
+/// A terminal task must not leave a registered proof checkout and its target
+/// behind forever. The fixture uses the managed ownership record, real Git,
+/// SQLite task state and the public factory GC handler.
+#[tokio::test]
+async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "review-control");
+    let project = env.cas_root.parent().unwrap();
+    let scratch = project.join("scratch");
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nscratch_root = {:?}\n",
+            scratch.display().to_string()
+        ),
+    )
+    .unwrap();
+    let task = Task::new("cas-review-fixture".into(), "review owner".into());
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    let checkout = managed.path.clone();
+    let owned = checkout.parent().unwrap().to_path_buf();
+    assert!(checkout.starts_with(
+        cas_types::factory_scratch::project_scratch_dir(&scratch, &env.cas_root).join("verify")
+    ));
+    drop(managed);
+    let retried = cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    assert_eq!(retried.path, checkout, "admission retries must reuse the same task/head checkout");
+    drop(retried);
+    let marker = owned.join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(checkout.is_dir(), "open task checkout must be retained");
+    let mut task = env.task_store().get(&task.id).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "young terminal checkout must be retained");
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let lease_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(owned.join("lease"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lease_file).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(
+        owned.is_dir(),
+        "active review lease must prevent reclamation"
+    );
+    drop(lease_file);
+    // Force alone is still a preview for disposable checkout removal.
+    let mut preview = cleanup.clone();
+    preview.dry_run = None;
+    env.service
+        .factory_request(Parameters(preview))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "preview removed review checkout");
+    owner["schema_version"] = serde_json::json!(999);
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(owned.is_dir(), "unknown ownership schema must be retained");
+    owner["schema_version"] = serde_json::json!(1);
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    git_stdout(&checkout, &["checkout", "--detach", "epic/foreign"]);
+    env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(owned.is_dir(), "changed review head must be retained");
+    git_stdout(&checkout, &["checkout", "--detach", &head]);
+    let file = std::fs::File::open(checkout.join("target/output")).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "open proof output must prevent reclamation");
+    drop(file);
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        !owned.exists(),
+        "terminal managed checkout leaked: {}",
+        get_text(&output)
+    );
+    assert!(
+        !git_stdout(project, &["worktree", "list", "--porcelain"])
+            .contains(checkout.to_str().unwrap()),
+        "GC must remove the Git registration as well as the files"
+    );
+
+    // A resolved dispatch releases its own proof checkout even if the task
+    // stays open (for example, a rejected delivery receiving another round).
+    let task = Task::new("cas-dispatch-fixture".into(), "dispatch owner".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root,
+        &task.id,
+        "test-supervisor-id",
+        "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+        false,
+    )
+    .unwrap();
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root,
+        project,
+        &task.id,
+        Some(&dispatch.id),
+        &head,
+    )
+    .unwrap();
+    let owned = managed.path.parent().unwrap().to_path_buf();
+    drop(managed);
+    let marker = owned.join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "pending dispatch must be retained");
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        "test-supervisor-id",
+        None,
+        true,
+    )
+    .unwrap();
+    drop(conn);
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        !owned.exists(),
+        "resolved dispatch scratch leaked: {}",
+        get_text(&output)
+    );
+    assert_eq!(
+        env.task_store().get(&task.id).unwrap().status,
+        TaskStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    let scratch = env.cas_root.parent().unwrap().join("scratch");
+    let unmanaged = scratch.join("old-supervisor-walk");
+    std::fs::create_dir_all(&unmanaged).unwrap();
+    // Sparse file makes the logical-size threshold deterministic and cheap.
+    std::fs::File::create(unmanaged.join("output"))
+        .unwrap()
+        .set_len(1024 * 1024 * 1024)
+        .unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nscratch_root = {:?}\n",
+            scratch.display().to_string()
+        ),
+    )
+    .unwrap();
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
+    let output = env
+        .service
+        .factory_request(Parameters(request))
+        .await
+        .unwrap();
+    let text = get_text(&output);
+    assert!(
+        text.contains("Large unmanaged scratch directories"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "{}: 1073741824 bytes (never auto-deleted)",
+            unmanaged.display()
+        )),
+        "{text}"
+    );
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        unmanaged.join("output").is_file(),
+        "unmanaged output is review-only"
+    );
+}
+
 #[tokio::test]
 async fn test_gc_cleanup_without_force() {
     let env = FactoryTestEnv::new();
@@ -8552,6 +8776,20 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         status_text.contains(&format!("Message {notification_id} status:")),
         "status response must describe the same returned ID: {status_text}"
     );
+
+    // cas-6021: the same local id given as `id` is this queue's message,
+    // not a peer-mailbox lookup that answers 404.
+    let mut by_id = coord_msg("message_status", "swift-fox", "unused", None);
+    by_id.id = Some(notification_id.to_string());
+    let by_id_text = get_text(
+        &env.service
+            .coordination(Parameters(by_id))
+            .await
+            .expect("a local id given as id= resolves locally"),
+    );
+    // pin: the local report's header names the queue message (cas-6021).
+    assert!(by_id_text.contains(&format!("Message {notification_id} status:")), "{by_id_text}");
+    assert!(!by_id_text.contains("Peer message"), "{by_id_text}");
 }
 
 #[tokio::test]

@@ -2552,7 +2552,7 @@ impl CasCore {
                 let cas_root = self.cas_root.clone();
                 peer_budget
                     .run(move || {
-                        claims.acquire_for_start(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
+                        claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                             local.contains(holder)
                         })
                     })

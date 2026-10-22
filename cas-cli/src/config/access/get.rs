@@ -86,6 +86,20 @@ impl Config {
             "hooks.ai_model" => Some(hooks.ai_model.clone()),
             "hooks.ai_fallback" => Some(hooks.ai_fallback.to_string()),
             "hooks.minimal_start" => Some(hooks.minimal_start.to_string()),
+            "hooks.stop.duplicate_detection_enabled" => {
+                Some(hooks.stop.duplicate_detection_enabled.to_string())
+            }
+            "hooks.stop.duplicate_detection_threshold" => {
+                Some(hooks.stop.duplicate_detection_threshold.to_string())
+            }
+            "hooks.stop.learning_review_enabled" => {
+                Some(hooks.stop.learning_review_enabled.to_string())
+            }
+            "hooks.stop.learning_review_threshold" => {
+                Some(hooks.stop.learning_review_threshold.to_string())
+            }
+            "hooks.stop.rule_review_enabled" => Some(hooks.stop.rule_review_enabled.to_string()),
+            "hooks.stop.rule_review_threshold" => Some(hooks.stop.rule_review_threshold.to_string()),
             // Hooks.plan_mode section
             "hooks.plan_mode.enabled" => Some(hooks.plan_mode.enabled.to_string()),
             "hooks.plan_mode.token_budget" => Some(hooks.plan_mode.token_budget.to_string()),
@@ -272,6 +286,12 @@ impl Config {
                 Some(notifications.display_duration_secs.to_string())
             }
             "notifications.max_visible" => Some(notifications.max_visible.to_string()),
+            "notifications.on_permission_prompt" => {
+                Some(notifications.on_permission_prompt.to_string())
+            }
+            "notifications.on_idle_prompt" => Some(notifications.on_idle_prompt.to_string()),
+            "notifications.on_auth_success" => Some(notifications.on_auth_success.to_string()),
+            "notifications.webhook_url" => Some(notifications.webhook_url.unwrap_or_default()),
             // Notifications.tasks section
             "notifications.tasks.on_created" => Some(notifications.tasks.on_created.to_string()),
             "notifications.tasks.on_started" => Some(notifications.tasks.on_started.to_string()),

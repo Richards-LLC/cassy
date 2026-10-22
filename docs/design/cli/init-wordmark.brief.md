@@ -10,9 +10,9 @@
 
 Use the same styled-output plus UTF-8 predicate as root help. Keep the raw
 clap command's default banner ASCII so alternate help entry paths cannot skip
-the locale policy. Limit changes to wordmark selection and init's text writer.
+the locale policy. R1 changed wordmark selection and the init text writer; R2 extends the same policy to the actual spinner and quick-start table.
 
-## Critique
+## R1 critique — superseded coverage
 
 Candidate `a8c1d0041a4ff2fb397338ed5a10d613a0150d61`,
 `cas 3.71.0 (a8c1d00 2026-10-22)`, SHA-256
@@ -47,3 +47,54 @@ failure. Task artifacts hold raw reports, allowed reports, exact exceptions,
 source equality proof, candidate receipt, ledger and PNGs. Adjacent
 [UTF-8](init-wordmark.utf8.capture.txt) and
 [ASCII](init-wordmark.ascii.capture.txt) captures pin the actual welcome text.
+
+
+## R2 complete-init evidence
+
+Candidate `9e9210dd9693a2571716e68e0fc8e2dfa7e6d615`,
+`cas 3.71.0 (9e9210d 2026-10-22)`, SHA-256
+`3f7651748a0f79e53b850a809a29b344d73521ee00d802695357c95f20e3c4a5`.
+
+The initial EOF-at-existing-config walk missed spinner and quick-start output.
+R2 selects ASCII spinner frames and `Border::Ascii` whenever the shared styled
+UTF-8 predicate is false, including the first frame with animation disabled.
+The existing init regression now renders the actual quick-start table and
+checks both missed decorations in the locale/mode cases. It fails before the
+fix; root help remains covered by its existing adjacent regression.
+
+Real TTY QA completes both `--yes --no-integrations` and interactive selection
+1 (reconfigure), then `Proceed` confirmation, at 80/120 under C and UTF-8.
+Each run reads back configuration, the SQLite tasks table, hooks and MCP files.
+28 C/plain raw ANSI captures are ASCII, including overwritten spinner frames.
+Four UTF-8 old/new ANSI comparisons are byte-identical: 6262 bytes for `--yes`
+and 15470 for interactive, at both widths. The preserved baseline is ancestor
+build `a8c1d0041`, not an asserted exact immediate-base build.
+
+- `terminal-qa: PASS r2-yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed`
+- `terminal-qa: PASS r2-yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed`
+- `terminal-qa: PASS r2-interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed`
+- `terminal-qa: PASS r2-interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed`
+
+These passes use explicit supervisor approvals 4206333 and 4206384 for four
+inherited findings: palette `cas-f15f`, factory-tooling overflow `cas-0ba9`,
+piped phase redraws `cas-3075`, and the exact unchanged progress sentence
+`Reconfiguring Cassy...` (with two leading spaces) falsely reported as
+truncation (`cas-592b`).
+All 190 exact distinct exception entries and their tasks are listed in the
+ledger. Unfiltered reports remain FAIL; no blanket visual-quality pass is
+claimed. The old 76-cell maximum applied only to R1's incomplete entry walk;
+the full flow exposes an inherited 112-cell UTF-8 / 115-cell C tooling row.
+
+| Dimension | Full-wizard score | Evidence / retained issue |
+| --- | --- | --- |
+| Hierarchy | 4 | Existing-config choice leads to one confirmation, then completed initialization and quick-start commands. |
+| Fit | 2 | Changed logo/table fit 80; inherited tooling row overflows under approved `cas-0ba9` exception. |
+| Craft | 3 | ASCII spinner/table are coherent; pre-existing Next steps box alignment remains unchanged. |
+| Theme safety | 1 | Fixed palette still fails light themes; approved `cas-f15f` exception. |
+| Machine contract | 3 | Full C/plain output is ASCII; inherited piped redraws remain under `cas-3075`. JSON unchanged, not exercised. |
+
+The whole wizard remains below craft floors due to retained inherited issues;
+this delivery proves the approved locale repair and UTF-8 preservation.
+Inspected actual C80 dark/light PNGs and plain captures for both paths.
+[Defaults capture](init-full-yes.ascii.capture.txt) and
+[interactive capture](init-full-interactive.ascii.capture.txt) retain full text.

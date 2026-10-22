@@ -1338,9 +1338,17 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 /// slot, a private target, the zero-test guard). A verifier otherwise has no
 /// clean checkout of that head under the worktrees root, and fell back to
 /// plain Cargo that no admission saw.
-pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> Result<()> {
+pub(crate) fn execute_verifier(
+    cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
+    head: &str,
+    args: &[String],
+) -> Result<()> {
     execute_verifier_at(
         cas_root,
+        task_id,
+        dispatch_id,
         head,
         args,
         &std::env::current_dir()?,
@@ -1351,6 +1359,8 @@ pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> 
 
 fn execute_verifier_at(
     cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
     head: &str,
     args: &[String],
     cwd: &Path,
@@ -1362,38 +1372,9 @@ fn execute_verifier_at(
             "Verifier tests run named tests only: `nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`"
         );
     }
-    let worktree = verifier_worktree(cas_root, cwd, head)?;
-    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner, None)
-}
-
-/// A detached checkout of `head` under the Cassy worktrees root, so the
-/// capped runner admits it and its slot counts. Reused while it still points
-/// at `head`; it never touches a worker's checkout.
-fn verifier_worktree(cas_root: &Path, cwd: &Path, head: &str) -> Result<PathBuf> {
-    if !valid_git_oid(head) {
-        bail!("Verifier tests need the full bound head commit SHA, not {head:?}");
-    }
-    let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
-    git(&repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])
-        .with_context(|| format!("bound head {head} is not in this repository; fetch it first"))?;
-    let worktree = cas_root.join("worktrees").join(format!("verify-{}", &head[..12]));
-    if worktree.exists() {
-        let current = git(&worktree, &["rev-parse", "HEAD"])?;
-        if current.trim() != head {
-            bail!(
-                "{} is checked out at {} instead of the bound head {head}; remove it and retry",
-                worktree.display(),
-                current.trim()
-            );
-        }
-    } else {
-        std::fs::create_dir_all(cas_root.join("worktrees"))?;
-        git(
-            &repo,
-            &["worktree", "add", "--detach", &worktree.to_string_lossy(), head],
-        )?;
-    }
-    Ok(worktree)
+    let checkout =
+        crate::factory_review_scratch::create(cas_root, cwd, task_id, dispatch_id, head)?;
+    execute_at_with_scope(cas_root, args, &checkout.path, cargo, scope_runner, None)
 }
 
 /// Prefer the active task's declared integration target, never the pushed
@@ -1438,7 +1419,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
     // Check only isolated, seeded worker caches; never use a shared target.
-    if !repo.starts_with(cas_root.join("worktrees")) {
+    if !repo.starts_with(cas_root.join("worktrees"))
+        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo) {
         bail!(
             "Worker check requires an isolated worktree under {}",
             cas_root.join("worktrees").display()
@@ -2962,7 +2944,16 @@ PY"#);
         // and consumes the same episode's later automatic escalation.
         let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
         assert!(execute_at(&root, &args, &repo, &fake).is_err());
-        let explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        let mut explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        // The worker has not retried for six minutes. Admission no longer
+        // reserves a slot, but the live episode must consume its explicit page.
+        explicit.since -= chrono::Duration::minutes(6);
+        explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
+        let explicit_path = std::fs::read_dir(root.join("capacity-waits")).unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json")).unwrap();
+        std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "gap exceeds admission freshness");
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("capacity-worker".into());
         let worker = CasService::new(core, None);
@@ -2972,8 +2963,9 @@ PY"#);
             "blocker": true, "summary": "Storage repair needed", "message": need,
         })).unwrap())).await.unwrap();
         assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
-        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
-            .iter().any(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)));
+        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
+            .iter().filter(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)).count(), 1,
+            "exactly one explicit assistance page is durably queued");
         let after_need = notices.pending_count("capacity-supervisor").unwrap();
         crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
@@ -3082,7 +3074,16 @@ PY"#);
         p2_wait_record["since"] = serde_json::json!(
             (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339()
         );
+        p2_wait_record["next_retry"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(43)).to_rfc3339()
+        );
         std::fs::write(&p2_wait_path, serde_json::to_vec(&p2_wait_record).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "priority-p2-worker", chrono::Utc::now()).unwrap().is_none());
+        let aged = crate::factory_capacity_wait::record_refusal(
+            &root, &repos[0], "retry after a gap longer than four minutes", chrono::Utc::now(),
+        ).unwrap().unwrap();
+        assert_eq!(aged.since, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(p2_wait_record["since"].clone()).unwrap(), "retry preserves aging across the gap");
+        assert!(aged.cause.starts_with("priority=P0"), "{}", aged.cause);
         drop(held);
 
         let p0_aged_p2_block = execute_at(&root, &args, &repos[1], &fake)
@@ -3540,15 +3541,21 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
     /// counted worktrees root, instead of running as uncounted plain Cargo.
     #[test]
     fn verifier_tests_are_admitted_against_the_builder_cap_cas_d95c() {
-        let _env =
-            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("project");
         fixture_commit(&repo);
-        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let head = git(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         let root = repo.join(".cas");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 1\n").unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders = 1\n",
+        )
+        .unwrap();
         let slots = root.join("worker-check-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let _held = acquire_slot(&slots, 1).unwrap();
@@ -3557,15 +3564,54 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
             .map(|arg| arg.to_string())
             .collect();
 
-        let error = execute_verifier_at(&root, &head, &args, &repo, Path::new("/nonexistent/cargo"), None)
-            .expect_err("the only builder slot is held");
-        assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
-        let checkout = root.join("worktrees").join(format!("verify-{}", &head[..12]));
-        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &args,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("the only builder slot is held");
+        assert!(
+            error.to_string().contains("max_concurrent_builders=1"),
+            "{error}"
+        );
+        let run = std::fs::read_dir(root.join("review-scratch/cas-proof"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            git(&run.join("repo"), &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim(),
+            head
+        );
 
-        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"].iter().map(|arg| arg.to_string()).collect();
-        let error = execute_verifier_at(&root, &head, &unnamed, &repo, Path::new("/nonexistent/cargo"), None)
-            .expect_err("verifiers run named tests only");
+        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &unnamed,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("verifiers run named tests only");
         assert!(error.to_string().contains("named tests only"), "{error}");
     }
 

@@ -418,13 +418,13 @@ impl PeerClaims {
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
-    /// Cancel an old pending release before task start takes a new Cloud
-    /// claim. The per-task fence also waits out a release already in flight;
-    /// cancellation alone cannot invalidate that release's earlier snapshot.
-    /// Called on the blocking pool under the start request's peer budget.
+    /// Cancel an old pending release before task start or manual claim takes
+    /// a new Cloud claim. The per-task fence also waits out a release already
+    /// in flight; cancellation alone cannot invalidate its earlier snapshot.
+    /// Called on the blocking pool under the request's peer budget.
     /// The caller retains the returned guard until its local lease is published.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn acquire_for_start(
+    pub(crate) fn acquire_for_local_lease(
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
@@ -1615,6 +1615,30 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn manual_claim_between_retry_check_and_release_keeps_fresh_claim_cas_f535() {
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                release_pending_task_claims_with(&claims, dir.path(), |task| {
+                    // The same helper wired to cas_task_claim: Cloud before
+                    // local try_claim. Delay local publication to force the gap.
+                    assert!(crate::store::open_agent_store(dir.path()).unwrap()
+                        .get_lease(task).unwrap().is_none());
+                    let (answer, fence) = claims.acquire_for_local_lease(
+                        dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                    );
+                    assert!(matches!(answer, Acquire::Claimed));
+                    drop(fence);
+                });
+                assert_eq!(held.lock().unwrap().as_ref().map(|lock| lock["id"].clone()),
+                    Some(serde_json::json!("fresh-lock")),
+                    "the pending release removed the manual claimant's fresh Cloud claim");
+                assert!(read_pending_claim_releases(dir.path()).is_empty());
+            }).await.unwrap();
+            assert!(server.received_requests().await.unwrap().iter()
+                .all(|request| !request.url.path().ends_with("/release")));
+        }
+
+        #[tokio::test]
         async fn synchronous_release_and_restart_preserve_fresh_claim_cas_923e() {
             let (_server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
@@ -1641,7 +1665,7 @@ mod tests {
                 let restart = {
                     let (claims, root) = (claims.clone(), dir.path().to_path_buf());
                     std::thread::spawn(move || {
-                        let (answer, fence) = claims.acquire_for_start(
+                        let (answer, fence) = claims.acquire_for_local_lease(
                             &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                         );
                         assert!(matches!(answer, Acquire::Claimed));
@@ -1671,7 +1695,7 @@ mod tests {
             // new local lease, published before the start fence is dropped.
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
-                let (answer, fence) = claims.acquire_for_start(
+                let (answer, fence) = claims.acquire_for_local_lease(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                 );
                 assert!(matches!(answer, Acquire::Claimed));
@@ -1733,7 +1757,7 @@ mod tests {
                 // the fence must not cancel a later release on waking up.
                 let pending = read_pending_claim_releases(dir.path());
                 let expired = claims.clone().with_budget(PeerBudget::new(Duration::ZERO));
-                assert!(matches!(expired.acquire_for_start(
+                assert!(matches!(expired.acquire_for_local_lease(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                 ).0, Acquire::Unavailable(_)));
                 assert_eq!(read_pending_claim_releases(dir.path()), pending,
@@ -1741,7 +1765,7 @@ mod tests {
                 release_pending_task_claims_with(&claims, dir.path(), |task| {
                     // The real task-start order: Cloud first, local lease later.
                     assert!(crate::store::open_agent_store(dir.path()).unwrap().get_lease(task).unwrap().is_none());
-                    assert!(matches!(claims.acquire_for_start(
+                    assert!(matches!(claims.acquire_for_local_lease(
                         dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                     ).0, Acquire::Claimed));
                     // Deliberately leave the local lease absent until retry ends.
@@ -1795,7 +1819,7 @@ mod tests {
                 drop(probe);
                 let restart = {
                     let (claims, root) = (claims.clone(), dir.path().to_path_buf());
-                    std::thread::spawn(move || claims.acquire_for_start(
+                    std::thread::spawn(move || claims.acquire_for_local_lease(
                         &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                     ))
                 };

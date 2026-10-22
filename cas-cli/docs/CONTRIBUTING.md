@@ -1467,8 +1467,13 @@ waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
 shows that episode once; the background reminder scan sends one capacity notice
 after 20 minutes, without a blocked-task page. A delivered explicit assistance
-message consumes that episode's automatic notice. Successful admission clears
-it, and a changed task/lease invalidates it. Capacity waiting never changes task
+message consumes that episode's automatic notice even after a gap longer than
+four minutes between retries. A stale retry stops reserving queue position;
+the live task lease still preserves its original wait age and notice state.
+Workers cannot change priority on any non-terminal task, including Open and
+AwaitingMerge; reopening does not grant permission to promote it. Priority
+updates refuse when caller authority cannot be read. Successful admission clears
+the wait, and a changed task/lease invalidates it. Capacity waiting never changes task
 status; genuine blocked/yielded tasks retain their existing semantics.
 `force=true` only overrides the existing spawn-time soft check, never capped
 worker slot locks.
@@ -1487,13 +1492,39 @@ Daemon startup also tries to give its inherited interactive cgroup (including
 the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
 settings. Missing controllers or user-manager permissions leave startup working.
 
-Task verifiers use the same budget (cas-d95c). `cas factory verifier-test
---cas-root <root> --head <bound head SHA> -- nextest run -p <crate> [--lib|--test
-<harness>] -E 'test(name)'` checks the bound head out at
-`<root>/worktrees/verify-<sha12>` and runs it through the capped runner, so the
-build takes a counted builder slot and is refused under the same PSI and cap
-rules. The PreToolUse guard sends a task-verifier subagent's plain Cargo build
-there.
+Task verifiers use the same budget. Run `cas factory verifier-test
+--cas-root <root> --task-id <task-id> --dispatch-id <dispatch-id>
+--head <bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>]
+-E 'test(name)'`. Omit `--dispatch-id` when no dispatch exists. The helper
+creates a managed detached checkout, resolves Zig, seeds a private Cargo target
+and runs through the existing counted builder slot, PSI and capacity checks.
+
+For a supervisor walk or source review, create the same disposable checkout:
+
+```bash
+cas factory scratch-checkout --cas-root <root> --task-id <task-id> --head <full SHA>
+```
+
+Use the printed absolute path as the review directory. Add `--dispatch-id` when
+reviewing a dispatch. With `factory.scratch_root` configured, the managed home
+is `<scratch_root>/<project-key>/verify/<task-id>/<run>/repo`; otherwise it is
+`<root>/review-scratch/<task-id>/<run>/repo`. Each run has a private ownership
+record and exclusive lease; retries reuse the same task/dispatch/full-head
+checkout, so admission refusals cannot multiply source trees. Changed source
+or ownership refuses reuse; no existing ad-hoc directory is adopted.
+Publish durable proof outside that disposable home, in the task artifact root.
+
+`gc_report` includes managed review checkout status and flags unmanaged scratch
+root siblings of at least 1 GiB (apparent file bytes) as review-only.
+`gc_cleanup force=true dry_run=false` reclaims owned checkouts at least two hours
+old when the task is Closed/Cancelled or the exact dispatch is resolved. It
+checks leases and native process evidence (open files, cwd, mappings and argv),
+rechecks terminal ownership, removes any Git worktree registration, then deletes
+the disposable checkout and its build output. Unknown/malformed ownership,
+changed heads, another repository's registration, live or unverifiable users,
+and younger checkouts are retained. Force alone remains a preview for this tier.
+These rules make interrupted verifier/supervisor output collectable without
+relying on an agent remembering to remove a large checkout.
 
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create

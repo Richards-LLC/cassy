@@ -21,7 +21,7 @@ pub(crate) fn execute_export(
         _ => {
             let theme = ActiveTheme::default();
             let mut stderr = io::stderr();
-            let mut fmt = Formatter::stdout(&mut stderr, theme);
+            let mut fmt = Formatter::stderr(&mut stderr, theme);
             StatusLine::error(format!(
                 "Unknown format: {}. Use 'yaml' or 'json'",
                 args.format
@@ -118,7 +118,7 @@ pub(crate) fn execute_import(
         if !args.force {
             let theme = ActiveTheme::default();
             let mut stderr = io::stderr();
-            let mut fmt = Formatter::stdout(&mut stderr, theme);
+            let mut fmt = Formatter::stderr(&mut stderr, theme);
             StatusLine::warning("This will overwrite your current configuration.")
                 .render(&mut fmt)?;
             StatusLine::info("Use --force to confirm, or --dry-run to preview changes.")

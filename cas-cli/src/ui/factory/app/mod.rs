@@ -692,11 +692,16 @@ fn hardlink_seed_tree_inner(
                 skipped_crates,
             )?;
         } else if file_type.is_file() {
-            // Cargo coordinates writes through target/**/.cargo-lock.  A
-            // hardlink would make independently seeded worker targets share
-            // that inode, serializing their otherwise private builds. Cargo
-            // recreates the lock file on first use, so omit it at every depth.
-            if entry.file_name() == ".cargo-lock" {
+            // Cargo recreates its locks on first use. Sharing their inodes
+            // would serialize independently seeded targets. Keep every Cargo
+            // lock private, including other .lock files within a profile.
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".cargo-lock" | ".cargo-build-lock" | ".cargo-artifact-lock"
+            ) || (source != source_root && name.ends_with(".lock"))
+            {
                 continue;
             }
             #[cfg(unix)]

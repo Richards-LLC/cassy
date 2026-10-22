@@ -10462,6 +10462,7 @@ mod tests {
         // including when no labelled block needs to be added.
         let id = send(&format!("{quiet}\nloud three"));
         let prompt = store.queued_prompt(id).unwrap().unwrap().prompt;
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
         assert!(!prompt.contains(quiet), "absorbed waking text must keep its wake: {prompt}");
         // Exercise absorption with no pre-existing fold as well.
         let (_temp, plain) = create_test_store();
@@ -10473,6 +10474,7 @@ mod tests {
         }
         let rows = plain.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
         assert!(!rows[0].prompt.contains(quiet), "an identical quiet resend cannot cancel a wake: {}", rows[0].prompt);
     }
 

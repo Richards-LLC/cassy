@@ -24,6 +24,9 @@ const CLAIM_BUDGET: Duration = Duration::from_secs(2);
 const OWN_CLAIM_REUSE_SECS: i64 = 120;
 /// After the Cloud could not be asked, edits skip the check for this long.
 const UNAVAILABLE_BACKOFF_SECS: i64 = 60;
+/// cas-a30e9: a worker is sent the contended-file notice at most once per
+/// file in this window (Codex workers, which get it as a message).
+const NOTICE_WINDOW_SECS: i64 = OWN_CLAIM_REUSE_SECS;
 
 /// What a worker learns before it edits `path`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +59,9 @@ struct Ledger {
     agent_id: String,
     #[serde(default)]
     leases: BTreeMap<String, Entry>,
+    /// When this agent was last sent the contended-file notice, by lease id.
+    #[serde(default)]
+    notified: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,6 +219,68 @@ pub fn collision_note(relative_path: &str, holder: &str) -> String {
          coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`), which can \
          reach the other session's supervisor, so both edits do not collide."
     )
+}
+
+/// cas-a30e9: Codex rejects PreToolUse context, so a Codex worker gets the
+/// contended-file advisory as a factory message to itself, the channel its
+/// coordination messages already use. Sent at most once per file per
+/// [`NOTICE_WINDOW_SECS`]; returns whether a message was queued.
+pub fn notify_worker_of_holder(
+    cas_root: &Path,
+    agent_id: &str,
+    agent_name: &str,
+    factory_session: Option<&str>,
+    relative_path: &str,
+    holder: &str,
+) -> bool {
+    let id = lease_id(relative_path);
+    let now = chrono::Utc::now().timestamp();
+    let mut ledger = load(cas_root, agent_id);
+    if ledger
+        .notified
+        .get(&id)
+        .is_some_and(|at| now - at < NOTICE_WINDOW_SECS)
+    {
+        return false;
+    }
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_root) else {
+        return false;
+    };
+    let note = collision_note(relative_path, holder);
+    if queue
+        .enqueue_with_summary("cas", agent_name, &note, factory_session, Some("shared file"))
+        .is_err()
+    {
+        return false;
+    }
+    ledger.notified.insert(id, now);
+    ledger.agent_id = agent_id.to_string();
+    save(cas_root, agent_id, &ledger);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cas-a30e9: a Codex worker cannot be given PreToolUse context, so it is
+    /// messaged who holds a contended file, once per file per window.
+    #[test]
+    fn codex_worker_is_messaged_the_holder_once_per_window_cas_a30e9() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let holder = "fierce-koala-22 (task cas-ac47) on soundwave";
+        let path = "hub-web/src/source-admission.ts";
+        let first = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, holder);
+        let repeat = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, holder);
+        assert!(first && !repeat, "first={first} repeat={repeat}");
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let queued = queue.peek_all(10).unwrap();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(queued[0].target, "bright-cobra-44");
+        // The same advisory a Claude worker gets as PreToolUse context.
+        assert_eq!(queued[0].prompt, collision_note(path, holder));
+    }
 }
 
 /// Release the file leases taken for `task_id` by whichever agent took them,

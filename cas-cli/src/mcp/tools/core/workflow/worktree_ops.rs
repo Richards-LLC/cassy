@@ -1573,8 +1573,18 @@ fn record_published_merge(
     target: &str,
     outcome: &crate::worktree::git::TargetPushOutcome,
 ) {
-    // Red: the pre-review behaviour, recording every push outcome.
-    let sha = merge_commit.map(str::to_string).or_else(|| git.resolve_commit(target));
+    // cas-3937 review: a published merge (pushed, already current, or a
+    // target that is local-only by design) is the request's terminal
+    // mutation. An unpublished one records nothing, so its NOT PUSHED next
+    // step reaches the caller.
+    use crate::worktree::git::TargetPushOutcome;
+    if !outcome.is_published() {
+        return;
+    }
+    let sha = match outcome {
+        TargetPushOutcome::Pushed { sha } | TargetPushOutcome::AlreadyCurrent { sha } => Some(sha.clone()),
+        _ => merge_commit.map(str::to_string).or_else(|| git.resolve_commit(target)),
+    };
     if let Some(sha) = sha {
         crate::mcp::tools::service::mutation_receipt::merge_committed(
             &sha,
@@ -4595,6 +4605,9 @@ impl CasCore {
             ) {
                 return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
             }
+            // cas-3937 review: the delivery close below can be slow too;
+            // record the published merge before it.
+            record_published_merge(manager.git(), None, &receipt.target_branch, &push_outcome);
             target_push = Some((receipt.target_branch.clone(), push_outcome));
 
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {

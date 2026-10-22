@@ -1694,6 +1694,16 @@ fn refresh_all_projects_with_user_refresh(
             crate::store::known_repos::register_repo(&project);
         }
 
+        // The post-swap child runs the new binary. Old MCP processes cannot
+        // notify on their own; emit one durable notice after migration.
+        if args.post_swap && !args.dry_run && !migration.failed() {
+            if let Err(error) = crate::factory_binary_skew::notify_after_install(
+                &cas_root, env!("CARGO_PKG_VERSION"),
+            ) {
+                tracing::warn!(project = %project.display(), %error, "factory binary skew notice unavailable");
+            }
+        }
+
         receipts.push(ProjectRefreshReceipt {
             project,
             unregistered,

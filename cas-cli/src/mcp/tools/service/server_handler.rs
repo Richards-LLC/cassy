@@ -350,6 +350,9 @@ type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
 
 /// cas-3b81: the note label carrying a late close's final outcome.
 const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
+/// cas-3937: marks a task note recording work that finished after a
+/// COMMITTED early answer.
+const POST_COMMIT_NOTE_MARKER: &str = "POST_COMMIT_OUTCOME";
 
 /// First line of a late close's answer, bounded for a task note.
 fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
@@ -396,6 +399,34 @@ fn log_post_commit(tool: &str, receipt: &super::mutation_receipt::Receipt, how: 
 }
 
 impl CasService {
+    /// cas-3937: a coordination request run through the MCP response budget
+    /// and post-commit grace, as a real tool call is, so integration tests
+    /// can drive slow post-commit work through the real handler.
+    #[doc(hidden)]
+    pub async fn coordination_with_budget_for_testing(
+        &self,
+        req: cas_mcp::types::CoordinationRequest,
+        budget: std::time::Duration,
+        grace: std::time::Duration,
+    ) -> ToolResult {
+        let arguments = serde_json::to_value(&req)
+            .ok()
+            .and_then(|value| value.as_object().cloned());
+        let service = self.clone();
+        self.call_with_deadline_and_grace(
+            "coordination",
+            arguments.as_ref(),
+            budget,
+            grace,
+            async move {
+                service
+                    .coordination(rmcp::handler::server::wrapper::Parameters(req))
+                    .await
+            },
+        )
+        .await
+    }
+
     /// The deadline alone, with no early post-commit answer.
     #[cfg(test)]
     async fn call_with_deadline<F>(
@@ -503,19 +534,26 @@ impl CasService {
                     .map(|commit| commit.description.clone())
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                let watcher_receipt = receipt.clone();
-                let tool = tool_name.to_string();
-                tokio::spawn(async move {
-                    let _ = handle.await;
-                    log_post_commit(&tool, &watcher_receipt, "finished in the background");
-                });
+                if tool_name == "task" {
+                    let watcher_receipt = receipt.clone();
+                    let tool = tool_name.to_string();
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                        log_post_commit(&tool, &watcher_receipt, "finished in the background");
+                    });
+                } else {
+                    // cas-3937 review: the work after the early answer (a
+                    // merge's close) must not finish where nobody sees it.
+                    self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
+                }
                 // cas-3937: a factory merge is not a task mutation; name the
                 // call itself, and its committed merge, instead.
                 if tool_name != "task" {
                     return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
                         "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
                          remaining work was still running {grace_s:.1}s after the commit and \
-                         finishes in the background. Do not retry.",
+                         finishes in the background. Do not retry it; read the task's notes \
+                         for the rest.",
                         action = receipt.action(),
                         grace_s = grace.as_secs_f64(),
                     ))]));
@@ -550,6 +588,9 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
+                } else if commit.is_some() && tool_name != "task" {
+                    // cas-3937 review: committed, still running; keep its result.
+                    self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
                     // Nothing committed: cancel as before, so an UNKNOWN answer
                     // is not followed by a late write the caller never sees.
@@ -712,6 +753,52 @@ impl CasService {
     /// happened with `task action=show` instead of guessing from "UNKNOWN".
     /// Appending is an atomic SQL append, so it cannot clobber the close's
     /// own row write.
+    /// cas-3937 review: a non-task call that answered COMMITTED (a merge,
+    /// after its push) keeps running. When it finishes, its result is
+    /// appended to the task named by its `task_id` argument, so a close that
+    /// a gate refused, or that failed, after the early answer is visible.
+    fn record_post_commit_outcome(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        start: std::time::Instant,
+    ) {
+        let task_id = arguments
+            .and_then(|args| args.get("task_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
+        let service = self.clone();
+        tokio::spawn(async move {
+            let joined = handle.await;
+            log_post_commit("factory", &receipt, "finished in the background");
+            let Some(task_id) = task_id else {
+                return;
+            };
+            let summary = late_close_summary(&joined);
+            let action = receipt.action().to_string();
+            let elapsed = start.elapsed();
+            let recorded = tokio::task::spawn_blocking(move || {
+                let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
+                let note = format!(
+                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s. Result: {summary}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    elapsed.as_secs_f64(),
+                );
+                store
+                    .append_note(&task_id, &note)
+                    .map_err(|error| format!("{task_id}: {error}"))
+            })
+            .await;
+            match recorded {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => warn!(error = %error, "MCP post-commit outcome not recorded"),
+                Err(error) => warn!(error = %error, "MCP post-commit outcome recorder ended abnormally"),
+            }
+        });
+    }
+
     fn record_late_close_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,

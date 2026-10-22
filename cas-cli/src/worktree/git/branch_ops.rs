@@ -86,13 +86,11 @@ pub enum TargetPushOutcome {
 }
 
 impl TargetPushOutcome {
-    /// True when the target ref is known to be visible on its remote (or
-    /// there is no remote for it to be visible on).
     /// cas-3937: the push state in a few words, for a merge's receipt.
     pub fn push_state_label(&self) -> &'static str {
         match self {
             Self::NoRemote => "no origin (the local target is the authority)",
-            Self::RemoteBranchAbsent => "not pushed: origin has no copy of the target",
+            Self::RemoteBranchAbsent => "local-only target (origin has no copy of it)",
             Self::AlreadyCurrent { .. } => "already current on origin",
             Self::Pushed { .. } => "pushed to origin",
             Self::ProtectedDefaultBranch { .. } => "not pushed: protected default branch",
@@ -101,6 +99,8 @@ impl TargetPushOutcome {
         }
     }
 
+    /// True when the target ref is known to be visible on its remote (or
+    /// there is no remote for it to be visible on).
     pub fn is_published(&self) -> bool {
         matches!(
             self,

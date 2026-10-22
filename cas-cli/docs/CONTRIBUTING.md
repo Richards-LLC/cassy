@@ -1163,18 +1163,25 @@ never spans a network call. Settled fences release their OS lock but retain
 `.cas/claim-release-locks/<task-hash>.lock`: one small file per encountered task.
 Do not unlink, replace or truncate these files during normal operation.
 
-Before the persistent-fence fix, a generation check protected only new callers.
-An older process (for example a long-running 3.71 `cas serve`) could open the file
-before settlement deleted it, then lock that detached inode while another
-process held a replacement. A version marker alone cannot protect a caller that
-ignores it. Keeping the same inode prevents that mixed-version split.
+Only unreleased v57 development builds deleted settled fence files; released
+3.71.0 has no per-task claim fence. In those development builds, a generation
+check protected only callers that used it. An older development process could
+open a file before settlement deleted it, then lock that detached inode while
+another process held a replacement. Keeping the same inode prevents that split;
+generation checks cannot repair an already detached old handle. Retire every
+unlinking development process to end that existing window.
+
+**3.71 → 3.72 rollout:** after installing 3.72, restart every `cas serve`, hub
+and worker session on the host, including harness-owned MCP servers and pinned
+sessions. A still-running 3.71 process takes no per-task fence and can race a
+3.72 process on the same task. This restart requirement applies to released
+3.71 installations as well as unreleased v57 development builds.
 
 `cas update` replaces the binary and can restart the managed hub; it does not
-restart harness-owned stdio `cas serve` processes or pinned factory sessions.
-Reload those MCP servers and relaunch pinned sessions when upgrading from a
-build that deleted settled fences. Generation checks remain as a defense for
-waiters while such processes drain, but cannot repair an already detached old
-handle. Retire all unlinking processes to end that existing window.
+restart harness-owned stdio `cas serve` processes or worker sessions, or verify
+that every running process has loaded 3.72. Binary replacement and a hub restart
+alone do not complete this rollout. End the old sessions and relaunch them with
+the installed 3.72 binary before resuming task claims.
 
 Fence-file removal belongs only to offline GC after explicit quiescence.
 Prevent every operation from holding or reopening these files throughout
@@ -1185,13 +1192,19 @@ Age, an idle agent row or a file version marker is not proof. There is no
 automatic online fence-file GC; retained files are intentional compatibility
 state.
 
-Windows concurrent-open/delete behavior has not been exercised here. Persistent
-files avoid normal deletion while another process has the file open. An older
-unlinking process or external cleanup can still cause a sharing/open error:
-acquisition reports PEERS NOT CHECKED and continues with the local lease, while
-synchronous release preserves the Cloud claim and a pending release stays queued
-for retry. Do not treat this advisory fallback as verified cross-machine
-exclusion; restart old processes and retry after the sharing conflict clears.
+Windows claim fencing has not been exercised and remains an implementation
+limitation. The generation recheck in `lock_task_claim_release_with` reads the
+path through a second handle after taking the exclusive whole-file lock.
+Windows mandatory locking can reject that read even without an old process or
+external cleanup. Persistent files and restarting sessions do not resolve this
+second-handle problem. A Windows fix must preserve path-identity validation as
+well as read through the locked handle; reading that handle alone would miss a
+replaced path. No Windows asset is built by the release workflow today.
+
+On a fence acquisition error, acquisition reports PEERS NOT CHECKED and continues
+with the local lease, synchronous release preserves the Cloud claim, and a
+pending release stays queued for retry. Windows cross-process claim exclusion
+is therefore **not verified**; do not rely on this advisory fallback for it.
 
 If the peer budget expires just after start cancels a pending release, Cloud
 acquisition can still be unavailable. Start reports PEERS NOT CHECKED and takes

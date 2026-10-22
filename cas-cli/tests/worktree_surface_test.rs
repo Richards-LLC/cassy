@@ -2385,8 +2385,19 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let service = make_service(root.clone());
     let req = request("charlie");
-    let rejected = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    // cas-3937: through the real response budget with no post-commit grace,
+    // so any phase after the push is "slow". A merge whose push failed has
+    // not committed anything a supervisor may leave alone: it must not answer
+    // COMMITTED, and keeps its NOT PUSHED next step.
+    let rejected = runtime
+        .block_on(service.coordination_with_budget_for_testing(
+            req.clone(),
+            std::time::Duration::from_secs(50),
+            std::time::Duration::ZERO,
+        ))
+        .unwrap();
     assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
+    assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
     let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();

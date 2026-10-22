@@ -583,6 +583,37 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("{error:#}"))
 }
 
+/// Render the diagnostic for a person while leaving [`json_error_message`]
+/// as the stable machine-readable representation.
+pub fn human_error_message(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    let Some(detail) = message
+        .strip_prefix("refused: ")
+        .filter(|_| message.contains("operator-only because"))
+    else {
+        return message;
+    };
+
+    let detail = if let Some((reason, remedy)) = detail.split_once("; run `") {
+        if let Some((command, context)) = remedy.split_once('`') {
+            let context = context
+                .strip_prefix(" yourself from your own terminal.")
+                .unwrap_or(context)
+                .trim_start();
+            format!(
+                "  {}\n  Run this command yourself from your own terminal:\n  {command}\n  {}",
+                crate::cloud::presence::wrap_line(&format!("{reason}.")).trim_end(),
+                crate::cloud::presence::wrap_line(context).trim_end()
+            )
+        } else {
+            format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+        }
+    } else {
+        format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+    };
+    format!("Operator-only config change refused.\n{detail}")
+}
+
 /// Run the CLI with the given arguments
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let tracer_timer = std::time::Instant::now();
@@ -966,6 +997,25 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
+
+    #[test]
+    fn operator_config_refusal_has_a_wrapped_human_form() {
+        let error = anyhow::anyhow!(
+            "refused: CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+        );
+        let rendered = super::human_error_message(&error);
+
+        assert_eq!(
+            rendered,
+            "Operator-only config change refused.\n  CLAUDECODE is set, so this runs inside an agent session.\n  verification.force_bypass_allowed is operator-only because it relaxes\n  a Cassy guard.\n  Run this command yourself from your own terminal:\n  cas config set verification.force_bypass_allowed <value>\n  If this is your own terminal, it inherited CLAUDECODE from an agent\n  pane: open a fresh terminal and run it there."
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
+        assert_eq!(
+            super::json_error_message(&error),
+            error.to_string(),
+            "machine output keeps the original one-line refusal"
+        );
+    }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was

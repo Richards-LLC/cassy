@@ -9,7 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed — task claims stay exclusive across upgrades
 
-- **Persistent claim fences** — Was: settling a claim fence could delete a file already opened by an older Cassy process, allowing old and new callers to lock different files for the same task. → Now: settlement retains the shared file and releases only its OS lock. Small per-task files intentionally remain until offline GC can prove quiescence. After upgrading from a build that deleted fences, reload every MCP server and relaunch pinned sessions; binary replacement and a hub restart alone do not retire those running builds. Windows sharing/open failures remain an advisory local-lease fallback and are documented as unverified.
+- **Persistent claim fences** — Was: released 3.71 had no per-task claim fence, while unreleased v57 development builds introduced fences but deleted settled files, allowing callers to lock different files for the same task. → Now: settlement retains the shared file and releases only its OS lock. Small per-task files intentionally remain until offline GC can prove quiescence.
+
+- **3.71 → 3.72 rollout** — After installing 3.72, restart every `cas serve`, hub and worker session on the host, including harness-owned MCP servers and pinned sessions. A running 3.71 process takes no per-task fence and can race a 3.72 process. `cas update` can restart the managed hub but does not restart or verify every other session; binary replacement and a hub restart alone are insufficient. This also retires unreleased development builds that deleted fences.
+
+- **Windows limitation** — Claim fencing remains unverified on Windows: its exclusive whole-file lock can reject the generation recheck through a second handle. The current advisory local-lease fallback does not establish cross-process claim exclusion, and restarting sessions does not fix this limitation. The release workflow builds no Windows asset.
 
 ## [3.71.0] - 2026-10-21
 

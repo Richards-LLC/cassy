@@ -580,7 +580,38 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             merge.supervisor_override = Some(true);
             merge.reason = Some("red run reviewed".to_string());
         }
-        let merged = get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"));
+        let merged = if row == "green-approved" {
+            // A close slower than the post-commit grace, deterministically.
+            env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
+            // cas-3937: under the real response budget with no post-commit
+            // grace, the published merge answers COMMITTED with its merge
+            // and push state, and the close after it finishes in the
+            // background, recording its result on the task.
+            let answer = get_text(
+                &supervisor
+                    .coordination_with_budget_for_testing(
+                        merge,
+                        std::time::Duration::from_secs(50),
+                        std::time::Duration::ZERO,
+                    )
+                    .await
+                    .expect("merge"),
+            );
+            // pin: the early answer names the merge and its local-only target (cas-3937).
+            assert!(answer.contains("COMMITTED") && answer.contains("local-only target"), "{row}: {answer}");
+            let mut notes = String::new();
+            for _ in 0..400 {
+                notes = task_store.get(&task.id).unwrap().notes;
+                if notes.contains("POST_COMMIT_OUTCOME") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
+            answer
+        } else {
+            get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"))
+        };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");

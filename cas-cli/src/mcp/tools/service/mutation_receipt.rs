@@ -139,8 +139,8 @@ pub(crate) fn merge_committed(commit: &str, target: &str, push_state: &str) {
         let _ = receipt.commit.set(Commit {
             description: format!(
                 "merge {commit} into {target}; push: {push_state}; the task close and \
-                 verifier dispatch after it may still be running; check task action=show \
-                 before retrying"
+                 verifier dispatch after it continue, and their result is recorded as a \
+                 task note"
             ),
             notification_id: None,
         });

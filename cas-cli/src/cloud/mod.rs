@@ -127,7 +127,7 @@ pub use sync_queue::{
 };
 pub(crate) use sync_queue::{
     DependencyEndpointState, TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent,
-    TaskSyncPayload,
+    TaskSyncPayload, TaskSyncRecoveryRecord,
 };
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,

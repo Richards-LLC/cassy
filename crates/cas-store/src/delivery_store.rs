@@ -890,6 +890,7 @@ mod tests {
     use super::*;
     use crate::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
     use cas_types::{Agent, AgentRole, ClaimResult, Task, TaskStatus, VerificationDispatchState};
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -1901,5 +1902,56 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn observed_delivery_merge_retries_busy_and_is_idempotent() {
+        let root = TempDir::new().unwrap();
+        drop(open(root.path()).unwrap());
+
+        let db_path = root.path().join("cas.db");
+        let (locked, ready) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = Connection::open(db_path).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(crate::SQLITE_BUSY_TIMEOUT + Duration::from_millis(250));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+
+        let started = Instant::now();
+        let result = record_observed_delivery_merge(
+            root.path(),
+            "cas-observed-merge",
+            "factory/worker",
+            "epic/release",
+            &"a".repeat(40),
+            &"b".repeat(40),
+            "supervisor",
+        );
+        holder.join().unwrap();
+        result.expect("the observation should retry after one busy-timeout window");
+        assert!(started.elapsed() < Duration::from_secs(15));
+
+        record_observed_delivery_merge(
+            root.path(),
+            "cas-observed-merge",
+            "factory/worker",
+            "epic/release",
+            &"a".repeat(40),
+            &"b".repeat(40),
+            "supervisor",
+        )
+        .unwrap();
+        let conn = open(root.path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
+                ["cas-observed-merge"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "retrying the same observation must be idempotent");
     }
 }

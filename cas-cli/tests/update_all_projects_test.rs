@@ -109,18 +109,43 @@ fn all_projects_dry_run_is_non_mutating_then_syncs_every_discovered_project() {
         "output was:\n{synced_out}"
     );
     assert!(
-        synced_out.contains("not cloud-linked"),
-        "offline/unlinked team phase must be an advisory skip; output was:\n{synced_out}"
+        missing.is_file(),
+        "native sweep must restore the stale builtin"
     );
+    // cas-32e3 leaves repairs staged on integration/default branches. That
+    // actionable warning takes precedence over healthy-only unlinked notes
+    // in compact output; the machine receipt carries every phase's verdict.
+    let json = cas_cmd(root)
+        .current_dir(root)
+        .env("CAS_ROOT", first.join(".cas"))
+        .env("CAS_PROJECT_ROOTS", &projects)
+        .args(["--json", "update", "--all-projects"])
+        .assert()
+        .success();
+    let json_out = String::from_utf8_lossy(&json.get_output().stdout);
+    let receipt: serde_json::Value = json_out
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value.get("projects").is_some())
+        .expect("all-projects JSON receipt");
+    let refreshed = receipt["projects"].as_array().expect("projects array");
+    assert_eq!(refreshed.len(), 2, "receipt was: {receipt}");
+    // pin: the machine receipt must preserve the advisory unlinked disposition.
+    const UNLINKED: &str = "skipped: not cloud-linked";
+    for project in refreshed {
+        for phase in ["membership", "cloud_sync"] {
+            assert_eq!(
+                project[phase].as_str(),
+                Some(UNLINKED),
+                "{phase}: {project}"
+            );
+        }
+    }
     assert!(
         !synced_out.contains("Syncing .claude files")
             && !synced_out.contains("[OK] Schema up to date")
             && !synced_out.contains("built-ins up to date"),
         "compact output must suppress successful phase details; output was:\n{synced_out}"
-    );
-    assert!(
-        missing.is_file(),
-        "native sweep must restore the stale builtin"
     );
 }
 

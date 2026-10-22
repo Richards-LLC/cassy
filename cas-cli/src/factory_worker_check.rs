@@ -1959,6 +1959,17 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         fixture_commit_as(&repo, "unreferenced same-name asset");
         let delivered_head = fixture_head(&repo);
         std::fs::write(
+            repo.join("docs/maintenance/update-managed-files.brief.md"),
+            "maintenance v2\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "referenced asset change");
+        let referenced_head = fixture_head(&repo);
+        assert!(
+            passing_test_receipts(&root, &repo, &referenced_head).is_empty(),
+            "a change to the exact included repo-relative path invalidates the old test receipt"
+        );
+        std::fs::write(
             repo.join("crates/widget/src/lib.rs"),
             "const MAINTENANCE: &str = include_str!(\"../../../docs/maintenance/update-managed-files.brief.md\");\nconst RELEASE: &str = include_str!(\"../../../docs/release/update-managed-files.brief.md\");\n",
         )

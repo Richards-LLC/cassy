@@ -45,7 +45,7 @@ fn test_verification_config_toggle() {
     assert!(!human_refusal.status.success());
     let stderr = String::from_utf8_lossy(&human_refusal.stderr);
     assert!(
-        stderr.contains("Operator-only configuration change refused."),
+        stderr.contains("Operator-only config change refused."),
         "the CLI should show the short refusal headline; stderr: {stderr}"
     );
     assert!(

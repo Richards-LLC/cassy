@@ -586,7 +586,19 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
 /// Render the diagnostic for a person while leaving [`json_error_message`]
 /// as the stable machine-readable representation.
 pub fn human_error_message(error: &anyhow::Error) -> String {
-    format!("{error:#}")
+    let message = format!("{error:#}");
+    let Some(detail) = message
+        .strip_prefix("refused: ")
+        .filter(|_| message.contains("operator-only because"))
+    else {
+        return message;
+    };
+
+    let detail = crate::cloud::presence::wrap_line(detail);
+    format!(
+        "Operator-only config change refused.\n  {}",
+        detail.trim_end()
+    )
 }
 
 /// Run the CLI with the given arguments
@@ -982,7 +994,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "Operator-only configuration change refused.\n  CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed\n  is operator-only because it relaxes a Cassy guard; run `cas config set\n  verification.force_bypass_allowed <value>` yourself from your own terminal. If\n  this is your own terminal, it inherited CLAUDECODE from an agent pane: open a\n  fresh terminal and run it there."
+            "Operator-only config change refused.\n  CLAUDECODE is set, so this runs inside an agent session.\n  verification.force_bypass_allowed is operator-only because it relaxes\n  a Cassy guard; run `cas config set verification.force_bypass_allowed\n  <value>` yourself from your own terminal. If this is your own\n  terminal, it inherited CLAUDECODE from an agent pane: open a fresh\n  terminal and run it there."
         );
         assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
         assert_eq!(

@@ -570,6 +570,8 @@ async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
     let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
     let result = service.factory(Parameters(request)).await.expect("authenticated successor must rescue unpushed work");
     let receipt = text(result);
+    // pin: the command receipt is readable at 80 columns and has a JSON escape.
+    assert_eq!(receipt.replace(&tip, "0123456789012345678901234567890123456789").trim(), include_str!("../../../../../docs/design/cli/factory-recover-branch.capture.txt").trim());
     let destination = "refs/heads/factory/recovery-caller-cas-recover";
     assert_eq!(git(remote.path(), &["rev-parse", destination]), tip);
     assert_eq!(git(root, &["rev-parse", "HEAD"]), tip, "source checkout untouched");

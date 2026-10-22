@@ -729,6 +729,14 @@ pub enum FactoryCommands {
         #[arg(long)]
         request: std::path::PathBuf,
     },
+    /// Publish a dead worker's explicit commit on the successor's own task ref.
+    RecoverBranch {
+        #[arg(long)]
+        task_id: String,
+        /// JSON request: branch, full head SHA, expected_remote (empty for absent).
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
     /// Record an existing supervisor-run named test for an assigned task.
     RecordTestReceipt {
         #[arg(long)]
@@ -1167,6 +1175,18 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
                 let result = core.shadow_review_inner(Some(&payload)).map_err(anyhow::Error::msg)?;
                 println!("{result}");
+                Ok(())
+            }
+            FactoryCommands::RecoverBranch { task_id, request } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("branch recovery requires a Cassy project"))?;
+                if std::fs::metadata(request)?.len() > 16 * 1024 {
+                    anyhow::bail!("branch recovery request exceeds 16 KiB");
+                }
+                let payload = std::fs::read_to_string(request)?;
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let receipt = crate::supervisor_branch_recovery::recover(&core, task_id, &payload)?;
+                if cli.json { println!("{}", serde_json::to_string(&receipt)?); }
+                else { println!("{}", receipt.render()); }
                 Ok(())
             }
             FactoryCommands::RecordTestReceipt { task_id, request } => {

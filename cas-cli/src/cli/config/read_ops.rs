@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
@@ -220,27 +220,86 @@ pub(crate) fn save_editor_changes(
     pending_resets: &HashSet<String>,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
+    let mut changes_by_root = BTreeMap::<PathBuf, Vec<(String, bool)>>::new();
     for (key, value) in edited.list() {
         if pending_resets.contains(&key) || original.get(&key).as_deref() == Some(value.as_str()) {
             continue;
         }
 
         let config_root = config_root_for_key(&key, cas_root);
-        let mut target = Config::load(&config_root)?;
-        update_config_in_place(
-            &mut target,
-            &key,
-            cas_root,
-            |_, after| {
-                after.set(&key, &value)?;
-                Ok(())
-            },
-            |before, after| guard_operator_config(before, after, InvocationContext::from_process),
-        )?;
+        changes_by_root
+            .entry(config_root)
+            .or_default()
+            .push((key, false));
     }
 
     for key in pending_resets {
-        reset_config_value(key, cas_root)?;
+        let config_root = config_root_for_key(key, cas_root);
+        changes_by_root
+            .entry(config_root)
+            .or_default()
+            .push((key.clone(), true));
+    }
+
+    let edited_document = toml_edit::Document::parse(toml::to_string(edited)?)?;
+    for (config_root, mut changes) in changes_by_root {
+        changes.sort_by(|left, right| left.0.cmp(&right.0));
+        let fallback = Config::load(&config_root)?;
+        persist_editor_changes_for_root(&config_root, &fallback, &edited_document, &changes)?;
+    }
+    Ok(())
+}
+
+/// Apply all editor writes and resets for one config file under one stable
+/// lock, keeping comments and unknown keys intact until the atomic replace.
+fn persist_editor_changes_for_root(
+    config_root: &Path,
+    fallback: &Config,
+    edited_document: &toml_edit::Document,
+    changes: &[(String, bool)],
+) -> anyhow::Result<()> {
+    let _lock = crate::config::lock_project_config(config_root)?;
+    let path = config_root.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let before: Config = if raw.is_empty() {
+        fallback.clone()
+    } else {
+        toml::from_str(&raw)?
+    };
+    let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
+    let mut reconcile_viktor = false;
+
+    for (key, reset) in changes {
+        let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
+        if *reset {
+            remove_config_document_key(&mut document, stored_path, alternate_path)?;
+        } else {
+            let replacement = config_document_item(edited_document.as_item(), serialized_path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("edited config omitted {key}"))?;
+            set_config_document_item(&mut document, stored_path, Some(replacement))?;
+            if let Some(alternate_path) = alternate_path {
+                set_config_document_item(&mut document, alternate_path, None)?;
+            }
+            if let Some(marker) = upkeep_observe_marker_for_set(key) {
+                set_config_document_item(&mut document, marker, None)?;
+            }
+        }
+        reconcile_viktor |= key == "viktor.enabled";
+    }
+
+    let contents = document.to_string();
+    let after: Config = toml::from_str(&contents)?;
+    guard_operator_config(&before, &after, InvocationContext::from_process)?;
+    if contents != raw {
+        crate::config::atomic_replace_project_config(&path, &contents)?;
+    }
+    if reconcile_viktor {
+        crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
     }
     Ok(())
 }

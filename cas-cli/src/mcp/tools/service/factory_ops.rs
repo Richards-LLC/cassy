@@ -7953,13 +7953,26 @@ fn resume_brief_sender(
     caller: Option<&str>,
     factory_session: Option<&str>,
 ) -> String {
-    // Red: the pre-cas-d1e0 sender.
-    let _ = factory_session;
-    let caller = caller.unwrap_or("unknown");
+    // The caller's own name when it has an agent record.
+    if let Some(agent) = caller.and_then(|id| agents.get(id).ok()) {
+        return agent.name;
+    }
+    // Otherwise the factory session's supervisor, the identity it acts for.
+    let Some(session) = factory_session else {
+        return "supervisor".to_string();
+    };
     agents
-        .get(caller)
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && agent.factory_session.as_deref() == Some(session)
+                && agent.status != cas_types::AgentStatus::Shutdown
+        })
+        .max_by_key(|agent| agent.last_heartbeat)
         .map(|agent| agent.name)
-        .unwrap_or_else(|_| caller.to_string())
+        .unwrap_or_else(|| format!("supervisor (factory session {session})"))
 }
 
 #[cfg(test)]

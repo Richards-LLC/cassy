@@ -3504,9 +3504,7 @@ impl SqlitePromptQueueStore {
         scan_cap: usize,
         mut include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
     ) -> Result<(Vec<(QueuedPrompt, DateTime<Utc>)>, bool)> {
-        // Red: the pre-cas-d1e0 scan, with no cap.
-        let _ = scan_cap;
-        if limit == 0 || recipient.is_empty() || factory_session.is_empty() {
+        if limit == 0 || scan_cap == 0 || recipient.is_empty() || factory_session.is_empty() {
             return Ok((Vec::new(), false));
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -3525,24 +3523,32 @@ impl SqlitePromptQueueStore {
                 AND q.origin_kind = 'registered_agent' AND a.role = 'supervisor'
                 AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}
                 AND julianday(seen.seen_at) >= julianday(?3)
-              ORDER BY julianday(seen.seen_at) DESC, q.id DESC"
+              ORDER BY julianday(seen.seen_at) DESC, q.id DESC
+              LIMIT ?4"
         ))?;
         let rows = stmt.query_map(
-            params![recipient, factory_session, since.to_rfc3339()],
+            params![
+                recipient,
+                factory_session,
+                since.to_rfc3339(),
+                i64::try_from(scan_cap).unwrap_or(i64::MAX)
+            ],
             |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
         )?;
         let mut matched = Vec::new();
+        let mut scanned = 0usize;
         for row in rows {
+            scanned += 1;
             let (prompt, at) = row?;
             let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
             if include(&prompt, at) {
                 matched.push((prompt, at));
                 if matched.len() == limit {
-                    break;
+                    return Ok((matched, false));
                 }
             }
         }
-        Ok((matched, false))
+        Ok((matched, scanned == scan_cap))
     }
 
     /// Remove the empty diagnostic artifact left by older installations/tools.

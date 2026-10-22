@@ -6,7 +6,7 @@ did not build this change, and Cassy refuses the implementer here. Judge the
 running product the way a customer meets it, and judge what the delivery
 changed: the pages, controls and journeys its diff touches, and its acceptance
 criteria. A defect shared with base is in scope when the delivery's stated
-purpose or acceptance criteria cover it, or its diff adds or edits a journey
+purpose, acceptance criteria or demo statement cover it, or its diff adds or edits a journey
 invariant that covers it. Do not fix anything.
 
 The task description names the delivery, its branch and exact tip, the base
@@ -54,6 +54,9 @@ unit/typecheck receipts as well. Run independent adjacent/demo/visual cells in
 steps 3–4; the automated selection is the worker's responsibility. Read the
 tests the delivery adds against [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
 bloat, restated implementation, sleeps and retry-wrapped flakes are Normal findings.
+Rate a delivery test that steps around its asserted invariant at least Normal.
+For example, re-picking the sender after a 409 masks whether the chosen sender
+survived the conflict; judge the masked failure under §3.
 
 Where the project has a journey registry, the QA task's journey table is the
 park-time impact for the reviewed head: every live journey in it needs its own
@@ -211,7 +214,7 @@ delivery as a `platform_proof` note (`qa-bundle: <abs>/bundle.json`).
 Reject only for what the delivery did or failed to do. The generated QA task
 states the same bar, so decide by it, not by impression:
 
-- a regression the delivery introduced: a Blocking or High finding it causes,
+- a regression caused by the delivery: a Blocking or High finding it causes,
   or a strict visual-QA finding the base build does not have
 - `visual-qa.mjs --strict` ran against anything but your local serves
 - any rubric dimension below 3 for what the delivery changed, or

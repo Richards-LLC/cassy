@@ -356,7 +356,7 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
         },
         {
-          "text": "read-only backlog visibility — not self-dispatch",
+          "text": "read-only backlog visibility \u2014 not self-dispatch",
           "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
         },
         {
@@ -1077,7 +1077,7 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains mcp integration."
         },
         {
-          "text": "## Symptom → cause",
+          "text": "## Symptom \u2192 cause",
           "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
         }
       ],
@@ -1456,7 +1456,7 @@
           "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
         },
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1501,7 +1501,7 @@
       ],
       "contains": [
         {
-          "text": "each ≥ 4",
+          "text": "each \u2265 4",
           "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
         },
         {
@@ -1925,72 +1925,12 @@
       ],
       "contains": [
         {
-          "text": "~/.cas/artifacts/<project-key>/<task-id>/qa/",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+          "text": "independent-pass.md#3-correctness-paths",
+          "reason": "Visual baseline findings use the same delivery-scope classification as independent QA."
         },
         {
-          "text": "bundle.json",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "snapshots: { dom: true, aria: true, screen: true }",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "screenshots: false",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "page.screencast.start",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "showActions",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "showChapter",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "toMatchAriaSnapshot",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "ariaSnapshotJSON",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "forcedColors",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "reducedMotion",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "contrast",
-          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
-        },
-        {
-          "text": "visual-qa.mjs --strict",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "critique_score",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "note_type=platform_proof",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "npx playwright trace actions --errors-only",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
-        },
-        {
-          "text": "trace snapshot <N> --phase after",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+          "text": "journey invariant its diff adds or edits are unmet even when base shares them",
+          "reason": "A shared baseline failure inside a delivery-owned invariant remains unmet (GH #1339)."
         }
       ],
       "absent": [],
@@ -2292,7 +2232,7 @@
           "case_sensitive": false
         },
         {
-          "text": "Was → Now",
+          "text": "Was \u2192 Now",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
         },
         {
@@ -2383,7 +2323,7 @@
       ],
       "contains": [
         {
-          "text": "was → now",
+          "text": "was \u2192 now",
           "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
           "case_sensitive": false,
           "unicode_case": true
@@ -3825,7 +3765,7 @@
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         },
         {
-          "text": "`radius` —",
+          "text": "`radius` \u2014",
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
         }
       ],
@@ -4228,11 +4168,11 @@
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "30°",
+          "text": "30\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
-          "text": "150°",
+          "text": "150\u00b0",
           "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
         },
         {
@@ -4731,6 +4671,14 @@
         {
           "text": "../../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "purpose, acceptance criteria or demo statement cover it",
+          "reason": "The QA entry instructions include the demo statement in delivery-owned acceptance scope (GH #1339)."
+        },
+        {
+          "text": "steps around its asserted invariant at least Normal",
+          "reason": "A test masking its own invariant must not be downgraded to a Note (GH #1339)."
         }
       ],
       "absent": [],

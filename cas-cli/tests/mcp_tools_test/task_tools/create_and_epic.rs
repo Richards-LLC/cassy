@@ -798,6 +798,36 @@ async fn test_successor_epic_starts_from_its_open_predecessor_tip_cas_1630() {
     );
 }
 
+/// cas-1630 review: a predecessor whose branch is missing (another repo, or
+/// deleted) cannot be stacked on. The successor is cut from trunk, as before,
+/// rather than left with no branch at all.
+#[tokio::test]
+async fn test_successor_of_a_predecessor_without_a_branch_falls_back_to_trunk_cas_1630() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let trunk_sha = git_in(repo, &["rev-parse", "HEAD"]);
+    let (v56, v56_branch, _) = unreleased_epic(&service, repo, "Burn Down V56", "v56.txt").await;
+    git_in(repo, &["branch", "-D", &v56_branch]);
+
+    let mut successor = epic_create_request("Burn Down V57");
+    successor.blocked_by = Some(v56);
+    let text = extract_text(
+        service
+            .cas_task_create(Parameters(successor))
+            .await
+            .expect("successor epic create should succeed"),
+    );
+    let id = extract_task_id(&text).expect("should have epic ID");
+    assert_eq!(
+        git_in(repo, &["rev-parse", &format!("epic/burn-down-v57-{id}")]),
+        trunk_sha,
+        "a missing predecessor branch falls back to trunk: {text}"
+    );
+    assert!(!text.contains("STACKED ON PREDECESSOR"), "{text}");
+}
+
 /// cas-1630: a follow-up filed into an epic whose branch lacks the code it
 /// cites is told so at create, naming the open epic that has it.
 #[tokio::test]

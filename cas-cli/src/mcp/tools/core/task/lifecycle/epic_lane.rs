@@ -199,6 +199,13 @@ pub(crate) fn cited_commit_warning(
     let Ok(pattern) = regex::Regex::new(r"\b[0-9a-f]{7,40}\b") else {
         return String::new();
     };
+    // Most tasks cite no commit; skip the task scan for them.
+    if !pattern
+        .find_iter(text)
+        .any(|m| m.as_str().bytes().any(|byte| byte.is_ascii_alphabetic()))
+    {
+        return String::new();
+    }
     let mut seen = std::collections::BTreeSet::new();
     let others: Vec<(String, String)> = store
         .list(None)

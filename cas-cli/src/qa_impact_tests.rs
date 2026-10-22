@@ -516,8 +516,13 @@ fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs(
         None
     );
     // Documented formats: the independent-QA journeys table (PASS in `Run`),
-    // scripts/journey-bundles.py, and short Result/Status tables.
+    // scripts/journey-bundles.py, and short Result/Status tables. Real ledgers
+    // (cas-4916) also use `Run` for run ids beside `Result`, compound headers
+    // and bold verdicts.
     for ledger in [
+        "| Journey | Result | Run |\n| --- | --- | --- |\n| AUDIT | PASS | post_audit_v2_runs.id=a1 |\n| AUDIT | FAIL | post_audit_v2_runs.id=b2 |\n| SEND | PASS | 1 |\n".to_string(),
+        "| ID | Verdict / label | Evidence |\n| --- | --- | --- |\n| AUDIT | PASS / real-build | post_audit_v2_runs.id=a1 |\n| SEND | NOT A ROUTE / source | - |\n".to_string(),
+        "| Journey | Verdict |\n| --- | --- |\n| AUDIT | **PASS** post_audit_v2_runs.id=a1 |\n| SEND | **NOT EXERCISED:** sandbox unavailable |\n".to_string(),
         "| ID | Run | Dead end | Copy | Steps | Context | Waits | Severity | Findings / tasks |\n|---|---|---|---|---|---|---|---|---|\n| AUDIT | PASS | 0 | 1 | 0 | 0 | 0 | none | post_audit_v2_runs.id=a1 |\n| SEND | FAIL | 1 | 0 | 0 | 0 | 0 | high | cas-1 |\n".to_string(),
         "| ID | Journey | Run | Total | Slowest stage |\n|---|---|---|---|---|\n| AUDIT | Audit post_audit_v2_runs.id=a1 | PASS | 4.2s | submit (3.1s) |\n| SEND | Send | PASS | 1.0s | send (0.4s) |\n".to_string(),
         "| Journey | Result |\n| --- | --- |\n| AUDIT | PASS post_audit_v2_runs.id=a1 |\n| SEND | NOT EXERCISED: sandbox unavailable |\n".to_string(),

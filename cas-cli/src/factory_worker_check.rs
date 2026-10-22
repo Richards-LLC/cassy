@@ -1730,7 +1730,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             return Err(error);
         }
     };
-    crate::factory_capacity_wait::admitted(&cas_root, &repo)?;
+    if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
+        tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
+    }
     // A parked target may contain proof logs but no debug artifacts. Seed only
     // missing children from the published immutable baseline under the lane lock.
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
@@ -3385,8 +3387,15 @@ PY"#);
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("capacity-worker".into());
         let worker = CasService::new(core, None);
+        let mut other = Agent::new_with_role(
+            "other-supervisor".into(), "other-lead".into(), AgentRole::Supervisor,
+        );
+        other.factory_session = Some("other-session".into());
+        agents.register(&other).unwrap();
         let mut last_need = None;
-        for target in ["supervisor", "capacity-lead"] {
+        for (target, consumes_notice) in [
+            ("supervisor", true), ("other-lead", false), ("capacity-lead", true),
+        ] {
             crate::factory_capacity_wait::admitted(&root, &repo).unwrap();
             assert!(execute_at(&root, &args, &repo, &fake).is_err());
             let mut explicit =
@@ -3420,15 +3429,14 @@ PY"#);
                 .await
                 .unwrap();
             assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
+            let resolved_target = if target == "supervisor" { "capacity-lead" } else { target };
             assert_eq!(
                 crate::store::open_prompt_queue_store(&root)
                     .unwrap()
                     .peek_all(100)
                     .unwrap()
                     .iter()
-                    .filter(
-                        |prompt| prompt.target == "capacity-lead" && prompt.prompt.contains(&need)
-                    )
+                    .filter(|prompt| prompt.target == resolved_target && prompt.prompt.contains(&need))
                     .count(),
                 1,
                 "exactly one explicit assistance page is durably queued"
@@ -3442,10 +3450,12 @@ PY"#);
             .unwrap();
             assert_eq!(
                 notices.pending_count("capacity-supervisor").unwrap(),
-                after_need,
-                "a blocker sent to {target} consumes the automatic notice"
+                after_need + usize::from(!consumes_notice),
+                "a blocker sent to {target} only consumes its owner's automatic notice"
             );
-            last_need = Some((explicit.since, after_need));
+            last_need = Some((
+                explicit.since, notices.pending_count("capacity-supervisor").unwrap(),
+            ));
         }
         let (explicit_since, after_need) = last_need.unwrap();
 

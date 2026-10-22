@@ -6578,9 +6578,12 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
     env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
     assert!(checkout.join("target/output").exists(), "held review lease was ignored");
     drop(managed);
-    let report = get_text(&env.service.factory_request(Parameters(factory_req("gc_report"))).await.unwrap());
+    let mut report_request = factory_req("gc_report");
+    report_request.full = Some(true);
+    let report = get_text(&env.service.factory_request(Parameters(report_request)).await.unwrap());
     let status: serde_json::Value = serde_json::from_str(report.lines()
-        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON=")).unwrap()).unwrap();
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full GC report must include review status: {report}"))).unwrap();
     assert_eq!(status["reclaimable_bytes"], b"regenerable".len(), "{report}");
     let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     assert!(!checkout.join("target").exists(), "one GC pass must reclaim deferred output: {}", get_text(&result));

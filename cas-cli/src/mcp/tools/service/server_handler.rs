@@ -778,7 +778,7 @@ impl CasService {
             };
             // cas-3937 review: the close's own outcome, not the merge
             // answer's first line (always its CI block).
-            let followup = receipt
+            let recorded_close = receipt
                 .followup
                 .lock()
                 .ok()
@@ -786,8 +786,17 @@ impl CasService {
                 .map(|text| {
                     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     crate::mcp::tools::truncate_str(&text, 400).to_string()
-                })
-                .unwrap_or_else(|| late_close_summary(&joined));
+                });
+            // cas-3fc8: a merge that fails after its close was recorded keeps
+            // both: the close's outcome and the merge's own failure.
+            let merge_failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+            let followup = match recorded_close {
+                Some(close) if merge_failed => {
+                    format!("{close}. The merge itself then failed: {}", late_close_summary(&joined))
+                }
+                Some(close) => close,
+                None => late_close_summary(&joined),
+            };
             let action = receipt.action().to_string();
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {

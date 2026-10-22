@@ -289,6 +289,17 @@ impl TestEnvGuard {
         std::env::set_current_dir(path).expect("set test current directory");
     }
 
+    /// cas-3fc8 (rule-026): enter `path` until the returned guard drops.
+    /// Declare it after the directory it enters, so the process leaves that
+    /// directory before it is deleted, even when the test panics; other
+    /// tests in the process never see a deleted current directory.
+    #[allow(dead_code)]
+    pub(crate) fn enter_dir(&self, path: impl AsRef<Path>) -> CurrentDirGuard {
+        let saved = std::env::current_dir().expect("current test directory");
+        std::env::set_current_dir(path).expect("set test current directory");
+        CurrentDirGuard { saved }
+    }
+
     fn capture(&mut self, key: &OsStr) {
         if !self.saved.iter().any(|(saved, _)| saved == key) {
             self.saved.push((key.to_os_string(), std::env::var_os(key)));
@@ -311,6 +322,18 @@ impl TestEnvGuard {
         for key in keys {
             self.remove(key);
         }
+    }
+}
+
+/// Restores the current directory saved by [`TestEnvGuard::enter_dir`].
+#[allow(dead_code)]
+pub(crate) struct CurrentDirGuard {
+    saved: std::path::PathBuf,
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.saved);
     }
 }
 

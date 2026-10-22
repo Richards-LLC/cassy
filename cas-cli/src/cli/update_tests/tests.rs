@@ -3583,7 +3583,9 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
     for columns in ["80", "120"] {
         env.set("COLUMNS", columns);
         let (result, output) = capture_phase(true, || {
-            sync_user_builtins_with_violet(&update_test_cli(false), || Ok(()))
+            UpdateStepTracker::new(1, true).run("Distributing built-ins to user-level", || {
+                sync_user_builtins_with_violet(&update_test_cli(false), || Ok(()))
+            })
         });
         result.unwrap();
         let warning = output.split_once("[WARN]").expect("modified reference warning").1;

@@ -52,7 +52,8 @@ fn write_reference_warning_prose(
     text: &str,
     prefix_cells: usize,
 ) -> io::Result<()> {
-    let limit = usize::from(fmt.width().min(80));
+    // UpdateStepTracker::phase replays captured lines with two more cells.
+    let limit = usize::from(fmt.width().min(80)).saturating_sub(2);
     let mut cells = prefix_cells;
     for word in text.split_whitespace() {
         let word_cells = ratatui::text::Line::from(word).width();

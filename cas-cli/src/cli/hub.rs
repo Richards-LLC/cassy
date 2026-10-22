@@ -2047,7 +2047,13 @@ fn serve_foreground_logged(
                 std::process::id(),
             )?;
         }
-        let mut lock = lock.context("another cas hub instance already holds the machine lock")?;
+        // The launcher hands ownership to this process without an atomic lock
+        // transfer. Let a concurrent stop finish its bounded cleanup rather
+        // than treating a transient owner in that gap as a failed launch.
+        let mut lock = match lock {
+            Some(lock) => lock,
+            None => paths.wait_for_instance_lock(HUB_LAUNCH_TIMEOUT)?,
+        };
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
             .or_else(|| paths.read_process_record().ok().and_then(|previous| {

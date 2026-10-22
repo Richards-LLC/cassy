@@ -89,6 +89,7 @@ fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
 fn startup_cloud_pull(
     cas_root: &std::path::Path,
 ) -> crate::error::Result<crate::cloud::SyncResult> {
+    crate::store::detect::guard_implicit_worktree_write(cas_root, "start cloud sync")?;
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, SyncResult};
     use crate::store::{
         open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
@@ -143,6 +144,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
     use rmcp::ServiceExt;
 
     let cas_root = resolve_mcp_serve_root()?;
+    let cloud_sync_allowed =
+        match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[Cassy] Cloud sync disabled: {error}");
+                false
+            }
+        };
 
     // Install panic hook before anything else can panic. Routes panics to a
     // dedicated file under `.cas/logs/cas-serve-{date}.log` with timestamp,
@@ -223,7 +232,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // Hold the JoinHandle so that if `eager_init_stores` aborts startup we can
     // cancel this task instead of leaving it racing the dying process to open
     // the same DB that just refused to open (cas-5c05 review A2).
-    let cloud_sync_handle = {
+    let cloud_sync_handle = cloud_sync_allowed.then(|| {
         let cas_root_bg = cas_root.clone();
         tokio::task::spawn(async move {
             let result = tokio::time::timeout(
@@ -243,7 +252,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 eprintln!("[Cassy] Cloud sync timed out (continuing without sync)");
             }
         })
-    };
+    });
 
     let (daemon, activity, _handle) = if enable_daemon {
         let cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
@@ -292,7 +301,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
 
         let config = EmbeddedDaemonConfig {
             cas_root: cas_root.clone(),
-            cloud_sync_enabled: cloud_config.auto_sync,
+            cloud_sync_enabled: cloud_sync_allowed && cloud_config.auto_sync,
             cloud_sync_interval_secs: cloud_config.interval_secs.max(1),
             index_code: code_config.enabled && code_role.is_writer(),
             // cas-ba66: the code-vector queue belongs to the canonical writer.
@@ -330,7 +339,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
     if let Err(e) = eager_init_stores(&core, &cas_root) {
         // Cancel the cloud-sync task before bubbling the error so it stops
         // racing for the same DB during the parent's shutdown window.
-        cloud_sync_handle.abort();
+        if let Some(handle) = cloud_sync_handle {
+            handle.abort();
+        }
         return Err(e);
     }
 

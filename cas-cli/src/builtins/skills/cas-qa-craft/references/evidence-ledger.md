@@ -43,6 +43,16 @@ supervisor for a candidate, and leave the binary cells `NOT EXERCISED` until it
 arrives. An installed release whose version names another revision proves
 nothing about this one.
 
+Before invoking a candidate `serve` or any stateful command, create a disposable
+fixture project with an empty `.cas` directory outside its source checkout. Give
+every candidate subprocess, including the fixture's `cas init`, an explicit
+`CAS_ROOT` naming that `.cas`, an isolated `HOME`, and `XDG_CONFIG_HOME` beneath
+that home. Initialize the fixture before serving it and record the resolved
+store path in the ledger. A scratch worktree shares the main store through Git;
+unsetting `CAS_ROOT` alone can migrate that live store or sync it to Cloud. Keep
+the QA agent's own authenticated MCP environment separate from these subprocess
+overrides.
+
 After the rows, include these sections:
 
 ```markdown

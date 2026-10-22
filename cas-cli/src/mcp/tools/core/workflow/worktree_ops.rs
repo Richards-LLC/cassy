@@ -5127,13 +5127,12 @@ impl CasCore {
         // cas-eda0: a parked delivery merged here with green CI (no override)
         // and published is closed by Cassy, not by a worker re-close. The
         // close keeps every gate; a verdict still owed is dispatched by it.
+        let auto_close_expected = transactional_delivery.is_none()
+            && !ci_override
+            && matches!(branch_ci_state, BranchCiState::Green { .. })
+            && push_outcome.is_published();
         let push_note = match (task_id, merge_commit.as_deref()) {
-            (Some(task_id), Some(merge_sha))
-                if transactional_delivery.is_none()
-                    && !ci_override
-                    && matches!(branch_ci_state, BranchCiState::Green { .. })
-                    && push_outcome.is_published() =>
-            {
+            (Some(task_id), Some(merge_sha)) if auto_close_expected => {
                 let outcome = self.close_after_green_merge(task_id, merge_sha).await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 format!("{push_note}{}", outcome.receipt(task_id))
@@ -5144,22 +5143,30 @@ impl CasCore {
         if let Some((task_id, source_branch, target_branch, source_tip, _)) =
             pending_observation.as_ref()
         {
-            let task_closed = self
-                .open_task_store()
-                .ok()
-                .and_then(|store| store.get(task_id).ok())
-                .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
-            let dispatch_pending = cas_store::get_latest_verification_dispatch(&cas_root, task_id)
-                .ok()
-                .flatten()
-                .is_some_and(|dispatch| {
-                    matches!(
-                        dispatch.state,
-                        cas_types::VerificationDispatchState::Pending
-                            | cas_types::VerificationDispatchState::Claimed
-                    )
-                });
-            if task_closed || dispatch_pending {
+            // Advisory/override merges have no automatic close follow-up.
+            // Their durable observation is terminal; only a green auto-close
+            // that still owes a close/dispatch must retain its recovery intent.
+            let followup_complete = if auto_close_expected {
+                let task_closed = self
+                    .open_task_store()
+                    .ok()
+                    .and_then(|store| store.get(task_id).ok())
+                    .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
+                let dispatch_pending = cas_store::get_latest_verification_dispatch(&cas_root, task_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|dispatch| {
+                        matches!(
+                            dispatch.state,
+                            cas_types::VerificationDispatchState::Pending
+                                | cas_types::VerificationDispatchState::Claimed
+                        )
+                    });
+                task_closed || dispatch_pending
+            } else {
+                true
+            };
+            if followup_complete {
                 cas_store::clear_pending_observed_delivery_merge(
                     &cas_root,
                     task_id,

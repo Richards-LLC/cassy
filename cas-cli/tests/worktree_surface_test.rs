@@ -2796,6 +2796,12 @@ async fn cas_01dc_empty_checkpoint_proves_task_content_but_not_empty_only_delive
 }
 #[tokio::test]
 async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
+    for (conclusion, ci_override) in [("success", false), ("failure", true), ("neutral", false)] {
+        check_observation_recovery(conclusion, ci_override).await;
+    }
+}
+
+async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     let mut env = test_env();
     let repo = GitRepo::new();
     let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -2804,10 +2810,7 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         &repo.root,
     );
     let origin = "https://github.com/org/delivery-observation.git";
-    run_git(
-        &["remote", "add", "origin", origin],
-        &repo.root,
-    );
+    run_git(&["remote", "add", "origin", origin], &repo.root);
     run_git(
         &[
             "config",
@@ -2883,7 +2886,7 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
 
     env.set(
         cas::github_issue_attach::GH_BIN_ENV,
-        ci_check_run::green_ci(remote.path()),
+        ci_check_run::ci_concluded(remote.path(), conclusion),
     );
     let _env = env.enter_dir(&repo.root);
     let service = delivery_service(&cas_root, "observation-supervisor");
@@ -2891,15 +2894,17 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     request.id = Some("factory/alice".into());
     request.task_id = Some(task_id.into());
     request.cleanup = Some(false);
+    request.supervisor_override = Some(ci_override);
+    request.reason = ci_override.then(|| "Fixture supervisor reviewed failing CI".into());
     let first = service
         .coordination(Parameters(request.clone()))
         .await
         .expect_err("first request must surface the failed observation write");
     assert!(
-        first
-            .message
-            .contains("Retry `worktree_merge id=")
-            && first.message.contains("task_id=cas-8045-observation-retry`"),
+        first.message.contains("Retry `worktree_merge id=")
+            && first
+                .message
+                .contains("task_id=cas-8045-observation-retry`"),
         "{}",
         first.message
     );
@@ -2912,18 +2917,27 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     conn.execute_batch("DROP TRIGGER fail_fixture_observation;")
         .unwrap();
     let retry = service
-        .coordination(Parameters(request))
+        .coordination(Parameters(request.clone()))
         .await
         .expect("retry should reconcile the already-published merge");
     let text = get_text(&retry);
-    assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
-    let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, task_id)
-        .unwrap()
-        .expect("retry must create the post-merge verification dispatch");
-    assert_eq!(
-        dispatch.state,
-        cas::types::VerificationDispatchState::Pending
-    );
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap();
+    if conclusion == "success" {
+        assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
+        assert_eq!(
+            dispatch
+                .as_ref()
+                .expect("recovery must dispatch verification")
+                .state,
+            cas::types::VerificationDispatchState::Pending
+        );
+    } else {
+        assert!(!retry.is_error.unwrap_or(false), "{text}");
+        assert!(
+            dispatch.is_none(),
+            "advisory/override merges do not auto-close"
+        );
+    }
     let observations: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
@@ -2940,6 +2954,42 @@ async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
         )
         .unwrap();
     assert_eq!(pending_intents, 0, "successful recovery clears its intent");
+
+    // A peer may advance the target before a repeated request. Recovery is
+    // complete: the third call must neither republish nor observe that new tip.
+    run_git(&["switch", "epic/observation"], &repo.root);
+    run_git(
+        &["commit", "--allow-empty", "-m", "peer target advance"],
+        &repo.root,
+    );
+    run_git(&["push", "origin", "epic/observation"], &repo.root);
+    let target = git_stdout(&repo.root, &["rev-parse", "epic/observation"]);
+    let third = service.coordination(Parameters(request)).await.unwrap();
+    let text = get_text(&third);
+    assert!(text.contains("Already contained"), "{conclusion}: {text}");
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "epic/observation"]),
+        target
+    );
+    assert_eq!(
+        git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/observation"]),
+        target
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap(),
+        dispatch
+    );
+    let after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, 1,
+        "a repeated merge cannot observe the peer's new target"
+    );
 }
 
 #[tokio::test]

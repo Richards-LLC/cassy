@@ -652,7 +652,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let existing_content = if mcp_json_path.exists() {
         Some(
             std::fs::read_to_string(&mcp_json_path)
-                .context("Cannot read .mcp.json; file left unchanged")?,
+                .context("Cannot read .mcp.json; left unchanged")?,
         )
     } else {
         None
@@ -661,7 +661,7 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     // Read existing config or create new
     let mut config: serde_json::Value = match existing_content.as_ref() {
         Some(content) => serde_json::from_str(content)
-            .context("Invalid JSON in .mcp.json; file left unchanged")?,
+            .context("Invalid JSON in .mcp.json; left unchanged")?,
         None => serde_json::json!({}),
     };
 
@@ -669,13 +669,13 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let root = config
         .as_object_mut()
         .context("root must be a JSON object")
-        .context("Invalid JSON in .mcp.json; file left unchanged")?;
+        .context("Invalid JSON in .mcp.json; left unchanged")?;
     let servers = root
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .context("mcpServers must be a JSON object")
-        .context("Invalid JSON in .mcp.json; file left unchanged")?;
+        .context("Invalid JSON in .mcp.json; left unchanged")?;
 
     // Add or update Cassy server config
     servers.insert(

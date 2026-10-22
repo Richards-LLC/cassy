@@ -2941,6 +2941,51 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         );
     }
 
+    /// cas-edeb: managed review checkouts have no target lease, so nested
+    /// tests must not inherit the outer host's test-binary runner.
+    #[cfg(unix)]
+    #[test]
+    fn managed_review_test_does_not_inherit_host_runner_cas_edeb() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        env.set(&variable, "/inherited/outer-test-runner");
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = fixture_head(&repo);
+        let root = repo.join(".cas");
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let checkout =
+            crate::factory_review_scratch::create(&root, &repo, "cas-proof", None, &head).unwrap();
+        assert!(
+            crate::factory_target_cache::owner::acquire(&root, &checkout.path)
+                .unwrap()
+                .is_none(),
+            "managed review checkouts do not own worker target leases"
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            &format!(
+                r#"[ "$1" = nextest ] || exit 2
+[ -z "${{{variable}:-}}" ] || {{ echo 'test command inherited host runner' >&2; exit 3; }}
+python3 -c 'import os, sys; sys.exit(0 if not os.environ.get("{variable}") else 4)'
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
+            ),
+        );
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
+            .map(str::to_string);
+        execute_at_with_scope(&root, &args, &checkout.path, &fake, None, None).unwrap();
+    }
+
     /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at
     /// the same commit; anything else is an independent check and stays gated.
     #[test]

@@ -1,7 +1,7 @@
 //! One PR comment per gate, edited in place: the comment carrying [`MARKER`]
 //! is updated; only when none exists is a new one created.
 use super::pack::Pack;
-use super::printable;
+use super::{printable, short};
 use super::verdict::GateVerdict;
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ pub fn render_comment(pack: &Pack) -> String {
     };
     let mut body = format!(
         "{MARKER}\n### Cassy release gate: {word} for `{}`\n\n{} rows",
-        &pack.sha[..pack.sha.len().min(12)],
+        short(&pack.sha),
         pack.rows.len()
     );
     let passing = pack.rows.iter().filter(|r| r.verdict.word() == "PASS").count();

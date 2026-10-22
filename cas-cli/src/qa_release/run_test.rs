@@ -143,6 +143,8 @@ fn run_scope_freeze_seal() {
     let pack = pack::Pack::load(&pack::pack_dir(&gate.cas, &gate.sha).unwrap()).unwrap();
     assert_eq!(pack.gate.verdict, verdict::GateVerdict::Clean);
     assert_eq!(pack.rows.iter().find(|r| r.id == "support").unwrap().manual_minutes, Some(7));
+    let json = run::status_json(&gate.cas, &sealed).unwrap();
+    assert_eq!((json["sha"].as_str(), json["hand_walk"]["total_minutes"].as_u64()), (Some(gate.sha.as_str()), Some(7)));
     assert_eq!(pack.media.len(), 3, "one frame per row, digested");
 }
 
@@ -246,6 +248,8 @@ fn run_preflight_refusals() {
         evidence: Some(gate.evidence("support")),
         ..run::Record::default()
     };
+    let refusal = run::record(&gate.cas, None, &record).unwrap_err().to_string();
+    assert!(refusal.contains("was sealed by the TTL; retry the record with --sha"), "{refusal}");
     let resealed = run::record(&gate.cas, Some(&gate.sha), &record).unwrap();
     assert_eq!(resealed.generation, 2);
     assert_eq!(resealed.row("support").unwrap().verdict.word(), "PASS");
@@ -259,6 +263,8 @@ fn run_preflight_refusals() {
     assert!(run::active(&gate.cas).unwrap().is_none());
     let until = chrono::Utc::now();
     assert!(run::Freeze { sha: "abc".into(), until }.refusal("staging").contains("for abc holds"));
+    let wide = format!("a{}", "é".repeat(12));
+    assert_eq!(short(&wide), format!("a{}", "é".repeat(11)), "cuts on a char boundary");
     assert!(crate::config::Config::default().set("qa.release.gate_env", "stag ing").is_err());
 
     let path = gate.cas.join("config.toml");

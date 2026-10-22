@@ -642,18 +642,7 @@ mod pre_compact_flush_tests {
     #[test]
     fn notification_webhook_sender_rejects_non_https() {
         if std::env::var_os("CAS_2E34_REFUSAL_CAPTURE").is_some() {
-            let mut env = crate::test_support::TestEnvGuard::temp_home();
-            let fakebin = env.home().join("bin");
-            std::fs::create_dir(&fakebin).unwrap();
-            #[cfg(unix)] {
-                use std::os::unix::fs::PermissionsExt;
-                for name in ["notify-send", "osascript"] {
-                    let program = fakebin.join(name);
-                    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
-                    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
-                }
-            }
-            env.set("PATH", &fakebin);
+            let env = crate::test_support::TestEnvGuard::temp_home();
             let root = env.home().join(".cas");
             std::fs::write(root.join("config.toml"),
                 "[notifications]\nenabled = true\non_idle_prompt = true\nwebhook_url = ' https://hooks.example.test/private-destination '\n"
@@ -674,9 +663,19 @@ mod pre_compact_flush_tests {
 
         let name = concat!(module_path!(), "::notification_webhook_sender_rejects_non_https");
         let name = name.strip_prefix("cas::").unwrap_or(name);
+        let fakebin = tempfile::tempdir().unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["notify-send", "osascript"] {
+                let program = fakebin.path().join(name);
+                std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture"])
             .env("CAS_2E34_REFUSAL_CAPTURE", "1")
+            .env("PATH", fakebin.path())
             .output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{output:?}");

@@ -113,8 +113,8 @@ pub enum Outcome {
     /// At least one invariant read back false: a product defect.
     Fail { readback: Readback, failed: Vec<String> },
     /// A provider failed, throttled or ran out (`external`, `rate_limited`,
-    /// `insufficient`).
-    BlockedExternal { provider: Option<String>, error: String },
+    /// `insufficient`): the row stays owed.
+    BlockedExternal(crate::qa_release::blocked::BlockedExternal),
     /// No complete answer, so the row cannot pass.
     Missing(String),
 }
@@ -184,24 +184,20 @@ pub fn classify(
     subjects: &BTreeMap<String, String>,
     answer: Result<Value, crate::qa_release::CallError>,
 ) -> Outcome {
-    use crate::qa_release::{CallError, ErrorKind};
+    use crate::qa_release::{CallError, blocked::BlockedExternal};
     if declaration.invariants.is_empty() {
         return Outcome::Missing(format!("journey {journey} declares no readback invariants"));
     }
     let data = match answer {
         Ok(data) => data,
-        Err(CallError::Adapter(_, error))
-            if matches!(
-                error.kind,
-                ErrorKind::External | ErrorKind::RateLimited | ErrorKind::Insufficient
-            ) =>
-        {
-            return Outcome::BlockedExternal {
-                provider: error.provider,
-                error: error.message,
-            };
+        Err(error) => {
+            if let CallError::Adapter(_, adapter) = &error
+                && let Some(blocked) = BlockedExternal::from_adapter(adapter)
+            {
+                return Outcome::BlockedExternal(blocked);
+            }
+            return Outcome::Missing(error.to_string());
         }
-        Err(error) => return Outcome::Missing(error.to_string()),
     };
     let readback = |ok| Readback {
         journey: journey.into(),

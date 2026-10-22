@@ -138,6 +138,13 @@ The row remains deferred, never PASS. The delivery can park and close after its
 ordinary merge gates without waiting for a deployed PASS. Terminal rendering
 still requires its separate terminal-qa receipt unless explicitly waived.
 
+A row whose provider failed, throttled or ran out before it could be judged
+uses verdict `BLOCKED_EXTERNAL` and evidence cell
+`blocked: provider=<provider> error=<error>`. It is neither PASS nor FAIL: the
+cell stays owed, so the ledger is refused even beside a PASS row, and the
+refusal names each owed row, its cell, provider and error. Re-walk the cell
+once the provider recovers and record its PASS or FAIL.
+
 Where the diff comes from:
 
 - **First close** (not yet merged): `merge-base(parent, factory/<worker>)..factory/<worker>`.

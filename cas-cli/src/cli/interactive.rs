@@ -2,6 +2,7 @@
 
 use std::io::{self, BufRead, Write};
 
+use crate::ui::components::OutputMode;
 use crossterm::event::KeyModifiers;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -209,6 +210,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     let mut stdout = io::stdout();
     let mut selected: usize = 0;
     let cols = ColumnWidths::compute(items);
+    let mode = OutputMode::detect();
 
     // Reserve vertical space so the terminal scrolls enough for our content.
     let total_lines = items.len() + 3; // title + blank + items + help
@@ -223,7 +225,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     enable_raw_mode()?;
     execute!(stdout, Hide)?;
 
-    render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+    render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
 
     let result = loop {
         if !event::poll(std::time::Duration::from_millis(50))? {
@@ -256,7 +258,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
                 KeyCode::Esc | KeyCode::Char('q') => break None,
                 _ => continue,
             }
-            render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+            render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
         }
     };
 
@@ -273,9 +275,24 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     }
     execute!(stdout, MoveTo(0, origin_row))?;
 
-    // Completed-form summary line
-    match result {
-        Some(idx) => {
+    render_completed(
+        &mut stdout,
+        title,
+        result.map(|idx| items[idx].label.as_str()),
+        mode,
+    )?;
+    Ok(result)
+}
+
+fn render_completed(
+    mut stdout: &mut impl Write,
+    title: &str,
+    selected: Option<&str>,
+    _mode: OutputMode,
+) -> io::Result<()> {
+    // The same summary renderer is used after acceptance and cancellation.
+    match selected {
+        Some(label) => {
             execute!(
                 stdout,
                 SetForegroundColor(Color::Green),
@@ -287,7 +304,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
                 SetForegroundColor(Color::DarkGrey),
                 Print(": "),
                 ResetColor,
-                Print(&items[idx].label),
+                Print(label),
                 Print("\n"),
             )?;
         }
@@ -303,8 +320,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
             )?;
         }
     }
-
-    Ok(result)
+    Ok(())
 }
 
 /// Pad `s` with spaces to `width`.
@@ -317,12 +333,13 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 fn render_picker(
-    stdout: &mut io::Stdout,
+    mut stdout: &mut impl Write,
     title: &str,
     items: &[PickerItem],
     selected: usize,
     origin_row: u16,
     cols: &ColumnWidths,
+    _mode: OutputMode,
 ) -> io::Result<()> {
     let mut row = origin_row;
 
@@ -409,6 +426,70 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    /// pin: styled UTF-8 picker output stays identical; C/plain decorations
+    /// must be ASCII on the same actual row/help/completion renderers.
+    #[test]
+    fn picker_decorations_follow_locale_cas_ba0e() {
+        use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
+        use crate::ui::components::OutputMode;
+        use crossterm::style::Color;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let items = vec![
+            PickerItem {
+                label: "Alpha".into(),
+                tags: vec![PickerTag {
+                    text: "ready".into(),
+                    color: Color::Green,
+                }],
+            },
+            PickerItem {
+                label: "Beta".into(),
+                tags: vec![],
+            },
+        ];
+        let cols = ColumnWidths::compute(&items);
+        let mut failures = Vec::new();
+        for locale in ["C.UTF-8", "C"] {
+            env.set("LC_ALL", locale);
+            let mut output = Vec::new();
+            render_picker(
+                &mut output,
+                "Destination",
+                &items,
+                0,
+                0,
+                &cols,
+                OutputMode::Styled,
+            )
+            .unwrap();
+            render_completed(
+                &mut output,
+                "Destination",
+                Some("Alpha"),
+                OutputMode::Styled,
+            )
+            .unwrap();
+            render_completed(&mut output, "Destination", None, OutputMode::Styled).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            if locale == "C.UTF-8" {
+                // Save the pre-fix bytes in the red receipt before pinning them.
+                eprintln!(
+                    "CAS_BA0E_UTF8_RENDER={}",
+                    serde_json::to_string(&text).unwrap()
+                );
+                assert!(text.contains("  ❯ ") && text.contains("  ✓ ") && text.contains("  ✗ "));
+                assert!(text.contains("  ↑/↓ navigate • enter select • q cancel"));
+            } else if !text.is_ascii() {
+                failures.push(format!("{locale}: {text:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "picker locale fallback missing: {}",
+            failures.join("; ")
+        );
+    }
 
     /// EOF on stdin must NOT cause `select` to loop forever (cas-bf06).
     /// Prior to this fix, a closed stdin spun at 100% CPU writing

@@ -267,6 +267,7 @@ fn managed_event_kind_classifies_mentions_without_escalating_other_activity_cas_
             let delivery = parse_delivery(&cloud.claim["deliveries"][0]).unwrap();
             PromptQueueTyper(&queue).notice_into("owner-session", &delivery).unwrap();
             let recovery = queue.peek_all(10).unwrap().into_iter()
+                // pin: the machine envelope distinguishes a recovery notice from the original delivery.
                 .find(|row| row.prompt.contains("kind=\"recovery_notice\""))
                 .expect("uncertain prior dispatch keeps its recovery notice");
             assert!(!recovery.urgent, "{case}: recovery must not repeat the mention interrupt");

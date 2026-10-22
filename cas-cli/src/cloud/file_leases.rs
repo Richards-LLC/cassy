@@ -50,6 +50,10 @@ pub fn lease_id(relative_path: &str) -> String {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Ledger {
+    /// The agent that holds this ledger's leases, so a release run by another
+    /// agent (a supervisor's park, close or cancel) releases them as it.
+    #[serde(default)]
+    agent_id: String,
     #[serde(default)]
     leases: BTreeMap<String, Entry>,
 }
@@ -59,7 +63,13 @@ struct Entry {
     path: String,
     mine: bool,
     at_unix_secs: i64,
+    /// The task the lease was taken for (cas-8dbe review: release by task).
+    #[serde(default)]
+    task_id: Option<String>,
 }
+
+/// The whole release of one task's leases waits at most this long.
+const RELEASE_BUDGET: Duration = Duration::from_secs(5);
 
 fn ledger_path(cas_root: &Path, agent_id: &str) -> PathBuf {
     let safe: String = agent_id
@@ -183,6 +193,7 @@ pub(crate) fn claim_with(
                     path: relative_path.to_string(),
                     mine,
                     at_unix_secs: now,
+                    task_id: Some(task_id.to_string()),
                 },
             );
         }
@@ -190,6 +201,7 @@ pub(crate) fn claim_with(
             ledger.leases.remove(&id);
         }
     }
+    ledger.agent_id = agent_id.to_string();
     save(cas_root, agent_id, &ledger);
     lease
 }
@@ -203,18 +215,17 @@ pub fn collision_note(relative_path: &str, holder: &str) -> String {
     )
 }
 
-/// Release every file lease `agent_id` recorded, when its task ends.
-pub fn release_all(cas_root: &Path, agent_id: &str) {
-    let ledger = load(cas_root, agent_id);
-    if ledger.leases.is_empty() {
-        return;
-    }
-    if let Some(claims) = PeerClaims::for_project(cas_root) {
-        for (id, entry) in &ledger.leases {
-            if entry.mine {
-                let _ = claims.release_own(id, agent_id);
-            }
-        }
-    }
-    let _ = std::fs::remove_file(ledger_path(cas_root, agent_id));
+/// Release the file leases taken for `task_id` by whichever agent took them,
+/// when the task parks, closes or is cancelled. On the factory path the
+/// worker's close only parks the task and the supervisor closes it, so the
+/// release runs by task, not by the calling agent.
+pub fn release_for_task(cas_root: &Path, task_id: &str) {
+    let claims = PeerClaims::for_project(cas_root)
+        .map(|claims| claims.with_budget(super::peer_claims::PeerBudget::new(RELEASE_BUDGET)));
+    release_for_task_with(claims.as_ref(), cas_root, task_id);
+}
+
+pub(crate) fn release_for_task_with(claims: Option<&PeerClaims>, cas_root: &Path, task_id: &str) {
+    // Red: the pre-review behaviour, where a park or supervisor close released nothing.
+    let _ = (claims, cas_root, task_id);
 }

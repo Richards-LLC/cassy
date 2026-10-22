@@ -1402,6 +1402,19 @@ mod tests {
                 }
             }
         }
+        /// The holder's own release clears the lock.
+        struct Release(Held);
+        impl Respond for Release {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or_default();
+                let mut held = self.0.lock().unwrap();
+                if held.as_ref().is_some_and(|(owner, _)| Some(owner.as_str()) == body["agent_id"].as_str()) {
+                    *held = None;
+                }
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "success"}))
+            }
+        }
         struct Lock(Held, fn(&str, &str, &str) -> serde_json::Value);
         impl Respond for Lock {
             fn respond(&self, request: &Request) -> ResponseTemplate {
@@ -1417,6 +1430,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
             .respond_with(Claim(held.clone(), lock_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+            .respond_with(Release(held.clone()))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -1449,13 +1467,18 @@ mod tests {
         let (root_a, root_b) = (roots.0.path().to_path_buf(), roots.1.path().to_path_buf());
         let path_edited = "hub-web/src/source-admission.ts";
 
-        let (first, second, again) = tokio::task::spawn_blocking(move || {
-            use crate::cloud::file_leases::{FileLease, claim_with};
+        let (first, second, again, after_park) = tokio::task::spawn_blocking(move || {
+            use crate::cloud::file_leases::{FileLease, claim_with, release_for_task_with};
             let first = claim_with(&a, &root_a, "worker-a", "fierce-koala-22", "cas-ac47", path_edited);
             let second = claim_with(&b, &root_b, "worker-b", "bright-cobra-44", "cas-9f01", path_edited);
             let again = claim_with(&a, &root_a, "worker-a", "fierce-koala-22", "cas-ac47", path_edited);
             assert!(matches!(again, FileLease::Mine));
-            (first, second, again)
+            // cas-8dbe review: on the factory path the worker's close parks
+            // the task and the supervisor closes it. The park releases by
+            // task, as worker-a, so session B can take the file.
+            release_for_task_with(Some(&a), &root_a, "cas-ac47");
+            let after_park = claim_with(&b, &root_b, "worker-b", "bright-cobra-44", "cas-9f01", path_edited);
+            (first, second, again, after_park)
         })
         .await
         .unwrap();
@@ -1474,7 +1497,12 @@ mod tests {
             .into_iter()
             .filter(|request| request.url.path().ends_with("/claim"))
             .count();
-        assert_eq!(claims, 2, "session A's repeat edit reuses its own lease without asking");
+        assert_eq!(
+            after_park,
+            crate::cloud::file_leases::FileLease::Mine,
+            "a parked task frees its files for the other session"
+        );
+        assert_eq!(claims, 3, "session A's repeat edit reuses its own lease without asking");
     }
 
     /// cas-0078 (f): cloud work runs on the blocking pool, and one budget

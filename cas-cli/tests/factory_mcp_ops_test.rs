@@ -10863,6 +10863,88 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
     );
 }
 
+/// cas-fd4c: a successor epic stacked on an open predecessor shows a stale
+/// base in epic_status once the predecessor advances. A clean advance names
+/// the predecessor commit and the merge; a conflicting one is refused with
+/// the files it would touch, and nothing is merged.
+#[tokio::test]
+async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+    let git = |args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let commit = |name: &str, body: &str| {
+        std::fs::write(project.join(name), body).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", name]);
+        git(&["rev-parse", "HEAD"])
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    commit("seed.txt", "seed");
+    git(&["checkout", "-b", "epic/pred"]);
+    commit("pred.txt", "pred");
+    git(&["checkout", "-b", "epic/succ"]);
+    commit("succ.txt", "succ");
+    add_epic_with_id(&env, "cas-pred", TaskStatus::Open, "epic/pred");
+    add_epic_with_id(&env, "cas-succ", TaskStatus::Open, "epic/succ");
+    env.task_store()
+        .add_dependency(&cas::types::Dependency::new(
+            "cas-succ".into(),
+            "cas-pred".into(),
+            cas::types::DependencyType::Blocks,
+        ))
+        .unwrap();
+    let status = || async {
+        let mut req = factory_req("epic_status");
+        req.id = Some("cas-succ".to_string());
+        get_text(&env.service.factory_request(Parameters(req)).await.expect("status"))
+    };
+
+    let in_sync = status().await;
+    assert!(!in_sync.contains("STALE BASE"), "a successor with every predecessor commit is current: {in_sync}");
+
+    git(&["checkout", "epic/pred"]);
+    let advanced = commit("pred-2.txt", "pred advances");
+    let clean = status().await;
+    // pin: the receipt must name the predecessor commit and the merge to run (cas-fd4c).
+    assert!(
+        clean.contains("STALE BASE") && clean.contains(&advanced[..12]) && clean.contains("git merge --no-ff epic/pred"),
+        "{clean}"
+    );
+
+    git(&["checkout", "epic/succ"]);
+    commit("shared.txt", "successor edit");
+    git(&["checkout", "epic/pred"]);
+    let conflicting = commit("shared.txt", "predecessor edit");
+    let successor_before = git(&["rev-parse", "epic/succ"]);
+    let refused = status().await;
+    // pin: a conflict is refused with its files, never offered as a clean merge (cas-fd4c).
+    assert!(
+        refused.contains("MERGE REFUSED") && refused.contains("shared.txt") && refused.contains(&conflicting[..12]),
+        "{refused}"
+    );
+    assert!(!refused.contains("git merge --no-ff"), "{refused}");
+    assert_eq!(git(&["rev-parse", "epic/succ"]), successor_before, "epic_status merges nothing");
+}
+
 /// cas-d4fc: a project-level encode chore is visible even without an epic link.
 /// Exercise unified rule dispatch -> live stores -> supervisor status rendering.
 #[tokio::test]

@@ -6380,7 +6380,7 @@ mod tests {
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
             assert!(!message.contains('\u{85}'), "{message:?}");
-            assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+            assert_eq!(error.code, super::ErrorCode::INTERNAL_ERROR);
             if source.contains('\u{85}') {
                 // pin: refused rendering must explain why no command can be pasted.
                 assert!(message.contains("no copyable command"), "{message}");

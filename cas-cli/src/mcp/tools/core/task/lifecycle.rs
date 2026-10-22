@@ -3562,6 +3562,7 @@ mod related_recall_response_tests {
     async fn sibling_safety_block_does_not_hide_distinct_scope_cas_8bcb() {
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_SESSION_ID", "boilerplate-planner");
+        std::fs::create_dir_all(env.home().join("project")).unwrap();
         let core = CasCore::with_daemon(env.home().join("project"), None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();

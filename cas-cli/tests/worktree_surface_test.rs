@@ -2437,7 +2437,6 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
                 .contains(&format!("advanced from `{old_anchor}` to `{tip}`"))
         );
         if corrected_after_rebase {
-            // pin: audit must distinguish a preserved rebase plus corrections from an anchor never pushed.
             assert!(
                 parked
                     .notes
@@ -2457,11 +2456,10 @@ async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
             .unwrap()
             .poll_all(100)
             .unwrap();
-        // pin: the transport's JSON branch_tip is the immutable merge boundary.
-        assert!(
-            rows.iter()
-                .any(|row| row.prompt.contains(&format!("\"branch_tip\":\"{tip}\"")))
-        );
+        assert!(rows.iter().any(|row| {
+            // pin: the transport's JSON branch_tip is the immutable merge boundary.
+            row.prompt.contains(&format!("\"branch_tip\":\"{tip}\""))
+        }));
         assert_eq!(
             tasks
                 .get(task_id)

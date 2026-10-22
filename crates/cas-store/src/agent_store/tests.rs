@@ -1518,7 +1518,7 @@ fn cas_8063_unregister_retains_minimal_peer_identity_once() {
         reopened.register(&ineligible).unwrap();
         assert!(reopened.claim_supervisor_handoffs(&ineligible).unwrap().is_empty(), "{id}");
     }
-    let mut successor = Agent::new("successor".into(), "new-supervisor".into());
+    let mut successor = Agent::new(agent.id.clone(), "new-supervisor".into());
     successor.role = AgentRole::Supervisor;
     successor.machine_id = agent.machine_id.clone();
     reopened.register(&successor).unwrap();

@@ -121,7 +121,12 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
             successor.factory_session.as_deref(),
             Some(SOURCE),
             Some(NotificationPriority::High),
-            &format!("supervisor-handoff:{}", handoff.id),
+            &format!(
+                "supervisor-handoff:{}:{}:{}",
+                handoff.id,
+                successor.id,
+                successor.registered_at.to_rfc3339()
+            ),
             Some(&QueueOrigin::Daemon),
         )?;
         store.mark_supervisor_handoff_queued(&handoff.id, successor)?;

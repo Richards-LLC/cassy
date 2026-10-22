@@ -296,7 +296,7 @@ impl SqliteAgentStore {
         let mut stmt = tx.prepare(
             "SELECT e.id,e.payload,e.reason FROM agent_session_ends e
              WHERE e.role='supervisor' AND e.machine_id=?1 AND e.registered_at<?2
-               AND e.agent_id<>?3 AND e.queued_at IS NULL
+               AND e.queued_at IS NULL
                AND EXISTS (SELECT 1 FROM agents s WHERE s.id=?3 AND s.registered_at=?2 AND s.machine_id=?1 AND s.role='supervisor' AND s.status IN ('active','idle'))
                AND (e.claimed_by IS NULL OR (e.claimed_by=?3 AND e.claimed_epoch=?2)
                     OR NOT EXISTS (SELECT 1 FROM agents c WHERE c.id=e.claimed_by AND c.registered_at=e.claimed_epoch AND c.status IN ('active','idle')))

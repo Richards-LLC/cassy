@@ -2896,6 +2896,84 @@ PY"#);
 
     #[cfg(unix)]
     #[test]
+    fn higher_priority_capacity_waiter_gets_next_slot_and_lower_priority_progresses() {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus};
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders=1\n",
+        )
+        .unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+
+        let mut repos = Vec::new();
+        for (worker_id, worker_name, task_id, priority) in [
+            (
+                "priority-p2-worker",
+                "priority-p2",
+                "cas-priority-p2",
+                Priority::MEDIUM,
+            ),
+            (
+                "priority-p0-worker",
+                "priority-p0",
+                "cas-priority-p0",
+                Priority::CRITICAL,
+            ),
+        ] {
+            let mut agent = Agent::new_with_role(
+                worker_id.into(),
+                worker_name.into(),
+                AgentRole::Worker,
+            );
+            agent.factory_session = Some(format!("session-{worker_name}"));
+            agents.register(&agent).unwrap();
+            let mut task = Task::new(task_id.into(), "wait for a builder slot".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some(worker_name.into());
+            task.priority = priority;
+            tasks.add(&task).unwrap();
+            agents
+                .try_claim(task_id, worker_id, 3600, Some("working"))
+                .unwrap();
+            let repo = root.join("worktrees").join(worker_name);
+            fixture_commit(&repo);
+            repos.push(repo);
+        }
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        let p2_wait = execute_at(&root, &args, &repos[0], &fake)
+            .unwrap_err()
+            .to_string();
+        assert!(p2_wait.contains("priority=P2"), "{p2_wait}");
+        let p0_wait = execute_at(&root, &args, &repos[1], &fake)
+            .unwrap_err()
+            .to_string();
+        assert!(p0_wait.contains("priority=P0"), "{p0_wait}");
+        drop(held);
+
+        let p2_retried = execute_at(&root, &args, &repos[0], &fake)
+            .unwrap_err()
+            .to_string();
+        assert!(p2_retried.contains("queued behind priority=P0"), "{p2_retried}");
+        execute_at(&root, &args, &repos[1], &fake).unwrap();
+        execute_at(&root, &args, &repos[0], &fake).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
         let mut env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);

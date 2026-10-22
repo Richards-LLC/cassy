@@ -39,3 +39,6 @@ word-split failure is retained as `art-4e771130`.
 Scored by young-otter-20 on 2026-10-22 against supervisor captures. The existing
 progress-row spacing defect is outside this warning renderer and is being
 filed separately by the supervisor; this task does not change that row.
+
+The committed capture normalizes the home-root label to `<home>` under the
+design-doc-paths policy; raw native captures remain in task artifacts.

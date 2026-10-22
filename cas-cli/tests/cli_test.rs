@@ -89,6 +89,36 @@ fn qa_candidate_plan_uses_project_artifacts_and_manifest_names_cas_0227() {
     assert_eq!(plan["receipt_file"], candidate.join("RECEIPT.json").display().to_string());
     assert_eq!(plan["revision"].as_str().unwrap().len(), 40);
     assert!(!candidate.exists(), "planning must not build or create evidence");
+
+    // cas-d0e6: the receipt names the short form, and a worker resolves the
+    // binary by task id alone instead of typing the hashed artifacts path.
+    let text_plan = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "candidate", "build", "--task", "cas-0227", "--plan"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&text_plan.stdout).contains("cas qa candidate path --task cas-0227"),
+        "{}",
+        String::from_utf8_lossy(&text_plan.stdout)
+    );
+    let path = |role: &str| {
+        cas_cmd(root)
+            .current_dir(root)
+            .env("CAS_AGENT_ROLE", role)
+            .args(["qa", "candidate", "path", "--task", "cas-0227"])
+            .output()
+            .unwrap()
+    };
+    let binary = candidate.join("cas").display().to_string();
+    let missing = path("worker");
+    assert!(!missing.status.success(), "no candidate has been built yet");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains(&binary), "{missing:?}");
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("cas"), "built candidate\n").unwrap();
+    let found = path("worker");
+    assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
+    assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
 }
 
 #[test]

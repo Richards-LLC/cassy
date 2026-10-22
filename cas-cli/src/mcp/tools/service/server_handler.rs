@@ -509,6 +509,17 @@ impl CasService {
                     let _ = handle.await;
                     log_post_commit(&tool, &watcher_receipt, "finished in the background");
                 });
+                // cas-3937: a factory merge is not a task mutation; name the
+                // call itself, and its committed merge, instead.
+                if tool_name != "task" {
+                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                        "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
+                         remaining work was still running {grace_s:.1}s after the commit and \
+                         finishes in the background. Do not retry.",
+                        action = receipt.action(),
+                        grace_s = grace.as_secs_f64(),
+                    ))]));
+                }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
                     "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \
@@ -1253,6 +1264,57 @@ mod tests {
                 .notes
                 .contains("committed note")
         );
+    }
+
+    /// cas-3937: a worktree_merge whose merge and push committed, followed
+    /// by a slow phase (the close gate and verifier dispatch), reports the
+    /// merged commit and push state: COMMITTED at the deadline, and an early
+    /// success once the post-commit grace runs out. Never UNKNOWN.
+    #[tokio::test]
+    async fn a_committed_merge_with_a_slow_close_reports_its_outcome_cas_3937() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let temp = tempfile::tempdir().unwrap();
+        let service = CasService::new(
+            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments =
+            serde_json::json!({"action": "worktree_merge", "id": "sharp-cobra-83", "task_id": "cas-3fb4"});
+        let merge_then_slow_close = || async {
+            super::super::mutation_receipt::merge_committed("4dd898a71", "epic/v57", "pushed to origin");
+            std::future::pending().await
+        };
+
+        let error = service
+            .call_with_deadline(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_millis(50),
+                merge_then_slow_close(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error:?}");
+        assert!(
+            error.message.contains("4dd898a71") && error.message.contains("pushed to origin"),
+            "{error:?}"
+        );
+
+        let answered = service
+            .call_with_deadline_and_grace(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_millis(50),
+                merge_then_slow_close(),
+            )
+            .await
+            .expect("a committed merge answers once its grace runs out");
+        let text = format!("{answered:?}");
+        assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
+        assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
     }
 
     /// cas-24d8: a close that committed only an intermediate write (a gate

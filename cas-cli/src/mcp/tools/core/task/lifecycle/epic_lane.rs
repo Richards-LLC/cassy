@@ -216,20 +216,29 @@ pub(crate) fn stale_base_note(
     predecessor_branch: &str,
 ) -> String {
     let resolve = |name: &str| git_stdout(repo, &["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")]);
-    let Some(successor) = resolve(branch).or_else(|| resolve(&format!("origin/{branch}"))) else {
-        return String::new();
+    let successor = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
+        // A fetched descendant includes everything the local copy has. For
+        // divergent copies retain the local view; neither is more advanced.
+        (Some(local), Some(remote)) if git_ok(repo, &["merge-base", "--is-ancestor", &local, &remote]) => remote,
+        (Some(local), _) => local,
+        (None, Some(remote)) => remote,
+        (None, None) => return String::new(),
     };
-    // The predecessor as this clone last saw it, locally or on origin.
-    let Some((source, tip)) = [predecessor_branch.to_string(), format!("origin/{predecessor_branch}")]
+    // Compare every last-observed predecessor tip against that same successor.
+    // max_by_key keeps the last tie, so a matching local ref remains the remedy.
+    let Some((source, tip, lacking)) = [format!("origin/{predecessor_branch}"), predecessor_branch.to_string()]
         .into_iter()
-        .filter_map(|name| resolve(&name).map(|tip| (name, tip)))
-        .find(|(_, tip)| !git_ok(repo, &["merge-base", "--is-ancestor", tip, &successor]))
+        .filter_map(|name| {
+            let tip = resolve(&name)?;
+            let lacking = git_stdout(repo, &["rev-list", "--count", &format!("{successor}..{tip}")])?
+                .parse::<u64>().ok()?;
+            (lacking > 0).then_some((name, tip, lacking))
+        })
+        .max_by_key(|(_, _, lacking)| *lacking)
     else {
         return String::new();
     };
     let short = &tip[..tip.len().min(12)];
-    let lacking = git_stdout(repo, &["rev-list", "--count", &format!("{successor}..{tip}")])
-        .unwrap_or_else(|| "some".to_string());
     let probe = std::process::Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(["merge-tree", "--write-tree", "--name-only", "--no-messages", &successor, &tip])
@@ -250,12 +259,18 @@ pub(crate) fn stale_base_note(
                 .filter(|line| !line.is_empty())
                 .map(str::to_string)
                 .collect();
+            const MAX_CONFLICT_FILES: usize = 8;
+            let mut preview = files.iter().take(MAX_CONFLICT_FILES).cloned().collect::<Vec<_>>().join(", ");
+            let omitted = files.len().saturating_sub(MAX_CONFLICT_FILES);
+            if omitted > 0 {
+                preview.push_str(&format!(", +{omitted} more"));
+            }
             format!(
                 "\n⛔ STALE BASE, MERGE REFUSED (cas-fd4c): stacked on open epic {predecessor_id} \
                  ({predecessor_branch}) @ {short}, which {branch} lacks ({lacking} commit(s)). \
                  Merging it would conflict in: {}. Nothing was merged. Resolve that merge by hand \
                  on {branch}, or land {predecessor_id} first.\n",
-                files.join(", ")
+                preview
             )
         }
         _ => format!(

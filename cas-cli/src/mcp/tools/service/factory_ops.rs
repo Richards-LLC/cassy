@@ -3898,12 +3898,15 @@ impl CasService {
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            let summary = render_worker_liveness_summary_scoped(
+            let mut summary = render_worker_liveness_summary_scoped(
                 &liveness_rows,
                 factory_session.as_deref(),
                 scoped_worker_count,
                 outside_scope_worker_count,
             );
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
             // cas-73b5: the fast poll surfaces a wedged daemon loop too.
             let health = factory_session
                 .as_deref()
@@ -4311,6 +4314,9 @@ impl CasService {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
             }
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { msg.push_str(&format!("\n{capacity}\n")); }
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
@@ -4437,6 +4443,9 @@ impl CasService {
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
         // starting it past the configured stall threshold.
+        let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+            factory_session.as_deref(), chrono::Utc::now());
+        if !capacity.is_empty() { output.push_str(&format!("{capacity}\n\n")); }
         let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             match open_task_store(&self.inner.cas_root)

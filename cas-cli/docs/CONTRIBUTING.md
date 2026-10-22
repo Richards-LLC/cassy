@@ -1395,6 +1395,14 @@ fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply
 Invalid hand-edited thresholds use defaults. A denied worker command prints
 `Waiting for build admission` with its measured reason and asks for the same
 capped command to be retried; it does not hold a builder slot while waiting.
+Registered workers retain their InProgress task and lease during capacity
+waiting. Each refusal updates one durable worker/task/lease-generation episode,
+with its original start, current cause and next retry (120 seconds). worker_status
+shows that episode once; the background reminder scan sends one capacity notice
+after 20 minutes, without a blocked-task page. A delivered explicit assistance
+message consumes that episode's automatic notice. Successful admission clears
+it, and a changed task/lease invalidates it. Capacity waiting never changes task
+status; genuine blocked/yielded tasks retain their existing semantics.
 `force=true` only overrides the existing spawn-time soft check, never capped
 worker slot locks.
 

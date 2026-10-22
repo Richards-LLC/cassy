@@ -224,7 +224,9 @@ pub fn handle_notification(
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
     // Config files can predate URL validation or be edited outside the CLI;
     // enforce the destination policy at the last point before sending data.
-    crate::config::validate_notification_webhook_url(url)?;
+    let Some(url) = crate::config::validate_notification_webhook_url(url)? else {
+        return Ok(());
+    };
 
     // Simple HTTP POST with JSON payload
     let payload = serde_json::json!({
@@ -235,6 +237,9 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
     // Use curl for simplicity (available on most systems)
     let output = std::process::Command::new("curl")
         .args([
+            "--globoff",
+            "--proto",
+            "=https,http",
             "-s",
             "-X",
             "POST",
@@ -242,7 +247,8 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
             "Content-Type: application/json",
             "-d",
             &payload.to_string(),
-            url,
+            "--",
+            url.as_str(),
         ])
         .output();
 
@@ -642,6 +648,56 @@ mod pre_compact_flush_tests {
         .expect_err("non-HTTPS destinations must be rejected before sending")
         .to_string();
         assert!(error.contains("HTTPS"), "{error}");
+    }
+
+    #[test]
+    fn notification_webhook_sender_rejects_parser_differential_and_normalizes_curl_url() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let curl = temp.path().join("curl");
+        let captured_args = temp.path().join("curl-args");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CURL_ARGS_FILE\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{old_path}", temp.path().display());
+        let captured_args_path = captured_args.to_str().unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", path.as_str()),
+            ("CURL_ARGS_FILE", captured_args_path),
+        ]);
+
+        send_webhook_notification("", "empty webhook must be a no-op").unwrap();
+        assert!(!captured_args.exists(), "empty webhook must not invoke curl");
+
+        for url in [
+            "http://127.0.0.1\\@evil.example/",
+            "http://localhost\\@evil.example",
+            "http://127.0.0.1:80\\@evil.example/",
+        ] {
+            let error = send_webhook_notification(url, "secret notification")
+                .expect_err("parser-differential destinations must be refused")
+                .to_string();
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{error}"
+            );
+            assert!(!captured_args.exists(), "curl must not receive {url}");
+        }
+
+        send_webhook_notification("HTTPS://Hooks.Example.Test/webhook", "safe notification")
+            .unwrap();
+        let args = std::fs::read_to_string(captured_args).unwrap();
+        let args: Vec<_> = args.lines().collect();
+        assert_eq!(args.first(), Some(&"--globoff"));
+        assert!(args.windows(2).any(|pair| pair == ["--proto", "=https,http"]));
+        assert_eq!(args.get(args.len() - 2), Some(&"--"));
+        assert_eq!(args.last(), Some(&"https://hooks.example.test/webhook"));
     }
 
     // -------------------------------------------------------------------------

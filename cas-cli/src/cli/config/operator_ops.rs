@@ -533,8 +533,13 @@ mod tests {
         for url in [
             "http://example.test/webhook",
             "http://localhost.example.test/webhook",
+            "http://127.0.0.1\\@evil.example/",
+            "http://localhost\\@evil.example",
             "ftp://localhost/webhook",
             "not a url",
+            "https://hooks.example.test/has space",
+            "https://hooks.example.test/has\tcontrol",
+            "https://hooks.example.test/has\ncontrol",
         ] {
             let mut config = Config::load(&root).unwrap();
             let error = set_config_value(
@@ -579,6 +584,22 @@ mod tests {
                 Some(url)
             );
         }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(
+            &mut config,
+            "notifications.webhook_url",
+            "HTTPS://Hooks.Example.Test/services/secret",
+            &root,
+            operator,
+        )
+        .unwrap();
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some("https://hooks.example.test/services/secret")
+        );
     }
 
     #[test]

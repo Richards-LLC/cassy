@@ -2324,6 +2324,21 @@ impl CasService {
                             )));
                         }
                         MergeRequestDecision::Pending { target_tip } => {
+                            // cas-749f: composing an envelope does not advance
+                            // the durable park or prove the new tip's checks.
+                            // The merge gate reads the persisted anchor, so
+                            // require close to reconcile it before queueing.
+                            if task.status == cas_types::TaskStatus::AwaitingMerge
+                                && let Some(anchor) = recorded_anchor.as_deref()
+                                && anchor != branch_tip
+                            {
+                                return Ok(Self::success(format!(
+                                    "MERGE REQUEST REQUIRES RE-PARK: {} is parked at {anchor}, but its pushed source is {branch_tip}. No merge request was queued and no anchor was advanced. Re-run `{}task action=close id={}` at {branch_tip} with checks for that tip, then send the merge request again.",
+                                    task.id,
+                                    crate::mcp::tools::core::guidance::caller_prefix(),
+                                    task.id,
+                                )));
+                            }
                             let anchor_tip = recorded_anchor
                                 .as_deref()
                                 .filter(|anchor| *anchor != branch_tip)

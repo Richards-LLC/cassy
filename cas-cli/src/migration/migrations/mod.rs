@@ -259,8 +259,8 @@ pub mod m280_rule_candidates;
 pub mod m281_accepted_proposal_targets;
 mod m282_epic_split_decisions;
 mod m283_agent_session_ends;
-mod m283_qa_fixture_cleanup;
-mod m284_qa_resource_use;
+mod m284_qa_fixture_cleanup;
+mod m285_qa_resource_use;
 pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
@@ -557,8 +557,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m281_accepted_proposal_targets::MIGRATION,
     m282_epic_split_decisions::MIGRATION,
     m283_agent_session_ends::MIGRATION,
-    m283_qa_fixture_cleanup::MIGRATION,
-    m284_qa_resource_use::MIGRATION,
+    m284_qa_fixture_cleanup::MIGRATION,
+    m285_qa_resource_use::MIGRATION,
 ];
 
 #[cfg(test)]

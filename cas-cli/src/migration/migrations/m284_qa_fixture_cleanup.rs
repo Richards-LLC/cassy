@@ -2,7 +2,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 283,
+    id: 284,
     name: "qa_fixture_cleanup",
     subsystem: Subsystem::Verification,
     description: "Persist release fixture cleanup handles and orphan debt",

@@ -5988,8 +5988,8 @@ mod spawn_base_tests {
         ]).output().unwrap();
         assert!(amended.status.success());
         let parent_tip = head_sha(&repo, "main");
-        let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/diverged", "main")
-            .expect_err("repair-only parent divergence still refuses");
+        let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &repo.join(".cas"), "cas-legacy-child")
+            .err().expect("repair-only parent divergence still refuses").to_string();
         assert!(error.contains("reconcile commit") && error.contains("PR"), "{error}");
         assert_eq!(head_sha(&repo, "epic/diverged"), epic_tip);
         assert_eq!(head_sha(&repo, "main"), parent_tip);

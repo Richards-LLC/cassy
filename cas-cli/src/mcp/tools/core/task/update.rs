@@ -636,29 +636,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-        let requested_status_is_nonterminal = req
-            .status
-            .as_deref()
-            .and_then(|status| status.parse::<TaskStatus>().ok())
-            .is_some_and(|status| !matches!(status, TaskStatus::Closed | TaskStatus::Cancelled));
-        if req.priority.is_some() && (!task.is_terminal() || requested_status_is_nonterminal) {
-            // Priority controls shared build admission. A worker cannot evade
-            // this guard by reopening its task, and unavailable authority must
-            // refuse the entire update before ordinary fields are changed.
-            let caller_id = self.get_registered_agent_id_read_only()?;
-            let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("TASK PRIORITY UPDATE REJECTED: cannot read caller authority: {error}"),
-                )
-            })?;
-            if caller.role == cas_types::AgentRole::Worker {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
-                ));
-            }
-        }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.
@@ -1410,6 +1387,35 @@ impl CasCore {
                 data: None,
             });
         }
+        // Immutable proof-scope refusals above do not depend on caller
+        // authority. For ordinary updates, only a normalized priority change
+        // needs the worker restriction; notes and idempotent priority values
+        // must not require a registered session or readable agent store.
+        let requested_priority = req.priority.map(|priority| Priority(priority.min(4) as i32));
+        let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);
+        let requested_status_is_nonterminal = req
+            .status
+            .as_deref()
+            .and_then(|status| status.parse::<TaskStatus>().ok())
+            .is_some_and(|status| !matches!(status, TaskStatus::Closed | TaskStatus::Cancelled));
+        if priority_changes && (!task.is_terminal() || requested_status_is_nonterminal) {
+            // Priority controls shared build admission. A worker cannot evade
+            // this guard by reopening its task, and unavailable authority must
+            // refuse the entire update before ordinary fields are changed.
+            let caller_id = self.get_registered_agent_id_read_only()?;
+            let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("TASK PRIORITY UPDATE REJECTED: cannot read caller authority: {error}"),
+                )
+            })?;
+            if caller.role == cas_types::AgentRole::Worker {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                ));
+            }
+        }
         // Resolving an existing work target is necessary only when this call
         // changes its branch. Unrelated task fields (notably the first
         // external_ref proof on a parked no-code task) must not be rejected
@@ -1468,8 +1474,8 @@ impl CasCore {
             changes.push("notes");
         }
 
-        if let Some(priority) = req.priority {
-            task.priority = Priority(priority.min(4) as i32);
+        if let Some(priority) = requested_priority {
+            task.priority = priority;
             changes.push("priority");
         }
 
@@ -2755,6 +2761,31 @@ mod status_transition_tests {
         assert!(result.is_err(), "unreadable authority must refuse: {result:?}");
         assert_eq!(stored.priority, Priority::MEDIUM, "refusal must precede task writes");
         assert_eq!(stored.title, task.title);
+
+        // Notes do not acquire priority authority just because a client sends
+        // its current priority too. Compare the persisted, normalized value;
+        // an out-of-range input still writes BACKLOG, not a new priority.
+        for (priority, requested) in [
+            (Priority::MEDIUM, None),
+            (Priority::MEDIUM, Some(2_u8)),
+            (Priority::BACKLOG, Some(u8::MAX)),
+        ] {
+            let mut current = tasks.get(&task.id).unwrap();
+            current.priority = priority;
+            tasks.update(&current).unwrap();
+            let note = format!("progress with unchanged priority {requested:?}");
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": requested, "notes": note,
+            }))
+            .unwrap();
+            core.cas_task_update(Parameters(request))
+                .await
+                .expect("an unchanged priority must not require readable authority");
+            let stored = tasks.get(&task.id).unwrap();
+            assert_eq!(stored.priority, priority);
+            assert_eq!(stored.title, task.title);
+            assert!(stored.notes.contains(&note));
+        }
     }
 
     #[tokio::test]

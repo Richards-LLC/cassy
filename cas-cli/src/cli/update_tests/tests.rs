@@ -3693,11 +3693,14 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
             && !output.contains("retired config settings remain ignored"),
         "receipted config failures must not replay duplicate or projection findings: {output}"
     );
+    // Longer phase remedies can wrap this cause between words at 80 columns.
+    let prose = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        rendered.matches("config is read-only").count(),
+        prose.matches("config is read-only").count(),
         1,
         "{rendered}"
     );
+    assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
     assert!(
         rendered.contains("cas update --user"),
         "existing phase remedy lost: {rendered}"

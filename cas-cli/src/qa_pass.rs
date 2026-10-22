@@ -1374,15 +1374,16 @@ page's older backlog.\n\
 visual-qa.mjs --strict finding the base build does not have.\n\
 - Reject when a cas-ui-craft critique dimension for what the delivery changed scores below 3, or \
 distinctiveness, fit or hierarchy scores below 4 on a public surface.\n\
-- Reject when an acceptance criterion or the demo statement is not met on the running build. A defect the \
-delivery claims to fix that still reproduces is an unmet criterion.\n\
+- Reject when the delivery's stated purpose, an acceptance criterion, the demo statement, or a journey \
+invariant its diff adds or edits is not met on the running build, even if base shares the same failure.\n\
 - Forced colors, reduced motion and more contrast count only when the capture proves the mode \
 with matchMedia (for example matchMedia('(forced-colors: active)').matches is true).\n\
 - Keyboard-only must reach and complete the demo's primary action.\n\
 - A required mode you did not run is NOT EXERCISED, never PASS, and rejects.\n\
-- A defect the base build already has never rejects, even on a touched page, unless the delivery claims \
-to fix it. Record it under Pre-existing in LEDGER.md and pass it to qa_record with \"scope\": \
-\"pre-existing\"; Cassy files it as a follow-up task linked to the delivery.\n\
+- A failure the base build already has is pre-existing only when it falls outside the delivery's stated \
+purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or \
+edits. Record only those findings under Pre-existing in LEDGER.md and pass them to qa_record with \
+\"scope\": \"pre-existing\"; Cassy files them as follow-up tasks linked to the delivery.\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.
@@ -2016,8 +2017,8 @@ mod tests {
             "page's older backlog",
             "a regression the delivery introduced",
             "finding the base build does not have",
-            "A defect the delivery claims to fix that still reproduces is an unmet criterion",
-            "never rejects, even on a touched page",
+            "the delivery's stated purpose, an acceptance criterion, the demo statement, or a journey invariant its diff adds or edits is not met on the running build, even if base shares the same failure",
+            "is pre-existing only when it falls outside the delivery's stated purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or edits",
             "\"scope\": \"pre-existing\"",
             "visual_qa_status \"scoped\"",
             "files.visual_qa_baseline_json",

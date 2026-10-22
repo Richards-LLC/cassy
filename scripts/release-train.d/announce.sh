@@ -51,7 +51,7 @@ PY
 }
 
 release_train_announce_posted_block() {
-    local posted_at channel channel_id channel_display tick
+    local posted_at channel channel_id channel_display tick report_message report_link report_file
     posted_at="$(release_train_announce_eastern_time "$(release_train_announce_receipt_field POSTED_AT)")"
     channel="$(release_train_announce_receipt_field CHANNEL)"
     channel_id="$(release_train_announce_receipt_field CHANNEL_ID)"
@@ -63,21 +63,27 @@ release_train_announce_posted_block() {
 
 - **Posted at:** ${tick}${posted_at}${tick}
 - **Channel:** ${tick}${channel_display}${tick}
-- **User top-level:** ${tick}message_id=$(release_train_announce_receipt_field USER_TOP_LEVEL_ID)${tick} · <$(release_train_announce_receipt_field USER_TOP_LEVEL_PERMALINK)>
-- **User reply:** ${tick}message_id=$(release_train_announce_receipt_field USER_REPLY_ID)${tick} · <$(release_train_announce_receipt_field USER_REPLY_PERMALINK)>
-- **Dev top-level:** ${tick}message_id=$(release_train_announce_receipt_field DEV_TOP_LEVEL_ID)${tick} · <$(release_train_announce_receipt_field DEV_TOP_LEVEL_PERMALINK)>
-- **Dev reply:** ${tick}message_id=$(release_train_announce_receipt_field DEV_REPLY_ID)${tick} · <$(release_train_announce_receipt_field DEV_REPLY_PERMALINK)>
+- **User top-level:** ${tick}message_id=$(release_train_announce_receipt_field USER_TOP_LEVEL_ID)${tick} · ${tick}part_ids=$(release_train_announce_receipt_field USER_TOP_LEVEL_PART_IDS)${tick} · <$(release_train_announce_receipt_field USER_TOP_LEVEL_PERMALINK)>
+- **User reply:** ${tick}message_id=$(release_train_announce_receipt_field USER_REPLY_ID)${tick} · ${tick}part_ids=$(release_train_announce_receipt_field USER_REPLY_PART_IDS)${tick} · <$(release_train_announce_receipt_field USER_REPLY_PERMALINK)>
+- **Dev top-level:** ${tick}message_id=$(release_train_announce_receipt_field DEV_TOP_LEVEL_ID)${tick} · ${tick}part_ids=$(release_train_announce_receipt_field DEV_TOP_LEVEL_PART_IDS)${tick} · <$(release_train_announce_receipt_field DEV_TOP_LEVEL_PERMALINK)>
+- **Dev reply:** ${tick}message_id=$(release_train_announce_receipt_field DEV_REPLY_ID)${tick} · ${tick}part_ids=$(release_train_announce_receipt_field DEV_REPLY_PART_IDS)${tick} · <$(release_train_announce_receipt_field DEV_REPLY_PERMALINK)>
 EOF
+    if [[ -s "$run_dir/release-report.receipt" ]]; then
+        report_message="$(sed -n 's/^PDF_MESSAGE_ID=//p' "$run_dir/release-report.receipt" | head -n1)"
+        report_link="$(sed -n 's/^PDF_MESSAGE_PERMALINK=//p' "$run_dir/release-report.receipt" | head -n1)"
+        report_file="$(sed -n 's/^PDF_FILE_ID=//p' "$run_dir/release-report.receipt" | head -n1)"
+        if [[ -z "$report_message" || -z "$report_file" || "$report_link" != https://* ]]; then
+            printf 'ERROR report receipt: missing PDF upload message identity in %s/release-report.receipt\n' "$run_dir" >&2
+            return 1
+        fi
+        printf '%s\n' "- **PDF upload:** ${tick}message_id=${report_message}${tick} · ${tick}file_id=${report_file}${tick} · <${report_link}>"
+    fi
 }
 
 release_train_announce_append_posted() {
     local draft="$1" temp
-    # A POSTED section that already names message ids is a recorded receipt.
-    # One without ids is the runtime template's empty table: replace it, or
-    # the published ids never reach the committed draft.
-    if awk '/^## POSTED$/ { in_posted = 1; next } in_posted && /^## / { in_posted = 0 } in_posted && /message_id=/ { found = 1 } END { exit !found }' "$draft"; then
-        return 0
-    fi
+    # Receipts are authoritative: refresh the block without reposting, including
+    # split parts and a report upload that completed after --announce.
     temp="$(mktemp "$worktree/.release-draft-posted.XXXXXX")"
     if ! {
         awk '/^## POSTED$/ { skip = 1; next } skip && /^## / { skip = 0 } !skip { print }' "$draft" \
@@ -117,7 +123,8 @@ release_train_announce() {
     if [[ -s "$receipt" ]]; then
         for key in POSTED_AT CHANNEL USER_TOP_LEVEL_ID USER_TOP_LEVEL_PERMALINK \
             USER_REPLY_ID USER_REPLY_PERMALINK DEV_TOP_LEVEL_ID DEV_TOP_LEVEL_PERMALINK \
-            DEV_REPLY_ID DEV_REPLY_PERMALINK; do
+            DEV_REPLY_ID DEV_REPLY_PERMALINK \
+        USER_TOP_LEVEL_PART_IDS USER_REPLY_PART_IDS DEV_TOP_LEVEL_PART_IDS DEV_REPLY_PART_IDS; do
             if ! sed -n "s/^${key}=//p" "$receipt" | head -n1 | grep -q '[^[:space:]]'; then
                 printf 'ERROR announce receipt: partial receipt at %s; refusing to retry writes\n' "$receipt" >&2
                 return 1
@@ -157,7 +164,8 @@ release_train_announce() {
     fi
     for key in POSTED_AT CHANNEL USER_TOP_LEVEL_ID USER_TOP_LEVEL_PERMALINK \
         USER_REPLY_ID USER_REPLY_PERMALINK DEV_TOP_LEVEL_ID DEV_TOP_LEVEL_PERMALINK \
-        DEV_REPLY_ID DEV_REPLY_PERMALINK; do
+        DEV_REPLY_ID DEV_REPLY_PERMALINK \
+        USER_TOP_LEVEL_PART_IDS USER_REPLY_PART_IDS DEV_TOP_LEVEL_PART_IDS DEV_REPLY_PART_IDS; do
         if ! sed -n "s/^${key}=//p" "$receipt" | head -n1 | grep -q '[^[:space:]]'; then
             printf 'ERROR announce receipt: missing %s in %s\n' "$key" "$receipt" >&2
             return 1

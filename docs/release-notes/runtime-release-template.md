@@ -40,16 +40,22 @@ Live on production — **Dev** — {{DEV_IMPACT_PUNCH}}
 3. Run `release-published-receipt.sh --write-draft` against this draft. It
    downloads and hashes both published assets before replacing every digest
    placeholder; never type a digest from a local audit archive.
-4. Post the User top-level and its only reply, then the Dev top-level and its
-   only reply; append the receipt below.
+4. Post the User top-level and its logical reply, then the Dev top-level and its
+   logical reply. Violet may split a reply body: record every returned part ID
+   in order, plus the singular message ID and returned permalink. After report
+   delivery, record the PDF upload message ID/permalink separately from file ID;
+   append the receipt below.
 
 ## POSTED
 
 Channel: `#cas-internal` (`C0B44GUKDK2`).
 
-| Message | UTC timestamp | Permalink |
-| --- | --- | --- |
-| User top-level |  |  |
-| User reply (Was → Now) |  |  |
-| Dev top-level |  |  |
-| Dev reply (Was → Now) |  |  |
+Posted at: <Eastern 12-hour time, e.g. 9:45 AM ET>.
+
+| Message | Message ID | Ordered part IDs | Returned permalink | File ID |
+| --- | --- | --- | --- | --- |
+| User top-level |  |  |  | — |
+| User reply (Was → Now) |  |  |  | — |
+| Dev top-level |  |  |  | — |
+| Dev reply (Was → Now) |  |  |  | — |
+| PDF upload |  | — |  |  |

@@ -213,7 +213,7 @@ class Announce(unittest.TestCase):
         self.assertFalse(self.receipt.exists())
 
     def test_post_sends_validated_bodies_and_preserves_threads_and_receipts(self):
-        for split_replies in ({}, {2: ["2", "2.1"], 4: ["4", "4.1", "4.2"]}):
+        for split_replies in ({}, {2: ["2.0", "2"], 4: ["4.0", "4.1", "4"]}):
             with self.subTest(split_replies=split_replies):
                 self.split_replies = split_replies
                 self.write_draft(tuple(f"\n{body}\n" for body in BODIES))
@@ -232,7 +232,16 @@ class Announce(unittest.TestCase):
                     capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                (self.root / "release-report.receipt").write_text(
+                    "PDF_MESSAGE_ID=pdf-upload\nPDF_FILE_ID=F-report\n"
+                    "PDF_MESSAGE_PERMALINK=https://slack.test/pdf-upload\n")
+                # Refresh twice: a later report must enter POSTED without duplicating it.
+                for _ in range(2):
+                    subprocess.run(result.args, check=True, capture_output=True, text=True)
                 posted = self.draft.read_text().split("## POSTED", 1)[1]
+                self.assertEqual(posted.count("message_id=pdf-upload"), 1)
+                self.assertIn("file_id=F-report", posted)
+                self.assertIn("https://slack.test/pdf-upload", posted)
                 for number, prefix in enumerate(("USER_TOP_LEVEL", "USER_REPLY", "DEV_TOP_LEVEL", "DEV_REPLY"), 1):
                     expected = split_replies.get(number, [str(number)])
                     self.assertEqual(json.loads(values[f"{prefix}_PART_IDS"]), expected)
@@ -241,6 +250,20 @@ class Announce(unittest.TestCase):
                 self.assertEqual(len(self.reads), 1)
                 self.assertIs(self.reads[0]["include_channels"], False)
                 self.assertIs(self.reads[0]["include_files"], False)
+                # An old singular-only receipt cannot prove a complete reply.
+                self.receipt.write_text("\n".join(
+                    line for line in self.receipt.read_text().splitlines()
+                    if not line.startswith("USER_REPLY_PART_IDS=")
+                ) + "\n")
+                incomplete = subprocess.run(
+                    ["bash", "-c", 'source "$1"; run_dir="$2"; worktree="$2"; '
+                     'version=9.99.8; CAS_RELEASE_TRAIN_DRAFT="$3"; release_train_announce',
+                     "partial-receipt-test", str(SCRIPT.parent / "release-train.d/announce.sh"),
+                     str(self.root), str(self.draft)], capture_output=True, text=True,
+                )
+                self.assertNotEqual(incomplete.returncode, 0)
+                self.assertIn("partial receipt", incomplete.stderr)
+                self.assertIn("refusing to retry writes", incomplete.stderr)
 
 
 class TokenPreflight(unittest.TestCase):

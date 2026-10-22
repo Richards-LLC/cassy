@@ -768,6 +768,7 @@ def main(argv: list[str]) -> int:
                 },
             },
         )
+        pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF")
         pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
             client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
@@ -797,6 +798,8 @@ def main(argv: list[str]) -> int:
                 "PAGE_COUNT": str(pages),
                 "PDF_FILE_PERMALINK": pdf_permalink,
                 "PDF_FILE_ID": pdf_file_id,
+                "PDF_MESSAGE_ID": pdf_message_id,
+                "PDF_MESSAGE_PERMALINK": pdf_message_permalink,
                 "HTML_FILE_ID": html_file_id,
                 "USER_THREAD_TS": user_thread,
                 "DEV_THREAD_TS": dev_thread,

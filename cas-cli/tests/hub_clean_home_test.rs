@@ -2419,6 +2419,8 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         let launcher = launcher.unwrap();
         let mut cleanup_lock = paths.acquire_instance_lock().unwrap();
         cleanup_lock.set_phase("stopping").unwrap();
+        let unrelated_error = paths.root().join(".launcher-unrelated.error");
+        fs::write(&unrelated_error, b"another launch's diagnostic").unwrap();
         fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
         let contention = barrier.join(format!("startup-lock-waiter-{launcher}"));
         let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
@@ -2438,6 +2440,11 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
         fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
         let output = start.wait_with_output().unwrap();
         assert!(contention.exists(), "hub did not attempt the contended lock: {output:?}");
+        let errors = fs::read_dir(paths.root()).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".error"))
+            .map(|entry| entry.path()).collect::<Vec<_>>();
+        assert_eq!(errors, vec![unrelated_error.clone()], "launch leaked its diagnostic file");
+        assert_eq!(fs::read(&unrelated_error).unwrap(), b"another launch's diagnostic");
         if !cleanup_finishes {
             assert!(!output.status.success(), "hub ignored the held machine lock: {output:?}");
             let stderr = String::from_utf8_lossy(&output.stderr);

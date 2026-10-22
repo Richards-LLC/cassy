@@ -53,3 +53,22 @@ terminal-qa: PASS hub-restart-auto-fallback · 7 runs · 0 fail · 0 warn · 0 a
 | Craft | 5 | All seven captures pass at 80 columns; the longest line is 55 cells, with no wrap or clipped token. |
 | Theme safety | 5 | Dark, light, both Solarized palettes, `NO_COLOR=1`, and `LC_ALL=C` pass with readable plain output. |
 | Machine contract | 5 | The piped run exits 0 and appends the warning cleanly; the targeted JSON restart test passes with one JSON value. |
+
+## Required refusal critique (cas-1471)
+
+terminal-qa: PASS cas-1471-start · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-1471/terminal-qa/start/report.json
+
+terminal-qa: PASS cas-1471-restart · 12 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-1471/terminal-qa/restart/report.json
+
+Supervisor QA used candidate `894434db7607a4f634b3d30a672bafa0037ca7f0`
+with isolated Required-mode, signed-out probes. Both commands refused before
+starting a hub; all process and runtime-file readbacks were empty. A follow-up
+with `--strict` explicitly set reproduced both passing reports with no warnings.
+
+| Dimension | Score | Evidence |
+| --- | ---: | --- |
+| Hierarchy | 4 | The first two lines name Required transport and the refused operation, followed by the signed-out cause and labeled diagnostics. |
+| Fit | 5 | Full retry and loopback commands occupy separate lines; all human captures fit 80 columns (maximum 57 cells for start, 59 for restart). |
+| Craft | 5 | Both operations pass all twelve captures with no warnings, clipping, or split command tokens. |
+| Theme safety | 5 | Four palettes at 80 and 120 columns, C locale, and no-color captures retain the same readable refusal. |
+| Machine contract | 5 | Each JSON capture is one error document; every probe preserves the candidate's nonzero refusal exit. |

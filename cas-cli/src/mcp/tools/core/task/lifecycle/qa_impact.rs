@@ -210,9 +210,10 @@ struct Row<'a> {
     cells: Vec<&'a str>,
 }
 
-/// Header names of a ledger table's verdict column, in priority order: the
+/// Header names of a ledger table's verdict columns, in priority order: the
 /// evidence ledger's `verdict`, the independent-QA journeys table's `Run`, and
-/// short `Result` or `Status` tables.
+/// short `Result` or `Status` tables. A header matches by its first word, so
+/// `Verdict / label` and `Result/source` count.
 const VERDICT_HEADERS: [&str; 4] = ["verdict", "run", "result", "status"];
 
 fn table_cells(line: &str) -> Vec<&str> {
@@ -228,17 +229,43 @@ fn separator(cells: &[&str]) -> bool {
         .all(|c| c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':')))
 }
 
-/// Ledger rows outside code fences. Only the verdict column is read. A table
-/// header (the row above a `|---|` separator, or a row with a `Verdict` cell)
-/// names it by [`VERDICT_HEADERS`]; a headed table without one has no verdict
-/// column. Only a headerless row falls back by position: the fifth cell of a
-/// row with five or more cells, else the second. A list row reads
-/// `- ID: verdict`.
+/// The header cell's first word, lowercased, without Markdown emphasis.
+fn header_word(cell: &str) -> String {
+    cell.trim_matches(|c: char| c == '*' || c == '_')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+/// The verdict-named columns of a header row, in [`VERDICT_HEADERS`] order.
+fn verdict_columns(cells: &[&str]) -> Vec<usize> {
+    let words: Vec<String> = cells.iter().map(|cell| header_word(cell)).collect();
+    VERDICT_HEADERS
+        .iter()
+        .flat_map(|name| {
+            words
+                .iter()
+                .enumerate()
+                .filter(move |(_, word)| word == name)
+                .map(|(index, _)| index)
+        })
+        .collect()
+}
+
+/// Ledger rows outside code fences. Only verdict columns are read. A table
+/// header (the row above a `|---|` separator, or a row whose cell starts with
+/// `Verdict`) names them by [`VERDICT_HEADERS`]; a row reads the first one
+/// whose cell holds a verdict, so a `Run` column of run ids beside `Result`
+/// still counts. A headed table without one has no verdict column. Only a
+/// headerless row falls back by position: the fifth cell of a row with five or
+/// more cells, else the second. A list row reads `- ID: verdict`.
 fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
     let lines: Vec<&str> = ledger.lines().map(str::trim).collect();
     let mut fenced = false;
-    // `Some(column)` inside a headed table; `None` before any header.
-    let mut header: Option<Option<usize>> = None;
+    // `Some(columns)` inside a headed table; `None` before any header.
+    let mut header: Option<Vec<usize>> = None;
     let mut rows = Vec::new();
     for (index, line) in lines.iter().copied().enumerate() {
         if line.starts_with("```") || line.starts_with("~~~") {
@@ -268,16 +295,18 @@ fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
         let above_separator = lines
             .get(index + 1)
             .is_some_and(|next| next.contains('|') && separator(&table_cells(next)));
-        if above_separator || cells.iter().any(|c| c.eq_ignore_ascii_case("verdict")) {
-            header = Some(
-                VERDICT_HEADERS
-                    .iter()
-                    .find_map(|name| cells.iter().position(|c| c.eq_ignore_ascii_case(name))),
-            );
+        if above_separator || cells.iter().any(|c| header_word(c) == "verdict") {
+            header = Some(verdict_columns(&cells));
             continue;
         }
-        let column = header.unwrap_or(Some(if cells.len() >= 5 { 4 } else { 1 }));
-        if let Some(verdict) = column.and_then(|column| cells.get(column).copied()) {
+        let positional = [if cells.len() >= 5 { 4 } else { 1 }];
+        let columns = header.as_deref().unwrap_or(&positional);
+        let verdict = columns
+            .iter()
+            .filter_map(|column| cells.get(*column).copied())
+            .find(|cell| disposition(cell, &cells).is_some())
+            .or_else(|| columns.first().and_then(|column| cells.get(*column).copied()));
+        if let Some(verdict) = verdict {
             rows.push(Row {
                 id: cells[0],
                 verdict,
@@ -298,16 +327,19 @@ enum Disposition {
     Owed(Option<crate::qa_release::blocked::BlockedExternal>),
 }
 
-fn disposition(row: &Row<'_>) -> Option<Disposition> {
+/// Reads one verdict cell; bold (`**PASS**`) reads as plain.
+fn disposition(cell: &str, cells: &[&str]) -> Option<Disposition> {
     use crate::qa_release::blocked::{self, BlockedExternal};
-    let cell = row.verdict;
+    let cell = cell.trim_start_matches('*');
+    let after = |verdict: &str| {
+        cell.strip_prefix(verdict)
+            .map(|rest| rest.trim_start_matches('*'))
+    };
     if cell.starts_with(blocked::VERDICT) {
-        return Some(Disposition::Owed(BlockedExternal::from_row(
-            cell, &row.cells,
-        )));
+        return Some(Disposition::Owed(BlockedExternal::from_row(cell, cells)));
     }
     let word = |verdict: &str| {
-        cell.strip_prefix(verdict).is_some_and(|rest| {
+        after(verdict).is_some_and(|rest| {
             rest.is_empty()
                 || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | '—' | '-'))
         })
@@ -315,10 +347,12 @@ fn disposition(row: &Row<'_>) -> Option<Disposition> {
     if word("PASS") || word("FAIL") {
         Some(Disposition::Run)
     } else if word("NOT A ROUTE")
-        || cell.strip_prefix("NOT EXERCISED:").is_some_and(|reason| {
-            let reason = reason.trim();
-            !reason.is_empty() && reason != "<reason>"
-        })
+        || after("NOT EXERCISED")
+            .and_then(|rest| rest.strip_prefix(':'))
+            .is_some_and(|reason| {
+                let reason = reason.trim().trim_start_matches('*').trim();
+                !reason.is_empty() && reason != "<reason>"
+            })
     {
         Some(Disposition::Recorded)
     } else {
@@ -351,7 +385,7 @@ pub(crate) fn ledger_refusal(impact: &Value, head: &str, ledger: &str) -> Option
         let recorded: Vec<_> = rows
             .iter()
             .filter(|row| row.id == id)
-            .filter_map(|row| Some((row, disposition(row)?)))
+            .filter_map(|row| Some((row, disposition(row.verdict, &row.cells)?)))
             .collect();
         if recorded.is_empty() {
             missing.push(id);

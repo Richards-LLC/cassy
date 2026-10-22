@@ -1698,12 +1698,23 @@ impl CasCore {
                         .ok()
                         .and_then(|store| epic_lane::open_predecessor_epic(store.as_ref(), &blocked_by_ids))
                         .and_then(|(id, branch)| {
-                            // A local-only predecessor lane is still its tip.
+                            // resolve_fresh_base reports success with an empty
+                            // SHA for a branch that exists neither locally nor
+                            // on origin (another repo, or deleted). Stack only
+                            // on a tip that resolves to a commit here, falling
+                            // back to a local-only lane, else to trunk.
+                            let resolves = |sha: &str| {
+                                !sha.is_empty()
+                                    && git_ops.ref_sha(&format!("{sha}^{{commit}}")).is_ok()
+                            };
                             match git_ops.resolve_fresh_base(&branch) {
-                                Ok(fresh) => Some((id, branch, fresh.branch_ref, fresh.sha)),
-                                Err(_) => git_ops
+                                Ok(fresh) if resolves(&fresh.sha) => {
+                                    Some((id, branch, fresh.branch_ref, fresh.sha))
+                                }
+                                _ => git_ops
                                     .ref_sha(&branch)
                                     .ok()
+                                    .filter(|sha| resolves(sha))
                                     .map(|sha| (id, branch.clone(), branch, sha)),
                             }
                         });

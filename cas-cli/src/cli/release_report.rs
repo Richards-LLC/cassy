@@ -3173,6 +3173,7 @@ mod tests {
             "docs/release-reports/v3.72.0.md",
             "docs/release-reports/v3.72.0.pdf",
         );
+        // pin: the exact URL is the link a reader of the published PDF follows.
         assert_eq!(source, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.md");
         assert_eq!(pdf, "https://github.com/Richards-LLC/cassy/blob/v3.72.0/docs/release-reports/v3.72.0.pdf");
     }

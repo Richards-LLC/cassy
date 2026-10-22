@@ -309,6 +309,7 @@ impl Check {
         const REMEDIATION_MARKERS: &[&str] = &[
             "; Run `",
             ". Run `",
+            ". Run:\n",
             ". Review ",
             ". Do not treat ",
             "; repair ",

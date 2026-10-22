@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
-        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &[
+        const SYNTHETIC_PATH_KEYS: &[&str] = &[
             "hooks.stop.duplicate_detection_enabled",
             "hooks.stop.duplicate_detection_threshold",
             "hooks.stop.learning_review_enabled",
@@ -943,6 +943,7 @@ mod tests {
             "notifications.on_idle_prompt",
             "notifications.on_permission_prompt",
             "notifications.webhook_url",
+            "slack.stakeholder_contacts",
         ];
 
         let registry = crate::config::registry();
@@ -958,9 +959,14 @@ mod tests {
                 toml_edit::Document::parse(toml::to_string(&config).unwrap())
                     .unwrap()
                     .into_mut()
-            } else if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
+            } else if SYNTHETIC_PATH_KEYS.contains(&key) {
                 let (parent, leaf) = key.rsplit_once('.').expect("nested config key");
-                toml_edit::Document::parse(format!("[{parent}]\n{leaf} = \"sentinel\"\n"))
+                let value = if key == "slack.stakeholder_contacts" {
+                    "[]"
+                } else {
+                    "\"sentinel\""
+                };
+                toml_edit::Document::parse(format!("[{parent}]\n{leaf} = {value}\n"))
                     .unwrap()
                     .into_mut()
             } else {

@@ -111,7 +111,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         }
         return Ok(());
     }
-    let (pid, ppid, pid_starttime, metadata): (Option<u32>, Option<u32>, Option<u64>, String) =
+    let (pid, ppid, pid_starttime, metadata): (Option<u32>, Option<u32>, Option<i64>, String) =
         conn.query_row(
             "SELECT pid,ppid,pid_starttime,metadata FROM agents WHERE id=?",
             [id],
@@ -133,7 +133,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         factory_session: session.clone(),
         pid,
         ppid,
-        pid_starttime,
+        pid_starttime: pid_starttime.and_then(|value| u64::try_from(value).ok()),
         parent_starttime,
         tasks: Vec::new(),
         workers: Vec::new(),

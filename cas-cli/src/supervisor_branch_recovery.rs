@@ -3,7 +3,6 @@
 use std::{path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use cas_store::AgentStore;
 use cas_types::{Agent, AgentRole, AgentStatus, ClaimResult, TaskLease};
 use serde::{Deserialize, Serialize};
 

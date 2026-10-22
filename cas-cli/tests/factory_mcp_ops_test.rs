@@ -5858,6 +5858,24 @@ async fn test_gc_report_empty() {
         "{text}"
     );
     assert!(text.contains("processes=0 rss_bytes=0"), "{text}");
+    assert!(text.contains("Orphaned reminders (issuer and recipient gone): 0"), "{text}");
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let old = chrono::Utc::now() - chrono::Duration::hours(25);
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    for owner in ["gone-issuer-a", "gone-issuer-b"] {
+        let id = reminders.create(
+            owner, None, "wait", cas::store::ReminderTriggerType::Event,
+            None, Some("task_completed"), None, 0, None,
+        ).unwrap();
+        conn.execute("UPDATE reminders SET created_at=?1 WHERE id=?2",
+            rusqlite::params![old.to_rfc3339(), id],
+        ).unwrap();
+    }
+    let report = env.service.factory_request(Parameters(factory_req("gc_report"))).await.unwrap();
+    let text = get_text(&report);
+    assert!(text.contains("Orphaned reminders (issuer and recipient gone): 2"), "{text}");
+    assert_eq!(reminders.list_all_pending().unwrap().len(), 2,
+        "gc_report counts orphaned reminders without mutating them");
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let pid = std::process::id();

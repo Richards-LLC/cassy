@@ -590,6 +590,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             task.status = TaskStatus::Open;
             // Managed linked checkouts share the factory's CAS identity/store.
             std::os::unix::fs::symlink(&cas_root, worker_path.join(".cas")).unwrap();
+            std::fs::write(repo.root.join(".git/info/exclude"), ".cas\n").unwrap();
             task.deliverables.work_target = Some(WorkTarget {
                 repo_selector: format!("project:github.com/org/{slug}"),
                 target_branch: "main".into(),

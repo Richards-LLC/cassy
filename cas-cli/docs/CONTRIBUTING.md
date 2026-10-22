@@ -2634,6 +2634,10 @@ parked patch set, allows attributable corrections while the worker exclusively
 owns the delivery, and audits the replacement anchor. An explicit receipt or
 stored anchor absent from the pushed source refuses at close with recovery
 guidance. Sending a merge request cannot advance the persisted park anchor.
+An empty checkpoint atop real task commits retains its parked anchor while
+content proof measures the attributed task commits beneath it. A delivery
+containing only empty commits still refuses; existing attribution and content
+loss checks remain in force.
 A transferred delivery also resolves its recorded parked or handoff branch
 when the receiving worker's lane belongs to another task, including a branch
 available only on origin. Already integrated work needs no branch adoption or

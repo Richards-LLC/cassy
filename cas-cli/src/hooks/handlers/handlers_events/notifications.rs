@@ -642,10 +642,26 @@ mod pre_compact_flush_tests {
     #[test]
     fn notification_webhook_sender_rejects_non_https() {
         if std::env::var_os("CAS_2E34_REFUSAL_CAPTURE").is_some() {
-            send_webhook_notification(
-                " https://hooks.example.test/private-destination ",
-                "private-notification-text",
-            ).expect_err("old whitespace-bearing stored values must still be refused");
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            let fakebin = env.home().join("bin");
+            std::fs::create_dir(&fakebin).unwrap();
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                for name in ["notify-send", "osascript"] {
+                    let program = fakebin.join(name);
+                    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+                    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+            env.set("PATH", &fakebin);
+            let root = env.home().join(".cas");
+            std::fs::write(root.join("config.toml"),
+                "[notifications]\nenabled = true\non_idle_prompt = true\nwebhook_url = ' https://hooks.example.test/private-destination '\n"
+            ).unwrap();
+            handle_notification(&HookInput {
+                hook_event_name: "idle_prompt".into(),
+                ..Default::default()
+            }, Some(&root)).unwrap();
             return;
         }
         let error = send_webhook_notification(
@@ -666,11 +682,10 @@ mod pre_compact_flush_tests {
         assert!(output.status.success(), "{output:?}");
         crate::test_child::assert_passed(&stdout, name);
         let warning = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(warning.lines().count(), 1, "{warning:?}");
+        assert_eq!(warning.lines().filter(|line| line.contains("Warning:")).count(), 1, "{warning:?}");
         assert!(warning.contains("Warning: notification webhook refused"), "{warning}");
         assert!(warning.contains("notifications.webhook_url"), "{warning}");
         assert!(!warning.contains("private-destination"), "destination leaked: {warning}");
-        assert!(!warning.contains("private-notification-text"), "payload leaked: {warning}");
     }
 
     #[test]

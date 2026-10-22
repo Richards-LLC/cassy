@@ -3432,7 +3432,7 @@ mod epic_move_work_target_tests {
         let release_signal = released_tx.clone();
         Mock::given(method("POST"))
             .and(path(format!("/api/agents/tasks/{key}/release")))
-            .respond_with(move |_| {
+            .respond_with(move |_: &wiremock::Request| {
                 if let Some(sender) = release_signal.lock().unwrap().take() {
                     let _ = sender.send(());
                 }

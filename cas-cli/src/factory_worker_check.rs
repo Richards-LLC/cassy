@@ -2944,7 +2944,16 @@ PY"#);
         // and consumes the same episode's later automatic escalation.
         let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
         assert!(execute_at(&root, &args, &repo, &fake).is_err());
-        let explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        let mut explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        // The worker has not retried for six minutes. Admission no longer
+        // reserves a slot, but the live episode must consume its explicit page.
+        explicit.since -= chrono::Duration::minutes(6);
+        explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
+        let explicit_path = std::fs::read_dir(root.join("capacity-waits")).unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json")).unwrap();
+        std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "gap exceeds admission freshness");
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.set_agent_id_for_testing("capacity-worker".into());
         let worker = CasService::new(core, None);
@@ -2954,8 +2963,9 @@ PY"#);
             "blocker": true, "summary": "Storage repair needed", "message": need,
         })).unwrap())).await.unwrap();
         assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
-        assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
-            .iter().any(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)));
+        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
+            .iter().filter(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)).count(), 1,
+            "exactly one explicit assistance page is durably queued");
         let after_need = notices.pending_count("capacity-supervisor").unwrap();
         crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
         assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
@@ -3064,7 +3074,16 @@ PY"#);
         p2_wait_record["since"] = serde_json::json!(
             (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339()
         );
+        p2_wait_record["next_retry"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(43)).to_rfc3339()
+        );
         std::fs::write(&p2_wait_path, serde_json::to_vec(&p2_wait_record).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "priority-p2-worker", chrono::Utc::now()).unwrap().is_none());
+        let aged = crate::factory_capacity_wait::record_refusal(
+            &root, &repos[0], "retry after a gap longer than four minutes", chrono::Utc::now(),
+        ).unwrap().unwrap();
+        assert_eq!(aged.since, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(p2_wait_record["since"].clone()).unwrap(), "retry preserves aging across the gap");
+        assert!(aged.cause.starts_with("priority=P0"), "{}", aged.cause);
         drop(held);
 
         let p0_aged_p2_block = execute_at(&root, &args, &repos[1], &fake)

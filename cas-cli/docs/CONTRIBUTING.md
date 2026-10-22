@@ -1467,8 +1467,13 @@ waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
 shows that episode once; the background reminder scan sends one capacity notice
 after 20 minutes, without a blocked-task page. A delivered explicit assistance
-message consumes that episode's automatic notice. Successful admission clears
-it, and a changed task/lease invalidates it. Capacity waiting never changes task
+message consumes that episode's automatic notice even after a gap longer than
+four minutes between retries. A stale retry stops reserving queue position;
+the live task lease still preserves its original wait age and notice state.
+Workers cannot change priority on any non-terminal task, including Open and
+AwaitingMerge; reopening does not grant permission to promote it. Priority
+updates refuse when caller authority cannot be read. Successful admission clears
+the wait, and a changed task/lease invalidates it. Capacity waiting never changes task
 status; genuine blocked/yielded tasks retain their existing semantics.
 `force=true` only overrides the existing spawn-time soft check, never capped
 worker slot locks.

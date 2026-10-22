@@ -384,6 +384,18 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         TaskStatus::InProgress,
         "{stale_external_embedded}"
     );
+    // cas-70cb: another task can remove the include after this delivery was
+    // measured. That newer HEAD must not let the old receipt cover its asset.
+    let untested_delivery = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(&f.worker_path, &["checkout", "-q", "-b", "factory/without-include"]);
+    std::fs::write(f.worker_path.join(source_path), "pub fn turn() {}\n").unwrap();
+    git(&f.worker_path, &["add", source_path]);
+    git(&f.worker_path, &["commit", "-q", "-m", "next task removes include"]);
+    assert!(
+        crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &untested_delivery).is_empty(),
+        "removing an include on another HEAD must not authorize the delivered asset change"
+    );
+    git(&f.worker_path, &["checkout", "-q", LANE]);
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(),
@@ -404,6 +416,17 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let parked = call(&f.worker, close.clone()).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+
+    // The worker now starts another task whose Rust source names this brief.
+    // The supervisor still closes the parked delivery's immutable tree.
+    git(&f.worker_path, &["checkout", "-q", "-b", "factory/next-task"]);
+    let source = std::fs::read_to_string(f.worker_path.join(source_path)).unwrap();
+    std::fs::write(
+        f.worker_path.join(source_path),
+        format!("{source}\nconst NEXT_TASK: &str = include_str!(\"../../../{doc_path}\");\n"),
+    ).unwrap();
+    git(&f.worker_path, &["add", source_path]);
+    git(&f.worker_path, &["commit", "-q", "-m", "next task embeds brief"]);
 
     git(&f.dir.path(), &["merge", "--ff-only", LANE]);
     git(&f.dir.path(), &["push", "-q", "origin", "main"]);

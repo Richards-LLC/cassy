@@ -915,10 +915,7 @@ fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     if is_workspace_crate_path(repo, path)
         || lower == ".env"
-        || lower == "docs/qa/batch-qa.md"
-        || lower == "docs/qa/journeys.md"
-        || lower == "docs/design/petrastella-design-language.md"
-        || lower.starts_with("docs/review/")
+        || is_named_by_tracked_rust_source(repo, path)
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
         || lower.starts_with("hub-web/dist/")
@@ -979,11 +976,28 @@ fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
     )
 }
 
+/// A Rust source file can embed assets outside its crate directory with
+/// `include_str!` or `include_bytes!`. Detect those by filename so new assets do
+/// not need a hand-maintained path entry here. Treat git errors conservatively
+/// as proof inputs rather than reusing a receipt we could not validate.
+fn is_named_by_tracked_rust_source(repo: &Path, path: &str) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let Ok(matches) = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["grep", "-lF", "-e", name, "HEAD", "--", "*.rs"])
+        .current_dir(repo)
+        .output()
+    else {
+        return true;
+    };
+    matches.status.code() != Some(1)
+}
+
 /// Cargo inputs are not limited to source-code extensions: `include_str!`,
 /// `include_bytes!`, and package build scripts can consume any file beneath a
 /// crate directory. Treat those files as proof inputs regardless of suffix.
-/// The repository's build script also watches a few assets outside crate roots;
-/// those are covered by the explicit paths above.
 fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
     let path = Path::new(path);
     let Some(parent) = path.parent() else {

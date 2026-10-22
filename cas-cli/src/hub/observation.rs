@@ -301,11 +301,22 @@ fn bounded_output(program: &str, args: &[&str], timeout: Duration) -> Option<Com
     })
 }
 
+/// The hub's launchd service label.
+pub(crate) const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
+/// Names an isolated hub's own launchd label (QA and tests).
+pub(crate) const LAUNCHD_TEST_LABEL_ENV: &str = "CAS_HUB_LAUNCHD_LABEL";
+
+/// cas-0a3d: the one label resolution shared by hub status and the service
+/// commands, so an isolated hub never reads the live hub's service.
+pub(crate) fn launchd_label() -> String {
+    std::env::var(LAUNCHD_TEST_LABEL_ENV).unwrap_or_else(|_| LAUNCHD_LABEL.to_owned())
+}
+
 /// The launchd plist and `launchctl print` target for the hub's service in
 /// `domain` (for example `gui/501`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn launchd_service_paths(home: &Path, domain: &str) -> (PathBuf, String) {
-    let label = "dev.cas.commander-hub";
+    let label = launchd_label();
     (
         home.join("Library/LaunchAgents").join(format!("{label}.plist")),
         format!("{domain}/{label}"),

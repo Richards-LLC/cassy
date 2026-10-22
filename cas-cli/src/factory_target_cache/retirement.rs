@@ -633,8 +633,10 @@ mod tests {
         record["active"] = true.into();
         record["start"] = (record["start"].as_u64().unwrap() + 1).into();
         fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        // Fake /proc links model kernel-resolved paths, not macOS's /var
+        // alias: retirement canonicalizes the worktree before probing it.
         symlink(
-            worker.join("target/debug/deps/output"),
+            worker.join("target/debug/deps/output").canonicalize().unwrap(),
             process.join("fd/3"),
         )
         .unwrap();

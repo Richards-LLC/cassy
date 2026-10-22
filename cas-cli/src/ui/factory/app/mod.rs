@@ -8173,7 +8173,15 @@ mod spawn_isolation_tests {
         let source_artifact = snapshot.join("debug").join("deps").join("libwarm.rlib");
         std::fs::create_dir_all(source_lock.parent().unwrap()).unwrap();
         std::fs::create_dir_all(source_artifact.parent().unwrap()).unwrap();
-        std::fs::write(&source_lock, b"Cargo lock").unwrap();
+        let lock_names = [
+            ".cargo-lock",
+            ".cargo-build-lock",
+            ".cargo-artifact-lock",
+            "future.lock",
+        ];
+        for name in lock_names {
+            std::fs::write(snapshot.join("debug").join(name), b"Cargo lock").unwrap();
+        }
         std::fs::write(&source_artifact, b"warm artifact").unwrap();
 
         let worker_a = tmp.path().join("worker-a-target");
@@ -8181,11 +8189,13 @@ mod spawn_isolation_tests {
         for worker_target in [&worker_a, &worker_b] {
             let mut stats = TargetSeedStats::default();
             hardlink_seed_tree(&snapshot, worker_target, worker_target, &mut stats).unwrap();
+            for name in lock_names {
+                assert!(
+                    !worker_target.join("debug").join(name).exists(),
+                    "a seeded target must not inherit the snapshot lock {name}"
+                );
+            }
             assert_eq!(stats.files, 1, "only the reusable artifact is seeded");
-            assert!(
-                !worker_target.join("debug/.cargo-lock").exists(),
-                "a seeded target must not inherit the snapshot Cargo lock"
-            );
         }
 
         let worker_a_lock = OpenOptions::new()

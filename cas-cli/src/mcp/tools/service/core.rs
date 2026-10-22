@@ -950,7 +950,10 @@ impl CasService {
         // cas-f0a1: candidates are matched too, so a repeat observation
         // counts against the lesson it repeats instead of starting over.
         let candidates = cas_store::similar_rule_candidates(&self.inner.cas_root, &content)
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Failed to read similar rule candidates");
+                Vec::new()
+            });
         let mut candidate_report = String::new();
         if !candidates.is_empty() {
             candidate_report.push_str(&format!(

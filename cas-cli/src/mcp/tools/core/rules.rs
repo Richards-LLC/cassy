@@ -1080,7 +1080,15 @@ impl CasCore {
             task_id,
             verdict_id,
         )
-        .map_err(|error| invalid(format!("Failed to record the observation: {error}")))?;
+        .map_err(|error| {
+            let mut mapped = invalid(format!("Failed to record the observation: {error}"));
+            if matches!(&error, cas_store::StoreError::Database(source)
+                if cas_store::shared_db::is_busy_error(source))
+            {
+                mapped.code = ErrorCode::INTERNAL_ERROR;
+            }
+            mapped
+        })?;
         let tasks = candidate.distinct_tasks();
         let mut output = format!(
             "Observed rule candidate {} ({tasks}/{CANDIDATE_DECISION_TASKS} tasks). It is not a rule and is never surfaced to agents.",

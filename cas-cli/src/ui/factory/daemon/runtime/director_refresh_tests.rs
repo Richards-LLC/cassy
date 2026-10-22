@@ -1186,10 +1186,15 @@ async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
 async fn c3b16_refused_reminder_scan_keeps_its_edges() {
     let dir = tempfile::tempdir().unwrap();
     let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
-    // The reminder's owner has shut down, so it falls back to this factory's
-    // supervisor and has a recipient without a director read.
+    // A retired supervisor's reminder can fall back to its successor;
+    // a retired worker's reminder must remain addressed to that worker.
+    // This gives the scan a recipient without reading the director.
     let agents = crate::store::open_agent_store(&cas_dir).unwrap();
-    let mut gone = cas_types::Agent::new("gone".into(), "gone-worker".into());
+    let mut gone = cas_types::Agent::new_with_role(
+        "gone".into(),
+        "previous-supervisor".into(),
+        cas_types::AgentRole::Supervisor,
+    );
     agents.register(&gone).unwrap();
     gone.status = cas_types::AgentStatus::Shutdown;
     agents.update(&gone).unwrap();
@@ -1199,7 +1204,7 @@ async fn c3b16_refused_reminder_scan_keeps_its_edges() {
         worker: "edge-worker".into(),
     };
     let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
-    reminders
+    let reminder_id = reminders
         .create_with_scope(
             "gone",
             None,
@@ -1229,6 +1234,14 @@ async fn c3b16_refused_reminder_scan_keeps_its_edges() {
         assert!(Instant::now() < deadline, "the refused scan's event reminder never fired");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let fired = reminders.list_recently_fired(60).unwrap();
+    let reminder = fired
+        .iter()
+        .find(|r| r.id == reminder_id)
+        .expect("the refused scan must fire the reminder, not expire it");
+    let context = reminder.fired_event.as_ref().expect("the consumed edge is preserved");
+    assert_eq!(context["event_type"], event.event_type());
+    assert_eq!(context["data"]["task_id"], "cas-ed9e");
 }
 
 /// A `WorkerIdle` event for a worker with a task, and cached panel data that

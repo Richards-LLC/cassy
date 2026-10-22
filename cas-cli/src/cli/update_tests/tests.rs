@@ -529,6 +529,7 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
             .iter().find(|file| file.path == "skills/finish/SKILL.md").unwrap();
         assert_eq!(std::fs::read_to_string(&installed).unwrap(), builtin.content);
         if harness == SupervisorCli::Claude {
+            // pin: preserve or install the exact command/skill bytes at the harness boundary.
             assert_eq!(std::fs::read_to_string(home.join(root).join("commands/finish.md")).unwrap(), builtin.content);
         }
         // Retain the managed marker: an operator edit still takes precedence.
@@ -537,12 +538,15 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
     let command = home.join(".claude/commands/finish.md");
     std::fs::write(&command, "customized command after install\n").unwrap();
     sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    // pin: preserve or install the exact command/skill bytes at the harness boundary.
     assert_eq!(std::fs::read_to_string(command).unwrap(), "customized command after install\n");
     for (_, root) in roots {
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
         assert!(std::fs::read_to_string(home.join(root).join("skills/finish/SKILL.md"))
             .unwrap().ends_with("Operator customization.\n"), "{root}");
     }
     for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
         assert_eq!(std::fs::read_to_string(custom.join(path)).unwrap(), "operator's personal finish\n");
     }
     // Init and project refresh use this same writer, including OpenCode's
@@ -559,6 +563,7 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
         assert!(path.is_file(), "{harness:?} missing project finish");
         std::fs::write(&path, "project finish override\n").unwrap();
         crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
         assert_eq!(std::fs::read_to_string(path).unwrap(), "project finish override\n");
     }
 }

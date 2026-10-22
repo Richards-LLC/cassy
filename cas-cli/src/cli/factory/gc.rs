@@ -22,7 +22,8 @@ pub(super) fn execute(command: &FactoryGcCommands, cas_root: Option<&Path>) -> R
         } => json!({
             "action": "gc_cleanup",
             "force": force,
-            // Preview is the default; mutation requires the explicit inverse.
+            // dry_run gates only the stricter cache/process/journey tiers;
+            // earlier metadata cleanup and force-only tiers keep their gates.
             "dry_run": *dry_run || !*no_dry_run,
         }),
     };

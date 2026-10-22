@@ -140,6 +140,43 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
     cas::store::init_cas_dir(project.path()).expect("initialize fake store");
     let home = TempDir::new().unwrap();
 
+    let help = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(help)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // pin: CLI cleanup help documents each actual mutation tier.
+    assert!(
+        help.contains(concat!(
+            "Each run may mark stale agents and missing worktrees, purge dead ",
+            "agent records, clear gone or recycled process-group records, and ",
+            "remove stale skill markers."
+        )),
+        "{help}"
+    );
+    assert!(
+        help.contains(concat!(
+            "--force also reaps orphan worker process groups and prunes ",
+            "terminal prompt entries."
+        )),
+        "{help}"
+    );
+    assert!(
+        help.contains(concat!(
+            "Target-cache reclamation, orphan-process kills, and ",
+            "journey-recording cleanup require both --force and --no-dry-run. ",
+            "Artifact cleanup requires both flags and artifacts=true."
+        )),
+        "{help}"
+    );
+
     let report = gc_command_at(project.path(), &home)
         .args(["factory", "gc", "report"])
         .assert()

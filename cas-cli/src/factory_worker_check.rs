@@ -2667,6 +2667,72 @@ PY"#);
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 
+    /// Capacity is waiting for local resources, not a yielded task.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_refusals_keep_lease_and_escalate_once_cas_dd28() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::RawContent;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "capacity-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_ROOT", &root);
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("capacity-worker", "worker", AgentRole::Worker),
+            ("capacity-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("capacity-fixture".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-dd28".into(), "wait for build capacity".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("working")).unwrap();
+        let lease = agents.get_lease(&task.id).unwrap().unwrap();
+        let notices = open_supervisor_queue_store(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-supervisor".into());
+        let service = CasService::new(core, None);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        for _ in 0..3 {
+            let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+            assert!(refused.contains("Waiting for build admission"), "{refused}");
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+            assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), 0);
+        }
+        let result = service.factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "worker_status", "summary_mode": true,
+        })).unwrap())).await.unwrap();
+        let status = result.content.into_iter().filter_map(|content| match content.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // pin: capacity wait and next retry identify resource waiting to workers and supervisors.
+        assert!(status.to_ascii_lowercase().contains("capacity wait"), "{status}");
+        assert!(status.contains("next retry"), "{status}");
+        assert!(status.contains("max_concurrent_builders=1"), "{status}");
+        drop(held);
+    }
+
     #[cfg(unix)]
     #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {

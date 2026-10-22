@@ -51,6 +51,10 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
     std::fs::write(repo.join("product.rs"), "pub fn product() {}\n").unwrap();
     git(repo, &["add", "product.rs"]);
     git(repo, &["commit", "-q", "-m", "fix(cas-3d72): product content"]);
+    // Never-merge workflow proofs still inspect intermediate commits, even
+    // though ordinary evidence deliveries are judged by their net diff.
+    git(repo, &["rm", "product.rs"]);
+    git(repo, &["commit", "-q", "-m", "revert(cas-3d72): product content"]);
     git(repo, &["checkout", "-q", "main"]);
 
     let mut task = assigned(id, TaskType::Task, "main");
@@ -93,6 +97,7 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
         format!("never-merge:branch:{product_branch}").into();
     let refused = call(&f.supervisor, contaminated).await;
     assert!(refused.contains("EVIDENCE ONLY CLOSE REJECTED"), "{refused}");
+    assert!(refused.contains("product.rs"), "{refused}");
     assert_eq!(f.task(id).status, TaskStatus::Blocked, "{refused}");
     let response = call(&f.supervisor, request).await;
     assert_closed_without_lane(&f, id, &response);

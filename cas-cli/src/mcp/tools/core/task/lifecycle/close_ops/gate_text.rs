@@ -164,7 +164,9 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
          may use `{supervisor_prefix}task action=close id={task_id} evidence_only=true \
          evidence_only_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
          evidence_only_reference=<PR-URL-or-branch> reason=\"...\"`; CAS measures and logs \
-         the immutable delivery paths. If the \
+         the immutable delivery's net base..tip diff. A non-evidence path that was \
+         touched and fully reverted does not disqualify the report; no history rewrite \
+         is required. If non-evidence changes remain in that net diff and the \
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
          may the assigned worker start a fresh cycle."

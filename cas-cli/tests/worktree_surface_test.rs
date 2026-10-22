@@ -2388,8 +2388,19 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let service = make_service(root.clone());
     let req = request("charlie");
-    let rejected = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
+    // cas-3937: through the real response budget with no post-commit grace,
+    // so any phase after the push is "slow". A merge whose push failed has
+    // not committed anything a supervisor may leave alone: it must not answer
+    // COMMITTED, and keeps its NOT PUSHED next step.
+    let rejected = runtime
+        .block_on(service.coordination_with_budget_for_testing(
+            req.clone(),
+            std::time::Duration::from_secs(50),
+            std::time::Duration::ZERO,
+        ))
+        .unwrap();
     assert!(get_text(&rejected).contains("NOT PUSHED"), "{}", get_text(&rejected));
+    assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
     let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
@@ -2400,8 +2411,31 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
     std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
     run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
-    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
+    // cas-3937: a published merge answers COMMITTED with its merge and push
+    // state as soon as it is published; the close after it finishes in the
+    // background, and its result lands on the task as a note.
+    let mut landed_req = req;
+    landed_req.task_id = Some("task-charlie".into());
+    let landed = runtime
+        .block_on(service.coordination_with_budget_for_testing(
+            landed_req,
+            std::time::Duration::from_secs(50),
+            std::time::Duration::ZERO,
+        ))
+        .unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
+    // pin: the early answer names the merge outcome (cas-3937).
+    assert!(get_text(&landed).contains("COMMITTED") && get_text(&landed).contains("pushed to origin"), "{}", get_text(&landed));
+    let mut background_note = None;
+    for _ in 0..200 {
+        let notes = open_task_store(&root).unwrap().get("task-charlie").unwrap().notes;
+        if notes.contains("POST_COMMIT_OUTCOME") {
+            background_note = Some(notes);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(background_note.is_some(), "the background close records its result on the task");
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
     assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);

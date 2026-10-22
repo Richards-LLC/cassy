@@ -396,6 +396,34 @@ fn log_post_commit(tool: &str, receipt: &super::mutation_receipt::Receipt, how: 
 }
 
 impl CasService {
+    /// cas-3937: a coordination request run through the MCP response budget
+    /// and post-commit grace, as a real tool call is, so integration tests
+    /// can drive slow post-commit work through the real handler.
+    #[doc(hidden)]
+    pub async fn coordination_with_budget_for_testing(
+        &self,
+        req: cas_mcp::types::CoordinationRequest,
+        budget: std::time::Duration,
+        grace: std::time::Duration,
+    ) -> ToolResult {
+        let arguments = serde_json::to_value(&req)
+            .ok()
+            .and_then(|value| value.as_object().cloned());
+        let service = self.clone();
+        self.call_with_deadline_and_grace(
+            "coordination",
+            arguments.as_ref(),
+            budget,
+            grace,
+            async move {
+                service
+                    .coordination(rmcp::handler::server::wrapper::Parameters(req))
+                    .await
+            },
+        )
+        .await
+    }
+
     /// The deadline alone, with no early post-commit answer.
     #[cfg(test)]
     async fn call_with_deadline<F>(

@@ -115,3 +115,15 @@ HTML visual inspection is **NOT EXERCISED**: the browser runtime reported no
 browser available after documented troubleshooting. Supervisor #542582 accepted
 the computed palette/contrast and layout checks as the substitute for this
 plain-text error change; no rendered PNG review is claimed.
+
+
+## Corrective round (cas-d258, ver-74175b782035)
+
+The first delivery was rejected and reverted: a CasError that already included
+its source was expanded again by `{error:#}`, repeating the same cause; a second
+wrap also removed the existing two-space continuation indent. The corrective
+round retains outer recovery context, prints each embedded cause once, and
+wraps the diagnostic body once with its hanging indent. The existing CLI
+regression includes a real unwritable project before store creation and checks
+that `Permission denied` appears once. Prior candidate receipts above describe
+the rejected round; corrective candidate proof will be recorded separately.

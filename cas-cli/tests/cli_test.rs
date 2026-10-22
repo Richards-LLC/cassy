@@ -532,6 +532,45 @@ print(json.dumps(held))
 
 #[test]
 fn test_init_yes_flag() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let project = TempDir::new().unwrap();
+        // Establish the child's isolated home before making the project
+        // unwritable; failure must come from real project initialization.
+        let mut command = cas_cmd(project.path());
+        command
+            .current_dir(project.path())
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .args(["init", "--yes", "--no-integrations"]);
+        let restore = RestorePermissions(
+            project.path().into(),
+            std::fs::metadata(project.path()).unwrap().permissions(),
+        );
+        std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let output = command.output().unwrap();
+        drop(restore);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            stderr.matches("Permission denied").count(),
+            1,
+            "a CasError that already displays its source must not repeat it: {stderr}"
+        );
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Permission denied")
+        );
+        assert!(!project.path().join(".cas/cas.db").exists());
+    }
     let mut redraws = Vec::new();
     // Both human entry paths share execute_step; exercise completion and an
     // actual filesystem failure through their piped CLI, not a renderer copy.
@@ -590,7 +629,11 @@ fn test_init_yes_flag() {
             String::from_utf8_lossy(&output.stderr)
         );
         let text = String::from_utf8(output.stdout).unwrap();
-        let config_phase = if existing_store { "Keeping existing configuration" } else { "Saving configuration" };
+        let config_phase = if existing_store {
+            "Keeping existing configuration"
+        } else {
+            "Saving configuration"
+        };
         assert!(text.contains(config_phase), "{text}");
         assert!(text.contains("Updating .gitignore"), "{text}");
         if text
@@ -627,6 +670,15 @@ fn test_init_yes_flag() {
                     .lines()
                     .all(|line| ratatui::text::Line::raw(line).width() <= width),
                 "{width} columns, existing={existing_store}: {stderr}"
+            );
+            let continuation = stderr
+                .lines()
+                .skip(if existing_store { 1 } else { 3 })
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            assert!(
+                !continuation.is_empty() && continuation.iter().all(|line| line.starts_with("  ")),
+                "wrapped diagnostic continuations retain their hanging indent: {stderr}"
             );
             assert_eq!(
                 std::fs::read_to_string(temp.path().join(".codex/config.toml")).unwrap(),

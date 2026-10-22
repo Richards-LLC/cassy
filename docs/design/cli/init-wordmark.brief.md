@@ -98,3 +98,13 @@ this delivery proves the approved locale repair and UTF-8 preservation.
 Inspected actual C80 dark/light PNGs and plain captures for both paths.
 [Defaults capture](init-full-yes.ascii.capture.txt) and
 [interactive capture](init-full-interactive.ascii.capture.txt) retain full text.
+
+## Follow-up contract (cas-8bc8)
+
+The Next steps box derives one width from its actual title and content; every
+border and row shares that width and fits 80 columns. The command wording and
+styled UTF-8 bytes outside this box stay unchanged. With all three locale
+variables absent or empty, use the same ASCII decorations as C; explicit UTF-8
+keeps the existing styled output. Published captures use `<project>` for the
+project path so they remain portable. Full real-TTY defaults and interactive
+reconfigure/confirm flows must complete with durable files at 80/120 columns.

@@ -1651,6 +1651,78 @@ fn contained_at(
 /// cas-d8ab: the containment re-check after reconciliation reads the origin
 /// tip that reconciliation just fetched, rather than fetching origin again.
 /// An unreachable origin proves nothing here, so there is no receipt.
+/// cas-3937: record a merge on the request's receipt, so a slow close
+/// after it still answers with the merge.
+fn record_published_merge(
+    git: &crate::worktree::GitOperations,
+    merge_commit: Option<&str>,
+    target: &str,
+    outcome: &crate::worktree::git::TargetPushOutcome,
+) {
+    // cas-3937 review: a published merge (pushed, already current, or a
+    // target that is local-only by design) is the request's terminal
+    // mutation. An unpublished one records nothing, so its NOT PUSHED next
+    // step reaches the caller.
+    use crate::worktree::git::TargetPushOutcome;
+    if !outcome.is_published() {
+        return;
+    }
+    let sha = match outcome {
+        TargetPushOutcome::Pushed { sha } | TargetPushOutcome::AlreadyCurrent { sha } => Some(sha.clone()),
+        _ => merge_commit.map(str::to_string).or_else(|| git.resolve_commit(target)),
+    };
+    if let Some(sha) = sha {
+        crate::mcp::tools::service::mutation_receipt::merge_committed(
+            &sha,
+            target,
+            outcome.push_state_label(),
+        );
+    }
+}
+
+/// cas-3937 test seam: stretch the work after a recorded merge, so a test
+/// can prove a slow close still answers with the merge. Debug builds only.
+async fn post_merge_test_delay() {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("CAS_TEST_POST_MERGE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms.min(10_000))).await;
+    }
+}
+
+#[cfg(test)]
+mod record_published_merge_tests {
+    use super::record_published_merge;
+    use crate::mcp::tools::service::mutation_receipt::{Receipt, scope};
+    use crate::worktree::git::TargetPushOutcome;
+
+    /// cas-3937 review: only a published merge (pushed, already current, or
+    /// a target that is local-only by design) is a COMMITTED outcome. An
+    /// unpublished one records nothing, so its NOT PUSHED next step reaches
+    /// the caller instead of "COMMITTED … do not retry".
+    #[tokio::test]
+    async fn only_a_published_merge_is_recorded_as_committed_cas_3937() {
+        let git = crate::worktree::GitOperations::new(std::env::temp_dir());
+        let sha = || "abc123".to_string();
+        let reason = || "rejected".to_string();
+        for (outcome, committed) in [
+            (TargetPushOutcome::Pushed { sha: sha() }, true),
+            (TargetPushOutcome::AlreadyCurrent { sha: sha() }, true),
+            (TargetPushOutcome::NoRemote, true),
+            (TargetPushOutcome::RemoteBranchAbsent, true),
+            (TargetPushOutcome::NonFastForward { sha: sha(), remote_sha: None, reason: reason() }, false),
+            (TargetPushOutcome::NotPushed { sha: Some(sha()), remote_sha: None, reason: reason() }, false),
+            (TargetPushOutcome::ProtectedDefaultBranch { sha: sha(), remote_sha: None, reason: reason() }, false),
+        ] {
+            let receipt = Receipt::new("factory", "worktree_merge", Some("wt"));
+            scope(receipt.clone(), async { record_published_merge(&git, Some("abc123"), "epic/x", &outcome) }).await;
+            assert_eq!(receipt.commit.get().is_some(), committed, "{outcome:?}");
+        }
+    }
+}
+
 fn contained_after_reconcile(
     git: &crate::worktree::GitOperations,
     source: &str,
@@ -4631,6 +4703,10 @@ impl CasCore {
             ) {
                 return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
             }
+            // cas-3937 review: the delivery close below can be slow too;
+            // record the published merge before it.
+            record_published_merge(manager.git(), None, &receipt.target_branch, &push_outcome);
+            post_merge_test_delay().await;
             target_push = Some((receipt.target_branch.clone(), push_outcome));
 
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
@@ -4785,13 +4861,8 @@ impl CasCore {
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
         // cas-3937: from here the merge is a fact; a slow close or verifier
         // dispatch below must not turn its answer into UNKNOWN.
-        if let Some(sha) = merge_commit.as_deref() {
-            crate::mcp::tools::service::mutation_receipt::merge_committed(
-                sha,
-                &push_branch,
-                push_outcome.push_state_label(),
-            );
-        }
+        record_published_merge(manager.git(), merge_commit.as_deref(), &push_branch, &push_outcome);
+        post_merge_test_delay().await;
         let trunk_notice = if trunk_fallback {
             if push_outcome.is_published() {
                 format!(

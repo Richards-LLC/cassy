@@ -10620,6 +10620,25 @@ impl CasCore {
             if let Some(change) = concurrent_close_change(&close_snapshot, &task, current) {
                 return Ok(close_refused(change));
             }
+            // cas-3f81: notes appended while the gates ran are not a scope
+            // change. Keep the stored timeline verbatim, then add this close's
+            // pending notes. Close may already have persisted a shared prefix
+            // of audit paragraphs; exclude only that prefix, never deduplicate
+            // the stored timeline (repeated observations are legitimate).
+            let shared_bytes = task.notes.split("\n\n")
+                .zip(current.notes.split("\n\n"))
+                .take_while(|(closing, stored)| closing == stored)
+                .map(|(note, _)| note.len() + 2)
+                .sum::<usize>()
+                .min(task.notes.len());
+            let pending = &task.notes[shared_bytes..];
+            task.notes = if pending.is_empty() {
+                current.notes.clone()
+            } else if current.notes.is_empty() {
+                pending.to_owned()
+            } else {
+                format!("{}\n\n{pending}", current.notes)
+            };
         }
         // cas-ec74: adopt the store-owned stamp so the Closed occurrence below
         // matches the persisted row instead of a second clock read.

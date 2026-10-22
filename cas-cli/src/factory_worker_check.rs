@@ -3100,7 +3100,7 @@ PY"#);
         let aged = crate::factory_capacity_wait::record_refusal(
             &root, &repos[0], "retry after a gap longer than four minutes", chrono::Utc::now(),
         ).unwrap().unwrap();
-        assert_eq!(serde_json::to_value(aged.since).unwrap(), p2_wait_record["since"], "retry preserves aging across the gap");
+        assert_eq!(aged.since, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(p2_wait_record["since"].clone()).unwrap(), "retry preserves aging across the gap");
         assert!(aged.cause.starts_with("priority=P0"), "{}", aged.cause);
         drop(held);
 

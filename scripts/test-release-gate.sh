@@ -583,7 +583,7 @@ fi
 # cas-dcb4: the gate schedules independent rows concurrently under declared
 # resources. Spans come from the fake Cargo, visual-QA and script fixtures;
 # the receipt, timing.tsv and failure reporting keep canonical row order.
-readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,design-doc-paths,journey-catalog,builtin-skill-limits,doctor-snapshot,communication-slos,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
+readonly gate_canonical_rows='scratch-base,epic-worktree-fresh,epic-worktree-zig,publish-toolchain,failure-log,assemble-stale-base,ancestor-proxy-config,version-literals,ci-script-tests,hub-web-tests,release-binary-isa,operator-launch-smoke,fixture-paths,workspace-tests,macos-check,hub-web-dist-drift,hub-web-visual-qa,nextest,doctests,archive-mode,snapshot-portability,builtin-projections,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene,journey-catalog,builtin-skill-limits,doctor-snapshot,communication-slos,migration-registry,ci-script-tests-changed,fixture-paths-src,builtin-projections-src,call-shapes,release-notes-draft,working-tree'
 
 # span_check <log> overlap A B | disjoint A B... | max | wall
 span_check() {
@@ -834,7 +834,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene design-doc-paths \
+        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
         journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed fixture-paths-src builtin-projections-src call-shapes release-notes-draft \
         hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then

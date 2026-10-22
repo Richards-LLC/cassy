@@ -20,7 +20,7 @@ readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig publish-toolchain failure-log ancestor-proxy-config assemble-stale-base
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
-    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene design-doc-paths
+    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
     journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
@@ -1695,6 +1695,7 @@ check_test_targets() {
 }
 
 check_markdown_lint() {
+    python3 scripts/check-design-paths.py || return $?
     python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}"
 }
 
@@ -1735,10 +1736,6 @@ check_test_shape() {
     if [[ -f scripts/test-worker-proof-guards.py ]]; then
         release_test_child python3 scripts/test-worker-proof-guards.py
     fi
-}
-
-check_design_doc_paths() {
-    python3 scripts/check-design-paths.py
 }
 
 check_builtin_doc_hygiene() {
@@ -2317,7 +2314,6 @@ else
 fi
 gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-gate_row design-doc-paths 'portable home and artifact paths across docs/design' check_design_doc_paths
 gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
@@ -2359,7 +2355,6 @@ fast_row_fix() {
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
         builtin-doc-hygiene) printf 'remove the operator data, or restore the contract phrase listed in scripts/builtin-contract-phrases.json, as the row log names' ;;
-        design-doc-paths) printf 'replace absolute home paths in docs/design with portable placeholders or artifact ids' ;;
         journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
         doctor-snapshot) printf 'add the new doctor phase to its row group and update the reviewed doctor snapshot' ;;

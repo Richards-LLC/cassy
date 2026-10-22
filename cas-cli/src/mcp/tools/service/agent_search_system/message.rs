@@ -6292,6 +6292,9 @@ mod cas_89e1_post_merge_message_type_tests {
         ] {
             let mut request = message_request_to("supervisor");
             request.kind = Some(kind.to_string());
+            if kind == "status" {
+                request.summary = Some("status\nsummary\r\nline\tend".into());
+            }
             let response = response_text(
                 service
                     .message_send(request)
@@ -6304,6 +6307,13 @@ mod cas_89e1_post_merge_message_type_tests {
                 .poll_all(10)
                 .unwrap();
             let row = rows.last().expect("typed worker row");
+            if kind == "status" {
+                assert_eq!(
+                    row.summary.as_deref(),
+                    Some("status summary line end"),
+                    "message summaries remain one line and contain no controls"
+                );
+            }
             assert_eq!(row.target, "supervisor-a");
             assert_eq!(
                 crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)

@@ -25,7 +25,7 @@ use super::FactoryArgs;
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUIRED_BACKEND_FAILURE: &str =
-    "factory doctor found missing required backend(s); fix the issue above and rerun `cas factory doctor`";
+    "Missing required backend(s). Fix them; rerun `cas factory doctor`.";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DoctorRow {

@@ -286,6 +286,14 @@ async fn propose_and_accept(cloud: &FakeCloud, soundwave: &Side, prowl: &Side) -
     id
 }
 
+fn with_broken_release_column<T>(root: &std::path::Path, probe: impl FnOnce() -> T) -> T {
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN task_id TO broken_task_id;").unwrap();
+    let result = probe();
+    conn.execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN broken_task_id TO task_id;").unwrap();
+    result
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -372,20 +380,31 @@ async fn shipped_epic_splits_stop_binding_without_cancellation_cas_43d8() {
             assert!(local.get_parent_epic(child).is_err(), "cleanup must not mistake a read failure for movement");
             assert_eq!(cas_store::list_epic_splits(root).unwrap(), vec![historical.clone()]);
         }
-        if release_read_error {
-            // Keep the raw split readable while release-marker decoding fails.
-            rusqlite::Connection::open(root.join("cas.db")).unwrap()
-                .execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN task_id TO broken_task_id;").unwrap();
-            assert!(cas_store::list_epic_split_child_releases(root).is_err());
-            assert_eq!(cas_store::list_epic_splits(root).unwrap(), vec![historical.clone()]);
-        }
-        let released_now = cas::cloud::epic_split::split_hold_for(root, child).is_none();
         let check_renewal = repair_error || projection_error || release_read_error;
-        let renewed = check_renewal.then(|| cas::cloud::epic_split::renew_split_claims(root, &claims, "sw", 600));
-        if release_read_error {
-            rusqlite::Connection::open(root.join("cas.db")).unwrap()
-                .execute_batch("ALTER TABLE epic_split_releases RENAME COLUMN broken_task_id TO task_id;").unwrap();
-        }
+        let observe_binding = || {
+            let released_now = cas::cloud::epic_split::split_hold_for(root, child).is_none();
+            let renewed = check_renewal.then(|| cas::cloud::epic_split::renew_split_claims(root, &claims, "sw", 600));
+            (released_now, renewed)
+        };
+        let (released_now, renewed) = if release_read_error {
+            // A failed assertion must not leave this machine's schema broken.
+            let interrupted = std::panic::catch_unwind(|| {
+                with_broken_release_column(root, || -> () { panic!("interrupted release probe"); });
+            });
+            assert!(interrupted.is_err());
+            assert!(cas_store::list_epic_split_child_releases(root).is_ok(),
+                "release schema must be restored while unwinding the probe");
+            let observed = with_broken_release_column(root, || {
+                // Keep the raw split readable while release-marker decoding fails.
+                assert!(cas_store::list_epic_split_child_releases(root).is_err());
+                assert_eq!(cas_store::list_epic_splits(root).unwrap(), vec![historical.clone()]);
+                observe_binding()
+            });
+            assert!(cas_store::list_epic_split_child_releases(root).is_ok());
+            observed
+        } else {
+            observe_binding()
+        };
         if projection_error {
             assert_eq!(cloud_holder(&cloud, "cas-a2").as_deref(), Some("sw"), "a projection error must not release the owner's claim");
             rusqlite::Connection::open(root.join("cas.db")).unwrap()

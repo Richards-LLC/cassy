@@ -131,7 +131,10 @@ fn registry_upkeep_receipt_uses_target_ownership_for_delivery_files() {
             None,
         );
         if owner_added {
-            assert!(result.is_ok(), "target ownership repair must allow close: {result:?}");
+            assert!(
+                result.is_ok(),
+                "target ownership repair must allow close: {result:?}"
+            );
         } else {
             let error = result.unwrap_err();
             assert!(
@@ -306,6 +309,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
         f.repo.path(),
         &f.qa,
         &f.base,
+        &head,
         &head,
         Some(&["README.md".into()]),
         None,

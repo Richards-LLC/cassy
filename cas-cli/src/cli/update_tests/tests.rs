@@ -2518,6 +2518,28 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
 }
 
 #[test]
+fn cloud_findings_keep_c_locale_cause_and_remedy_cas_2c9c() {
+    for (summary, cause, remedy) in [
+        (
+            "[WARN] Push incomplete - 1 rejected by cloud (invalid_json_nul x1) - invalid_json_nul: Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul` - queued rows remain - run cas cloud queue --retry\n",
+            "push incomplete: 1 rejected by cloud (invalid_json_nul x1)",
+            "Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul`",
+        ),
+        (
+            "[WARN] Pull incomplete - 1 errors - run cas cloud pull\n",
+            "pull incomplete: 1 errors",
+            "cas cloud pull",
+        ),
+    ] {
+        assert_eq!(
+            findings::cause_and_remedy("cloud sync: counts only", summary),
+            (cause.to_owned(), Some(remedy.to_owned())),
+            "lost cloud finding from {summary:?}"
+        );
+    }
+}
+
+#[test]
 fn store_lock_failure_names_holders_and_the_remedy_cas_91a3() {
     let cas_root = Path::new("/projects/soundwave-config/.cas");
     let phase = ProjectPhase::Failed("migration: database error: database is locked".to_string());

@@ -33,9 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;

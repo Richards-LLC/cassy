@@ -594,11 +594,24 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
         return message;
     };
 
-    let detail = crate::cloud::presence::wrap_line(detail);
-    format!(
-        "Operator-only config change refused.\n  {}",
-        detail.trim_end()
-    )
+    let detail = if let Some((reason, remedy)) = detail.split_once("; run `") {
+        if let Some((command, context)) = remedy.split_once('`') {
+            let context = context
+                .strip_prefix(" yourself from your own terminal.")
+                .unwrap_or(context)
+                .trim_start();
+            format!(
+                "  {}\n  Run this command yourself from your own terminal:\n  {command}\n  {}",
+                crate::cloud::presence::wrap_line(&format!("{reason}.")).trim_end(),
+                crate::cloud::presence::wrap_line(context).trim_end()
+            )
+        } else {
+            format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+        }
+    } else {
+        format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+    };
+    format!("Operator-only config change refused.\n{detail}")
 }
 
 /// Run the CLI with the given arguments

@@ -858,28 +858,41 @@ fn publish_with(
     Ok(())
 }
 
-/// The head commit of each open PR into `base`, by PR number.
+/// The head commit of each open PR into `base`, by PR number. Reads every
+/// page of the REST listing, so a large backlog is never cut short.
 pub fn open_pr_heads(repo: &Path, base: &str) -> Result<Vec<(u64, String)>, String> {
     let gh = gh_bin();
     let publish_repo = publish_repo(repo, &gh)?;
+    let base: String = base
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect();
     let mut command = Command::new(gh);
     command
         .env("GH_HOST", "github.com")
-        .args(["pr", "list", "--repo", &publish_repo, "--base", base, "--state", "open"])
-        .args(["--limit", "100", "--json", "number,headRefOid"])
+        .args(["api", "--paginate"])
+        .arg(format!("repos/{publish_repo}/pulls?state=open&base={base}&per_page=100"))
         .current_dir(repo);
-    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
-    let prs: Vec<serde_json::Value> = serde_json::from_slice(&stdout)
-        .map_err(|error| format!("`gh pr list` returned unreadable JSON: {error}"))?;
-    Ok(prs
-        .iter()
-        .filter_map(|pr| {
-            let number = pr.get("number")?.as_u64()?;
-            let sha = pr.get("headRefOid")?.as_str()?;
-            let hex = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
-            hex.then(|| (number, sha.to_ascii_lowercase()))
-        })
-        .collect())
+    let stdout = run_bounded_detailed(command, GH_PUBLISH_TIMEOUT)?;
+    // `--paginate` prints one JSON array per page, back to back.
+    let mut heads = Vec::new();
+    for page in serde_json::Deserializer::from_slice(&stdout).into_iter::<Vec<serde_json::Value>>() {
+        let page = page.map_err(|error| format!("GitHub PR listing returned unreadable JSON: {error}"))?;
+        for pr in page {
+            let number = pr.get("number").and_then(serde_json::Value::as_u64);
+            let sha = pr.pointer("/head/sha").and_then(serde_json::Value::as_str);
+            match (number, sha) {
+                (Some(number), Some(sha)) if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    heads.push((number, sha.to_ascii_lowercase()));
+                }
+                _ => return Err("GitHub PR listing has an entry without a number and head sha".to_string()),
+            }
+        }
+    }
+    Ok(heads)
 }
 
 fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: String) {

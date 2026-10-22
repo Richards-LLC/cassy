@@ -151,8 +151,8 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
                 .unwrap()
                 .block_on(core.cas_task_create_with_target(
                     request,
-                    f.repo.to_str(),
-                    Some(if adopted { "epic/peer-only" } else { "main" }),
+                    if adopted { f.repo.to_str() } else { None },
+                    if adopted { Some("epic/peer-only") } else { None },
                     true,
                 ))
                 .unwrap();

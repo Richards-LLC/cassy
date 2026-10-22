@@ -48,7 +48,9 @@ pub struct ResourcePlan {
 /// Why the gate must not freeze. Every refusal precedes the freeze.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceRefusal {
-    #[error("RESOURCE UNDECLARED: {journey} consumes {resource}, which registry resources do not declare")]
+    #[error(
+        "RESOURCE UNDECLARED: {journey} consumes {resource}, which registry resources do not declare"
+    )]
     Undeclared { journey: String, resource: String },
     #[error("RESOURCE INVALID: {resource}: {message}")]
     Invalid { resource: String, message: String },
@@ -62,7 +64,9 @@ pub enum ResourceRefusal {
         why: String,
     },
     /// A quota cannot cover the plan within today's remaining allowance.
-    #[error("RESOURCE SHORTFALL: {resource} needs {need}, {left} of {per_day} left in 24h on {env}")]
+    #[error(
+        "RESOURCE SHORTFALL: {resource} needs {need}, {left} of {per_day} left in 24h on {env}"
+    )]
     Quota {
         resource: String,
         need: u64,
@@ -71,7 +75,9 @@ pub enum ResourceRefusal {
         env: String,
     },
     /// One run uses more than a rate resource allows per minute, so it never fits.
-    #[error("RESOURCE SHORTFALL: {journey} needs {need} {resource} per run, above per_min {per_min}")]
+    #[error(
+        "RESOURCE SHORTFALL: {journey} needs {need} {resource} per run, above per_min {per_min}"
+    )]
     Rate {
         journey: String,
         resource: String,
@@ -95,12 +101,23 @@ impl ResourceRefusal {
     }
 }
 
-fn limit(resources: &BTreeMap<String, Resource>, journey: &str, name: &str) -> Result<Limit, ResourceRefusal> {
-    let resource = resources.get(name).ok_or_else(|| ResourceRefusal::Undeclared {
-        journey: journey.into(),
-        resource: name.into(),
-    })?;
-    resource.limit().map_err(|message| ResourceRefusal::Invalid { resource: name.into(), message })
+fn limit(
+    resources: &BTreeMap<String, Resource>,
+    journey: &str,
+    name: &str,
+) -> Result<Limit, ResourceRefusal> {
+    let resource = resources
+        .get(name)
+        .ok_or_else(|| ResourceRefusal::Undeclared {
+            journey: journey.into(),
+            resource: name.into(),
+        })?;
+    resource
+        .limit()
+        .map_err(|message| ResourceRefusal::Invalid {
+            resource: name.into(),
+            message,
+        })
 }
 
 /// Gate preflight: sums the plan's need, refuses what the local ledger can
@@ -116,7 +133,10 @@ pub fn preflight(
     resources: &BTreeMap<String, Resource>,
     rows: &[PlannedRow<'_>],
 ) -> Result<ResourcePlan, ResourceRefusal> {
-    let mut plan = ResourcePlan { env: env.into(), ..ResourcePlan::default() };
+    let mut plan = ResourcePlan {
+        env: env.into(),
+        ..ResourcePlan::default()
+    };
     let mut limits = BTreeMap::new();
     for row in rows {
         let multiplier = u64::from(row.runs) * u64::from(row.cells);
@@ -161,12 +181,27 @@ pub fn preflight(
     if balances.is_empty() {
         return Ok(plan);
     }
-    let request = |args: Value| Request { env, sha, args, ..Request::default() };
-    let data = call(project_root, config, Verb::Balance, request(serde_json::json!({ "resources": balances })))?;
+    let request = |args: Value| Request {
+        env,
+        sha,
+        args,
+        ..Request::default()
+    };
+    let data = call(
+        project_root,
+        config,
+        Verb::Balance,
+        request(serde_json::json!({ "resources": balances })),
+    )?;
     plan.balance = amounts(Verb::Balance, &data, &balances)?;
     let short: BTreeMap<&str, u64> = balances
         .iter()
-        .filter_map(|&name| plan.need[name].checked_sub(plan.balance[name]).filter(|s| *s > 0).map(|s| (name, s)))
+        .filter_map(|&name| {
+            plan.need[name]
+                .checked_sub(plan.balance[name])
+                .filter(|s| *s > 0)
+                .map(|s| (name, s))
+        })
         .collect();
     if short.is_empty() {
         return Ok(plan);
@@ -184,13 +219,21 @@ pub fn preflight(
         return Err(shortfall(name, &plan, why));
     }
     let names: Vec<&str> = short.keys().copied().collect();
-    let data = call(project_root, config, Verb::Grant, request(serde_json::json!({ "amounts": short })))?;
+    let data = call(
+        project_root,
+        config,
+        Verb::Grant,
+        request(serde_json::json!({ "amounts": short })),
+    )?;
     let granted = amounts(Verb::Grant, &data, &names)?;
     for (&name, &shortfall_amount) in &short {
         plan.balance.insert(name.into(), granted[name]);
         plan.granted.insert(name.into(), shortfall_amount);
     }
-    match names.iter().find(|&&name| plan.balance[name] < plan.need[name]) {
+    match names
+        .iter()
+        .find(|&&name| plan.balance[name] < plan.need[name])
+    {
         Some(name) => Err(shortfall(name, &plan, "grant did not cover it".into())),
         None => Ok(plan),
     }
@@ -201,12 +244,19 @@ fn amounts(verb: Verb, data: &Value, names: &[&str]) -> Result<BTreeMap<String, 
     names
         .iter()
         .map(|&name| {
-            data.get(name).and_then(Value::as_u64).map(|amount| (name.to_owned(), amount)).ok_or_else(|| {
-                CallError::Protocol(
-                    verb.as_str(),
-                    format!("{} data has no whole amount for {}", verb.as_str(), printable(name)),
-                )
-            })
+            data.get(name)
+                .and_then(Value::as_u64)
+                .map(|amount| (name.to_owned(), amount))
+                .ok_or_else(|| {
+                    CallError::Protocol(
+                        verb.as_str(),
+                        format!(
+                            "{} data has no whole amount for {}",
+                            verb.as_str(),
+                            printable(name)
+                        ),
+                    )
+                })
         })
         .collect()
 }
@@ -223,7 +273,10 @@ pub(crate) fn try_take(
     hold: Duration,
 ) -> cas_store::Result<Option<ResourceGrant>> {
     let (window_ms, limit, concurrency) = match limit {
-        Limit::Rate { per_min, concurrency } => (MINUTE_MS, per_min, concurrency),
+        Limit::Rate {
+            per_min,
+            concurrency,
+        } => (MINUTE_MS, per_min, concurrency),
         Limit::Quota { per_day } => (DAY_MS, per_day, None),
         Limit::Balance => return Ok(None),
     };
@@ -312,7 +365,10 @@ fn acquire<'a>(
     consumes: &BTreeMap<String, u32>,
 ) -> Result<Permits<'a>, MeteredError> {
     let hold = Duration::from_secs(u64::from(config.timeout_secs.max(1)) + 5);
-    let mut permits = Permits { cas_root: meter.cas_root, ids: Vec::new() };
+    let mut permits = Permits {
+        cas_root: meter.cas_root,
+        ids: Vec::new(),
+    };
     // BTreeMap order: every process takes resources in the same order.
     for (name, &amount) in consumes {
         let limit = limit(meter.resources, journey, name)?;
@@ -327,13 +383,17 @@ fn acquire<'a>(
                     permits.ids.push(id);
                     break;
                 }
-                Some(ResourceGrant::RetryAt { earliest, latest }) => (after(earliest), after(latest)),
+                Some(ResourceGrant::RetryAt { earliest, latest }) => {
+                    (after(earliest), after(latest))
+                }
                 Some(ResourceGrant::Never) => (Duration::MAX, Duration::MAX),
             };
             let left = meter.deadline.saturating_duration_since(Instant::now());
             if earliest > left {
                 permits.refund();
-                return Err(MeteredError::Budget { resource: name.clone() });
+                return Err(MeteredError::Budget {
+                    resource: name.clone(),
+                });
             }
             // The window frees at `earliest`; a held slot may free any time
             // before `latest`, so poll it.
@@ -361,7 +421,9 @@ pub fn call_metered(
         let answer = call(project_root, config, verb, request.clone());
         drop(permits);
         let retry = match &answer {
-            Err(CallError::Adapter(_, error)) if error.kind == ErrorKind::RateLimited && !retried => {
+            Err(CallError::Adapter(_, error))
+                if error.kind == ErrorKind::RateLimited && !retried =>
+            {
                 error.retry_after_s.map(Duration::from_secs)
             }
             _ => None,

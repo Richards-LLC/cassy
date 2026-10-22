@@ -26,7 +26,12 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(detected(), 1, "a new store has the ledger");
-        assert_eq!(crate::migration::check_migrations(&root).unwrap().pending_count(), 0);
+        assert_eq!(
+            crate::migration::check_migrations(&root)
+                .unwrap()
+                .pending_count(),
+            0
+        );
         conn.execute("DROP TABLE qa_resource_use", []).unwrap();
         assert_eq!(detected(), 0);
         crate::migration::run_migrations(&root, false).unwrap();

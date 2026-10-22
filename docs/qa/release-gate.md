@@ -19,6 +19,7 @@ deploy_workflows = ["Deploy Backend to Staging", "Deploy Frontend to Staging"]
 adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
+grant_envs = ["staging"]
 
 [qa.release.components]
 backend = ["apps/backend", "packages/shared"]
@@ -38,6 +39,7 @@ env = "staging"
 | `env` | Environment variable names allowed into the adapter. |
 | `timeout_secs` | Per-call timeout (default 120). |
 | `components` | Served component name to the repository paths it is built from. |
+| `grant_envs` | Environments where preflight may `grant` a balance shortfall (default `["staging"]`). |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
 
@@ -82,9 +84,8 @@ A response with a different `v`, an `ok: true` that carries an error, or an
 printable characters.
 
 The verbs are `served`, `flags`, `balance`, `grant`, `fixture-setup`,
-`fixture-teardown`, `run`, `readback` and `migrations`. `served`, `flags`,
-`readback`, `migrations` and fixture setup/teardown are implemented; later
-slices add the remaining verbs.
+`fixture-teardown`, `run`, `readback` and `migrations`. All but `run` are
+implemented; the run state machine adds it.
 
 ### `served`
 
@@ -177,6 +178,75 @@ and error class (`read`, `parse`, `write`) until that operation recovers. A
 healthy read rearms read/parse warnings; a matching persisted observation or a
 successful write rearms write warnings. State-write failures keep current alerts
 available, and unchanged observations do not rewrite the state file.
+
+## Resource budgets
+
+The registry header declares the provider budgets that the gate shares, and
+each journey declares what one run uses:
+
+```yaml
+resources:
+  staging-api: {kind: rate, per_min: 60, concurrency: 4}
+  visitor-audits: {kind: quota, per_day: 3}
+  credits: {kind: balance}
+journeys:
+  - id: audit
+    consumes: {staging-api: 12, visitor-audits: 1, credits: 10}
+```
+
+`cas qa journeys --check` rejects an unknown kind, a missing or zero limit,
+a limit that belongs to another kind, and a `consumes` entry that names an
+undeclared resource or uses zero units.
+
+### Shared ledger
+
+Rate and quota resources are metered per request in `qa_resource_use` in
+`.cas/cas.db`, one bucket per environment and resource. Every process on the
+host that uses this store shares it. Each take runs in one `BEGIN IMMEDIATE`
+transaction, so two processes together never take more than `per_min` units
+in any minute or `per_day` in any 24 hours, nor hold more than `concurrency`
+requests at once. A request takes its `consumes` in name order before the
+adapter call and releases its concurrency slot when the call ends; its use
+keeps counting for the rest of the window. A crashed holder's slot frees after
+`timeout_secs` plus five seconds. When the window cannot free in time for the
+row's wall clock, the row is `NOT_EXERCISED{timed_out}` and the adapter is not
+called. Migration 284 installs the ledger in existing stores through
+`cas update --schema-only`, and new stores get it at initialization.
+
+### Preflight need
+
+Before the freeze, need = Σ consumes × runs × cells per resource. These checks
+refuse locally, with no adapter call:
+
+- One run uses more of a rate resource than `per_min`, so it could never fit.
+- A quota's need exceeds what is left of `per_day` in the last 24 hours.
+
+For balance resources Cassy then calls `balance` once, then `grant` for the
+shortfall when the environment is in `grant_envs`:
+
+```json
+{"v":1,"verb":"balance","env":"staging","sha":"<candidate>","args":{"resources":["credits"]}}
+{"v":1,"ok":true,"data":{"credits":5}}
+{"v":1,"verb":"grant","env":"staging","sha":"<candidate>","args":{"amounts":{"credits":15}}}
+{"v":1,"ok":true,"data":{"credits":20}}
+```
+
+`grant` answers each granted resource's new balance. Every refusal names the
+resource, the need and the balance:
+
+- `RESOURCE SHORTFALL: credits needs 20, balance 5 on prod; prod is not in qa.release.grant_envs`
+- `RESOURCE SHORTFALL: credits needs 20, balance 12 on staging; grant did not cover it`
+
+A `balance` or `grant` failure caused by a provider (`external`,
+`rate_limited` or `insufficient`) is `BLOCKED_EXTERNAL`.
+
+### Throttling and exhaustion
+
+A mid-run `rate_limited` (429) answer is retried once, after `retry_after_s`,
+when that still fits the row's wall clock; the retry is metered like any other
+request. A second 429, or one that cannot wait, is
+`BLOCKED_EXTERNAL{provider, error}`. An `insufficient` (402) answer is
+`BLOCKED_EXTERNAL` at once and is not retried. Either way the row stays owed.
 
 ## Fixtures and personas
 

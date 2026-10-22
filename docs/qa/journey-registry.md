@@ -58,6 +58,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `invariants` | Optional `ID: {statement, check, bug?, pending_checker?, definition?, labeled?, compare?}` map. `check` describes the end-state read-back; `bug` may hold task metadata. |
 | `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?, compare?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
 | `fixtures` | Optional named fixtures with `description`, one of `provider`, `frozen`, or `recipe`, and optional `labels`. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
+| `resources` | Optional `name: {kind, ...}` map of shared provider budgets: `rate` needs `per_min` and takes an optional `concurrency`, `quota` needs `per_day`, and `balance` takes no limits. Never a command. See [release gate](release-gate.md#resource-budgets). |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `journeys` | Required non-empty list. |
 
@@ -84,6 +85,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
 | `readback` | Optional `{subjects: [...], invariants: [...]}`: the subject kinds (for example `account_uid`) and invariant IDs the release gate may read back. Both lists must be non-empty identifiers, and unknown keys are rejected. See [release gate](release-gate.md#read-back). |
+| `consumes` | Optional `{resource: units}` that one run uses; each resource must be declared in the header and each amount positive. See [release gate](release-gate.md#resource-budgets). |
 | `seeded` | Optional boolean, default false. A live seed is exempt from steps, invariants and traffic requirements until curated. |
 
 A seeded journey remains responsible for a valid entry, ownership and references.

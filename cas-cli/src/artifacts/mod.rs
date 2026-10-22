@@ -416,10 +416,14 @@ fn upload(
         },
     )?;
 
-    if let Err(error) = store.mark_committed(&artifact.id, completed.url.as_deref()) {
+    // Retry only local bookkeeping: replaying Cloud or proof attachment could
+    // create another object or receipt. The store retry honors wait budgets.
+    if let Err(error) = cas_store::shared_db::with_write_retry(|| {
+        store.mark_committed(&artifact.id, completed.url.as_deref())
+    }) {
         return Err(UploadFailure::Failed {
             step: cloud::UploadStep::Complete,
-            reason: format!("could not record the completion locally: {error}"),
+            reason: format!("uploaded, not committed locally: {error}"),
             interaction: format!("artifact {}", artifact.id),
         });
     }

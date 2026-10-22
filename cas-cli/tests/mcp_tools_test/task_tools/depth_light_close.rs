@@ -149,6 +149,7 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
 
     let close_text = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Feel-driven pass complete.".to_string()),
@@ -235,6 +236,7 @@ async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
     }
 
     core.cas_task_close(Parameters(TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("The task is complete.".to_string()),
@@ -278,6 +280,7 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
 
     let close_text = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Done.".to_string()),
@@ -338,6 +341,7 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
 
     let close_text = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Done.".to_string()),
@@ -548,6 +552,7 @@ async fn create_started_and_closed_light_task(core: &CasCore, title: &str) -> St
 
     let close_text = extract_text(
         core.cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Feel-driven pass complete.".to_string()),

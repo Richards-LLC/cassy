@@ -1794,6 +1794,7 @@ async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktr
     core.set_agent_id_for_testing(agent_id);
     let result = core
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: task.id.clone(),
             reason: Some("task A complete".to_string()),

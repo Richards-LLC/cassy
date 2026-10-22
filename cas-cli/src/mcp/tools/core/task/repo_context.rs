@@ -2188,6 +2188,7 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             task.status = TaskStatus::InProgress;
             task.deliverables.work_target = Some(target);
             let request = TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: task.id.clone(),
                 reason: None,

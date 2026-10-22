@@ -393,6 +393,17 @@ fn task_delivery_ranges(
     task_delivery_selection(repo, parent, window, tip, true).map(|selection| selection.ranges)
 }
 
+/// A no-delivery declaration requires no attributed commits, including
+/// empty commits and changes later reverted to the original tree.
+pub(super) fn has_delivery_commits(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<bool> {
+    task_delivery_ranges(repo, target, window, Some(tip)).map(|ranges| !ranges.is_empty())
+}
+
 /// The selected delivery ranges, plus whether a target-sync merge that would
 /// otherwise have been selected was excluded (cas-2664 defect 7), or a merge
 /// that brought another task's work (cas-f2eb). Empty

@@ -316,6 +316,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
+    /// Explicit per-attempt declaration for a helper with no Git delivery.
+    #[schemars(description = "For close: declare no delivery for this attempt. Requires a non-empty reason and registered caller; Cassy must prove no recorded delivery, task commits or unmerged lane work. Skips QA/factory-branch delivery gates only; verification still applies. Cannot combine with other close receipts or dispositions.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub no_delivery: Option<bool>,
+
     /// Portable task/commit/PR pointer for `action=cancel` when another result
     /// superseded this task.
     #[schemars(
@@ -1298,6 +1303,7 @@ mod worker_delivery_request_tests {
         assert_eq!(request.action, "close");
         assert_eq!(request.id.as_deref(), Some("cas-legacy"));
         assert_eq!(request.reason.as_deref(), Some("done"));
+        assert_eq!(request.no_delivery, None);
         assert!(request.completion_receipt.is_none());
         assert!(request.external_verification_receipt.is_none());
         assert_eq!(request.negative_result, None);
@@ -1315,6 +1321,23 @@ mod worker_delivery_request_tests {
             request.completion_receipt.as_deref(),
             Some(r#"{"task_id":"cas-new"}"#)
         );
+    }
+
+    #[test]
+    fn no_delivery_close_declaration_is_exposed_and_deserializes_cas_a94f() {
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": "cas-helper", "reason": "Simulator released",
+            "no_delivery": "true",
+        })).unwrap();
+        assert_eq!(request.no_delivery, Some(true));
+        assert!(request.execution_note.is_none());
+        assert!(request.external_ref.is_none());
+        let schema = serde_json::to_value(schemars::schema_for!(TaskRequest)).unwrap();
+        let description = schema["properties"]["no_delivery"]["description"].as_str().unwrap();
+        assert!(description.contains("verification still applies"));
+        assert!(serde_json::from_value::<TaskRequest>(serde_json::json!({
+            "action": "close", "no_delivery": {"reason": "untyped"},
+        })).is_err());
     }
 
     #[test]

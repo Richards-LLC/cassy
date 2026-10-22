@@ -2454,6 +2454,17 @@ task still needs evidence linking it to this delivery.
 A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
+An undeclared helper that never delivered code may instead close with
+`no_delivery=true reason="<completed helper outcome>"`. This declaration is
+required on every attempt and audited with the registered caller, repository,
+target SHA and measured refs. Cassy requires readable Git and task attribution,
+no recorded delivery or binding QA round, and no task commits or unmerged work
+on any local/origin candidate lane or closing HEAD. Empty diffs alone grant no
+exception. The declaration skips QA and factory-branch delivery gates while
+preserving verification and uncommitted-work checks; it sets no methodology,
+external reference or delivery anchor. It cannot be combined with other close
+receipts, dispositions or overrides. The unified MCP and per-action close
+requests expose this flag; there is no separate CLI task-close command.
 A read-only no-code task also closes on portable PR or artifact evidence when
 its allocated task branch contains only foreign commits. An earlier false park
 on those commits is retired; allocating a branch does not establish ownership.

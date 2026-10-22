@@ -361,6 +361,7 @@ async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
     let close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: dependent_id,
                 reason: Some("delivered despite blocker".to_string()),
                 supervisor_override: None,

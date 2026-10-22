@@ -182,6 +182,8 @@ fn slack_post_from_driver() {
     record("NOT_EXERCISED", "generation 5");
     set_mode(SAVE_FAILS);
     let before = top_level();
+    let pack_sha = || format!("{:x}", sha2::Sha256::digest(std::fs::read(dir.join(pack::PACK_FILE)).unwrap()));
+    let g5 = pack_sha();
     at(13.0);
     chmod(&dir, 0o755);
     set_mode(UP);
@@ -189,6 +191,8 @@ fn slack_post_from_driver() {
     assert_eq!(top_level(), before + 1, "a post whose record failed is not reposted");
     assert_eq!(noted("this process will not repost it"), 1);
     assert_eq!(noted("Slack: posted pack"), 2, "the receipt of the second post is noted");
+    let g5_note = notes().into_iter().find(|n| n.contains(&format!("Slack: posted pack {}", &g5[..12]))).unwrap();
+    assert!(g5_note.contains("to qa-release as release-gate-driver: https://slack.test/p/"), "{g5_note}");
 
     // 6. A failing tick (a live run on a broken registry) still posts.
     let clean = record("PASS", "generation 6");
@@ -199,8 +203,11 @@ fn slack_post_from_driver() {
     let valid = std::fs::read(&registry).unwrap();
     std::fs::write(&registry, "journeys: [").unwrap();
     let before = top_level();
+    let g6 = pack_sha();
     assert!(run::drive(&gate.cas, &mut None, &AtomicBool::new(false)).is_err(), "the tick fails");
     assert_eq!(top_level(), before + 1, "generation 6 posted anyway");
+    let finished = slack::posted(&dir).into_iter().find(|p| p.pack_sha256 == g6).expect("generation 6 recorded");
+    assert!(!finished.partial && finished.files >= 2 && finished.permalink.starts_with("https://slack.test/p/"), "{finished:?}");
     std::fs::write(&registry, valid).unwrap();
 
     // An unreadable pack is noted once, not every tick.
@@ -210,6 +217,8 @@ fn slack_post_from_driver() {
     at(16.0);
     chmod(&pack_json, 0o644);
     assert_eq!(noted("pack.json is unreadable"), 1);
+
+    assert!(violet.calls.lock().unwrap().iter().all(|c| c["channel"] == "qa-release"), "every call went to slack_channel");
 
     // A new channel resets the mark: nothing sealed before it and over 24 h old back-posts.
     let mut config = crate::config::Config::load(&gate.cas).unwrap();

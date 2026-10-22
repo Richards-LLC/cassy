@@ -1823,20 +1823,34 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     env.set("CAS_AGENT_ROLE", "worker");
     env.set("CAS_FACTORY_MODE", "1");
     let repo = GitRepo::new();
-    run_git(&["remote", "add", "origin", "https://github.com/test/reference-union.git"], &repo.root);
+    run_git(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/test/reference-union.git",
+        ],
+        &repo.root,
+    );
     let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
-    std::fs::write(cas_root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .unwrap();
     let base_hash = "1".repeat(64);
     let alice_hash = "2".repeat(64);
     let bob_hash = "3".repeat(64);
-    let ledger = |guide: &[&str]| serde_json::json!({
-        "version": 1,
-        "files": {
-            "skills/demo/references/guide.md": guide,
-            // A hash under another key cannot prove this guide's delivery.
-            "skills/other/references/guide.md": [&alice_hash, &bob_hash],
-        }
-    });
+    let ledger = |guide: &[&str]| {
+        serde_json::json!({
+            "version": 1,
+            "files": {
+                "skills/demo/references/guide.md": guide,
+                // A hash under another key cannot prove this guide's delivery.
+                "skills/other/references/guide.md": [&alice_hash, &bob_hash],
+            }
+        })
+    };
     let write_ledger = |root: &Path, value: &serde_json::Value| {
         let path = root.join(LEDGER);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1852,14 +1866,23 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     };
     let store = open_task_store(&cas_root).unwrap();
     let mut tasks = Vec::new();
-    for (id, worker, hash) in [("cas-e57a", "alice", &alice_hash), ("cas-e57b", "bob", &bob_hash)] {
+    for (id, worker, hash) in [
+        ("cas-e57a", "alice", &alice_hash),
+        ("cas-e57b", "bob", &bob_hash),
+    ] {
         let branch = format!("factory/{worker}");
         let path = cas_root.join("worktrees").join(worker);
         repo.add_worktree(&path, &branch);
         write_ledger(&path, &ledger(&[&base_hash, hash]));
         run_git(&["add", LEDGER], &path);
-        run_git(&["commit", "-m", &format!("{id}: extend reference history")], &path);
-        let mut task = Task::new(id.to_string(), format!("Extend {worker}'s reference history"));
+        run_git(
+            &["commit", "-m", &format!("{id}: extend reference history")],
+            &path,
+        );
+        let mut task = Task::new(
+            id.to_string(),
+            format!("Extend {worker}'s reference history"),
+        );
         task.status = TaskStatus::AwaitingMerge;
         task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
         task.depth = TaskDepth::Light;
@@ -1875,22 +1898,40 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
         store.add(&task).unwrap();
         tasks.push(task);
     }
-    run_git(&["merge", "--no-ff", "factory/alice", "-m", "merge Alice"], &repo.root);
+    run_git(
+        &["merge", "--no-ff", "factory/alice", "-m", "merge Alice"],
+        &repo.root,
+    );
     // Both branches extend the same JSON array. Resolve the real merge to
     // its semantic union, as regeneration does in the integration checkout.
     let merge = Command::new("git")
         .args(["merge", "--no-ff", "--no-commit", "factory/bob"])
-        .current_dir(&repo.root).output().unwrap();
-    assert!(merge.status.success() || merge.status.code() == Some(1), "{merge:?}");
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        merge.status.success() || merge.status.code() == Some(1),
+        "{merge:?}"
+    );
     let union = ledger(&[&bob_hash, &base_hash, &alice_hash]);
     write_ledger(&repo.root, &ledger(&[&base_hash, &bob_hash]));
     run_git(&["add", LEDGER], &repo.root);
-    run_git(&["commit", "-m", "merge Bob losing Alice's guide history"], &repo.root);
-    let cores: Vec<_> = tasks.iter().map(|task| {
-        let core = CasCore::with_daemon(cas_root.clone(), None, None);
-        core.set_agent_id_for_testing(register_worker_agent(&cas_root, task.assignee.as_deref().unwrap(), None));
-        core
-    }).collect();
+    run_git(
+        &["commit", "-m", "merge Bob losing Alice's guide history"],
+        &repo.root,
+    );
+    let cores: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            let core = CasCore::with_daemon(cas_root.clone(), None, None);
+            core.set_agent_id_for_testing(register_worker_agent(
+                &cas_root,
+                task.assignee.as_deref().unwrap(),
+                None,
+            ));
+            core
+        })
+        .collect();
     let close_request = |task: &Task| TaskCloseRequest {
         no_delivery: None,
         stranded_branch_override: None,
@@ -1903,21 +1944,46 @@ async fn merged_reference_history_union_closes_both_deliveries_cas_e579() {
     };
     // Remove Alice's delivered hash only from its correct key: its presence
     // under `other` and Bob's retained hash must not authorize Alice's close.
-    let rejected = cores[0].cas_task_close(Parameters(close_request(&tasks[0]))).await.unwrap();
+    let rejected = cores[0]
+        .cas_task_close(Parameters(close_request(&tasks[0])))
+        .await
+        .unwrap();
     let text = get_text(&rejected);
-    assert!(text.contains("DELIVERY CONTENT DROPPED") && text.contains(LEDGER), "{text}");
-    assert_eq!(store.get(&tasks[0].id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert!(
+        text.contains("DELIVERY CONTENT DROPPED") && text.contains(LEDGER),
+        "{text}"
+    );
+    assert_eq!(
+        store.get(&tasks[0].id).unwrap().status,
+        TaskStatus::AwaitingMerge
+    );
 
     write_ledger(&repo.root, &union);
-    run_git(&["commit", "-a", "--amend", "-m", "merge Bob with union of shipped histories"], &repo.root);
+    run_git(
+        &[
+            "commit",
+            "-a",
+            "--amend",
+            "-m",
+            "merge Bob with union of shipped histories",
+        ],
+        &repo.root,
+    );
     for (task, core) in tasks.iter().zip(cores) {
-        let result = core.cas_task_close(Parameters(close_request(task))).await.unwrap();
+        let result = core
+            .cas_task_close(Parameters(close_request(task)))
+            .await
+            .unwrap();
         let text = get_text(&result);
-        assert!(text.contains(&format!("Closed task: {}", task.id)), "both deliveries must close without an override: {text}");
+        assert!(
+            text.contains(&format!("Closed task: {}", task.id)),
+            "both deliveries must close without an override: {text}"
+        );
         assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
     }
     // Closing is read-only with respect to the integrated ledger.
-    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(repo.root.join(LEDGER)).unwrap()).unwrap();
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(repo.root.join(LEDGER)).unwrap()).unwrap();
     assert_eq!(kept, union);
 }
 

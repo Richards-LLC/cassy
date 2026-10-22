@@ -3448,6 +3448,26 @@ impl SqlitePromptQueueStore {
         since: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
+        self.received_supervisor_messages_since_matching(
+            recipient,
+            factory_session,
+            since,
+            limit,
+            |_, _| true,
+        )
+    }
+
+    /// Apply a caller's scope filter before counting the newest `limit` rows.
+    /// Stream rejected rows without retaining them. The predicate runs under
+    /// the connection lock and must not re-enter this store.
+    pub fn received_supervisor_messages_since_matching(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+        mut include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
+    ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
         if limit == 0 || recipient.is_empty() || factory_session.is_empty() {
             return Ok(Vec::new());
         }
@@ -3467,20 +3487,24 @@ impl SqlitePromptQueueStore {
                 AND q.origin_kind = 'registered_agent' AND a.role = 'supervisor'
                 AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}
                 AND julianday(seen.seen_at) >= julianday(?3)
-              ORDER BY julianday(seen.seen_at) DESC, q.id DESC LIMIT ?4"
+              ORDER BY julianday(seen.seen_at) DESC, q.id DESC"
         ))?;
-        let rows = stmt
-            .query_map(
-                params![recipient, factory_session, since.to_rfc3339(), limit as i64],
-                |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(prompt, at)| {
-                let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
-                Ok((prompt, at))
-            })
-            .collect()
+        let rows = stmt.query_map(
+            params![recipient, factory_session, since.to_rfc3339()],
+            |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
+        )?;
+        let mut matched = Vec::new();
+        for row in rows {
+            let (prompt, at) = row?;
+            let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
+            if include(&prompt, at) {
+                matched.push((prompt, at));
+                if matched.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(matched)
     }
 
     /// Remove the empty diagnostic artifact left by older installations/tools.

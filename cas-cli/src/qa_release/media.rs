@@ -13,12 +13,34 @@ use std::path::{Path, PathBuf};
 /// Transcoded copies live here, inside the pack's media directory.
 const SLACK_DIR: &str = ".slack";
 const VIDEO: &[&str] = &["mp4", "webm", "mov", "mkv"];
-/// Only images and video are uploaded; traces, logs and archives can carry
-/// credentials, so the Slack post links them by local path instead.
+/// Only images and video are uploaded, by extension and magic bytes; traces,
+/// logs and archives can carry credentials, so the Slack post links them by
+/// local path instead.
 const IMAGE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 fn extension_in(path: &str, list: &[&str]) -> bool {
     Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| list.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Whether the file's leading bytes are an image (`video == false`) or a
+/// video container: the extension alone would upload a zip named `x.png`.
+fn sniffed(path: &Path, video: bool) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    let Ok(read) = std::fs::File::open(path).and_then(|mut file| file.read(&mut head)) else {
+        return false;
+    };
+    let head = &head[..read];
+    if video {
+        // MP4/MOV: an `ftyp` box; WebM/Matroska: the EBML header.
+        head.get(4..8) == Some(b"ftyp") || head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+    } else {
+        head.starts_with(b"\x89PNG\r\n\x1a\n")
+            || head.starts_with(&[0xFF, 0xD8, 0xFF])
+            || head.starts_with(b"GIF87a")
+            || head.starts_with(b"GIF89a")
+            || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"))
+    }
 }
 
 /// Re-encodes a video so it fits `max_bytes`. The production implementation
@@ -105,11 +127,12 @@ pub fn slack_bundle(dir: &Path, limit: u64, transcoder: &impl Transcoder) -> Res
             bundle.pruned.push(media.clone());
             continue;
         }
-        if !extension_in(&media.path, IMAGE) && !extension_in(&media.path, VIDEO) {
+        let path = media_path(dir, &media.path)?;
+        let video = extension_in(&media.path, VIDEO);
+        if !(video || extension_in(&media.path, IMAGE)) || !sniffed(&path, video) {
             bundle.linked.push(media.clone());
             continue;
         }
-        let path = media_path(dir, &media.path)?;
         if media.bytes <= limit {
             bundle.files.push(BundleFile {
                 path,
@@ -119,7 +142,6 @@ pub fn slack_bundle(dir: &Path, limit: u64, transcoder: &impl Transcoder) -> Res
             });
             continue;
         }
-        let video = extension_in(&media.path, VIDEO);
         let copy = transcoded_path(dir, media)?;
         let fits = video
             && transcoder.transcode(&path, &copy, limit).is_ok()

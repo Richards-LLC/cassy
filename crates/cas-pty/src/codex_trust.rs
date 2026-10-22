@@ -1770,7 +1770,7 @@ mod tests {
             ("\u{85}\u{202e}", "\\u{85}\\u{202e}", "codex_hooks_invalid:"),
             ("\u{202e}", "\\u{202e}", "codex_main_checkout_hooks_stale:"),
         ] {
-            let unsafe_main = dir.join(format!("main{suffix}folder"));
+            let unsafe_main = dir.join(&format!("main{suffix}folder"));
             std::fs::rename(&previous_main, &unsafe_main).unwrap();
             std::fs::write(unsafe_main.join(".codex/hooks.json"), &stale).unwrap();
             std::fs::write(

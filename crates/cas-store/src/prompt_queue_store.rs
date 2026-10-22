@@ -1517,6 +1517,11 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
              AND agents.status <> 'shutdown'
        )";
 
+/// cas-d1e0: the most rows one received-message history scan reads. It
+/// holds the connection lock, so even a filter that rejects every row
+/// stops here; a hit is logged.
+pub const RECEIVED_HISTORY_SCAN_CAP: usize = 2_000;
+
 impl SqlitePromptQueueStore {
     /// A local terminal task is positive evidence that its action alert expired.
     fn terminal_relay_task_status(
@@ -3466,10 +3471,43 @@ impl SqlitePromptQueueStore {
         factory_session: &str,
         since: DateTime<Utc>,
         limit: usize,
-        mut include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
+        include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
     ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
+        let (matched, hit_cap) = self.received_supervisor_messages_scan(
+            recipient,
+            factory_session,
+            since,
+            limit,
+            RECEIVED_HISTORY_SCAN_CAP,
+            include,
+        )?;
+        if hit_cap {
+            tracing::warn!(
+                recipient,
+                factory_session,
+                scan_cap = RECEIVED_HISTORY_SCAN_CAP,
+                "received-message history scan hit its row cap; older received messages were not considered"
+            );
+        }
+        Ok(matched)
+    }
+
+    /// The scan behind [`Self::received_supervisor_messages_since_matching`],
+    /// reading at most `scan_cap` rows, filtered or not. Also says whether it
+    /// stopped at that cap before finding `limit` matches.
+    pub(crate) fn received_supervisor_messages_scan(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+        scan_cap: usize,
+        mut include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
+    ) -> Result<(Vec<(QueuedPrompt, DateTime<Utc>)>, bool)> {
+        // Red: the pre-cas-d1e0 scan, with no cap.
+        let _ = scan_cap;
         if limit == 0 || recipient.is_empty() || factory_session.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(&format!(
@@ -3504,7 +3542,7 @@ impl SqlitePromptQueueStore {
                 }
             }
         }
-        Ok(matched)
+        Ok((matched, false))
     }
 
     /// Remove the empty diagnostic artifact left by older installations/tools.
@@ -10185,6 +10223,68 @@ mod tests {
         assert_eq!(reader.pending_count().unwrap(), 1);
         assert!(reader.enqueue("supervisor", "worker", "forbidden").is_err());
         assert_eq!(writer.pending_count().unwrap(), 1);
+    }
+
+    /// cas-d1e0: the received-message history scan holds the connection
+    /// lock, so it reads a bounded number of rows. Within that bound an
+    /// eligible answer behind rows the caller's filter rejects is still
+    /// found; at the bound the scan stops and says so.
+    #[test]
+    fn received_history_scan_is_capped_and_finds_answers_behind_filtered_rows_cas_d1e0() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "history-supervisor".into(),
+            "lead".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("history-session".into());
+        agents.register(&supervisor).unwrap();
+        let since = Utc::now() - chrono::Duration::minutes(1);
+        let send = |prompt: &str| {
+            let id = store
+                .enqueue_urgent_with_outcome(
+                    "lead",
+                    "worker",
+                    prompt,
+                    Some("history-session"),
+                    None,
+                    None,
+                    false,
+                    Some(&QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            store
+                .record_recipient_surfaced(id, "worker", SurfacingSource::InboxPoll)
+                .unwrap();
+            id
+        };
+        let answer = send("the answer for cas-7777");
+        for _ in 0..3 {
+            send("unrelated chatter");
+        }
+        let scan = |cap| {
+            store
+                .received_supervisor_messages_scan("worker", "history-session", since, 1, cap, |row, _| {
+                    !row.prompt.contains("unrelated")
+                })
+                .unwrap()
+        };
+
+        let (found, hit_cap) = scan(10);
+        assert_eq!(found.iter().map(|(row, _)| row.id).collect::<Vec<_>>(), vec![answer]);
+        assert!(!hit_cap);
+
+        let (found, hit_cap) = scan(3);
+        assert!(found.is_empty(), "the answer is beyond a 3-row scan: {found:?}");
+        assert!(hit_cap, "a scan stopped by its cap says so");
     }
 
     #[test]

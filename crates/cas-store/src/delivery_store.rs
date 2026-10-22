@@ -123,22 +123,27 @@ pub fn record_observed_delivery_merge(
                 .to_string(),
         ));
     }
-    let conn = open(root)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO observed_delivery_merges
-         (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            task_id,
-            source_branch,
-            target_branch,
-            source_commit_sha,
-            merge_commit_sha,
-            actor_agent_id,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
+    // The merge and push already happened when this observation is written.
+    // Retry the whole one-statement write on SQLITE_BUSY; INSERT OR IGNORE
+    // keeps a retry after an ambiguous completion idempotent.
+    crate::shared_db::with_write_retry(|| {
+        let conn = open(root)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO observed_delivery_merges
+             (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                task_id,
+                source_branch,
+                target_branch,
+                source_commit_sha,
+                merge_commit_sha,
+                actor_agent_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    })
 }
 
 fn open(root: &Path) -> Result<Connection> {

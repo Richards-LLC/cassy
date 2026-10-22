@@ -1400,6 +1400,18 @@ fn protected_default_branch_pr_error(
     ))
 }
 
+fn delivery_observation_failure_message(
+    worktree_id: &str,
+    task_id: &str,
+    error: impl std::fmt::Display,
+) -> String {
+    format!(
+        "WorkTarget merge completed, but its delivery observation could not be recorded: {error}. \
+         Retry `worktree_merge id={worktree_id} task_id={task_id}`; the observation write is \
+         idempotent, and the retry will continue through verification dispatch."
+    )
+}
+
 /// Translate worktree merge failures into supervisor-actionable MCP errors.
 ///
 /// The low-level merge layer owns cleanup and path discovery; this callable
@@ -4951,8 +4963,10 @@ impl CasCore {
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "WorkTarget merge completed, but its delivery observation could not be recorded: {error}"
+                message: Cow::from(delivery_observation_failure_message(
+                    &worktree.id,
+                    task_id,
+                    error,
                 )),
                 data: None,
             })?;

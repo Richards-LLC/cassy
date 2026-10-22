@@ -133,11 +133,15 @@ const CASSY_WORDMARK: &str = r#"
 const CASSY_PLAIN_WORDMARK: &str = "Cassy";
 
 /// Select the wordmark that is safe for the destination before clap renders
-/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+/// help. Piped output, `NO_COLOR` and non-UTF-8 locales get a compact text fallback.
 pub fn help_wordmark() -> &'static str {
-    match crate::ui::components::OutputMode::detect() {
-        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
-        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+    help_wordmark_for_mode(crate::ui::components::OutputMode::detect())
+}
+
+fn help_wordmark_for_mode(mode: crate::ui::components::OutputMode) -> &'static str {
+    match mode {
+        crate::ui::components::OutputMode::Styled if crate::ui::components::locale_is_utf8() => CASSY_WORDMARK,
+        _ => CASSY_PLAIN_WORDMARK,
     }
 }
 
@@ -956,7 +960,7 @@ const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::fro
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli, hub_tracing_root, run};
+    use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
@@ -1070,12 +1074,31 @@ mod tests {
 
     #[test]
     fn cassy_wordmark_stays_compact_for_80_column_terminals() {
+        use crate::ui::components::OutputMode;
+
         let rows: Vec<_> = CASSY_WORDMARK
             .lines()
             .filter(|row| !row.is_empty())
             .collect();
         assert_eq!(rows.len(), 6, "the splash must remain at most eight rows");
         assert!(rows.iter().all(|row| row.chars().count() <= 80));
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (locale, expected_styled) in [
+            ("C", "Cassy"),
+            ("en_US.ISO-8859-1", "Cassy"),
+            ("C.UTF-8", CASSY_WORDMARK),
+        ] {
+            env.set("LC_ALL", locale);
+            let wordmark = help_wordmark_for_mode(OutputMode::Styled);
+            assert_eq!(wordmark, expected_styled, "styled root help in {locale}");
+            assert_eq!(help_wordmark_for_mode(OutputMode::Plain), "Cassy");
+            let help = Cli::command().before_help(wordmark).render_long_help().to_string();
+            assert!(help.contains("Usage:"), "root help retains command entry");
+            if expected_styled.is_ascii() {
+                assert!(help.is_ascii(), "root help must be ASCII in {locale}: {help}");
+            }
+        }
     }
 
     #[test]

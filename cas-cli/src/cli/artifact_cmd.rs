@@ -184,8 +184,13 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
 
 fn print_publish(outcome: &PublishOutcome) {
     let artifact = &outcome.artifact;
+    let verdict = if outcome.disposition.is_committed() {
+        "[OK] published"
+    } else {
+        "[WARN] local-only"
+    };
     println!(
-        "[OK] published {} - {} - {}",
+        "{verdict} {} - {} - {}",
         artifact.name,
         human_size(artifact.size_bytes),
         artifact.id
@@ -196,7 +201,7 @@ fn print_publish(outcome: &PublishOutcome) {
         PublishDisposition::UploadFailed { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
-            for line in reason.lines() {
+            for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
             println!("  -> cas artifact show {}", artifact.id);

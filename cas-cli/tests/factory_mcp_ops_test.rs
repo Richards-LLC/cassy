@@ -10785,6 +10785,121 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
     }
 }
 
+#[tokio::test]
+async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-cas-0a69-supervisor")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker = "stale-override-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-0a69-fixture\"\n",
+    )
+    .unwrap();
+    add_epic_with_id(&env, "cas-0a69-epic", TaskStatus::Open, "epic/requested");
+
+    let mut registered_worker = Agent::new("cas-0a69-worker-id".into(), worker.into());
+    registered_worker.role = AgentRole::Worker;
+    registered_worker.metadata.insert(
+        "clone_path".into(),
+        worker_path.to_string_lossy().into_owned(),
+    );
+    env.agent_store().register(&registered_worker).unwrap();
+
+    let task_id = child_task_of_epic(&env, "cas-0a69-epic", "Stale assignment override");
+    let tasks = env.task_store();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-0a69-fixture".into(),
+        target_branch: "epic/requested".into(),
+    });
+    tasks.update(&task).unwrap();
+
+    // A dirty old worker tree remains a start-time refusal, even when a
+    // supervisor explicitly accepts the stale assignment with an audit reason.
+    std::fs::write(worker_path.join("README"), "uncommitted local work\n").unwrap();
+    let reason = "reviewed the lane and scheduled a supervised refresh";
+    let missing_reason: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+    }))
+    .unwrap();
+    let refused = env
+        .service
+        .task(Parameters(missing_reason))
+        .await
+        .expect_err("an override needs an audit reason");
+    assert!(
+        refused
+            .message
+            .contains("supervisor_override=true requires a non-empty reason"),
+        "{refused}"
+    );
+
+    let request: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+        "reason": reason,
+    }))
+    .unwrap();
+    let response = env
+        .service
+        .task(Parameters(request))
+        .await
+        .expect("registered supervisor may explicitly accept stale assignment");
+    let receipt = get_text(&response);
+    assert!(receipt.contains("SUPERVISOR OVERRIDE"), "{receipt}");
+    assert!(
+        receipt.contains("task start"),
+        "dirty worktree caveat must be visible: {receipt}"
+    );
+    let saved = tasks.get(&task_id).unwrap();
+    assert_eq!(saved.assignee.as_deref(), Some(worker));
+    assert!(
+        saved.notes.contains(reason),
+        "override reason must be durable: {}",
+        saved.notes
+    );
+    assert!(
+        saved.notes.contains(task_id.as_str()),
+        "audit must name this task: {}",
+        saved.notes
+    );
+
+    // A worker cannot use the same escape hatch, even with a reason.
+    task.assignee = None;
+    tasks.update(&task).unwrap();
+    let worker_core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    worker_core.set_agent_id_for_testing(registered_worker.id.clone());
+    let worker_service = CasService::new(worker_core, None);
+    let request: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+        "reason": reason,
+    }))
+    .unwrap();
+    let refused = worker_service
+        .task(Parameters(request))
+        .await
+        .expect_err("workers cannot override stale assignment gating");
+    assert!(
+        refused.message.contains("SUPERVISOR OVERRIDE REJECTED"),
+        "{refused}"
+    );
+    assert!(tasks.get(&task_id).unwrap().assignee.is_none());
+}
+
 /// A review hold must preserve this task's work without admitting a prior task.
 #[tokio::test]
 async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a() {

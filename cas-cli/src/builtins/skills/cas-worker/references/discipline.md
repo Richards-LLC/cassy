@@ -77,9 +77,10 @@ headroom, keep the task InProgress and retain its lease. Follow the recorded
 next retry time and retry the same command; do not set status=blocked or send a
 supervisor blocker page for capacity alone. Record progress if useful, arm one
 retry reminder, then end the turn. The runner records one capacity-wait episode
-shown by worker_status; admission clears it. The daemon escalates an episode
-once after 20 minutes, including when no retry occurs. Report an actual need for
-supervisor action immediately through the ordinary blocker message path.
+shown by worker_status; admission clears it. The daemon can queue one notice per
+episode after 20 minutes, including when no retry occurs; delivery follows normal
+supervisor readiness policy. Report an actual need for supervisor action
+immediately through the ordinary blocker message path.
 A source/test failure or a required decision still follows its own workflow.
 
 ## Browser checks

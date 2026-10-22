@@ -818,11 +818,29 @@ fn tools_list_carries_no_schema_boilerplate() {
             tool.name
         );
     }
-    assert!(
-        payload.len() <= TOOLS_LIST_BUDGET_BYTES,
-        "tools/list is {} bytes; budget {TOOLS_LIST_BUDGET_BYTES}",
-        payload.len()
-    );
+    if payload.len() > TOOLS_LIST_BUDGET_BYTES {
+        // cas-78ee: name what to trim, largest first.
+        let descriptions: Vec<(usize, String)> = tools
+            .iter()
+            .map(|tool| (tool.description.as_ref().map_or(0, |text| text.len()), tool.name.to_string()))
+            .collect();
+        let mut properties: Vec<(usize, String)> = tools
+            .iter()
+            .flat_map(|tool| {
+                let properties = tool.input_schema["properties"].as_object().cloned().unwrap_or_default();
+                properties.into_iter().map(move |(name, schema)| {
+                    (serde_json::to_string(&schema).unwrap().len(), format!("{}.{name}", tool.name))
+                })
+            })
+            .collect();
+        properties.sort_by(|left, right| right.cmp(left));
+        properties.truncate(30);
+        panic!(
+            "tools/list is {} bytes; budget {TOOLS_LIST_BUDGET_BYTES}. Tool descriptions: {descriptions:?}. \
+             Largest properties: {properties:?}",
+            payload.len()
+        );
+    }
 }
 
 #[test]

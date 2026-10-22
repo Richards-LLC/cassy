@@ -3588,6 +3588,29 @@ impl CasCore {
             })?,
         };
 
+        // A pending QA round is the primary merge refusal, even when a
+        // worker-only request cannot infer a parked task (for example, the
+        // task was reopened while the round is still pending). Resolve that
+        // gate before parked-delivery inference can return AMBIGUOUS.
+        if task_id.is_none() {
+            let branch = system_a
+                .as_ref()
+                .map(|worktree| worktree.branch.clone())
+                .unwrap_or_else(|| system_b_merge_source(id, None).1);
+            if branch.starts_with("factory/") {
+                let cwd = cas_root.parent().unwrap_or(&cas_root);
+                if let Some(refusal) =
+                    crate::qa_pass::branch_merge_refusal(&cas_root, cwd, &branch)
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(refusal),
+                        data: None,
+                    });
+                }
+            }
+        }
+
         // A worker-only request must bind one parked task before repository,
         // target, source and containment resolution. A stale lane is not a
         // delivery receipt. Tracked System-A epic worktrees remain explicit.

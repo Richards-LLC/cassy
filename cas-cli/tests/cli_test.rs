@@ -29,8 +29,9 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
+        // cas-a0f8 made global help ASCII so it reads under LC_ALL=C.
         .stdout(predicate::str::contains(
-            "Cassy — a multi-agent coding factory with persistent memory and task coordination",
+            "Cassy - a multi-agent coding factory with persistent memory and task coordination",
         ));
 }
 

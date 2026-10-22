@@ -1840,45 +1840,109 @@ fn a_target_already_current_with_origin_reports_no_work() {
 
 #[test]
 fn a_non_fast_forward_rejection_is_classified_as_such() {
-    // git's own rejection text, verbatim from a push whose remote moved.
-    let stderr = " ! [rejected]        main -> main (fetch first)\n\
-                  error: failed to push some refs to '/tmp/origin.git'\n\
-                  hint: Updates were rejected because the remote contains work that you do\n\
-                  hint: not have locally.";
-    let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
-        "main",
-        "main",
-        "aaaaaaaaaaaa".to_string(),
-        Some("bbbbbbbbbbbb".to_string()),
-        stderr,
-    );
-    match outcome {
-        TargetPushOutcome::NonFastForward {
-            sha,
-            remote_sha,
-            reason,
-        } => {
-            assert_eq!(sha, "aaaaaaaaaaaa");
-            assert_eq!(remote_sha.as_deref(), Some("bbbbbbbbbbbb"));
-            assert!(reason.contains("rejected"), "{reason}");
+    let rejections = [
+        // git's own rejection text, verbatim from a push whose remote moved.
+        " ! [rejected]        main -> main (fetch first)\n\
+         error: failed to push some refs to '/tmp/origin.git'\n\
+         hint: Updates were rejected because the remote contains work that you do\n\
+         hint: not have locally.",
+        // cas-d8ab: receive-pack's compare-and-swap rejections, when a peer
+        // moved the ref while this push's pre-push hook ran.
+        " ! [remote rejected] main -> main (incorrect old value provided)\n\
+         error: failed to push some refs to '/tmp/origin.git'",
+        " ! [remote rejected] main -> main (cannot lock ref 'refs/heads/main': is at \
+         1111111111111111111111111111111111111111 but expected \
+         2222222222222222222222222222222222222222)\n\
+         error: failed to push some refs to '/tmp/origin.git'",
+    ];
+    for stderr in rejections {
+        let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
+            "main",
+            "main",
+            "aaaaaaaaaaaa".to_string(),
+            Some("bbbbbbbbbbbb".to_string()),
+            stderr,
+        );
+        match outcome {
+            TargetPushOutcome::NonFastForward {
+                sha,
+                remote_sha,
+                reason,
+            } => {
+                assert_eq!(sha, "aaaaaaaaaaaa");
+                assert_eq!(remote_sha.as_deref(), Some("bbbbbbbbbbbb"));
+                assert!(reason.contains("rejected"), "{reason}");
+            }
+            other => panic!("a non-fast-forward push must be classified, got {other:?} for {stderr}"),
         }
-        other => panic!("a non-fast-forward push must be classified, got {other:?}"),
     }
 }
 
 #[test]
 fn an_ordinary_push_failure_is_still_a_plain_not_pushed() {
-    // Guard against the new arm swallowing unrelated failures.
-    let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
-        "main",
-        "main",
-        "aaaaaaaaaaaa".to_string(),
-        None,
+    // Guard against the new arms swallowing unrelated failures: an auth
+    // failure, and a ref lock held by another process (no compare-and-swap).
+    let failures = [
         "fatal: could not read Username for 'https://github.com': No such device",
-    );
-    assert!(
-        matches!(outcome, TargetPushOutcome::NotPushed { .. }),
-        "an auth failure is not a non-fast-forward"
+        " ! [remote rejected] main -> main (cannot lock ref 'refs/heads/main': Unable to \
+         create '/srv/origin.git/refs/heads/main.lock': File exists.)\n\
+         error: failed to push some refs to '/srv/origin.git'",
+    ];
+    for stderr in failures {
+        let outcome = crate::worktree::git::branch_ops::classify_push_rejection(
+            "main",
+            "main",
+            "aaaaaaaaaaaa".to_string(),
+            None,
+            stderr,
+        );
+        assert!(
+            matches!(outcome, TargetPushOutcome::NotPushed { .. }),
+            "not a non-fast-forward: {stderr}"
+        );
+    }
+}
+
+/// cas-d8ab: a peer published a commit that conflicts with the local
+/// delivery. The single automatic fetch/merge retry refuses, and neither the
+/// local target nor origin moves.
+#[test]
+fn a_conflicting_peer_update_refuses_the_publication_retry_cas_d8ab() {
+    let (temp, origin_path, local_path) = create_repo_with_origin();
+    let peer = temp.path().join("peer");
+    Command::new("git")
+        .args(["clone", origin_path.to_str().unwrap(), peer.to_str().unwrap()])
+        .output()
+        .unwrap();
+    for (key, value) in [("user.email", "peer@test.com"), ("user.name", "Peer")] {
+        Command::new("git").args(["config", key, value]).current_dir(&peer).output().unwrap();
+    }
+    commit_file(&peer, "README.md", "# Peer delivery\n");
+    Command::new("git").args(["push", "-q", "origin", "main"]).current_dir(&peer).output().unwrap();
+    commit_file(&local_path, "README.md", "# Local delivery\n");
+    let origin_tip = || {
+        let out = Command::new("git").args(["rev-parse", "main"]).current_dir(&origin_path).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let peer_tip = origin_tip();
+    let git = GitOperations::new(local_path.clone());
+    let local_tip = git.resolve_commit("main").unwrap();
+
+    match git.publish_merge_target_with_retry("main") {
+        TargetPushOutcome::NonFastForward { sha, reason, .. } => {
+            assert_eq!(sha, local_tip);
+            // pin: the receipt must say the retry ran and refused, not only that the push failed.
+            assert!(reason.contains("automatic fetch/merge retry refused"), "{reason}");
+        }
+        other => panic!("a conflicting peer update must refuse the retry, got {other:?}"),
+    }
+    assert_eq!(git.resolve_commit("main").unwrap(), local_tip, "the local target stays put");
+    assert_eq!(origin_tip(), peer_tip, "origin keeps the peer's tip");
+    let worktrees = Command::new("git").args(["worktree", "list", "--porcelain"]).current_dir(&local_path).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&worktrees.stdout).lines().filter(|line| line.starts_with("worktree ")).count(),
+        1,
+        "the retry's temporary merge worktree is removed"
     );
 }
 

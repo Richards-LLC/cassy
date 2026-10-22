@@ -2393,10 +2393,30 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let retry = runtime.block_on(service.coordination(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
+    // cas-d8ab: count origin fetches. The containment re-check after the
+    // target sync reuses the origin tip that sync fetched.
+    let fetch_log = remote.path().join("fetches.log");
+    let counter = remote.path().join("count-upload-pack");
+    std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
+    std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
     let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
+    let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
+    assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
+
+    // cas-d8ab: origin is unreachable, and charlie's delivery is already in
+    // the local target. The merge says containment is unverified, instead of
+    // re-running the merge and push to end in NOT PUSHED.
+    run_git(&["config", "--unset", "remote.origin.uploadpack"], &repo.root);
+    run_git(&["remote", "set-url", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
+    let offline = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
+    let offline = get_text(&offline);
+    // pin: the operator-facing wording is the cas-d8ab acceptance criterion.
+    assert!(offline.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{offline}");
+    assert!(!offline.contains("NOT PUSHED"), "{offline}");
 }
 
 #[tokio::test]

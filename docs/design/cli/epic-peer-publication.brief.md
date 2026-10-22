@@ -4,13 +4,21 @@
 | --- | --- |
 | First two lines | Readiness names the source host: restore a missing lane here, or publish from its peer host. |
 | Scannable | One readiness verdict, one recovery/publication instruction, one raw shell command on its own line. |
-| Readable | Missing refs drive recovery on the source host; peer labels have control characters stripped before display and comparison. |
+| Readable | Missing refs drive recovery on the source device; legacy host labels are sanitized, and branch controls appear as visible escapes. |
 | Machine output | Existing spawn failure transport is unchanged; this is its error string, with no new JSON document or fields. |
 | Omitted | Creation history stays in task deliverables; no source-host path or automatic branch recreation is printed. |
 
 The branch and originating host travel together in sync-safe task deliverables.
 A mismatched branch or legacy task uses a neutral missing-lane diagnostic.
 A previously observed remote ref still refuses automatic resurrection. Existing published adoption never invents an origin host.
+
+Device identity takes precedence over hostname when recorded. This distinguishes
+peers sharing a default hostname and still recognizes a renamed source device.
+Legacy records retain hostname comparison. A control-bearing branch gets a
+visible escaped label and manual rename/publish advice, with no command.
+Other remedies use one shared argument formatter: the ASCII allowlist is bare,
+all other printable arguments use ordinary single quotes. Multiple command
+steps validate together, so one unsafe ref suppresses the whole remedy block.
 
 ## Critique
 

@@ -202,6 +202,7 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
         epic.deliverables.epic_branch_origin = Some(cas_types::EpicBranchOrigin {
             branch: "epic/unpublished".into(),
             host: format!("\n{host}\r\u{7}"),
+            device_id: None,
         });
         tasks.update(&epic).unwrap();
         git(repo, &["branch", "-D", "epic/unpublished"]);

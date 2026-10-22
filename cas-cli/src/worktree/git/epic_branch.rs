@@ -33,6 +33,40 @@ impl EpicBranchReadiness {
 }
 
 impl GitOperations {
+    /// Render copyable Git commands atomically, without shell expansion.
+    /// Callers own Git's option/refspec semantics and any fixed separators.
+    pub(crate) fn git_remedies<const N: usize>(
+        commands: [&[&str]; N],
+    ) -> Result<[String; N], String> {
+        for args in commands {
+            if let Some(value) = args.iter().find(|value| value.chars().any(char::is_control)) {
+                return Err(format!(
+                    "branch name contains control characters: {}\nRename it or push it by hand; no copyable command is available.",
+                    Self::visible_git_label(value),
+                ));
+            }
+        }
+        Ok(commands.map(|args| {
+            let words = args.iter().map(|value| {
+                if !value.is_empty() && value.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || b"/._+@-".contains(&byte)) {
+                    (*value).to_string()
+                } else {
+                    format!("'{}'", value.replace('\'', "'\\''"))
+                }
+            }).collect::<Vec<_>>();
+            format!("git {}", words.join(" "))
+        }))
+    }
+
+    /// Display synced labels without sending terminal control characters.
+    pub(crate) fn visible_git_label(value: &str) -> String {
+        value.chars().map(|character| {
+            if character.is_control() { character.escape_default().to_string() }
+            else { character.to_string() }
+        }).collect()
+    }
+
     /// First use, rather than creation, publishes an epic. An absent remote
     /// is verified by ls-remote, never inferred from a failed fetch/cache miss.
     /// Creation uses an empty expected-old lease; an existing remote is never
@@ -293,9 +327,16 @@ impl GitOperations {
         origin: Option<&cas_types::EpicBranchOrigin>,
         previously_published: bool,
     ) -> String {
+        let [publish, inspect] = match Self::git_remedies([
+            &["push", "origin", branch], &["reflog", "--all"],
+        ]) {
+            Ok(commands) => commands,
+            Err(refusal) => return refusal,
+        };
+        let label = Self::visible_git_label(branch);
         if previously_published {
             return format!(
-                "previously published '{branch}' is now absent on origin; refusing automatic resurrection"
+                "previously published '{label}' is now absent on origin; refusing automatic resurrection"
             );
         }
         let clean_host = |host: &str| {
@@ -312,18 +353,23 @@ impl GitOperations {
         {
             let local_host =
                 crate::cloud::device::DeviceConfig::hostname().map(|host| clean_host(&host));
-            if local_host.as_deref() == Some(host.as_str()) {
+            let local_device = crate::cloud::device::DeviceConfig::load().ok().flatten();
+            let source_here = match origin.and_then(|origin| origin.device_id.as_deref())
+                .filter(|id| !id.trim().is_empty()) {
+                Some(id) => local_device.as_ref().is_some_and(|device| device.device_id == id),
+                None => local_host.as_deref() == Some(host.as_str()),
+            };
+            if source_here {
                 return format!(
-                    "epic branch missing on originating host {host}\nRestore {branch} from a known commit or backup; inspect history:\ngit reflog --all"
+                    "epic branch missing on originating host {host}\nRestore {label} from a known commit or backup; inspect history:\n{inspect}"
                 );
             }
             return format!(
-                "epic branch not published by {host}\nNo local/origin ref; publish on {host}, then retry:\ngit push origin {}",
-                shell_words::quote(branch),
+                "epic branch not published by {host}\nNo local/origin ref; publish on {host}, then retry:\n{publish}",
             );
         }
         format!(
-            "epic branch '{branch}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
+            "epic branch '{label}' doesn't resolve locally or on origin\nLane may be unpublished or removed; no lane was recreated.\nAsk the originating host to publish or restore the branch."
         )
     }
 

@@ -541,6 +541,9 @@ pub struct FactoryBranchStart {
 pub struct EpicBranchOrigin {
     pub branch: String,
     pub host: String,
+    /// Stable source identity; legacy records fall back to their host label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 /// Deliverables and durable lifecycle evidence for a task.

@@ -536,14 +536,27 @@ fn test_init_json() {
             .output()
             .unwrap();
         if state == "directory" {
-            assert!(!output.status.success(), "MCP provisioning failure must fail init");
-            assert!(output.stdout.is_empty(), "failed init must not report initialized");
+            assert!(
+                !output.status.success(),
+                "MCP provisioning failure must fail init"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "failed init must not report initialized"
+            );
             assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
-            assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
+            assert!(
+                mcp_path.is_dir(),
+                "failed init must preserve the obstructing directory"
+            );
             continue;
         }
 
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["status"], "initialized");
         assert_eq!(report["agents"]["claude"], true);
@@ -553,7 +566,10 @@ fn test_init_json() {
         )
         .unwrap();
         // pin: Claude's MCP launch contract must match the durable server entry.
-        assert_eq!(mcp["mcpServers"]["cas"], serde_json::json!({"command": "cas", "args": ["serve"]}));
+        assert_eq!(
+            mcp["mcpServers"]["cas"],
+            serde_json::json!({"command": "cas", "args": ["serve"]})
+        );
         if state == "existing" {
             assert_eq!(mcp["mcpServers"]["other"], other_server);
         }

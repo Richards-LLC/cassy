@@ -11,8 +11,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
 use anyhow::Context;
+use clap::Parser;
 use crossterm::{
     execute,
     style::{Color, Print, SetForegroundColor},

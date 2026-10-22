@@ -2885,7 +2885,8 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         }
         let path = root.join("config.toml");
         let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        config["factory"]["epic_base_branch"] = toml_edit::value(if branch == "release/shared-state" { branch } else { "release/base" });
+        let configured_base = if branch == "release/shared-state" { branch } else { "release/base" };
+        config["factory"]["epic_base_branch"] = toml_edit::value(configured_base);
         std::fs::write(&path, config.to_string()).unwrap();
         if branch == "repair/config-unreadable" {
             // A directory fails config reading on every host, including root.

@@ -227,6 +227,22 @@ impl SyncQueue {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Latest lifecycle guard per task, without a recent-history limit that
+    /// could hide a still-protected delivery behind unrelated conflicts.
+    pub(crate) fn latest_task_lifecycle_conflicts(&self) -> Result<Vec<(String, String)>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, discarded_row_json FROM sync_conflicts
+             WHERE id IN (
+                 SELECT MAX(id) FROM sync_conflicts
+                 WHERE entity_type = 'task' AND strategy = 'task_lifecycle_guard'
+                 GROUP BY entity_id
+             ) ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Distinct task ids whose pulled row was parked as a
     /// [`PULL_ID_COLLISION`](crate::cloud::PULL_ID_COLLISION), most recent
     /// first. `cas doctor` reports these because each one is a foreign row

@@ -3,7 +3,7 @@
 | Field | Sentence |
 | --- | --- |
 | First two lines | Whether the pull completed across both personal and team scopes, how many errors need attention, and which peer close was skipped when local lifecycle authority retains the row. |
-| Scannable | One verdict line with the error count and sync counts, followed by one indented row per pull error in non-verbose mode. |
+| Scannable | One verdict line with the error count and sync counts, followed by one indented row per distinct pull error across both scopes in non-verbose mode. |
 | Readable | A skipped peer close names the task, remote and retained statuses, guard, and `cas cloud conflicts --json` remedy; `--verbose` keeps the existing detailed count rows and conflict diagnostics. |
 | Machine output | `--json` remains the existing single sync receipt; human error rows are not emitted into the machine document. |
 | Omitted | Successful per-kind rows and conflict details stay collapsed in the default view and remain available under `--verbose`. |
@@ -23,6 +23,8 @@
   matching other CLI summaries: `LC_ALL=C` uses `-`; UTF-8 keeps `·`.
 - Held-personal push warnings receive the same separator; renderer snapshots
   pin their expected locale through `TestEnvGuard`.
+- Personal and team pulls may report the same persisted lifecycle guard; merging
+  their summaries counts and prints an identical diagnostic once.
 
 ## Critique
 

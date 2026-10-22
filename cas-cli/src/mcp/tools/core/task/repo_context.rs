@@ -741,27 +741,33 @@ pub(crate) fn unanchored_task_start_warning(
     )
 }
 
-fn candidate_paths(cas_root: &Path) -> Result<Vec<candidate_probe::Candidate>, String> {
+fn candidate_paths(cas_root: &Path) -> (Vec<candidate_probe::Candidate>, bool) {
     let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
     let mut raw = vec![cas_root.to_path_buf()];
+    let mut scan_incomplete = false;
     if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
         && let Ok(known) = store.list()
     {
         raw.extend(known.into_iter().map(|repo| repo.path));
+    } else {
+        scan_incomplete = true;
     }
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for path in raw {
         if deadline.remaining().is_zero() {
-            return Err("WORK TARGET REPOSITORY UNAVAILABLE: known-root scan exceeded its 5s budget; retry after storage access recovers".to_string());
+            scan_incomplete = true;
+            break;
         }
-        if let Some(candidate) = candidate_probe::probe(&path, deadline)?
-            && seen.insert(candidate.repo_root.clone())
-        {
-            candidates.push(candidate);
+        match candidate_probe::probe(&path, deadline) {
+            Ok(Some(candidate)) if seen.insert(candidate.repo_root.clone()) => {
+                candidates.push(candidate);
+            }
+            Ok(_) => {}
+            Err(_) => scan_incomplete = true,
         }
     }
-    Ok(candidates)
+    (candidates, scan_incomplete)
 }
 
 fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
@@ -924,8 +930,8 @@ pub(crate) fn resolve_repo_context(
     // The caller's checkout is direct repository evidence. Resolve it before
     // unrelated host roots can exhaust the scan budget or stall on storage.
     // Explicit bindings above remain authoritative, including stale refusals.
-    if let Some(local) =
-        candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET))?
+    if let Ok(Some(local)) =
+        candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET))
         && local.identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
         })
@@ -940,7 +946,8 @@ pub(crate) fn resolve_repo_context(
     }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    for candidate in candidate_paths(cas_root)? {
+    let (candidates, scan_incomplete) = candidate_paths(cas_root);
+    for candidate in candidates {
         let identities = candidate.identities;
         if identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
@@ -976,6 +983,9 @@ pub(crate) fn resolve_repo_context(
                 target_branch,
             })
         }
+        [] if scan_incomplete => Err(
+            "WORK TARGET REPOSITORY UNAVAILABLE: known-root scan did not complete; retry after storage access recovers".to_string(),
+        ),
         [] => Err(format!(
             "⚠️ WORK TARGET REPOSITORY MISMATCH\n\n\
              Task targets `{}` (normalized `{}`), but no current-host known \

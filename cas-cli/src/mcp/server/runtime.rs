@@ -1563,6 +1563,22 @@ env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTU
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn worker_proxy_filters_boot_and_reload_config_preserving_supervisor_gh_1047() {
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = tempfile::tempdir().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        std::fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_proxy,
+            "[servers.viktor]\ntransport = 'http'\n\
+             url = 'https://viktor.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
+        ).unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
+        // The shared guard redirects XDG and scrubs provider credentials;
+        // keep the poisoned ambient config above to prove that boundary.
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");

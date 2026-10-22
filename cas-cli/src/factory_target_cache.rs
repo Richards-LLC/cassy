@@ -1955,7 +1955,12 @@ mod tests {
             min_idle_secs: 0,
             retention_count: 1,
         };
-        let report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        // cas-9725 counts projected builder growth (10 GiB per lane) against
+        // free space, so the real host disk decides "normal". Pin a roomy
+        // filesystem: 1% used, only the 1% watermark is under pressure.
+        let gib = 1024u64.pow(3);
+        let roomy = |_: &Path, policy| Ok(capacity_from_bytes(1000 * gib, 999 * gib, policy));
+        let report = inspect_with_probe(&cas, pressure, &[], &[], true, roomy).unwrap();
         assert_eq!(
             report.caches[0].disposition,
             CacheDisposition::Retained,
@@ -1963,7 +1968,7 @@ mod tests {
         );
         task.status = cas_types::TaskStatus::Closed;
         tasks.update(&task).unwrap();
-        let normal = inspect(
+        let normal = inspect_with_probe(
             &cas,
             TargetCachePolicy {
                 high_watermark_percent: 100,
@@ -1973,11 +1978,12 @@ mod tests {
             &[],
             &[],
             true,
+            roomy,
         )
         .unwrap();
         assert!(!normal.filesystem.pressure);
         assert_eq!(normal.caches[0].disposition, CacheDisposition::Retained);
-        let mut report = inspect(&cas, pressure, &[], &[], true).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], true, roomy).unwrap();
         assert!(report.filesystem.pressure);
         assert_eq!(report.caches[0].bytes, 11);
         assert_eq!(
@@ -2009,7 +2015,7 @@ mod tests {
             .open(target.join("debug/.cargo-lock"))
             .unwrap();
         lock.try_lock_exclusive().unwrap();
-        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], false, roomy).unwrap();
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
         assert_ne!(
             report.caches[0].disposition,
@@ -2019,7 +2025,7 @@ mod tests {
         assert!(target.exists());
         FileExt::unlock(&lock).unwrap();
         drop(lock);
-        let mut report = inspect(&cas, pressure, &[], &[], false).unwrap();
+        let mut report = inspect_with_probe(&cas, pressure, &[], &[], false, roomy).unwrap();
         cleanup_selected(&cas, &mut report, pressure, &[]).unwrap();
         assert_eq!(report.caches[0].disposition, CacheDisposition::Reclaimed);
         assert!(!target.exists());

@@ -6070,24 +6070,33 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
     }
 }
 
-/// cas-c85e (GH #997) fixture: a repo whose selector is
-/// `project:github.com/org/c85e-target`, a live `epic/c85e` lane, and alice's
-/// committed worktree. Returns the repo, env guard, and CAS root.
-fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
+/// cas-c85e (GH #997) fixture: a pinned project with a real local origin,
+/// a published `epic/c85e` lane, and alice's committed worktree. Retain origin
+/// for repeated-merge containment and origin-only target assertions.
+fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf, TempDir) {
     let repo = GitRepo::new();
     let mut env = test_env();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     run_git(
-        &["remote", "add", "origin", "git@github.com:org/c85e-target.git"],
+        &["init", "--bare", remote.path().to_str().unwrap()],
         &repo.root,
     );
-    let remote = repo.root.join(".git/c85e-origin.git");
-    run_git(&["init", "--bare", remote.to_str().unwrap()], &repo.root);
-    run_git(&["config", &format!("url.{}.insteadOf", remote.display()),
-        "git@github.com:org/c85e-target.git"], &repo.root);
+    let origin = "git@github.com:org/c85e-target.git";
+    run_git(&["remote", "add", "origin", origin], &repo.root);
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", remote.path().display()),
+            origin,
+        ],
+        &repo.root,
+    );
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
-    // Git transport is local; the declared cross-repo selector stays stable.
+    // Keep the stable selector (cas-e718) while disabling System A. Git
+    // transport uses the retained local origin rather than the public host.
+    let project_config = "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n";
     std::fs::write(cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"github.com/org/c85e-target\"\n[worktrees]\nenabled = false\n")
+        format!("{project_config}[worktrees]\nenabled = false\n"))
         .unwrap();
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
     run_git(&["branch", "epic/c85e"], &repo.root);
@@ -6098,8 +6107,14 @@ fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
     std::fs::write(wt_path.join("c85e-work.txt"), "moved task work").unwrap();
     run_git(&["add", "c85e-work.txt"], &wt_path);
     run_git(&["commit", "-m", "moved task work"], &wt_path);
+    std::fs::create_dir_all(wt_path.join(".cas")).unwrap();
+    std::fs::write(wt_path.join(".cas/config.toml"), project_config).unwrap();
+    run_git(
+        &["push", "origin", "main", "epic/c85e", "factory/alice"],
+        &repo.root,
+    );
     env.set_current_dir(&repo.root);
-    (repo, env, cas_root, wt_path)
+    (repo, env, cas_root, wt_path, remote)
 }
 
 const C85E_SELECTOR: &str = "project:github.com/org/c85e-target";
@@ -6117,7 +6132,7 @@ fn c85e_trunk_target() -> WorkTarget {
 /// the epic lane — never on main — and says so.
 #[tokio::test]
 async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
-    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let (repo, _env, cas_root, _wt, origin) = c85e_repo_with_alice_work();
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
@@ -6160,6 +6175,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
         (None, "to epic/c85e"),
         (Some(task.id.clone()), "already in epic/c85e"),
     ] {
+        let epic_before = git_stdout(&repo.root, &["rev-parse", "epic/c85e"]);
         let mut req = coord_req("worktree_merge");
         req.id = Some("factory/alice".to_string());
         req.task_id = task_id.clone();
@@ -6177,7 +6193,24 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
             !text.contains("to main") && !text.contains("epic branch main"),
             "must never land on or label trunk (task_id={task_id:?}):\n{text}"
         );
+        if task_id.is_some() {
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+                epic_before,
+                "a published contained delivery must not create another merge"
+            );
+        }
     }
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/epic/c85e"]),
+        git_stdout(&repo.root, &["rev-parse", "epic/c85e"]),
+        "the epic delivery must be published"
+    );
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
+        main_before,
+        "origin main must not move"
+    );
     assert!(
         git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "epic/c85e"])
             .contains("c85e-work.txt"),
@@ -6197,7 +6230,7 @@ async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
 /// receipted as trunk, never as "epic branch main".
 #[tokio::test]
 async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
-    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let (repo, _env, cas_root, _wt, _origin) = c85e_repo_with_alice_work();
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");

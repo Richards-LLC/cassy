@@ -7801,12 +7801,14 @@ impl CasCore {
         {
             task_commit_identity.known_commits.push(current_tip);
         }
-        let commit_receipt_window = {
+        let (commit_receipt_window, has_recorded_qa_boundary) = {
             let lease_history = self
                 .open_agent_store()
                 .ok()
                 .and_then(|store| store.get_lease_history(&req.id, None).ok())
                 .unwrap_or_default();
+            let has_recorded_boundary =
+                task_attribution::has_recorded_delivery_boundary(&task, &lease_history);
             let mut window = resolve_task_commit_receipt_window(
                 task.created_at,
                 &lease_history,
@@ -7815,7 +7817,7 @@ impl CasCore {
             if supervisor_override {
                 window.supervisor_override_reason = req.reason.clone();
             }
-            Some(window)
+            (Some(window), has_recorded_boundary)
         };
 
         // cas-7f60: set when the epic's branch is gone and its children were
@@ -8347,7 +8349,10 @@ impl CasCore {
             }).flatten();
             let qa_receipt = squash_anchor.as_deref().or(delivery_receipt)
                 .or(released_head.as_deref());
-            let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
+            // As in independent QA, an integrated receipt without a recorded
+            // boundary owns its own delta, not a creation-time Git window.
+            let qa_window = commit_receipt_window.as_ref().filter(|_| has_recorded_qa_boundary);
+            let attributed_paths = qa_window.and_then(|window| {
                 task_attribution::qa_paths(
                     &evidence_repo,
                     &resolved_parent_branch,
@@ -8371,7 +8376,7 @@ impl CasCore {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
                 Err(message) => return Ok(Self::tool_error(message)),
             }
-            let qa_base = commit_receipt_window.as_ref().and_then(|window| {
+            let qa_base = qa_window.and_then(|window| {
                 let head = super::qa_evidence_gate::delivered_head(
                     &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
                 )?;

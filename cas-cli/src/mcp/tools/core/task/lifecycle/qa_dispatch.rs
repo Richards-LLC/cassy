@@ -1300,12 +1300,8 @@ impl CasCore {
                 .ok()
                 .and_then(|store| store.get_lease_history(&task.id, None).ok())
                 .unwrap_or_default();
-            let has_recorded_boundary = task.deliverables.factory_branch_start.is_some()
-                || task.deliverables.factory_branch_anchor.is_some()
-                || !task.deliverables.historical_factory_branch_anchors.is_empty()
-                || history.iter().any(|entry| {
-                    matches!(entry.event_type.as_str(), "claimed" | "transferred")
-                });
+            let has_recorded_boundary =
+                super::close_ops::task_attribution::has_recorded_delivery_boundary(task, &history);
             let base = if has_recorded_boundary {
                 let window = super::close_ops::resolve_task_commit_receipt_window(
                     task.created_at,

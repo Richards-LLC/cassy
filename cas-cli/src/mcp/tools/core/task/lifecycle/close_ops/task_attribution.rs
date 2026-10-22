@@ -729,6 +729,21 @@ pub(super) fn qa_paths(
     Some(paths)
 }
 
+/// A creation timestamp alone cannot identify an integrated delivery's base:
+/// the receipt clock-skew allowance may include an unrelated preceding commit.
+/// Both QA gates retain multi-commit attribution only with a durable boundary.
+pub(crate) fn has_recorded_delivery_boundary(
+    task: &Task,
+    history: &[cas_store::LeaseHistoryEntry],
+) -> bool {
+    task.deliverables.factory_branch_start.is_some()
+        || task.deliverables.factory_branch_anchor.is_some()
+        || !task.deliverables.historical_factory_branch_anchors.is_empty()
+        || history.iter().any(|entry| {
+            matches!(entry.event_type.as_str(), "claimed" | "transferred")
+        })
+}
+
 /// The immutable baseline a scoped proof must be measured against: the first
 /// parent of the earliest commit in this task's delivery.
 ///

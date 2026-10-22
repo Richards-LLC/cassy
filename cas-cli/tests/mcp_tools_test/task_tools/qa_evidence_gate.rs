@@ -441,6 +441,32 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
     );
 }
 
+/// With no recorded work boundary, the receipt owns only its own delta.
+/// A nearby target commit's skipped test must not block this docs delivery.
+#[tokio::test]
+async fn close_ignores_pre_task_skip_without_recorded_base_cas_be50() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env, &[
+        ("tests/unrelated.spec.ts", "test.skip('unrelated', () => {});\n"),
+        ("docs/guide.md", "# This delivery\n"),
+    ], "");
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.created_at = chrono::DateTime::parse_from_rfc3339(
+        &git(&fx.repo, &["show", "-s", "--format=%cI", "HEAD^"])
+    ).unwrap().with_timezone(&chrono::Utc);
+    tasks.update(&task).unwrap();
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--ff-only", &head]);
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(head);
+    let result = fx.core.cas_task_close(Parameters(request)).await.unwrap();
+    let text = extract_text(result);
+    assert!(!text.contains("adds test skip/focus markers"), "{text}");
+    assert_eq!(fx.status(), TaskStatus::Closed, "{text}");
+}
+
 #[tokio::test]
 async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
     let mut test_env = TestEnvGuard::temp_home();

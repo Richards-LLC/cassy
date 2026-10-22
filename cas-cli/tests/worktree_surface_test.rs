@@ -1026,6 +1026,15 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
 
 #[tokio::test]
 async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
+    cross_repo_merge_mutates_only_declared_repo(false).await;
+}
+
+#[tokio::test]
+async fn worker_only_cross_repo_merge_uses_reviewed_target_repo_cas_be50() {
+    cross_repo_merge_mutates_only_declared_repo(true).await;
+}
+
+async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
     env.set("HOME", home.path());
@@ -1040,9 +1049,23 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
+    // Keep the new managed-merge fixture's transport entirely local while
+    // retaining a GitHub origin for its CI identity.
+    let remote = TempDir::new().unwrap();
+    if implicit {
+        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
+        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
+            "git@github.com:org/work-b.git"], &repo_b.root);
+        run_git(&["push", "origin", "main"], &repo_b.root);
+    }
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
     disable_system_a(&cas_root_a);
+    if implicit {
+        std::fs::write(cas_root_b.join("config.toml"),
+            "[project]\ncanonical_id = 'cas-be50-target'\n").unwrap();
+        cas::store::known_repos::register_repo_strict(&repo_b.root).unwrap();
+    }
 
     let task_store = open_task_store(&cas_root_a).expect("open repo A task store");
     let mut task = Task::new(
@@ -1051,7 +1074,9 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     );
     task.assignee = Some("alice".to_string());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "remote:github.com/org/work-b".to_string(),
+        repo_selector: if implicit { "project:cas-be50-target" } else {
+            "remote:github.com/org/work-b"
+        }.to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task binding");
@@ -1062,6 +1087,21 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     run_git(&["add", "repo-b-work.txt"], &wt_path);
     run_git(&["commit", "-m", "repo B work"], &wt_path);
 
+    if implicit {
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some("factory/alice".into());
+        let head = git_stdout(&repo_b.root, &["rev-parse", "factory/alice"]);
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        run_git(&["push", "origin", "factory/alice"], &repo_b.root);
+        task.demo_statement = "Read the delivered file in repo B".into();
+        task_store.update(&task).unwrap();
+        // Test-only review record: the exact source already has a verdict.
+        cas_store::waive_qa_pass(
+            &cas_root_a, &task.id, "fixture-reviewer", "alice", "factory/alice",
+            &head, "fixture: exact cross-repo delivery reviewed", chrono::Utc::now(),
+        ).unwrap();
+    }
+
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
@@ -1070,7 +1110,7 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     let svc = make_service(cas_root_a);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".to_string());
-    req.task_id = Some(task.id);
+    req.task_id = (!implicit).then_some(task.id);
     req.allow_trunk = Some(true);
     req.cleanup = Some(false);
     let result = svc

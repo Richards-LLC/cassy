@@ -17,6 +17,11 @@ The service retries startup publication within one shared deadline. If those
 attempts fail, launchd supervises the next attempt; `hub stop` removes the
 bootstrap job before stopping any remaining process.
 
+Required-mode start and restart refusals keep the signed-in-socket retry on its
+own line and the explicit loopback alternative on the next line. Each command
+remains complete and copyable, and each remedy line fits 80 columns. CLI/socket
+cause rows and JSON refusal semantics remain unchanged.
+
 ## Finding disposition
 
 - F01: fixed. Required-mode refusal leads with the policy and refused operation,

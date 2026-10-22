@@ -1485,9 +1485,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub orphans: Option<bool>,
 
-    /// Preview cleanup without making changes.
+    /// Preview destructive cleanup; gc_cleanup still performs baseline metadata maintenance.
     #[schemars(
-        description = "Preview cleanup; gc_cleanup caches default to true."
+        description = "Preview destructive cleanup; gc_cleanup still performs baseline metadata maintenance and caches default to dry-run."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,

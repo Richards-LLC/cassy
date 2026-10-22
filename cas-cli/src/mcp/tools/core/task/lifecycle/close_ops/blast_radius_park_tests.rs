@@ -406,6 +406,17 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     );
 
     let doc_path = "docs/design/cli/update-managed-files.brief.md";
+    // An older receipt whose range includes this obvious source input must
+    // be rejected without searching Rust source for its filename.
+    std::fs::write(f.worker_path.join("operator.py"), "print('next')\n").unwrap();
+    git(&f.worker_path, &["add", "operator.py"]);
+    git(&f.worker_path, &["commit", "-q", "-m", "update operator script"]);
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    for filter in ["test(gear)", "test(adjacent)"] {
+        crate::factory_worker_check::record_passing_test_for_tests(
+            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", filter,
+        );
+    }
     std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
     std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();
     git(&f.worker_path, &["add", doc_path]);
@@ -420,17 +431,19 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     // The worker now starts another task whose Rust source names this brief.
     // The supervisor still closes the parked delivery's immutable tree.
     git(&f.worker_path, &["checkout", "-q", "-b", "factory/next-task"]);
-    let source = std::fs::read_to_string(f.worker_path.join(source_path)).unwrap();
     std::fs::write(
         f.worker_path.join(source_path),
-        format!("{source}\nconst NEXT_TASK: &str = include_str!(\"../../../{doc_path}\");\n"),
+        format!("pub fn turn() {{}}\nconst NEXT_TASK: &str = include_str!(\"../../../{doc_path}\");\n"),
     ).unwrap();
     git(&f.worker_path, &["add", source_path]);
     git(&f.worker_path, &["commit", "-q", "-m", "next task embeds brief"]);
 
     git(&f.dir.path(), &["merge", "--ff-only", LANE]);
     git(&f.dir.path(), &["push", "-q", "origin", "main"]);
+    let trace = f.dir.path().join("close-git-trace.jsonl");
+    env.set("GIT_TRACE2_EVENT", &trace);
     let closed = call(&f.supervisor, close).await;
+    env.remove("GIT_TRACE2_EVENT");
     assert!(closed.contains("Closed task"), "{closed}");
     let task = f.task();
     assert_eq!(task.status, TaskStatus::Closed);
@@ -440,6 +453,19 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "the close must record the receipt rebind: {}",
         task.notes
     );
+    // Count real Git commands rather than inspecting cache internals. Both
+    // receipt filters and the close's package/audit readers share this lookup.
+    let trace = std::fs::read_to_string(trace).unwrap();
+    let greps: Vec<Vec<String>> = trace.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "start")
+        .filter_map(|event| Some(event["argv"].as_array()?.iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect::<Vec<_>>()))
+        .filter(|args| args.get(1).is_some_and(|arg| arg == "grep") && args.iter().any(|arg| arg == "-lF"))
+        .collect();
+    let brief = Path::new(doc_path).file_name().unwrap().to_str().unwrap();
+    assert_eq!(greps.iter().filter(|args| args.iter().any(|arg| arg == brief)).count(), 1, "one doc lookup per close: {greps:?}");
+    assert!(greps.iter().all(|args| !args.iter().any(|arg| arg == "operator.py")), "cheap extension checks run before grep: {greps:?}");
+    assert!(greps.iter().all(|args| args.iter().any(|arg| arg == &delivered_tip)), "source searches use the delivered tree: {greps:?}");
 }
 
 /// AC2: a worker receipt in `widget` at the parked tip already covers

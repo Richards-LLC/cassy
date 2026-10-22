@@ -1,0 +1,21 @@
+80.dark
+✓ [1/1] Distributing built-ins to user-leveldone                           197ms
+  Distributing built-ins to user-level
+    [WARN] ~/.claude does not exist; skipping (Claude Code not installed?)
+    [OK] ~/.codex: built-ins up to date
+    [WARN] Two finish skills preserved: ~/.agents/skills/finish/SKILL.md and
+           ~/.codex/skills/finish/SKILL.md; review both custom entrypoints.
+    ~/.claude-a@b.test: finish 0 updated, 0 preserved, 0 removed
+    ~/.codex-a@b.test: finish 0 updated, 0 preserved, 0 removed
+    ~/.cas/codex-base: finish 0 updated, 0 preserved, 0 removed
+
+c-locale
+[OK]    [1/1] Distributing built-ins to user-leveldone                     204ms
+  Distributing built-ins to user-level
+    [WARN] ~/.claude does not exist; skipping (Claude Code not installed?)
+    [OK] ~/.codex: built-ins up to date
+    [WARN] Two finish skills preserved: ~/.agents/skills/finish/SKILL.md and
+           ~/.codex/skills/finish/SKILL.md; review both custom entrypoints.
+    ~/.claude-a@b.test: finish 0 updated, 0 preserved, 0 removed
+    ~/.codex-a@b.test: finish 0 updated, 0 preserved, 0 removed
+    ~/.cas/codex-base: finish 0 updated, 0 preserved, 0 removed

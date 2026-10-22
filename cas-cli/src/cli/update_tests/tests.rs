@@ -676,6 +676,42 @@ fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
 }
 
 #[test]
+fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
+    use cas_mux::SupervisorCli;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home();
+    let accounts = [".codex", ".codex-named@example.com", ".cas/codex-base"];
+    for account in accounts {
+        std::fs::create_dir_all(home.join(account)).unwrap();
+    }
+    let cli = update_test_cli(true);
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    let project = home.join("project");
+    crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
+    let copies: Vec<_> = accounts.iter().map(|account| home.join(account).join("skills/finish/SKILL.md"))
+        .chain(std::iter::once(project.join(".codex/skills/finish/SKILL.md"))).collect();
+    assert!(copies.iter().all(|path| path.is_file()), "seed the existing builtin upgrade case");
+
+    let personal = home.join(".agents/skills/finish/SKILL.md");
+    let customized = "---\nname: finish\ndescription: My wrap-up\n---\nKeep my personal procedure.\n";
+    std::fs::create_dir_all(personal.parent().unwrap()).unwrap();
+    std::fs::write(&personal, customized).unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
+    for builtin in copies {
+        assert_eq!([&personal, &builtin].iter().filter(|path| path.is_file()).count(), 1,
+            "Codex must see exactly the personal finish, not {} too", builtin.display());
+    }
+    assert_eq!(std::fs::read_to_string(&personal).unwrap(), customized);
+    // A new account and another update must keep the same precedence.
+    let fresh = home.join(".codex-fresh@example.com");
+    std::fs::create_dir_all(&fresh).unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert!(!fresh.join("skills/finish/SKILL.md").exists());
+    assert_eq!(std::fs::read_to_string(personal).unwrap(), customized);
+}
+
+#[test]
 fn test_is_newer() {
     assert!(is_newer("0.3.0", "0.2.0"));
     assert!(is_newer("0.2.1", "0.2.0"));

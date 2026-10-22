@@ -29,6 +29,9 @@ use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_c
 use crate::cli::interactive;
 use crate::ui::components::OutputMode;
 
+pub(crate) const INCOMPLETE_INIT_RECOVERY: &str =
+    "Initialization is incomplete.\nFix the reported error, then re-run: cas init --force";
+
 /// Default overall timeout for `cas init`. If init is still running past this,
 /// the watchdog aborts the process with a clear error so a hang never consumes
 /// a CPU core indefinitely (see cas-bf06). Opt out via `CAS_INIT_NO_TIMEOUT=1`,
@@ -482,9 +485,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
         ),
     }
     if result.is_err() && cas_store_present(&cwd.join(".cas")) {
-        result.context(
-            "Initialization is incomplete.\nFix the reported error, then re-run: cas init --force",
-        )
+        result.context(INCOMPLETE_INIT_RECOVERY)
     } else {
         result
     }

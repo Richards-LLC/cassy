@@ -356,6 +356,7 @@ impl Config {
             ("qa.release.env".into(), self.get("qa.release.env").unwrap()),
             ("qa.release.timeout_secs".into(), self.get("qa.release.timeout_secs").unwrap()),
             ("qa.release.retention_days".into(), self.get("qa.release.retention_days").unwrap()),
+            ("qa.release.max_cells".into(), self.get("qa.release.max_cells").unwrap()),
             ("qa.release.components".into(), self.get("qa.release.components").unwrap()),
             ("qa.release.target_env".into(), self.get("qa.release.target_env").unwrap()),
             ("qa.release.gate_env".into(), self.get("qa.release.gate_env").unwrap()),

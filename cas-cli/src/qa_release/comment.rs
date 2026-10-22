@@ -59,6 +59,12 @@ pub fn render_comment(pack: &Pack) -> String {
             body.push_str(&format!("- {}: {by}\n", pr.subject()));
         }
     }
+    if !pack.matrix.is_empty() {
+        body.push_str("\n**Golden-set coverage**\n");
+        for coverage in &pack.matrix {
+            body.push_str(&format!("- {}\n", coverage.line()));
+        }
+    }
     if let Some(summary) = pack.hand_walk.as_ref().and_then(|h| h.summary(3)) {
         body.push_str(&format!("\n**Hand-walk debt** (never changes the verdict): {summary}\n"));
     }

@@ -5,7 +5,7 @@
 //! 2. Confirmation with file summary
 //! 3. Animated execution
 
-use std::io::{Write, stdout};
+use std::io::{IsTerminal, Write, stdout};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -1129,17 +1129,21 @@ where
     F: FnOnce() -> anyhow::Result<String>,
 {
     let mut stdout = stdout();
+    let is_tty = stdout.is_terminal();
     let started = Instant::now();
     info!(phase = label, "cas init: phase starting");
 
-    // Show spinner
+    // Transient progress belongs only on a terminal. Pipes receive the
+    // completed phase once, including when the wizard requests animation.
     let frames = spinner_frames_for_mode(OutputMode::detect());
-    print_colored("  ", InitStyle::Text)?;
-    print_colored(&format!("{}", frames[0]), InitStyle::WarningMark)?;
-    print_colored(&format!(" {label}..."), InitStyle::Text)?;
-    stdout.flush()?;
+    if is_tty {
+        print_colored("  ", InitStyle::Text)?;
+        print_colored(&format!("{}", frames[0]), InitStyle::WarningMark)?;
+        print_colored(&format!(" {label}..."), InitStyle::Text)?;
+        stdout.flush()?;
+    }
 
-    if animate {
+    if animate && is_tty {
         // Animate spinner briefly
         for i in 0..8 {
             thread::sleep(Duration::from_millis(50));
@@ -1158,7 +1162,9 @@ where
     match action() {
         Ok(result) => {
             // Show success
-            print!("\r");
+            if is_tty {
+                print!("\r");
+            }
             print_colored("  ✓ ", InitStyle::SuccessMark)?;
             print_colored(label, InitStyle::Text)?;
             // Pad to clear any remnants
@@ -1176,7 +1182,9 @@ where
         }
         Err(e) => {
             // Show failure
-            print!("\r");
+            if is_tty {
+                print!("\r");
+            }
             print_colored("  ✗ ", InitStyle::ErrorMark)?;
             print_colored(label, InitStyle::Text)?;
             print_colored(" — ", InitStyle::Text)?;

@@ -502,6 +502,26 @@ fn has_cas_tool_hooks(hooks: &Path) -> io::Result<bool> {
     Ok(cas_pre_tool_handlers(&mut value).next().is_some())
 }
 
+/// Keep controls, bidi formatting and Unicode line separators visible without
+/// changing the path used for filesystem operations.
+fn visible_hook_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(character,
+                    '\u{61c}' | '\u{200e}'..='\u{200f}'
+                    | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                character.escape_default().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Refuse a main checkout whose CAS hook bodies differ from the worker's own
 /// generated copy (cas-6591). Codex 0.162 runs the main checkout's file, so a
 /// stale body (observed: PreToolUse `^Bash$`, timeout 3) would be trusted and
@@ -515,7 +535,7 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
             .map_err(|error| {
                 io::Error::new(
                     error.kind(),
-                    format!("codex_hooks_invalid: {}: {error}", path.display()),
+                    format!("codex_hooks_invalid: {}: {error}", visible_hook_path(path)),
                 )
             })?
             .into_iter()
@@ -532,18 +552,25 @@ fn ensure_main_hooks_current(main: &Path, main_hooks: &Path, own: &Path) -> io::
     }
     // Ordinary single quotes preserve spaces, history tokens and substitutions.
     // cas-pty cannot depend on the CLI's Git remedy renderer.
-    let main_arg = format!("'{}'", main.display().to_string().replace('\'', "'\\''"));
+    let main_text = main.display().to_string();
+    let advice = if visible_hook_path(main) != main_text {
+        // Escaping inside ordinary shell quotes would change the target path.
+        "Update the main checkout by hand, then respawn; its path contains control or bidi characters, so no copyable command is available.".to_string()
+    } else {
+        let main_arg = format!("'{}'", main_text.replace('\'', "'\\''"));
+        format!(
+            "Update the main checkout (`git -C {main_arg} pull`, or `git -C {main_arg} \
+             checkout .codex/hooks.json`), then respawn."
+        )
+    };
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
             "codex_main_checkout_hooks_stale: {} carries CAS hooks that differ from {}, and \
              Codex loads the main checkout's file for a linked worktree, so the worker would run \
-             stale guards. Update the main checkout (`git -C {} pull`, or `git -C {} \
-             checkout .codex/hooks.json`), then respawn.",
-            main_hooks.display(),
-            own.display(),
-            main_arg,
-            main_arg
+             stale guards. {advice}",
+            visible_hook_path(main_hooks),
+            visible_hook_path(own),
         ),
     ))
 }

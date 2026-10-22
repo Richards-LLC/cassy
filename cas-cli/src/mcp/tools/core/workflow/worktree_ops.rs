@@ -1527,15 +1527,20 @@ fn worktree_merge_mcp_error(
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree."
         ),
-        WorktreeError::Git(GitError::MergeInProgress(details)) => format!(
-            "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
+        WorktreeError::Git(GitError::MergeInProgress(details)) => {
+            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            format!(
+                "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Resolve and commit the \
              existing merge, or {abort_advice}, \
              before retrying the merge into {target_branch}."
-        ),
-        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
-            "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
+            )
+        }
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
+            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            format!(
+                "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
              tracked changes on paths this merge would write: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Residue on paths the merge \
              does NOT touch is ignored — the merge runs in an ephemeral worktree and \
@@ -1547,7 +1552,8 @@ fn worktree_merge_mcp_error(
              2. Or merge out of band without touching the shared checkout: \
              {detached_advice}\n\n\
              `force=true` does not bypass shared-checkout residue."
-        ),
+            )
+        }
         WorktreeError::Git(GitError::TargetTipChanged {
             ref branch,
             ref expected,
@@ -1555,15 +1561,18 @@ fn worktree_merge_mcp_error(
         }) => {
             let branch = crate::worktree::GitOperations::visible_git_label(branch);
             format!(
-            "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
-             {source_branch} was being merged.\n\n\
-             The merge ran in an ephemeral worktree and was discarded rather than \
-             published over the concurrent update — {target_branch} still points at the \
-             other writer's commit and no shared checkout was touched. Re-run the merge \
-             against the new tip."
+                "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
+                 {source_branch} was being merged.\n\n\
+                 The merge ran in an ephemeral worktree and was discarded rather than \
+                 published over the concurrent update — {target_branch} still points at the \
+                 other writer's commit and no shared checkout was touched. Re-run the merge \
+                 against the new tip."
             )
-        },
-        other => format!("Failed to merge worktree: {other}"),
+        }
+        other => format!(
+            "Failed to merge worktree: {}",
+            crate::worktree::GitOperations::visible_git_label(&other.to_string()),
+        ),
     };
     if let Err(refusal) = remedies {
         message.push_str("\n\n");

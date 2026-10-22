@@ -588,7 +588,6 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     };
     let links = report_link_hrefs(
         project_config.issue_repo_registry().project.as_deref(),
-        &tag,
         &relative(&source_path),
         &relative(&pdf_path),
     );
@@ -2389,13 +2388,14 @@ fn is_release_note_section_label(line: &str) -> bool {
 /// The report's "Markdown source" and "Print edition" link targets, given
 /// their repository-relative paths. cas-692a: Chromium prints a relative link
 /// as a file:// URL into the generating checkout, so with a known GitHub
-/// repository both name the files at the release tag. Without one they stay
+/// repository both name the files on main: reports are committed after the
+/// release tag is created. Without one they stay
 /// sibling names; the PDF printer then drops their link targets.
-fn report_link_hrefs(github_repo: Option<&str>, tag: &str, source: &str, pdf: &str) -> (String, String) {
+fn report_link_hrefs(github_repo: Option<&str>, source: &str, pdf: &str) -> (String, String) {
     match github_repo {
         Some(repo) => (
-            format!("https://github.com/{repo}/blob/{tag}/{source}"),
-            format!("https://github.com/{repo}/blob/{tag}/{pdf}"),
+            format!("https://github.com/{repo}/blob/main/{source}"),
+            format!("https://github.com/{repo}/blob/main/{pdf}"),
         ),
         None => {
             let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
@@ -3203,7 +3203,6 @@ mod tests {
     fn report_links_name_the_main_github_files_not_the_checkout_cas_692a() {
         let (source, pdf) = report_link_hrefs(
             Some("o/r"),
-            "v9.99.1",
             "docs/release-reports/v9.99.1.md",
             "docs/release-reports/v9.99.1.pdf",
         );

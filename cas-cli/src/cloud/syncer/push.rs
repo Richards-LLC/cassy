@@ -125,6 +125,10 @@ impl CloudSyncer {
         sessions: &[Session],
         max_batches: Option<usize>,
     ) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let mut result = SyncResult::default();
         let start = Instant::now();
 

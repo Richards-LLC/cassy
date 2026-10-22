@@ -245,6 +245,54 @@ pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
     find_cas_root_ignoring_env(start)
 }
 
+/// Authorize migrations and cloud sync on an implicitly inherited worktree store.
+/// Factory panes opt in with CAS_ROOT; candidate subprocesses use an isolated root.
+pub(crate) fn guard_implicit_worktree_write(cas_dir: &Path, operation: &str) -> Result<()> {
+    let target = cas_dir.canonicalize().ok();
+    let same_root = |path: &Path| {
+        target
+            .as_ref()
+            .is_some_and(|target| path.canonicalize().ok().as_ref() == Some(target))
+    };
+    if cas_core::env_overlay::var_os("CAS_ROOT")
+        .map(PathBuf::from)
+        .is_some_and(|root| root.is_dir() && same_root(&root))
+    {
+        return Ok(());
+    }
+    let origins = [
+        std::env::current_dir().ok(),
+        std::env::var_os("CLAUDE_PROJECT_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir()),
+    ];
+    let inherited = origins.into_iter().flatten().any(|origin| {
+        find_cas_root_from_cas_worktree(&origin).is_some_and(|root| same_root(&root))
+            || find_main_repo_from_worktree(&origin)
+                .is_some_and(|repo| same_root(&repo.join(".cas")))
+    });
+    if !inherited {
+        return Ok(());
+    }
+    let installed = crate::duplicate_check::find_cas_binaries_on_path()
+        .first()
+        .and_then(|path| path.canonicalize().ok());
+    if installed.is_some()
+        && installed
+            == std::env::current_exe()
+                .ok()
+                .and_then(|path| path.canonicalize().ok())
+    {
+        return Ok(());
+    }
+    Err(CasError::Other(format!(
+        "Cannot {operation} on implicitly shared worktree store {} with this candidate binary. \
+         For candidate QA, initialize a disposable project and HOME, then set CAS_ROOT to its existing .cas. \
+         To intentionally use this shared store, set CAS_ROOT explicitly or run the installed cas on PATH.",
+        cas_dir.display()
+    )))
+}
+
 /// Resolve the repository root for a path using Git's worktree-aware
 /// toplevel resolver.
 ///

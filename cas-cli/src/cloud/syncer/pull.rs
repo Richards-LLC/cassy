@@ -2061,6 +2061,10 @@ impl CloudSyncer {
         project_id: Option<&str>,
         params: &[String],
     ) -> Result<(serde_json::Value, String), CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let (pull_url, project_id) = match project_id {
             Some(project_id) => {
                 build_scoped_pull_url_with(&self.cloud_config.endpoint, params, || {
@@ -3314,6 +3318,10 @@ impl CloudSyncer {
         rule_store: &dyn RuleStore,
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         self.clear_conflict_log();
         self.clear_incoming_revisions();
         let mut result = SyncResult::default();

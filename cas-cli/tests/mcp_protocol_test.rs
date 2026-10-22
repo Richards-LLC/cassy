@@ -1580,11 +1580,11 @@ fn worktree_serve_command(
 
 #[cfg(unix)]
 #[test]
-fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
+fn test_serve_migration_requires_explicit_root_or_installed_binary_cas_a65b() {
     let sandbox = CasSandbox::new();
     let (_scratch, worktree) = candidate_worktree(&sandbox);
     let db_path = sandbox.cas_root().join("cas.db");
-    {
+    let make_pending = || {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_verification_capabilities_dispatch;
@@ -1594,7 +1594,8 @@ fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
              DELETE FROM cas_migrations WHERE id = 213;",
         )
         .unwrap();
-    }
+    };
+    make_pending();
 
     // The candidate must not upgrade a live store found through a worktree.
     // CLAUDE_PROJECT_DIR identifies the worktree, not consent to mutate its parent.
@@ -1624,50 +1625,55 @@ fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
         "refusal must explain isolation: {stderr}"
     );
 
-    // Factory panes explicitly pin CAS_ROOT, so their normal schema repair survives.
-    let mut explicit = sandbox.command();
-    explicit
-        .current_dir(&worktree)
-        .env("CLAUDE_PROJECT_DIR", &worktree);
-    let mut client = McpTestClient::spawn_command_capturing_stderr(explicit);
-    let response = client.initialize();
-    assert!(
-        response.error.is_none(),
-        "cas serve must start after repairing pending m213: {:?}",
-        response.error
-    );
-    let stderr = client.stop_and_read_stderr();
-    assert!(
-        stderr.contains("Applied 1 pending schema migration(s) before MCP startup."),
-        "startup must report that it repaired m213 before serving: {stderr}"
-    );
+    for explicit_root in [true, false] {
+        // Both explicit factory roots and the installed PATH binary may repair schemas.
+        if !explicit_root {
+            make_pending();
+        }
+        let mut explicit = worktree_serve_command(&sandbox, &worktree, !explicit_root);
+        if explicit_root {
+            explicit.env("CAS_ROOT", sandbox.cas_root());
+        }
+        let mut client = McpTestClient::spawn_command_capturing_stderr(explicit);
+        let response = client.initialize();
+        assert!(
+            response.error.is_none(),
+            "cas serve must start after repairing pending m213: {:?}",
+            response.error
+        );
+        let stderr = client.stop_and_read_stderr();
+        assert!(
+            stderr.contains("Applied 1 pending schema migration(s) before MCP startup."),
+            "startup must report that it repaired m213 before serving: {stderr}"
+        );
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    for table in ["verification_capabilities", "verifications"] {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for table in ["verification_capabilities", "verifications"] {
+            assert_eq!(
+                conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}')
+                         WHERE name = 'dispatch_id'"
+                    ),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "cas serve must restore m213's dispatch_id column for {table}"
+            );
+        }
         assert_eq!(
             conn.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM pragma_table_info('{table}')
-                     WHERE name = 'dispatch_id'"
-                ),
+                "SELECT COUNT(*) FROM cas_migrations WHERE id = 213",
                 [],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
             1,
-            "cas serve must restore m213's dispatch_id column for {table}"
+            "automatic startup repair must record m213 as applied"
         );
     }
-    assert_eq!(
-        conn.query_row(
-            "SELECT COUNT(*) FROM cas_migrations WHERE id = 213",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap(),
-        1,
-        "automatic startup repair must record m213 as applied"
-    );
 }
 
 #[cfg(unix)]
@@ -1722,8 +1728,20 @@ async fn current_worktree_store_stays_readable_without_candidate_cloud_sync_cas_
             "{binding}: tool discovery must work"
         );
         let read = client.call_tool("task", json!({"action": "list"}));
-        assert!(read.error.is_none(), "{binding}: ordinary reads must work: {:?}", read.error);
-        assert_ne!(read.result.as_ref().and_then(|result| result.get("isError")).and_then(Value::as_bool), Some(true), "{binding}: task list returned an error: {:?}", read.result);
+        assert!(
+            read.error.is_none(),
+            "{binding}: ordinary reads must work: {:?}",
+            read.error
+        );
+        assert_ne!(
+            read.result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true),
+            "{binding}: task list returned an error: {:?}",
+            read.result
+        );
         if sync_allowed {
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),

@@ -82,6 +82,24 @@ expect fail '0 tests passed' 'zero-match retry clears stale exported count' \
     env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
 expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
 
+# cas-7cb0: nextest may stall while a libtest child writes its --list output.
+# The capped wrapper must diagnose and stop discovery before tests start.
+cat >"${tmpdir}/stalled-nextest" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+sleep 2
+EOF
+chmod +x "${tmpdir}/stalled-nextest"
+cat >"${tmpdir}/sample" <<'EOF'
+#!/usr/bin/env bash
+echo 'fake libtest stack: StdoutLock::write'
+EOF
+chmod +x "${tmpdir}/sample"
+expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
+    env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
+    CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib -E 'test(stalled)'
+
 stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure
 EOF

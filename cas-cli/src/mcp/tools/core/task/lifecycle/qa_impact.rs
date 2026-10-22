@@ -212,8 +212,8 @@ struct Row<'a> {
 
 /// Header names of a ledger table's verdict columns, in priority order: the
 /// evidence ledger's `verdict`, the independent-QA journeys table's `Run`, and
-/// short `Result` or `Status` tables. A header matches by its first word, so
-/// `Verdict / label` and `Result/source` count.
+/// short `Result` or `Status` tables. See [`names_column`] for compound
+/// headers such as `Verdict / label`.
 const VERDICT_HEADERS: [&str; 4] = ["verdict", "run", "result", "status"];
 
 fn table_cells(line: &str) -> Vec<&str> {
@@ -229,34 +229,39 @@ fn separator(cells: &[&str]) -> bool {
         .all(|c| c.contains('-') && c.chars().all(|ch| matches!(ch, '-' | ':')))
 }
 
-/// The header cell's first word, lowercased, without Markdown emphasis.
-fn header_word(cell: &str) -> String {
-    cell.trim_matches(|c: char| c == '*' || c == '_')
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .next()
-        .unwrap_or_default()
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-        .to_ascii_lowercase()
+/// Whether a header cell names `name`: exactly, or followed by a separator
+/// (`Verdict / label`, `Result/source`, `Run (n)`, `Status: prod`), so
+/// `Status page`, `Result before run` or `Run id` does not. `verdict` is
+/// unambiguous, so any `Verdict <qualifier>` counts (`verdict t1`).
+/// Emphasis is ignored.
+fn names_column(cell: &str, name: &str) -> bool {
+    let cell = cell
+        .trim_matches(|c: char| c == '*' || c == '_')
+        .to_ascii_lowercase();
+    cell.strip_prefix(name).is_some_and(|rest| {
+        rest.is_empty()
+            || rest.trim_start().starts_with(['/', '(', ':'])
+            || (name == "verdict" && rest.starts_with(char::is_whitespace))
+    })
 }
 
 /// The verdict-named columns of a header row, in [`VERDICT_HEADERS`] order.
 fn verdict_columns(cells: &[&str]) -> Vec<usize> {
-    let words: Vec<String> = cells.iter().map(|cell| header_word(cell)).collect();
     VERDICT_HEADERS
         .iter()
         .flat_map(|name| {
-            words
+            cells
                 .iter()
                 .enumerate()
-                .filter(move |(_, word)| word == name)
+                .filter(move |(_, cell)| names_column(cell, name))
                 .map(|(index, _)| index)
         })
         .collect()
 }
 
 /// Ledger rows outside code fences. Only verdict columns are read. A table
-/// header (the row above a `|---|` separator, or a row whose cell starts with
-/// `Verdict`) names them by [`VERDICT_HEADERS`]; a row reads the first one
+/// header (the row above a `|---|` separator, or a row with a cell that is
+/// exactly `Verdict`) names them by [`VERDICT_HEADERS`]; a row reads the first one
 /// whose cell holds a verdict, so a `Run` column of run ids beside `Result`
 /// still counts. A headed table without one has no verdict column. Only a
 /// headerless row falls back by position: the fifth cell of a row with five or
@@ -295,7 +300,7 @@ fn ledger_rows(ledger: &str) -> Vec<Row<'_>> {
         let above_separator = lines
             .get(index + 1)
             .is_some_and(|next| next.contains('|') && separator(&table_cells(next)));
-        if above_separator || cells.iter().any(|c| header_word(c) == "verdict") {
+        if above_separator || cells.iter().any(|c| c.eq_ignore_ascii_case("verdict")) {
             header = Some(verdict_columns(&cells));
             continue;
         }

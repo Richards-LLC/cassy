@@ -194,19 +194,105 @@ pub(crate) mod test_support {
 
     #[test]
     fn temp_home_uses_canonical_path_namespace() {
+        let machine = tempfile::tempdir().unwrap();
+        let xdg_keys = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"];
+        let _ambient =
+            xdg_keys.map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, machine.path()));
+        let poisoned_config = machine.path().join("code-mode-mcp/config.toml");
+        std::fs::create_dir_all(poisoned_config.parent().unwrap()).unwrap();
+        let poison = "[servers.machine]\ntransport = \"stdio\"\ncommand = \"must-not-run\"\n";
+        std::fs::write(&poisoned_config, poison).unwrap();
+
+        let assert_private_home = |home: &Path| {
+            assert_eq!(home, home.canonicalize().unwrap());
+            assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
+            #[cfg(feature = "mcp-proxy")]
+            {
+                let project = crate::cli::integrate::proxy::proxy_config_path();
+                let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+                assert!(
+                    config.servers.is_empty(),
+                    "machine proxy config leaked into temp HOME"
+                );
+                let private_config = home.join(".config/code-mode-mcp/config.toml");
+                std::fs::create_dir_all(private_config.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &private_config,
+                    "[servers.private]\ntransport = \"stdio\"\ncommand = \"fixture-only\"\n",
+                )
+                .unwrap();
+                let config = cmcp_core::config::Config::load_merged(project.as_deref()).unwrap();
+                assert_eq!(
+                    config
+                        .servers
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    ["private"]
+                );
+            }
+            for (key, directory) in xdg_keys
+                .into_iter()
+                .zip([".config", ".local/share", ".cache"])
+            {
+                assert_eq!(
+                    std::env::var_os(key).as_deref(),
+                    Some(home.join(directory).as_os_str()),
+                    "{key}"
+                );
+            }
+        };
         let guard = TestEnvGuard::temp_home();
-        assert_eq!(guard.home(), guard.home().canonicalize().unwrap());
-        assert_eq!(
-            std::env::var_os("HOME").as_deref(),
-            Some(guard.home().as_os_str())
-        );
+        assert_private_home(guard.home());
+        drop(guard);
+        TestEnvGuard::run_with_temp_home(assert_private_home);
+        for key in xdg_keys {
+            assert_eq!(
+                std::env::var_os(key).as_deref(),
+                Some(machine.path().as_os_str()),
+                "restore {key}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(poisoned_config).unwrap(), poison);
     }
 
     #[test]
     fn test_env_guard_scrubs_ambient_cas_and_factory_environment() {
         let ambient_build_guard =
             crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_BUILD_GUARD", "inherit");
+        let provider_keys = [
+            "VIKTOR_API_KEY",
+            "NEON_API_KEY",
+            "VERCEL_TOKEN",
+            "OPENAI_API_KEY",
+            "VOYAGE_API_KEY",
+            "EXA_API_KEY",
+            "GITHUB_TOKEN",
+            "VIOLET_SLACK_TOKEN_CASSY_PROXY",
+        ];
+        let _ambient_credentials = provider_keys
+            .map(|key| crate::test_env_guard::AmbientEnvRestore::set(key, "fixture-credential"));
+        {
+            let mut guard = TestEnvGuard::new();
+            for key in provider_keys {
+                assert!(
+                    std::env::var_os(key).is_none(),
+                    "ambient provider credential {key} leaked"
+                );
+            }
+            guard.set("VIKTOR_API_KEY", "explicit-fixture");
+            assert_eq!(
+                std::env::var("VIKTOR_API_KEY").as_deref(),
+                Ok("explicit-fixture")
+            );
+        }
         let guard = TestEnvGuard::temp_home();
+        for key in provider_keys {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "ambient provider credential {key} leaked"
+            );
+        }
         assert_eq!(
             std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
             Ok("off"),
@@ -258,6 +344,13 @@ pub(crate) mod test_support {
             "the default gh fixture must fail before any process or network call"
         );
         drop(guard);
+        for key in provider_keys {
+            assert_eq!(
+                std::env::var(key).as_deref(),
+                Ok("fixture-credential"),
+                "restore {key}"
+            );
+        }
         assert_eq!(
             std::env::var("CAS_FACTORY_BUILD_GUARD").as_deref(),
             Ok("inherit"),

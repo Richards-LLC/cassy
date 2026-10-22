@@ -729,6 +729,14 @@ pub enum FactoryCommands {
         #[arg(long)]
         request: std::path::PathBuf,
     },
+    /// Record an existing supervisor-run named test for an assigned task.
+    RecordTestReceipt {
+        #[arg(long)]
+        task_id: String,
+        /// JSON evidence: head, repo, cargo_args, log_path and exit_code.
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
     /// Internal capped runner installed by the worker PreToolUse guard.
     #[command(hide = true)]
     WorkerCheck {
@@ -740,6 +748,18 @@ pub enum FactoryCommands {
         /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
         #[arg(long)]
         isolated_test_env: Option<std::path::PathBuf>,
+        #[arg(last = true, required = true)]
+        cargo_args: Vec<String>,
+    },
+    /// Run a task's named tests at a verification's bound head under the
+    /// worker builder cap (task-verifier capped lane, cas-d95c)
+    VerifierTest {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        /// Full commit SHA of the verification's bound head
+        #[arg(long)]
+        head: String,
+        /// `nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -1152,6 +1172,16 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{result}");
                 Ok(())
             }
+            FactoryCommands::RecordTestReceipt { task_id, request } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("test receipt requires a Cassy project"))?;
+                if std::fs::metadata(request)?.len() > 512 * 1024 {
+                    anyhow::bail!("test receipt request exceeds 512 KiB");
+                }
+                let payload = std::fs::read_to_string(request)?;
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                println!("{}", crate::factory_worker_check::record_supervisor_test(&core, task_id, &payload)?);
+                Ok(())
+            }
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: true,
@@ -1164,6 +1194,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 isolated_test_env,
                 cargo_args,
             } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
+            FactoryCommands::VerifierTest {
+                cas_root,
+                head,
+                cargo_args,
+            } => crate::factory_worker_check::execute_verifier(cas_root, head, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,

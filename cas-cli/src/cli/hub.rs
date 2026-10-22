@@ -25,6 +25,8 @@ use crate::hub::{
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
+const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn hub_launch_timeout(tailscale_serve: bool) -> Duration {
     if tailscale_serve {
@@ -104,6 +106,8 @@ pub enum HubCommands {
     /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
     ///
     /// Stop also has `already_satisfied`; supervised restart reports hub status.
+    ///
+    /// Start also has `already_satisfied` when a peer launches the requested hub.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),
@@ -646,6 +650,25 @@ struct HubRestartStopReceipt {
     already_satisfied: bool,
 }
 
+struct HubStartOutcome {
+    record: HubProcessRecord,
+    already_satisfied: bool,
+}
+
+impl HubStartOutcome {
+    fn into_restart_json(self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self.record)?;
+        let object = value
+            .as_object_mut()
+            .context("hub process record must serialize as a JSON object")?;
+        object.insert(
+            "already_satisfied".to_owned(),
+            serde_json::Value::Bool(self.already_satisfied),
+        );
+        Ok(value)
+    }
+}
+
 impl From<HubStopReceipt> for HubRestartStopReceipt {
     fn from(stop: HubStopReceipt) -> Self {
         Self {
@@ -684,6 +707,9 @@ fn wait_for_stop_or_satisfying_hub(
     force: bool,
     stop_deadline: Option<crate::bounded_process::Deadline>,
 ) -> Result<Option<HubProcessRecord>> {
+    #[cfg(debug_assertions)]
+    mark_restart_stop_waiter_for_test()?;
+
     let deadline = Instant::now() + timeout;
     loop {
         ensure_stop_budget(stop_deadline)?;
@@ -1233,9 +1259,14 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
                         let stop = HubRestartStopReceipt::already_satisfied();
+                        let start = HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        }
+                        .into_restart_json()?;
                         println!(
                             "{}",
-                            serde_json::json!({"stop": stop, "start": record})
+                            serde_json::json!({"stop": stop, "start": start})
                         );
                     } else {
                         println!(
@@ -1271,6 +1302,7 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                         Err(error) => return Err(error),
                     };
                     if cli.json {
+                        let start = start.into_restart_json()?;
                         println!("{}", serde_json::json!({"stop": stop, "start": start}));
                     }
                     Ok(())
@@ -1407,6 +1439,41 @@ fn start_with_output_from(
     .map(|_| ())
 }
 
+fn peer_hub_record_after_child_exit(
+    paths: &HubRuntimePaths,
+    launcher_pid: u32,
+) -> Result<Option<u32>> {
+    let mut deadline = None;
+    loop {
+        let peer_holders = paths
+            .lock_holders()
+            .into_iter()
+            .filter(|holder| holder.pid != launcher_pid && process_is_running(holder.pid))
+            .map(|holder| holder.pid)
+            .collect::<Vec<_>>();
+        if let Some(record) = paths.read_process_record().ok()
+            && peer_holders.contains(&record.pid)
+        {
+            return Ok(Some(record.pid));
+        }
+        if peer_holders.is_empty() {
+            return Ok(None);
+        }
+        if deadline.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER",
+                "peer-record-wait",
+                "release-peer-record-wait",
+                launcher_pid,
+            )?;
+            deadline = Some(Instant::now() + HUB_PEER_RECORD_PUBLISH_TIMEOUT);
+        } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(None);
+        }
+        std::thread::sleep(HUB_PEER_RECORD_POLL_INTERVAL);
+    }
+}
+
 fn start_with_output_resolved(
     args: &HubServeArgs,
     cli: &Cli,
@@ -1414,7 +1481,7 @@ fn start_with_output_resolved(
     tailscale_port: u16,
     emit_output: bool,
     launch_origin: HubLaunchOrigin,
-) -> Result<HubProcessRecord> {
+) -> Result<HubStartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
         SocketAddr::new(args.bind, args.port),
@@ -1453,7 +1520,10 @@ fn start_with_output_resolved(
                             );
                         }
                     }
-                    return Ok(record);
+                    return Ok(HubStartOutcome {
+                        record,
+                        already_satisfied: true,
+                    });
                 }
                 HubStartDecision::Restart {
                     version_drift,
@@ -1494,7 +1564,10 @@ fn start_with_output_resolved(
                                 record.pid, record.version
                             );
                         }
-                        return Ok(*record);
+                        return Ok(HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        });
                     }
                     return start_with_output_resolved(
                         args,
@@ -1535,7 +1608,10 @@ fn start_with_output_resolved(
                     record.pid, record.version
                 );
             }
-            return Ok(*record);
+            return Ok(HubStartOutcome {
+                record: *record,
+                already_satisfied: true,
+            });
         }
     };
     let prior_record = paths.read_process_record().ok();
@@ -1645,9 +1721,19 @@ fn start_with_output_resolved(
         }
     };
     let cgroup = factory_worker_session().and_then(|session| {
-        crate::ui::factory::cgroup::join_shared_scope(&session, "hub", launcher_pid)
+        crate::ui::factory::cgroup::join_shared_scope(
+            &session,
+            &format!("hub-{launcher_pid}"),
+            launcher_pid,
+        )
     });
     drop(launch_guard);
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "launcher",
+        "release-launchers",
+        launcher_pid,
+    )?;
     let launch_metadata = cgroup
         .as_deref()
         .map(|path| path.to_string_lossy().into_owned())
@@ -1656,11 +1742,31 @@ fn start_with_output_resolved(
         terminate_failed_launch(&mut child, cgroup.as_deref());
         return Err(error.into());
     }
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "monitor",
+        "release-monitors",
+        launcher_pid,
+    )?;
 
     let deadline = Instant::now() + hub_launch_timeout(tailscale_serve);
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
+                let already_satisfied = record.pid != launcher_pid
+                    || record.launched_at.as_deref() != Some(launched_at.as_str());
+                if already_satisfied {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                }
+                if let Err(error) = hold_hub_test_barrier(
+                    "CAS_TEST_HUB_READY_BARRIER",
+                    "ready-observer",
+                    "release-ready-observers",
+                    launcher_pid,
+                ) {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                    return Err(error);
+                }
                 if tailscale_serve && host_transport_mode()? == HubTransportMode::Required
                     && let Some(warning) = &record.transport_warning
                 {
@@ -1678,18 +1784,21 @@ fn start_with_output_resolved(
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
                 }
-                return Ok(record);
+                return Ok(HubStartOutcome {
+                    record,
+                    already_satisfied,
+                });
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
-            if let Ok(record) = paths.read_process_record()
-                && record_is_ready(&paths, &record)
-            {
-                anyhow::bail!(
-                    "another cas hub instance won the machine lock (pid {}); replacement process exited with {}",
-                    record.pid,
-                    status
+            let winner_pid = peer_hub_record_after_child_exit(&paths, launcher_pid)?;
+            if let Some(winner_pid) = winner_pid {
+                let error = anyhow::anyhow!(
+                    "another cas hub instance won the machine lock (pid {winner_pid}); replacement process exited with {status} before becoming ready; inspect {}",
+                    paths.log_path().display()
                 );
+                terminate_failed_launch(&mut child, cgroup.as_deref());
+                return Err(error);
             }
             let error = anyhow::anyhow!(
                 "cas hub replacement exited with {status} before becoming ready; inspect {}",
@@ -1699,6 +1808,38 @@ fn start_with_output_resolved(
             return Err(error);
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Ok(record) = paths.read_process_record()
+        && record.pid != launcher_pid
+        && record_is_live(&record)
+        && running_hub_satisfies_request(
+            &record,
+            args,
+            tailscale_serve,
+            tailscale_port,
+            env!("CARGO_PKG_VERSION"),
+            tailscale_cli_available(&paths),
+        )
+    {
+        if record_is_ready(&paths, &record) {
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            return Ok(HubStartOutcome {
+                record,
+                already_satisfied: true,
+            });
+        }
+        if paths
+            .lock_holders()
+            .iter()
+            .any(|holder| holder.pid == record.pid)
+        {
+            let pid = record.pid;
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            anyhow::bail!(
+                "another cas hub instance won the machine lock (pid {pid}); this restart launch did not become ready before timeout; inspect {}",
+                paths.log_path().display()
+            );
+        }
     }
     let error = anyhow::anyhow!(
         "cas hub did not become ready; inspect {}",
@@ -1908,7 +2049,19 @@ fn serve_foreground_logged(
             transport_warning: None,
             nofile_limit,
         };
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_RECORD_PUBLICATION_BARRIER",
+            "hub-record-pending",
+            "release-hub-record",
+            record.pid,
+        )?;
         paths.write_process_record(&record)?;
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STARTUP_BARRIER",
+            "hub-starting",
+            "release-hub-startup",
+            record.pid,
+        )?;
         let mut startup_guard = HubStartupGuard::new(paths.clone(), tailscale_manager.clone());
 
         let (tailscale_listener, tailscale, transport_warning) = if tailscale_serve {
@@ -2111,6 +2264,46 @@ async fn serve_with_bounded_connection_drain(
 }
 
 #[cfg(debug_assertions)]
+fn hold_hub_test_barrier(
+    environment: &str,
+    marker: &str,
+    release: &str,
+    pid: u32,
+) -> Result<()> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let Some(root) = std::env::var_os(environment) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root)?;
+    fs::write(
+        root.join(format!("{marker}-{pid}")),
+        format!("{}\n", std::process::id()),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join(release).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::ensure!(
+        root.join(release).exists(),
+        "test hub barrier {environment} timed out"
+    );
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn hold_hub_test_barrier(
+    _environment: &str,
+    _marker: &str,
+    _release: &str,
+    _pid: u32,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
 fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
     use std::fs;
     use std::path::PathBuf;
@@ -2138,6 +2331,19 @@ fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
         root.join("release").exists(),
         "test hub lock-release barrier timed out"
     );
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn mark_restart_stop_waiter_for_test() -> Result<()> {
+    let Some(root) = std::env::var_os("CAS_TEST_HUB_LOCK_RELEASE_BARRIER") else {
+        return Ok(());
+    };
+    let root = std::path::PathBuf::from(root);
+    std::fs::write(
+        root.join(format!("restart-stop-waiter-{}", std::process::id())),
+        b"waiting\n",
+    )?;
     Ok(())
 }
 

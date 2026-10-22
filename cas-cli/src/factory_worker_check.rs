@@ -28,13 +28,47 @@ struct TestReceipt {
     count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supervisor_recorded: Option<SupervisorRecordedProof>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SupervisorRecordedProof {
+    supervisor_id: String,
+    task_id: String,
+    tested_repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    log_sha256: String,
+    recorded_at: String,
+}
+
+/// An authenticated supervisor attests the exit code of an existing run;
+/// recording never starts Cargo or relaxes worker admission.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorTestEvidence {
+    head: String,
+    repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    exit_code: i32,
 }
 
 impl TestReceipt {
     fn path_note(&self) -> String {
-        self.host_path_opt_out.as_ref()
+        let mut note = self
+            .host_path_opt_out
+            .as_ref()
             .map(|reason| format!(" [host PATH opt-out: {reason}]"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(proof) = &self.supervisor_recorded {
+            note.push_str(&format!(
+                " [supervisor-recorded by {} for {}; log sha256={}]",
+                proof.supervisor_id, proof.task_id, proof.log_sha256
+            ));
+        }
+        note
     }
 }
 
@@ -129,17 +163,42 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
     let Some(harness) = &test.harness else {
         return Ok(());
     };
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml"))?)?;
-    let mut manifests = vec![repo.join("Cargo.toml")];
+    let (path, value) = package_manifest(repo, &test.package)?;
+    let found = value
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
+                    && target
+                        .get("path")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|source| {
+                            path.parent().is_some_and(|dir| dir.join(source).is_file())
+                        })
+            })
+        });
+    if !found {
+        bail!(
+            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
+            test.package
+        );
+    }
+    Ok(())
+}
+
+fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let root = repo.join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
+    let mut manifests = vec![root];
     if let Some(members) = manifest
         .get("workspace")
         .and_then(|w| w.get("members"))
         .and_then(toml::Value::as_array)
     {
         for member in members.iter().filter_map(toml::Value::as_str) {
-            let pattern = repo.join(member).join("Cargo.toml");
             manifests.extend(
-                glob::glob(&pattern.to_string_lossy())?
+                glob::glob(&repo.join(member).join("Cargo.toml").to_string_lossy())?
                     .collect::<std::result::Result<Vec<_>, _>>()?,
             );
         }
@@ -150,36 +209,174 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(toml::Value::as_str)
-            != Some(test.package.as_str())
+            == Some(package)
         {
-            continue;
+            return Ok((path, value));
         }
-        let found = value
-            .get("test")
-            .and_then(toml::Value::as_array)
-            .is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
-                        && target
-                            .get("path")
-                            .and_then(toml::Value::as_str)
-                            .is_some_and(|source| {
-                                path.parent().is_some_and(|dir| dir.join(source).is_file())
-                            })
-                })
-            });
-        if found {
-            return Ok(());
+    }
+    bail!("Worker test refused: package {package} not found in workspace")
+}
+
+/// Record an existing supervisor-run selection under the assigned worker's
+/// normal receipt key. The authority, task binding and provenance are checked
+/// here so MCP and CLI use exactly the same path.
+pub(crate) fn record_supervisor_test(
+    core: &crate::mcp::CasCore,
+    task_id: &str,
+    payload: &str,
+) -> Result<String> {
+    let supervisor = core.resolve_live_supervisor_authority().map_err(|_| {
+        anyhow::anyhow!("record_test_receipt requires a live registered supervisor")
+    })?;
+    if payload.len() > 512 * 1024 {
+        bail!("supervisor evidence payload exceeds 512 KiB");
+    }
+    let evidence: SupervisorTestEvidence = serde_json::from_str(payload)
+        .context("payload must contain head, repo, cargo_args, log_path and exit_code")?;
+    if !valid_git_oid(&evidence.head) {
+        bail!("head must be the full tested commit SHA");
+    }
+    if !evidence.repo.is_absolute() || !evidence.log_path.is_absolute() {
+        bail!("repo and log_path must be absolute paths");
+    }
+    let test = targeted_test(&evidence.cargo_args).context(
+        "cargo_args must be nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'",
+    )?;
+    let root = core.cas_root.canonicalize()?;
+    let tasks = crate::store::open_task_store(&root)?;
+    let task = tasks.get(task_id)?;
+    if task.status == cas_types::TaskStatus::Closed {
+        bail!("cannot record new test evidence for a closed task");
+    }
+    let agents = crate::store::open_agent_store(&root)?;
+    let worker = task
+        .assignee
+        .as_deref()
+        .and_then(|assignee| {
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+        })
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .context("task must be assigned to a registered worker")?;
+    // Same metadata/convention precedence as the factory worker roster.
+    let repo = worker
+        .metadata
+        .get("clone_path")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| root.join("worktrees").join(&worker.name))
+        .canonicalize()
+        .context("assigned worker checkout is unavailable")?;
+    let tested_repo = evidence
+        .repo
+        .canonicalize()
+        .context("tested checkout is unavailable")?;
+    for checkout in [&repo, &tested_repo] {
+        if PathBuf::from(git(checkout, &["rev-parse", "--show-toplevel"])?).canonicalize()?
+            != *checkout
+            || clean_head(checkout)? != evidence.head
+        {
+            bail!(
+                "task worker checkout and tested checkout must both be clean at {}",
+                evidence.head
+            );
         }
+    }
+    package_manifest(&repo, &test.package)?;
+    validate_harness(&repo, &test)?;
+    let _lane = try_lock_lane(&root, &repo)?
+        .context("worker has an active capped run; retry recording later")?;
+    let path = test_receipt_path(&root, &repo, &evidence.head, &test);
+    // Just like an executed retry, failed evidence invalidates only this
+    // exact command's earlier receipt, never another selection's proof.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if evidence.exit_code != 0 {
         bail!(
-            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
-            test.package
+            "supervisor test exited {}; no PASS receipt recorded",
+            evidence.exit_code
         );
     }
-    bail!(
-        "Worker test refused: package {} not found in workspace",
-        test.package
-    )
+    let log_path = evidence.log_path.canonicalize()?;
+    if !std::fs::metadata(&log_path)?.is_file() {
+        bail!("supervisor log must be a regular file");
+    }
+    let mut log_file = File::open(&log_path)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    (&mut log_file)
+        .take(25 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
+        bail!("supervisor log must be non-empty and at most 25 MiB");
+    }
+    let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "");
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("supervisor log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("supervisor log must show a nonzero selection with every executed test passed");
+    }
+    // A receipt is not transferable across ownership or source mutations
+    // while the log was read. The worker lane lock also fences capped writers.
+    if tasks.get(task_id)?.assignee != task.assignee
+        || clean_head(&repo)? != evidence.head
+        || clean_head(&tested_repo)? != evidence.head
+    {
+        bail!("task assignment or checkout changed while recording; no PASS receipt recorded");
+    }
+    let provenance = SupervisorRecordedProof {
+        supervisor_id: supervisor.id,
+        task_id: task_id.to_string(),
+        tested_repo,
+        cargo_args: evidence.cargo_args,
+        log_path,
+        log_sha256: hex::encode(Sha256::digest(&bytes)),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let record = CheckReceipt {
+        head: evidence.head,
+        repo,
+        packages: vec![test.package],
+        test: Some(TestReceipt {
+            filter: test.filter,
+            harness: test.harness,
+            count,
+            host_path_opt_out: None,
+            supervisor_recorded: Some(provenance),
+        }),
+    };
+    let proof = record.test.as_ref().expect("test receipt");
+    let receipt = format!(
+        "test: PASS {} {} {} {}{}",
+        record.head,
+        record.packages[0],
+        proof.filter,
+        proof.count,
+        proof.path_note()
+    );
+    tasks.append_note(
+        task_id,
+        &format!(
+            "[{}] SUPERVISOR-RECORDED TEST: {}; provenance={}",
+            chrono::Utc::now().to_rfc3339(),
+            receipt,
+            serde_json::to_string(&proof.supervisor_recorded)?
+        ),
+    )?;
+    std::fs::create_dir_all(path.parent().context("receipt directory")?)?;
+    std::fs::write(path, serde_json::to_vec(&record)?)?;
+    Ok(receipt)
 }
 
 fn lock_file(path: &Path) -> Result<File> {
@@ -695,7 +892,7 @@ fn receipt_range_has_no_proof_inputs(
         && changes.stdout.split(|byte| *byte == 0).all(|path| {
             path.is_empty()
                 || std::str::from_utf8(path)
-                    .is_ok_and(|path| !is_test_or_build_input_path(path))
+                    .is_ok_and(|path| !is_test_or_build_input_path(repo, path))
         })
 }
 
@@ -714,8 +911,17 @@ fn valid_git_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn is_test_or_build_input_path(path: &str) -> bool {
+fn is_test_or_build_input_path(repo: &Path, path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    if is_workspace_crate_path(repo, path)
+        || lower == ".env"
+        || is_named_by_tracked_rust_source(repo, path)
+        || lower.ends_with(".capture.txt")
+        || lower == "hub-web/dist"
+        || lower.starts_with("hub-web/dist/")
+    {
+        return true;
+    }
     let parts = lower.split('/').collect::<Vec<_>>();
     let name = parts.last().copied().unwrap_or_default();
     if parts.iter().any(|part| {
@@ -770,6 +976,43 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
+/// A Rust source file can embed assets outside its crate directory with
+/// `include_str!` or `include_bytes!`. Detect those by filename so new assets do
+/// not need a hand-maintained path entry here. Treat git errors conservatively
+/// as proof inputs rather than reusing a receipt we could not validate.
+fn is_named_by_tracked_rust_source(repo: &Path, path: &str) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let Ok(matches) = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["grep", "-lF", "-e", name, "HEAD", "--", "*.rs"])
+        .current_dir(repo)
+        .output()
+    else {
+        return true;
+    };
+    matches.status.code() != Some(1)
+}
+
+/// Cargo inputs are not limited to source-code extensions: `include_str!`,
+/// `include_bytes!`, and package build scripts can consume any file beneath a
+/// crate directory. Treat those files as proof inputs regardless of suffix.
+fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
+    let path = Path::new(path);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component.as_os_str());
+        if prefix != Path::new(".") && repo.join(&prefix).join("Cargo.toml").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Write the receipt a passing targeted run leaves, for tests of the gates
 /// that read it (cas-b38a).
 #[cfg(test)]
@@ -798,6 +1041,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             host_path_opt_out: None,
+            supervisor_recorded: None,
         }),
     };
     std::fs::write(
@@ -1001,6 +1245,69 @@ pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_tes
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
+}
+
+/// cas-d95c: run a task's named tests at a verification's bound head under the
+/// same admission as a worker check (PSI and builder cap, a counted builder
+/// slot, a private target, the zero-test guard). A verifier otherwise has no
+/// clean checkout of that head under the worktrees root, and fell back to
+/// plain Cargo that no admission saw.
+pub(crate) fn execute_verifier(cas_root: &Path, head: &str, args: &[String]) -> Result<()> {
+    execute_verifier_at(
+        cas_root,
+        head,
+        args,
+        &std::env::current_dir()?,
+        Path::new("cargo"),
+        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+    )
+}
+
+fn execute_verifier_at(
+    cas_root: &Path,
+    head: &str,
+    args: &[String],
+    cwd: &Path,
+    cargo: &Path,
+    scope_runner: Option<&Path>,
+) -> Result<()> {
+    if targeted_test(args).is_none() {
+        bail!(
+            "Verifier tests run named tests only: `nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`"
+        );
+    }
+    let worktree = verifier_worktree(cas_root, cwd, head)?;
+    execute_at_with_scope(cas_root, args, &worktree, cargo, scope_runner, None)
+}
+
+/// A detached checkout of `head` under the Cassy worktrees root, so the
+/// capped runner admits it and its slot counts. Reused while it still points
+/// at `head`; it never touches a worker's checkout.
+fn verifier_worktree(cas_root: &Path, cwd: &Path, head: &str) -> Result<PathBuf> {
+    if !valid_git_oid(head) {
+        bail!("Verifier tests need the full bound head commit SHA, not {head:?}");
+    }
+    let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
+    git(&repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])
+        .with_context(|| format!("bound head {head} is not in this repository; fetch it first"))?;
+    let worktree = cas_root.join("worktrees").join(format!("verify-{}", &head[..12]));
+    if worktree.exists() {
+        let current = git(&worktree, &["rev-parse", "HEAD"])?;
+        if current.trim() != head {
+            bail!(
+                "{} is checked out at {} instead of the bound head {head}; remove it and retry",
+                worktree.display(),
+                current.trim()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(cas_root.join("worktrees"))?;
+        git(
+            &repo,
+            &["worktree", "add", "--detach", &worktree.to_string_lossy(), head],
+        )?;
+    }
+    Ok(worktree)
 }
 
 /// Prefer the active task's declared integration target, never the pushed
@@ -1234,6 +1541,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 harness: test.harness,
                 count,
                 host_path_opt_out,
+                supervisor_recorded: None,
             })
         }
         None => None,
@@ -1875,7 +2183,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         );
         let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None })));
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None })));
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
     }
 
@@ -2632,6 +2940,40 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
     /// runner only reads git state, so a builder-cap refusal, like every other
     /// path, must not take the optional index lock at all.
     #[cfg(unix)]
+    /// cas-d95c: a verifier's named-test run at a bound head is admitted
+    /// against the same builder cap as a worker check, in a checkout under the
+    /// counted worktrees root, instead of running as uncounted plain Cargo.
+    #[test]
+    fn verifier_tests_are_admitted_against_the_builder_cap_cas_d95c() {
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders = 1\n").unwrap();
+        let slots = root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let _held = acquire_slot(&slots, 1).unwrap();
+        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+
+        let error = execute_verifier_at(&root, &head, &args, &repo, Path::new("/nonexistent/cargo"), None)
+            .expect_err("the only builder slot is held");
+        assert!(error.to_string().contains("max_concurrent_builders=1"), "{error}");
+        let checkout = root.join("worktrees").join(format!("verify-{}", &head[..12]));
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).unwrap().trim(), head);
+
+        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"].iter().map(|arg| arg.to_string()).collect();
+        let error = execute_verifier_at(&root, &head, &unnamed, &repo, Path::new("/nonexistent/cargo"), None)
+            .expect_err("verifiers run named tests only");
+        assert!(error.to_string().contains("named tests only"), "{error}");
+    }
+
     #[test]
     fn builder_cap_refusal_never_takes_the_index_lock_cas_39f3() {
         use std::os::unix::fs::MetadataExt;

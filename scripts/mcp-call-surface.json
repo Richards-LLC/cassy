@@ -97,6 +97,7 @@
         "queue_notify",
         "queue_peek",
         "queue_poll",
+        "record_test_receipt",
         "recycle_worker",
         "release_claim",
         "release_worker",

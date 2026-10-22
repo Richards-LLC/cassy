@@ -128,6 +128,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "focus_epic",
     "epic_split",
     "restart_spawn_queue",
+    "record_test_receipt",
     "agent_list",
     "agent_cleanup",
     "lease_history",

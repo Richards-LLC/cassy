@@ -1485,6 +1485,31 @@ impl CasCore {
             delivery_mode,
         };
 
+        // Validate before the atomic create or assignment enqueue: refusing
+        // the whole create leaves neither a task nor a misleading worker prompt.
+        let mut assignee_warnings = Vec::new();
+        task.assignee = task.assignee.as_deref()
+            .and_then(super::update::normalize_assignee_update_value)
+            .map(|assignee| {
+                self.validate_task_assignee(
+                    task_store.as_ref(), &task, &assignee, task.status, &mut assignee_warnings,
+                )
+            })
+            .transpose()
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Task not created: {message}")),
+                data: None,
+            })?;
+        let assignee_receipt = task.assignee.as_deref()
+            .map(|assignee| format!("\nAssignee: {assignee}"))
+            .unwrap_or_default();
+        let assignee_receipt = if assignee_warnings.is_empty() {
+            assignee_receipt
+        } else {
+            format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
+        };
+
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -1625,10 +1650,11 @@ impl CasCore {
                                 "Warning: Failed to resolve a fresh epic base '{trunk}': {error}"
                             );
                             return Ok(Self::success(format!(
-                                "Created task: {} - {} (P{}){}{}{}",
+                                "Created task: {} - {} (P{}){}{}{}{}",
                                 id,
                                 task.title,
                                 task.priority.0,
+                                assignee_receipt,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
                                 assignment_warning,
@@ -1750,10 +1776,11 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}",
             id,
             task.title,
             task.priority.0,
+            assignee_receipt,
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
             assignment_warning,

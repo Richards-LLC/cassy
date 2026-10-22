@@ -1068,6 +1068,17 @@ Task creation excludes common planning words and prose such as `NOT` and
 require near identity; exact duplicate titles and concrete code/path overlap
 still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
+### Assignment on task creation
+
+In factory mode, `task action=create assignee=<worker>` uses the same worker
+identity normalization and freshness policy as `task action=update assignee=`.
+A refused assignment rejects the entire create before saving a task or queuing
+a worker prompt. Successful creates show the stored assignee, including any
+normalization or freshness warnings. `task action=show` always shows the stored
+assignee or `(unassigned)`. Parked-delivery and clean-idle reset exemptions,
+warning-only configuration, and assignments to workers not yet registered retain
+the update policy.
+
 ### Task start cancellation
 
 `task action=start` commits its local lease and InProgress status before awaiting
@@ -1311,6 +1322,36 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+When worker admission is unavailable but a supervisor has already run the
+selection in a scratch checkout, a **live registered supervisor** may record
+that run without executing it again. Use `factory action=record_test_receipt
+ task_id=<task> payload=<JSON>` (MCP), or `cas factory record-test-receipt
+--task-id <task> --request <evidence.json>` (CLI). The JSON is:
+
+```json
+{
+  "head": "<full tested commit SHA>",
+  "repo": "/absolute/supervisor-tested-checkout",
+  "cargo_args": ["nextest", "run", "-p", "cas", "--lib", "-E", "test(module::name)"],
+  "log_path": "/absolute/selected-nextest-run.log",
+  "exit_code": 0
+}
+```
+
+This is an explicit supervisor attestation of the recorded process exit code.
+The task must be assigned to a registered worker; its checkout and the tested
+checkout must both still be clean at `head`. The command must satisfy the same
+single-package, named-test and explicit-harness rules as a worker run. The
+non-empty UTF-8 log (at most 25 MiB) must contain exactly one nextest summary,
+with a nonzero selection and every executed test passed. Supply the selected
+run's log, without separate guard-run summaries. A failed recorded retry removes
+that exact command's previous receipt. An active worker run refuses recording.
+The action writes the normal worker-check receipt key and adds
+`supervisor-recorded` provenance to both its displayed receipt and task audit
+note, including the issuer, tested checkout, command and log SHA-256. Park reads
+it through the existing receipt contract; the recording action runs no Cargo
+command and changes no worker admission guard.
+
 Build admission reads Linux `/proc/pressure/cpu` and `/proc/pressure/memory`
 `some avg10` stall percentages, plus `MemAvailable` from `/proc/meminfo`.
 Valid CPU PSI replaces the raw load check, so unrelated I/O-heavy work does not
@@ -1370,6 +1411,14 @@ switch on systemd older than 254, whose scopes already pass arguments literally.
 Daemon startup also tries to give its inherited interactive cgroup (including
 the supervisor) at least 256 MiB `memory.low`, preserving stronger operator
 settings. Missing controllers or user-manager permissions leave startup working.
+
+Task verifiers use the same budget (cas-d95c). `cas factory verifier-test
+--cas-root <root> --head <bound head SHA> -- nextest run -p <crate> [--lib|--test
+<harness>] -E 'test(name)'` checks the bound head out at
+`<root>/worktrees/verify-<sha12>` and runs it through the capped runner, so the
+build takes a counted builder slot and is refused under the same PSI and cap
+rules. The PreToolUse guard sends a task-verifier subagent's plain Cargo build
+there.
 
 Shell redirection opens logs before the runner checks that commit. Use a
 Git-ignored `target/worker-check.log` or the task's artifacts directory; create

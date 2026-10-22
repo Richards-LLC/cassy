@@ -77,7 +77,14 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n").unwrap();
     std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
-    std::fs::write(repo.join("crates/widget/src/lib.rs"), "pub mod gear;\n").unwrap();
+    std::fs::write(
+        repo.join("crates/widget/src/lib.rs"),
+        "pub mod gear;\npub const EMBEDDED: &str = include_str!(\"embedded.md\");\npub const RELEASE_RUBRIC: &str = include_str!(\"../../../docs/RELEASE_SLACK_RUBRIC.md\");\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/widget/src/embedded.md"), "embedded prompt v1\n").unwrap();
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/RELEASE_SLACK_RUBRIC.md"), "release rubric v1\n").unwrap();
     std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() {}\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "seed"]);
@@ -159,13 +166,80 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     assert!(widened.contains("FOCUSED PROOF REQUIRED"), "{widened}");
 
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
-        &f.cas_dir(),
-        &f.worker_path,
-        &tested_tip,
-        "widget",
-        "test(gear)",
-    );
+    // cas-0dac: a supervisor ran this selection in a scratch checkout while
+    // the worker's build lane was unavailable. Record it through the public
+    // factory action, then let the real park gate consume the normal receipt.
+    let scratch = tempfile::tempdir().unwrap();
+    let tested_repo = scratch.path().join("tested");
+    git(f.dir.path(), &["worktree", "add", "-q", "--detach", tested_repo.to_str().unwrap(), &tested_tip]);
+    let log = scratch.path().join("supervisor-test.log");
+    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    let proof = serde_json::json!({
+        "head": tested_tip, "repo": tested_repo,
+        "cargo_args": ["nextest", "run", "-p", "widget", "--lib", "-E", "test(gear)"],
+        "log_path": log, "exit_code": 0,
+    });
+    let request = |proof: &serde_json::Value| serde_json::from_value(serde_json::json!({
+        "action": "record_test_receipt", "task_id": ID, "payload": proof.to_string(),
+    })).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    assert!(f.worker.factory(Parameters(request(&proof))).await.is_err(), "a worker cannot attest supervisor evidence via an environment hint");
+    for (field, value) in [
+        ("head", serde_json::json!(git(&f.worker_path, &["rev-parse", "HEAD^"]))),
+        ("exit_code", serde_json::json!(100)),
+        ("cargo_args", serde_json::json!(["nextest", "run", "-p", "widget", "--lib", "-E", "all()"])),
+    ] {
+        let mut invalid = proof.clone();
+        invalid[field] = value;
+        assert!(f.supervisor.factory(Parameters(request(&invalid))).await.is_err(), "invalid {field} must not supply a test receipt");
+    }
+    for failed_log in [
+        "     Summary [ 0.01s] 0 tests run: 0 passed, 1 skipped\n",
+        "     Summary [ 0.01s] 2 tests run: 1 passed, 1 failed\n",
+        "no harness summary\n",
+    ] {
+        std::fs::write(&log, failed_log).unwrap();
+        assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "failed or empty selection evidence must not count");
+    }
+    std::fs::write(&log, "     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n").unwrap();
+    std::fs::write(tested_repo.join("dirty.rs"), "// not tested\n").unwrap();
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty supervisor checkout must not count");
+    std::fs::remove_file(tested_repo.join("dirty.rs")).unwrap();
+    git(&tested_repo, &["checkout", "-q", "HEAD^"]);
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "another tested commit cannot supply this tip's receipt");
+    git(&tested_repo, &["checkout", "-q", &tested_tip]);
+    let mut wrong_task = request(&proof);
+    wrong_task.task_id = Some("cas-no-task".into());
+    assert!(f.supervisor.factory(Parameters(wrong_task)).await.is_err(), "evidence must name an assigned task");
+    std::fs::write(f.worker_path.join("dirty.rs"), "// worker changed\n").unwrap();
+    assert!(f.supervisor.factory(Parameters(request(&proof))).await.is_err(), "dirty worker checkout must not count");
+    std::fs::remove_file(f.worker_path.join("dirty.rs")).unwrap();
+    for caller in ["not-registered", "shutdown-supervisor"] {
+        if caller == "shutdown-supervisor" {
+            let mut agent = Agent::new_with_role(caller.into(), caller.into(), AgentRole::Supervisor);
+            agent.status = cas_types::AgentStatus::Shutdown;
+            open_agent_store(&f.cas_dir()).unwrap().register(&agent).unwrap();
+        }
+        let core = CasCore::with_daemon(f.cas_dir(), None, None);
+        core.set_agent_id_for_testing(caller.into());
+        let service = CasService::new(core, None);
+        assert!(service.factory(Parameters(request(&proof))).await.is_err(), "{caller} has no live supervisor authority");
+    }
+    let recorded = f.supervisor.factory(Parameters(request(&proof))).await;
+    assert!(recorded.is_ok(), "registered supervisor evidence must reach the worker receipt: {recorded:?}");
+    let receipt = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &tested_tip).join("\n");
+    // pin: supervisor-recorded distinguishes an attestation from a worker-executed run.
+    assert!(receipt.contains("supervisor-recorded") && receipt.contains("br-supervisor-session"), "the gate must preserve execution provenance: {receipt}");
+    let parked = call(&f.worker, close.clone()).await;
+    assert!(parked.contains("MERGE REQUIRED"), "supervisor receipt must pass focused proof at park: {parked}");
+    assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    assert!(f.task().notes.contains("br-supervisor-session"), "recording audits its registered issuer");
+    let reopened = call(&f.supervisor, serde_json::json!({
+        "action": "request_changes", "id": ID, "reason": "continue proof input regression",
+    })).await;
+    assert!(!reopened.contains("rejected"), "{reopened}");
+    let resumed = call(&f.worker, serde_json::json!({"action": "start", "id": ID})).await;
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{resumed}");
     let source_path = "crates/widget/src/gear.rs";
     std::fs::write(f.worker_path.join(source_path), "pub fn turn() { let _ = 2; }\n").unwrap();
     git(&f.worker_path, &["add", source_path]);
@@ -251,6 +325,65 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "receipt at {tested_tip} must not cover Cargo change: {stale}"
     );
     assert_eq!(f.task().status, TaskStatus::InProgress, "{stale}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
+    );
+
+    let embedded_path = "crates/widget/src/embedded.md";
+    std::fs::write(f.worker_path.join(embedded_path), "embedded prompt v2\n").unwrap();
+    git(&f.worker_path, &["add", embedded_path]);
+    git(
+        &f.worker_path,
+        &["commit", "-q", "-m", "docs(cas-br01): change compiled-in prompt"],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale_embedded = call(&f.worker, close.clone()).await;
+    assert!(
+        stale_embedded.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover a compiled-in non-Rust file: {stale_embedded}"
+    );
+    assert_eq!(f.task().status, TaskStatus::InProgress, "{stale_embedded}");
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
+    );
+
+    let external_embedded_path = "docs/RELEASE_SLACK_RUBRIC.md";
+    std::fs::write(
+        f.worker_path.join(external_embedded_path),
+        "release rubric v2\n",
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", external_embedded_path]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "docs(cas-br01): change an external compiled-in rubric",
+        ],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale_external_embedded = call(&f.worker, close.clone()).await;
+    assert!(
+        stale_external_embedded.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover an outside-crate compiled-in Markdown file: {stale_external_embedded}"
+    );
+    assert_eq!(
+        f.task().status,
+        TaskStatus::InProgress,
+        "{stale_external_embedded}"
+    );
     let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(),

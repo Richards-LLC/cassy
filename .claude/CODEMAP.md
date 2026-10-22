@@ -95,7 +95,7 @@ The Rust workspace has 18 members; `hub-web/` and `slack-bridge/` are separate T
 - `cas-cli/src/ui/factory/director/` - task dispatch, worker coordination, reminders, and stall handling.
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment evidence and directed supervisor wake batching.
 - `cas-cli/src/ui/factory/server_registry/` - owned server records and lifecycle.
-- `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_worker_check.rs` - target-path resolution and capped worker proof admission.
+- `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_worker_check.rs` - target-path resolution, capped worker proof admission, and authenticated supervisor-recorded exact-tip test evidence.
 - `cas-cli/src/factory_target_cache/` - target ownership, baseline seeding, parked caches, and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch/environment projections, pane readiness, and terminal snapshots.
 - `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, queued injection, and submit gating.

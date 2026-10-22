@@ -1286,8 +1286,8 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub event_type: Option<String>,
 
-    /// Payload (for queue_notify)
-    #[schemars(description = "JSON payload containing event details")]
+    /// Event details or exact-tip supervisor test evidence.
+    #[schemars(description = "queue_notify: event JSON. record_test_receipt (live registered supervisor only), with task_id: JSON {head: full SHA, repo: tested checkout, cargo_args: narrow nextest argv without cargo, log_path: non-empty single-run nextest log, exit_code: 0}. Both tested and assigned worker checkouts must be clean at head; records supervisor provenance, never runs Cargo.")]
     #[serde(default)]
     pub payload: Option<String>,
 

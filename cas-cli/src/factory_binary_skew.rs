@@ -196,7 +196,10 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
 }
 
 pub(crate) fn supervisor_banner(cas_root: &Path, session: Option<&str>) -> Option<String> {
-    let snapshot = snapshot(cas_root).ok()?;
+    let snapshot = match snapshot(cas_root) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return Some(format!("⚠ Factory MCP versions unavailable: {reason}")),
+    };
     let rows: Vec<_> = snapshot
         .servers
         .iter()

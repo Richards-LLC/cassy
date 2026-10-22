@@ -3970,7 +3970,9 @@ impl CasCore {
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
         if let Some(task_id) = task_id
-            && let Some(refusal) = self.independent_qa_merge_refusal(task_id, id, &cwd)
+            && let Some(refusal) = self.independent_qa_merge_refusal(
+                task_id, task_source.as_ref().map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
+            )
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,

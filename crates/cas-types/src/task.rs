@@ -546,6 +546,34 @@ pub struct EpicBranchOrigin {
     pub device_id: Option<String>,
 }
 
+/// CI evidence under which a published factory merge was admitted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeCiAdmission {
+    #[default]
+    Green,
+    Advisory,
+    Override,
+}
+
+impl MergeCiAdmission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Advisory => "advisory",
+            Self::Override => "override",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Advisory => "advisory (unconfirmed)",
+            Self::Override => "override",
+        }
+    }
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
@@ -692,11 +720,14 @@ pub struct TaskDeliverables {
     pub parked_close_reason: Option<String>,
 
     /// cas-eda0: target tip of the `worktree_merge` that landed this parked
-    /// delivery with green CI and no override. Its presence hands the close
+    /// delivery. Admission is recorded separately; old records read as green.
+    /// Its presence hands the close
     /// retry to Cassy: an approved verdict closes the task without waking
     /// the worker. Cleared with the park on reopen or conflict rework.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub green_merge_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_ci_admission: Option<MergeCiAdmission>,
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -754,6 +785,8 @@ struct TaskDeliverablesObject {
     parked_close_reason: Option<String>,
     #[serde(default)]
     green_merge_commit: Option<String>,
+    #[serde(default)]
+    merge_ci_admission: Option<MergeCiAdmission>,
 }
 
 impl From<TaskDeliverablesObject> for TaskDeliverables {
@@ -783,6 +816,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             merge_conflicted: value.merge_conflicted,
             parked_close_reason: value.parked_close_reason,
             green_merge_commit: value.green_merge_commit,
+            merge_ci_admission: value.merge_ci_admission,
         }
     }
 }
@@ -1136,6 +1170,11 @@ impl TaskDeliverables {
             .unwrap_or(&self.historical_factory_branch_anchors)
     }
 
+    /// Missing admission predates the distinction and retains green semantics.
+    pub fn effective_merge_ci_admission(&self) -> MergeCiAdmission {
+        self.merge_ci_admission.unwrap_or_default()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.epic_branch_origin.is_none()
             && self.split_takeover.is_none()
@@ -1156,6 +1195,8 @@ impl TaskDeliverables {
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
             && !self.merge_conflicted
+            && self.green_merge_commit.is_none()
+            && self.merge_ci_admission.is_none()
     }
 }
 
@@ -1621,6 +1662,12 @@ mod tests {
         assert!(deliverables.epic_branch_origin.is_none());
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+        assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
+        for (state, expected) in [("green", MergeCiAdmission::Green), ("advisory", MergeCiAdmission::Advisory), ("override", MergeCiAdmission::Override)] {
+            let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"green_merge_commit":"sha", "merge_ci_admission":state})).unwrap();
+            assert_eq!(parsed.effective_merge_ci_admission(), expected);
+            assert_eq!(serde_json::to_value(parsed).unwrap()["merge_ci_admission"], state);
+        }
     }
 
     #[test]

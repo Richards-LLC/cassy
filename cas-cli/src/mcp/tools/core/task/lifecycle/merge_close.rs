@@ -48,21 +48,26 @@ impl CassyMergeClose {
 impl CasCore {
     /// Record that `worktree_merge` published this parked delivery, then close
     /// it as Cassy. The legacy green_merge_commit field records the merge tip
-    /// for both confirmed and advisory CI; the task note preserves that distinction.
+    /// with a separate CI admission state, including explicit override merges.
     pub(crate) async fn close_after_published_merge(
         &self,
         task_id: &str,
         merge_commit: &str,
-        ci_confirmed: bool,
+        admission: cas_types::MergeCiAdmission,
     ) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
         // One conditional field write, never a read-modify-write of the row:
         // a worker close landing first must stay closed.
-        match store.record_green_merge(task_id, merge_commit) {
+        match store.record_merge_admission(task_id, merge_commit, admission) {
             Ok(true) => {
-                if !ci_confirmed {
+                if admission == cas_types::MergeCiAdmission::Override {
+                    // An override remains a manual close, including after a
+                    // verdict arrives. Recording evidence grants no close authority.
+                    return CassyMergeClose::NotEligible;
+                }
+                if admission == cas_types::MergeCiAdmission::Advisory {
                     let note = format!(
                         "CI unconfirmed at merge {merge_commit}; worktree_merge proceeded under advisory CI policy."
                     );
@@ -99,6 +104,9 @@ impl CasCore {
         let Some(merge_commit) = task.deliverables.green_merge_commit.clone() else {
             return CassyMergeClose::NotEligible;
         };
+        if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
+            return CassyMergeClose::NotEligible;
+        }
         let reason = task.deliverables.parked_close_reason.clone().unwrap_or_else(|| {
             format!("Merged at {merge_commit}; closed by Cassy after the merge.")
         });

@@ -799,12 +799,21 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
-    /// cas-eda0: record the green merge of a parked delivery as one
-    /// conditional write: only `deliverables.green_merge_commit` changes, and
+    /// cas-eda0: legacy green merge caller; newer callers name CI admission.
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        self.record_merge_admission(task_id, merge_commit, cas_types::MergeCiAdmission::Green)
+    }
+
+    /// Record a published merge and CI admission as one conditional write,
     /// only while the task is still a clean `awaiting_merge` park. Returns
     /// `false` when it is not (for example, its worker closed it meanwhile),
     /// so a concurrent close is never overwritten by a stale row.
-    fn record_green_merge(&self, _task_id: &str, _merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        _task_id: &str,
+        _merge_commit: &str,
+        _admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         Err(StoreError::Other(
             "conditional green-merge records are unsupported by this store".to_string(),
         ))

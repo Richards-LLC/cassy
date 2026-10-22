@@ -666,6 +666,10 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         assert_eq!(stored["merge_ci_admission"], admission, "{row}: {merged}");
         let roundtrip: cas::types::TaskDeliverables = serde_json::from_value(stored).unwrap();
         assert_eq!(serde_json::to_value(roundtrip).unwrap()["merge_ci_admission"], admission);
+        let shown = get_text(&supervisor.task(Parameters(task_req(serde_json::json!({
+            "action": "show", "id": task.id,
+        })))).await.expect("show merged task"));
+        assert!(shown.contains(&format!("CI admission: {admission}")), "{row}: {shown}");
 
         if let Some(verdict) = verdict {
             if admission == "advisory" {
@@ -696,7 +700,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
             }
         } else {
-            assert_eq!(after_merge.deliverables.green_merge_commit, None, "{row}: {merged}");
+            assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
+            assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(), "override must not auto-close or dispatch verification");
         }
 
         let worker_prompts: Vec<String> = cas::store::open_prompt_queue_store(&cas_root)

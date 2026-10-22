@@ -381,8 +381,13 @@ impl CasCore {
             if let Some(ref commit) = task.deliverables.commit_hash {
                 output.push_str(&format!("\n  Commit: {commit}"));
             }
-            if let Some(ref merge) = task.deliverables.merge_commit {
+            if let Some(merge) = task.deliverables.merge_commit.as_ref()
+                .or(task.deliverables.green_merge_commit.as_ref())
+            {
                 output.push_str(&format!("\n  Merge commit: {merge}"));
+            }
+            if task.deliverables.green_merge_commit.is_some() || task.deliverables.merge_ci_admission.is_some() {
+                output.push_str(&format!("\n  CI admission: {}", task.deliverables.effective_merge_ci_admission().label()));
             }
         }
 

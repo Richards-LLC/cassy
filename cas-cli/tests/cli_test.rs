@@ -654,7 +654,18 @@ fn test_init_json() {
 fn test_init_failure_reports_force_retry() {
     let mut missing_hints = Vec::new();
     for harness in ["claude", "codex"] {
-        for mode in ["json", "yes", "interactive"] {
+        let clean = TempDir::new().unwrap();
+        std::fs::create_dir(clean.path().join(format!(".{harness}"))).unwrap();
+        cas_cmd(clean.path()).current_dir(&clean)
+            .env("CODEX_HOME", clean.path().join(".test-home/.codex"))
+            .args(["init", "--json", "--no-integrations"])
+            .assert().success();
+        let clean_config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(clean.path().join(".cas/config.toml")).unwrap(),
+        ).unwrap();
+        for (mode, retry_mode) in [
+            ("json", "json"), ("json", "yes"), ("yes", "yes"), ("interactive", "yes"),
+        ] {
             let temp = TempDir::new().unwrap();
             let config_dir = temp.path().join(format!(".{harness}"));
             std::fs::create_dir(&config_dir).unwrap();
@@ -694,8 +705,13 @@ fn test_init_failure_reports_force_retry() {
             assert!(!blocked.exists());
             cas_cmd(temp.path()).current_dir(&temp)
                 .env("CODEX_HOME", &user_codex)
-                .args(["init", "--yes", "--no-integrations", "--force"])
+                .args(["init", if retry_mode == "json" { "--json" } else { "--yes" }, "--no-integrations", "--force"])
                 .assert().success();
+            let recovered_config: toml::Value = toml::from_str(
+                &std::fs::read_to_string(temp.path().join(".cas/config.toml")).unwrap(),
+            ).unwrap();
+            assert_eq!(recovered_config, clean_config,
+                "{harness}/{mode} -> {retry_mode}: force recovery must keep the full clean-init config");
             if harness == "claude" {
                 let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
                 assert_eq!(value["mcpServers"]["cas"]["command"], "cas");

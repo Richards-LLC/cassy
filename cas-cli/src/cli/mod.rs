@@ -612,6 +612,8 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
         format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
     };
     format!("Operator-only config change refused.\n{detail}")
+        .trim_end()
+        .to_owned()
 }
 
 /// Run the CLI with the given arguments

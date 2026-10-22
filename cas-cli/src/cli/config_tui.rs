@@ -196,6 +196,15 @@ impl ConfigTuiApp {
 
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let footer_height = self.status_message.as_ref().map_or(3, |(message, _)| {
+            message
+                .lines()
+                .count()
+                .max(1)
+                .saturating_add(2)
+                .try_into()
+                .unwrap_or(u16::MAX)
+        });
 
         // Main layout: header, body, footer
         let chunks = Layout::default()
@@ -203,7 +212,7 @@ impl ConfigTuiApp {
             .constraints([
                 Constraint::Length(3), // Header
                 Constraint::Min(10),   // Body
-                Constraint::Length(3), // Footer/status
+                Constraint::Length(footer_height), // Footer/status
             ])
             .split(area);
 
@@ -541,7 +550,10 @@ impl ConfigTuiApp {
             &self.config,
             context,
         ) {
-            self.status_message = Some((refusal.to_string(), true));
+            self.status_message = Some((
+                crate::cli::human_error_message(&anyhow::anyhow!(refusal)),
+                true,
+            ));
             return Ok(());
         }
         self.config.save(&self.cas_root)?;

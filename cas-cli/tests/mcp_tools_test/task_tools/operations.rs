@@ -6543,7 +6543,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     }
 
     git(&worker_checkout, &["fetch", "-q", "origin"]);
-    git(&worker_checkout, &["merge", "--ff-only", "origin/main"]);
+    git(&worker_checkout, &["merge", "--ff-only", "origin/main{a,b}!e"]);
     for (assignee, title) in [
         (&worker.name, "Reconcile invoice payments"),
         (&worker.id, "Calibrate satellite antenna"),

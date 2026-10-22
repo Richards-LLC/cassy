@@ -53,8 +53,9 @@ metadata:
 8. Apply the brief's rubric to 1280×800 and 390×844 in both color schemes, with
    keyboard and JavaScript-disabled checks, and run the strict visual-QA script
    from the `cas-ui-craft` critique rubric. Record scores and proof paths in the
-   brief; revise any clipping, contrast, overflow or half-empty pagination defect
-   before delivery.
+   brief, and name each screenshot, JSON and page-PNG path in the QA receipt
+   rather than "the task artifact directory"; revise any clipping, contrast,
+   overflow or half-empty pagination defect before delivery.
 9. Commit the Markdown, brief, standalone HTML, PDF and small QA receipt under
    `docs/release-reports/`. Carry these post-publication artifacts into the next
    release-prep commit; do not rewrite the published tag. Link the report and PDF

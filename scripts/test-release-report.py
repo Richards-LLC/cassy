@@ -316,5 +316,29 @@ class PdfCheckTests(unittest.TestCase):
         # The closing folio, not an evidence line that also names the source, is the anchor.
         self.assertEqual(run('Markdown source: the v9.99.1 CHANGELOG section.').returncode, 0)
 
+    def test_local_file_links_are_refused_cas_692a(self):
+        """cas-692a: a link into the generating checkout is dead for every reader."""
+        import pymupdf, subprocess, sys
+        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+
+        def run(link):
+            with tempfile.TemporaryDirectory() as tmp:
+                pdf = pymupdf.open()
+                page = pdf.new_page()
+                page.insert_text((60, 80), 'Evidence and scope. Markdown source')
+                page.insert_link({'from': pymupdf.Rect(60, 70, 200, 85), **link})
+                pdf.save(Path(tmp) / 'report.pdf')
+                return subprocess.run([sys.executable, str(check), str(Path(tmp) / 'report.pdf'), tmp],
+                                      capture_output=True, text=True)
+
+        # Chromium prints a relative link as a launch link to the local file.
+        launch = run({'kind': pymupdf.LINK_LAUNCH, 'file': '/home/x/.cas/worktrees/w/docs/release-reports/v9.99.1.md'})
+        self.assertNotEqual(launch.returncode, 0)
+        self.assertIn('local file link', launch.stderr)
+        uri = run({'kind': pymupdf.LINK_URI, 'uri': 'file:///home/x/docs/release-reports/v9.99.1.pdf'})
+        self.assertNotEqual(uri.returncode, 0)
+        tagged = 'https://github.com/o/r/blob/v9.99.1/docs/release-reports/v9.99.1.md'
+        self.assertEqual(run({'kind': pymupdf.LINK_URI, 'uri': tagged}).returncode, 0)
+
 if __name__ == '__main__':
     unittest.main()

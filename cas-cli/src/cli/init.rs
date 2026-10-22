@@ -740,43 +740,47 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 // ============================================================================
 
 fn print_welcome() -> anyhow::Result<()> {
-    println!();
-    print_colored(
+    render_welcome(OutputMode::detect(), print_colored)
+}
+
+fn render_welcome(mode: OutputMode, mut write: impl FnMut(&str, Color) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    write("\n", Color::Reset)?;
+    write(
         "  ╭──────────────────────────────────────────────────────╮\n",
         colors::CYAN,
     )?;
-    print_colored("  │", colors::CYAN)?;
-    print_colored(
+    write("  │", colors::CYAN)?;
+    write(
         "                                                      ",
         colors::CYAN,
     )?;
-    print_colored("│\n", colors::CYAN)?;
-    for line in cassy_wordmark_lines() {
-        print_colored("  │  ", colors::CYAN)?;
-        print_colored(line, colors::WORDMARK)?;
-        print_colored(
+    write("│\n", colors::CYAN)?;
+    for line in cassy_wordmark_lines_for_mode(mode) {
+        write("  │  ", colors::CYAN)?;
+        write(line, colors::WORDMARK)?;
+        write(
             &" ".repeat(INIT_WORDMARK_WIDTH.saturating_sub(line.chars().count())),
             colors::CYAN,
         )?;
-        print_colored("│\n", colors::CYAN)?;
+        write("│\n", colors::CYAN)?;
     }
-    print_colored("  │", colors::CYAN)?;
-    print_colored(
+    write("  │", colors::CYAN)?;
+    write(
         "                                                      ",
         colors::CYAN,
     )?;
-    print_colored("│\n", colors::CYAN)?;
-    print_colored(
+    write("│\n", colors::CYAN)?;
+    write(
         "  ╰──────────────────────────────────────────────────────╯\n",
         colors::CYAN,
     )?;
-    println!();
-    print_colored("  │ ", colors::GRAY)?;
-    print_colored(
+    write("\n", Color::Reset)?;
+    write("  │ ", colors::GRAY)?;
+    write(
         "Multi-agent coding factory with persistent memory and task coordination.\n",
         colors::WHITE,
     )?;
-    println!();
+    write("\n", Color::Reset)?;
     Ok(())
 }
 
@@ -1236,17 +1240,19 @@ fn quick_start_table_for_mode(mode: OutputMode) -> crate::ui::components::Table 
 }
 
 fn print_quick_start() {
+    let _ = render_quick_start(&mut stdout(), OutputMode::detect());
+}
+
+fn render_quick_start(out: &mut impl Write, mode: OutputMode) -> std::io::Result<()> {
     use crate::ui::components::{Formatter, Renderable};
     use crate::ui::theme::ActiveTheme;
 
-    let table = quick_start_table_for_mode(OutputMode::detect());
-
-    let theme = ActiveTheme::default();
-    let mut out = std::io::stdout();
-    let mut fmt = Formatter::stdout(&mut out, theme);
-    let _ = fmt.newline();
-    let _ = table.render(&mut fmt);
-    let _ = fmt.newline();
+    let table = quick_start_table_for_mode(mode);
+    let width = crossterm::terminal::size().map(|(width, _)| width).unwrap_or(80);
+    let mut fmt = Formatter::new(out, mode, ActiveTheme::default(), width);
+    fmt.newline()?;
+    table.render(&mut fmt)?;
+    fmt.newline()
 }
 
 // ============================================================================
@@ -1354,15 +1360,22 @@ fn next_steps_needed(cwd: &Path) -> Option<Vec<String>> {
 // ============================================================================
 
 fn print_colored(text: &str, color: Color) -> anyhow::Result<()> {
-    let mut stdout = stdout();
-    let mode = OutputMode::detect();
+    write_colored(&mut stdout(), text, color, OutputMode::detect())
+}
+
+fn write_colored(
+    writer: &mut impl Write,
+    text: &str,
+    color: Color,
+    mode: OutputMode,
+) -> anyhow::Result<()> {
     let text = init_text_for_mode(text, mode);
     if mode == OutputMode::Plain {
-        write!(stdout, "{text}")?;
+        write!(writer, "{text}")?;
         return Ok(());
     }
-    execute!(stdout, SetForegroundColor(color), Print(text.as_ref()))?;
-    execute!(stdout, SetForegroundColor(Color::Reset))?;
+    execute!(writer, SetForegroundColor(color), Print(text.as_ref()))?;
+    execute!(writer, SetForegroundColor(Color::Reset))?;
     Ok(())
 }
 
@@ -1415,6 +1428,35 @@ pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_agents_md,
 #[cfg(test)]
 mod integration_flag_tests {
     use super::*;
+
+    #[test]
+    fn init_welcome_and_guidance_use_terminal_foreground() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        env.set("LC_ALL", "C.UTF-8");
+        let mut output = Vec::new();
+        let mut write =
+            |text: &str, color| write_colored(&mut output, text, color, OutputMode::Styled);
+        render_welcome(OutputMode::Styled, &mut write).unwrap();
+        render_next_steps(&mut write).unwrap();
+        render_quick_start(&mut output, OutputMode::Styled).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Multi-agent coding factory"));
+        assert!(output.contains("git commit"));
+        assert!(output.contains("cas doctor"));
+        // Text and multi-cell borders must inherit the terminal foreground.
+        // Bold provides hierarchy without assuming a dark background.
+        let forced: Vec<_> = output
+            .split("\x1b[")
+            .skip(1)
+            .filter_map(|run| run.split_once('m').map(|(sgr, _)| sgr))
+            .filter(|sgr| !matches!(*sgr, "0" | "1" | "22" | "39" | "49"))
+            .collect();
+        assert!(
+            forced.is_empty(),
+            "text overrides terminal foreground: {forced:?}"
+        );
+    }
 
     #[test]
     fn cassy_init_wordmark_fits_80_column_wizard() {

@@ -148,3 +148,17 @@ explicit inherited exceptions. Inspected80column dark/light PNGs and plain text
 for all3locales and both interactive entries. Task ledger lists every exception,
 binary identity, retained failures, readbacks and final reports. Targeted Rust
 proof is bound to the final documentation tip separately.
+
+## Palette contract (cas-f15f)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The compact Cassy welcome introduces the existing-config choice without changing its wording or ordering. |
+| Scannable | The six-row logo, frame, section rules and aligned guidance keep their geometry; bold provides hierarchy without assuming a dark background. |
+| Readable | Descriptions, paths, commands and table text inherit the terminal foreground; only short semantic status marks receive palette-safe color. |
+| Machine output | Init JSON retains one result document and bypasses the splash; NO_COLOR and pipes retain the same readable text without SGR. |
+| Omitted | No hardcoded bright body, logo or border colors; locale fallback and compact dimensions remain covered by existing controls. |
+
+Real-build gates must pass all four palettes at80/120, C and NO_COLOR with
+all cas-f15f contrast allowances removed. The three previously approved exact
+exceptions for cas-0ba9, cas-3075 and cas-592b remain scoped to their findings.

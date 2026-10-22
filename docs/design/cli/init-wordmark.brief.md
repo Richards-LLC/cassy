@@ -148,3 +148,66 @@ explicit inherited exceptions. Inspected80column dark/light PNGs and plain text
 for all3locales and both interactive entries. Task ledger lists every exception,
 binary identity, retained failures, readbacks and final reports. Targeted Rust
 proof is bound to the final documentation tip separately.
+
+## Palette contract (cas-f15f)
+
+| Field | Contract |
+| --- | --- |
+| First two lines | The compact Cassy welcome introduces the existing-config choice without changing its wording or ordering. |
+| Scannable | The six-row logo, frame, section rules and aligned guidance keep their geometry; bold provides hierarchy without assuming a dark background. |
+| Readable | Descriptions, paths, commands and table text inherit the terminal foreground; only short semantic status marks receive palette-safe color. |
+| Machine output | Init JSON retains one result document and bypasses the splash; NO_COLOR and pipes retain the same readable text without SGR. |
+| Omitted | No hardcoded bright body, logo or border colors; locale fallback and compact dimensions remain covered by existing controls. |
+
+Real-build gates must pass all four palettes at80/120, C and NO_COLOR with
+all cas-f15f contrast allowances removed. The three previously approved exact
+exceptions for cas-0ba9, cas-3075 and cas-592b remain scoped to their findings.
+
+## Palette evidence and critique (cas-f15f)
+
+Candidate `f3aecb67acffb7284fe33cefee0dbe6789c48071`,
+`cas 3.71.0 (f3aecb6 2026-10-22)`, SHA256
+`2f6ca7525f2b8824779d911d46c7028cb2518f0a6e36bba41b19900c787a39bf`.
+
+Eight real-build gates pass: defaults and reconfigure under UTF8/C/unset,
+fresh interactive confirmation under UTF8, and adjacent unset-locale help.
+Each gate covers80/120, four palettes, NO_COLOR, pipe and C. All178cas-f15f
+exceptions are removed; zero contrast findings remain, including allowed
+findings. Same-command baseline reports fail256contrast defaults /452contrast
+reconfigure. Source-equivalent ancestor buildcd6681c supplies the baseline.
+105durable init readbacks confirm config/store/tasks/hooks/MCP;22init children
+and11help children have all3locale variables absent. All tested raw C/plain/
+unset output is ASCII. Six UTF8 defaults/fresh/reconfigure ×80/120 comparisons
+preserve visible text and layout byte-for-byte after stripping SGR only.
+
+Body, paths, commands, logo and rules now use terminal foreground. Bold
+provides logo/header hierarchy. Only short UTF8 marks use mid-tones, measured
+minimum3.71:1 success,3.30:1 warning,3.59:1 error; ASCII status words stay in
+default foreground. The quick-start palette override belongs only to init.
+
+- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/fresh-utf8-scoped/report.json
+- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-c-scoped/report.json
+- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-unset-scoped/report.json
+- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 21 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/interactive-utf8-scoped/report.json
+- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/root-help-unset/report.json
+- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-c-scoped/report.json
+- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-unset-scoped/report.json
+- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 13 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-f15f/terminal-qa/yes-utf8-scoped/report.json
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Existing-config choice leads to bold confirmation, then completed init and copyable commands. |
+| Fit | 2 full /5 welcome | Compact welcome/frame and61cell box fit80/120; inherited tooling row overflow retains exact cas-0ba9 exceptions. |
+| Craft | 4 | Consistent default text, bold hierarchy, aligned borders and short colored status marks. |
+| Theme safety | 5 | All4palettes pass with0contrast findings and no cas-f15f exceptions; actual before/after PNGs inspected. |
+| Machine contract | 3 | NO_COLOR/C/unset clean; inherited9piped redraws remain under cas-3075. JSON unchanged, not exercised. |
+
+The12retained exact exception entries cover only cas-0ba9, cas-3075 and the
+literal two-space `Reconfiguring Cassy...` truncation false positive cas-592b.
+The ledger lists every entry and preserves baseline FAIL reports. No blanket
+full-wizard fit/machine pass is claimed. Corrected screenshot capture waits
+for fonts and a2000px viewport; original paint/crop artifacts are retained.
+No CLI gate was replayed for screenshot correction. [Actual welcome/choice
+capture](init-welcome.palette.capture.txt) uses a portable project placeholder.
+Task artifact LEDGER.md and qa/pairs hold the complete real-build evidence;
+final-tip Rust receipts are recorded separately.

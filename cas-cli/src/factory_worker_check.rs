@@ -2021,7 +2021,7 @@ mod tests {
             let root = PathBuf::from(root);
             let mut command = Command::new("python3");
             command.arg("-c").arg("import pathlib, runpy, sys; guard = runpy.run_path(sys.argv[1], run_name='signal_fixture'); guard['verified'](pathlib.Path(sys.argv[2]).read_text(), sys.argv[3], ['nextest', 'run', '-p', 'cas', '--lib'], pathlib.Path(sys.argv[4]))")
-                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/worker-proof-guards.py"))
+                .arg(root.join("worker-proof-guards.py"))
                 .arg(root.join("verified.sh"))
                 .arg(root.join("fake-cargo.py"))
                 .arg(root.join("count"))
@@ -2042,6 +2042,11 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let fake = root.path().join("fake-cargo.py");
+        std::fs::write(
+            root.path().join("worker-proof-guards.py"),
+            include_str!("../../scripts/worker-proof-guards.py"),
+        )
+        .unwrap();
         std::fs::write(root.path().join("verified.sh"), include_str!("../../scripts/run-verified-tests.sh")).unwrap();
         std::fs::write(root.path().join("sitecustomize.py"), r#"import os, signal, time
 real_killpg = os.killpg
@@ -3358,11 +3363,12 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         )
         .unwrap();
         assert!(!repo.join(".context/zig/zig").exists());
-        // Preserve the tools needed by Git and the zero-test guard, but omit Zig.
+        // Preserve the tools needed by Git and the zero-test guard, including
+        // Python for nextest discovery; keep Zig absent from this PATH.
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let host_path = std::env::var_os("PATH").unwrap();
-        for tool in ["git", "bash", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
+        for tool in ["git", "bash", "python3", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
             let path = std::env::split_paths(&host_path)
                 .map(|dir| dir.join(tool))
                 .find(|path| executable(path))

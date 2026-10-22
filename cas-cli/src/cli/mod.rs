@@ -1097,6 +1097,8 @@ mod tests {
             assert!(help.contains("Usage:"), "root help retains command entry");
             if expected_styled.is_ascii() {
                 assert!(help.is_ascii(), "root help must be ASCII in {locale}: {help}");
+                let default_help = Cli::command().render_long_help().to_string();
+                assert!(default_help.is_ascii(), "raw clap entry must not bypass the locale fallback: {default_help}");
             }
         }
     }

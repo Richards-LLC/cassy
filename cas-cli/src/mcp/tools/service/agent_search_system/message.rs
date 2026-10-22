@@ -14,6 +14,27 @@ pub(crate) fn resolve_worker_supervisor_target(
     )
 }
 
+fn collapse_message_summary(summary: &str) -> String {
+    let mut collapsed = String::with_capacity(summary.len());
+    let mut pending_space = false;
+    for character in summary.chars() {
+        if character.is_control() {
+            pending_space |= character.is_whitespace() && !collapsed.is_empty();
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space |= !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(character);
+    }
+    collapsed
+}
+
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
     environment_name: Option<String>,
@@ -957,7 +978,8 @@ impl CasService {
         message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
         let summary = req
             .summary
-            .filter(|summary| !summary.trim().is_empty())
+            .map(|summary| collapse_message_summary(&summary))
+            .filter(|summary| !summary.is_empty())
             .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
@@ -6292,6 +6314,9 @@ mod cas_89e1_post_merge_message_type_tests {
         ] {
             let mut request = message_request_to("supervisor");
             request.kind = Some(kind.to_string());
+            if kind == "status" {
+                request.summary = Some("status\nsummary\r\nline\tend".into());
+            }
             let response = response_text(
                 service
                     .message_send(request)
@@ -6304,6 +6329,13 @@ mod cas_89e1_post_merge_message_type_tests {
                 .poll_all(10)
                 .unwrap();
             let row = rows.last().expect("typed worker row");
+            if kind == "status" {
+                assert_eq!(
+                    row.summary.as_deref(),
+                    Some("status summary line end"),
+                    "message summaries remain one line and contain no controls"
+                );
+            }
             assert_eq!(row.target, "supervisor-a");
             assert_eq!(
                 crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)

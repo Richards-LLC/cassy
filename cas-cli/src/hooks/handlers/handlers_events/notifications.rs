@@ -682,7 +682,11 @@ mod pre_compact_flush_tests {
             let error = send_webhook_notification(url, "secret notification")
                 .expect_err("parser-differential destinations must be refused")
                 .to_string();
-            assert!(error.to_ascii_lowercase().contains("https") || error.contains("URL"), "{error}");
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{error}"
+            );
             assert!(!captured_args.exists(), "curl must not receive {url}");
         }
 

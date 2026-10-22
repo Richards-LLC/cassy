@@ -741,20 +741,34 @@ pub(crate) fn unanchored_task_start_warning(
     )
 }
 
-fn candidate_paths(cas_root: &Path) -> (Vec<candidate_probe::Candidate>, bool) {
+fn candidate_paths(
+    cas_root: &Path,
+    local: Result<Option<candidate_probe::Candidate>, String>,
+) -> (Vec<candidate_probe::Candidate>, bool) {
     let deadline = Deadline::after(candidate_probe::SCAN_BUDGET);
-    let mut raw = vec![cas_root.to_path_buf()];
-    let mut scan_incomplete = false;
-    if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
-        && let Ok(known) = store.list()
+    let mut raw = Vec::new();
+    let mut scan_incomplete = local.is_err();
+    match crate::store::known_repos::open_host_known_repo_store()
+        .and_then(|store| store.list().map_err(Into::into))
     {
-        raw.extend(known.into_iter().map(|repo| repo.path));
-    } else {
-        scan_incomplete = true;
+        Ok(known) => raw.extend(known.into_iter().map(|repo| repo.path)),
+        // Hosts before the known-repository migration have a complete empty
+        // registry. Other read errors cannot prove a target is absent.
+        Err(error) if error.to_string().contains("no such table: known_repos") => {}
+        Err(_) => scan_incomplete = true,
     }
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
+    if let Ok(Some(local)) = local {
+        seen.insert(local.repo_root.clone());
+        candidates.push(local);
+    }
     for path in raw {
+        // The direct caller probe already read this checkout. Registered
+        // paths normally name its canonical root rather than its .cas path.
+        if path == cas_root || seen.contains(&path) {
+            continue;
+        }
         if deadline.remaining().is_zero() {
             scan_incomplete = true;
             break;
@@ -930,8 +944,8 @@ pub(crate) fn resolve_repo_context(
     // The caller's checkout is direct repository evidence. Resolve it before
     // unrelated host roots can exhaust the scan budget or stall on storage.
     // Explicit bindings above remain authoritative, including stale refusals.
-    if let Ok(Some(local)) =
-        candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET))
+    let local = candidate_probe::probe(cas_root, Deadline::after(candidate_probe::SCAN_BUDGET));
+    if let Ok(Some(local)) = &local
         && local.identities.iter().any(|identity| {
             canonical_selector(identity) == canonical_selector(&target.repo_selector)
         })
@@ -939,14 +953,14 @@ pub(crate) fn resolve_repo_context(
         let target_branch = validate_target_branch(&local.repo_root, &target.target_branch)?;
         return Ok(RepoContext {
             repo_selector: target.repo_selector.clone(),
-            repo_root: local.repo_root,
-            git_common_dir: local.git_common_dir,
+            repo_root: local.repo_root.clone(),
+            git_common_dir: local.git_common_dir.clone(),
             target_branch,
         });
     }
     let mut matches = Vec::new();
     let mut observed = Vec::new();
-    let (candidates, scan_incomplete) = candidate_paths(cas_root);
+    let (candidates, scan_incomplete) = candidate_paths(cas_root, local);
     for candidate in candidates {
         let identities = candidate.identities;
         if identities.iter().any(|identity| {

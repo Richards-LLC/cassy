@@ -19,7 +19,7 @@ use crate::cloud::{
     maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
-use crate::ui::theme::ActiveTheme;
+use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::store::{
     AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store,
@@ -3606,14 +3606,12 @@ pub(crate) fn render_sync_summary(
                 "personal only".to_string()
             });
             let error_count = summary.errors.len() + summary.team_errors.len();
+            let separator = format!(" {} ", Icons::separator_dot(fmt.unicode()));
+            let details = details.join(&separator);
             let message = if error_count == 0 {
-                format!("Pull complete · {}", details.join(" · "))
+                format!("Pull complete{separator}{details}")
             } else {
-                format!(
-                    "Pull incomplete · {} errors · {}",
-                    error_count,
-                    details.join(" · ")
-                )
+                format!("Pull incomplete{separator}{error_count} errors{separator}{details}")
             };
             if error_count == 0 && !summary.memory_fold_conflicts.is_empty() {
                 render_memory_fold_warning(fmt, summary.memory_fold_conflicts.len())?;

@@ -1765,22 +1765,31 @@ mod tests {
 
         // cas-4e22: quoted paths can still inject controls or reorder the
         // diagnostic. Refuse a pasteable command rather than change its argv.
-        let unsafe_main = dir.join("main\u{85}\u{202e}folder");
-        std::fs::rename(&main, &unsafe_main).unwrap();
-        std::fs::write(unsafe_main.join(".codex/hooks.json"), &stale).unwrap();
-        std::fs::write(
-            linked.join(".git"),
-            format!("gitdir: {}\n", unsafe_main.join(".git/worktrees/w").display()),
-        ).unwrap();
-        let message = prepare_codex_project_hooks_in(&config_path, &linked)
-            .unwrap_err().to_string();
-        assert!(message.starts_with("codex_main_checkout_hooks_stale:"), "{message:?}");
-        assert!(message.contains("main\\u{85}\\u{202e}folder"), "{message:?}");
-        assert!(!message.contains(['\u{85}', '\u{202e}']), "{message:?}");
-        assert!(message.contains("no copyable command"), "{message:?}");
-        assert!(!message.contains("`git -C "), "{message:?}");
-        // pin: refusing an unsafe remedy must leave the tracked hook bytes intact.
-        assert_eq!(std::fs::read_to_string(unsafe_main.join(".codex/hooks.json")).unwrap(), stale);
+        let mut previous_main = main;
+        for (suffix, visible, prefix) in [
+            ("\u{85}\u{202e}", "\\u{85}\\u{202e}", "codex_hooks_invalid:"),
+            ("\u{202e}", "\\u{202e}", "codex_main_checkout_hooks_stale:"),
+        ] {
+            let unsafe_main = dir.join(format!("main{suffix}folder"));
+            std::fs::rename(&previous_main, &unsafe_main).unwrap();
+            std::fs::write(unsafe_main.join(".codex/hooks.json"), &stale).unwrap();
+            std::fs::write(
+                linked.join(".git"),
+                format!("gitdir: {}\n", unsafe_main.join(".git/worktrees/w").display()),
+            ).unwrap();
+            let message = prepare_codex_project_hooks_in(&config_path, &linked)
+                .unwrap_err().to_string();
+            assert!(message.starts_with(prefix), "{message:?}");
+            assert!(message.contains(&format!("main{visible}folder")), "{message:?}");
+            assert!(!message.contains(['\u{85}', '\u{202e}']), "{message:?}");
+            if prefix == "codex_main_checkout_hooks_stale:" {
+                assert!(message.contains("no copyable command"), "{message:?}");
+            }
+            assert!(!message.contains("`git -C "), "{message:?}");
+            // pin: refusing an unsafe remedy must leave the tracked hook bytes intact.
+            assert_eq!(std::fs::read_to_string(unsafe_main.join(".codex/hooks.json")).unwrap(), stale);
+            previous_main = unsafe_main;
+        }
     }
 
     #[test]

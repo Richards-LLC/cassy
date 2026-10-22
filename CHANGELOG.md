@@ -75,15 +75,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Resume briefs** — Was: `recycle_worker` left out supervisor messages received after the last checkpoint, and `clear_context` sent no resume brief at all. → Now: both send a brief that includes the received answers. The history scan is capped, warns only on real truncation, and names the session supervisor as the sender.
 
-- **Supervisor handoff** — Was: a supervisor's session end lost the lane: its owned tasks, live workers, parked PRs and pending asks. → Now: the handoff keeps lease-owned tasks and their original lease evidence and is bound to the successor's registration epoch. Startup shows a bounded preview while the complete receipt is kept.
+- **Supervisor handoff** — Was: a supervisor's session end lost the lane: its owned tasks, live workers, parked PRs and pending asks. → Now: the handoff keeps lease-owned tasks and their original lease evidence and is bound to the successor's registration epoch. Startup shows a bounded preview while the complete receipt is kept, and SessionStart keeps the compact handoff pointer for every role within its budget.
 
 ### Fixed — builds wait in priority order
 
-- **Build priority** — Was: a P0 release-repair build waited behind P2 builds at the builder cap. → Now: queued worker builds are admitted by task priority. Workers cannot raise their own task's priority, even through a reopen. A stale high-priority waiter no longer blocks lower builds, and explicit wait notices are kept.
+- **Build priority** — Was: a P0 release-repair build waited behind P2 builds at the builder cap. → Now: queued worker builds are admitted by task priority. Workers cannot raise their own task's priority, even through a reopen; the guard applies only to a real priority change, after the proof-scope check. A stale high-priority waiter no longer blocks lower builds, and explicit wait notices are kept.
 
 - **Capped verifier lane** — Was: task-verifier subagents built with plain Cargo outside the builder cap, which pushed host memory pressure up and starved capped worker checks. → Now: `cas factory verifier-test --cas-root <R> --head <sha> -- nextest run ...` runs at the bound head inside the counted, capped lane, and the guard sends a verifier's plain Cargo build there.
 
-- **Capacity waits** — Was: each build-guard capacity refusal made workers toggle the task to blocked, which paged the supervisor every time. → Now: a bounded capacity wait keeps the task's lease and status and makes its retries visible.
+- **Capacity waits** — Was: each build-guard capacity refusal made workers toggle the task to blocked, which paged the supervisor every time. → Now: a bounded capacity wait keeps the task's lease and status and makes its retries visible. A wait that outlasts its bound sends one notice that wakes an idle supervisor.
 
 - **Admission GC cooldown** — Was: build-guard admission repeated a full scratch-target scan on every spawn and capped check while the disk stayed near full with nothing to reclaim. → Now: a scan that reclaims nothing cools down before it runs again.
 
@@ -95,9 +95,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **`cas factory gc`** — Was: `gc_report` and `gc_cleanup` were MCP-only, so an exact-tip candidate binary could not prove its cleanup behaviour before release. → Now: `cas factory gc report` and `cas factory gc cleanup` run the same actions from the CLI, with the cleanup tiers documented.
 
-- **Readable gc reports** — Was: the report called the default cleanup a preview although baseline metadata cleanup still mutates. Its output could overflow the terminal: 64 findings and a 598-cell line. → Now: the report describes each cleanup tier and shows a bounded summary, with the full and JSON views on request.
-
-- **Durable-artifact counts** — *Placeholder, still landing:* Was: the bounded gc summary could truncate the durable-artifact line before its closed-task candidate counts. → Now: those counts stay visible within 80 columns.
+- **Readable gc reports** — Was: the report called the default cleanup a preview although baseline metadata cleanup still mutates. Its output could overflow the terminal: 64 findings and a 598-cell line. → Now: the report describes each cleanup tier and shows a bounded summary, with the full and JSON views on request. Durable-artifact counts sit on their own row, ahead of long paths, within 80 columns.
 
 ### Fixed — hub restarts under contention
 
@@ -122,8 +120,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed — other
 
 - **Rule observation under load** — Was: `rule action=observe` failed with `database is locked` under load, so rule candidates were silently lost. → Now: observation writes retry under contention.
-
-- **Proof-scope refusals** — *Placeholder, still landing:* Was: a task update that included a priority was refused for an unregistered session before its locked delivery proof scope was checked. → Now: the proof-scope refusal comes first, and real priority changes still need a registered caller.
 
 ## [3.71.0] - 2026-10-21
 

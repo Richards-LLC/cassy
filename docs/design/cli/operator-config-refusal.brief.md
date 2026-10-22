@@ -52,7 +52,7 @@ terminal-qa: PASS notification-webhook-refusal-capture · 11 runs · 0 fail · 0
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 4 | Actual TUI captures retain the setting, input, URL cause and Enter/Esc controls inside one dialog; the hook warning names the refused channel and setting. |
-| Fit | 4 | Real 80/120-column dialogs show the wrapped cause and recovery controls; the captured warning is 74 columns and passes both widths. |
+| Fit | 4 | Real 80/120-column dialogs show the wrapped cause and recovery controls; the captured warning is 76 columns and passes both widths. |
 | Craft | 4 | Invalid HTTP, whitespace and malformed URL edits remain editable; correction stays unsaved and the adjacent operator-only save refusal remains intact. |
 | Theme safety | 4 | The new default-foreground ASCII warning passes four palettes, pipe, NO_COLOR and C locale; TUI styles remain inherited, with actual dark/light text inspected. |
 | Machine contract | 5 | Refused stored URL keeps hook stdout `{}`, emits one redacted stderr warning, and invokes no curl; empty URL remains quiet. |

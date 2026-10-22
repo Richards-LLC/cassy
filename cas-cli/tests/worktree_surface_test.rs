@@ -2427,12 +2427,20 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     // already-contained source is a no-op again rather than unverifiable.
     run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &repo.root);
     run_git(&["branch", "-D", "epic/race"], remote.path());
+    let origin_refs = git_stdout(remote.path(), &["for-each-ref"]);
     let local_only = runtime.block_on(service.coordination(Parameters(request("charlie")))).unwrap();
     let local_only = get_text(&local_only);
     assert!(!local_only.contains("CONTAINMENT COULD NOT BE VERIFIED"), "{local_only}");
     // pin: the existing contained receipt names the local authority.
     assert!(local_only.contains("Already contained"), "{local_only}");
+    // cas-8315: the local branch, not origin, is the named authority, and a
+    // no-op says nothing about an unverified merge or a rejected push.
+    // pin: the receipt's Target line names the authority it was judged by.
+    assert!(local_only.contains(&format!("Target: epic/race @ {local_before}")), "{local_only}");
+    // pin: the misleading fetch-failure note must not decorate a no-op.
+    assert!(!local_only.contains("could not fetch") && !local_only.contains("push may be rejected"), "{local_only}");
     assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), local_before, "the local target did not move");
+    assert_eq!(git_stdout(remote.path(), &["for-each-ref"]), origin_refs, "origin did not move");
 }
 
 #[tokio::test]

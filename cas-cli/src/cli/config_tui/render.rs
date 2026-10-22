@@ -279,7 +279,8 @@ impl ConfigTuiApp {
 
         let footer = Paragraph::new(message)
             .style(style)
-            .block(Block::default().borders(Borders::ALL));
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: true });
 
         frame.render_widget(footer, area);
     }

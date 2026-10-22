@@ -136,6 +136,7 @@
       "f7ca47f68001afd342d70fa2748976f11e66dcbdfd02578abe487b36ec1f945f"
     ],
     "skills/cas-cli-craft/references/output-contract.md": [
+      "7f1f89091bf24ef65a44fe774871c8541bb237f326b7ab485356059268cd66fb",
       "ae67d8190695dd9160c5881db11be8d0f2db4a36ec9b2dfc4fc5d0f3281010dd"
     ],
     "skills/cas-cli-craft/scripts/terminal-qa.mjs": [
@@ -144,7 +145,8 @@
       "80790072f81d7c4b2e4d3806aa62f6c57195c049fc7d421d1eca21bff6268fd5",
       "92aa37e639497edd29cef4c6ee656e4deb0419e0d2c73df797132521220aeb2b",
       "af21d217f96835815d2828779e5611b5ee2f10713cf5cc7a88371fdd89c21c5e",
-      "f31246ee1bd8851fac86500808937bf76ce180dd8eea080bfb5f6064642dc4d8"
+      "f31246ee1bd8851fac86500808937bf76ce180dd8eea080bfb5f6064642dc4d8",
+      "f31a6d62922c26a987de4e5adf140fa7bee37349f998bb8ddd9b9f8a376ce2b5"
     ],
     "skills/cas-code-review/SKILL.md": [
       "105536e6d431ca44750aad86cf2c0ba7cee1fb49140bce2903a39523752592ec",

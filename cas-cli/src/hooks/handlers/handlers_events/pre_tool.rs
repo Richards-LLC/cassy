@@ -126,8 +126,11 @@ fn worker_edit_targets(input: &HookInput) -> Vec<String> {
             .and_then(|value| value.as_str())
             .map(|file| vec![file.to_string()])
             .unwrap_or_default(),
-        // Red: the pre-a30e9 behaviour, where apply_patch took no lease.
-        Some("apply_patch") => Vec::new(),
+        Some("apply_patch") => tool_input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(apply_patch_write_targets)
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }

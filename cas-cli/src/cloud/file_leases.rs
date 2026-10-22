@@ -233,9 +233,30 @@ pub fn notify_worker_of_holder(
     relative_path: &str,
     holder: &str,
 ) -> bool {
-    // Red: the pre-a30e9 behaviour, where a Codex worker was never told.
-    let _ = (cas_root, agent_id, agent_name, factory_session, relative_path, holder);
-    false
+    let id = lease_id(relative_path);
+    let now = chrono::Utc::now().timestamp();
+    let mut ledger = load(cas_root, agent_id);
+    if ledger
+        .notified
+        .get(&id)
+        .is_some_and(|at| now - at < NOTICE_WINDOW_SECS)
+    {
+        return false;
+    }
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_root) else {
+        return false;
+    };
+    let note = collision_note(relative_path, holder);
+    if queue
+        .enqueue_with_summary("cas", agent_name, &note, factory_session, Some("shared file"))
+        .is_err()
+    {
+        return false;
+    }
+    ledger.notified.insert(id, now);
+    ledger.agent_id = agent_id.to_string();
+    save(cas_root, agent_id, &ledger);
+    true
 }
 
 #[cfg(test)]

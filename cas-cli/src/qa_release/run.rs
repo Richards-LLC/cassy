@@ -66,6 +66,12 @@ pub struct PlannedRow {
     pub manual: bool,
     /// `release_always`, `impacted` or `no_base` (no CLEAN ancestor or merge base).
     pub why: String,
+    /// The golden-set cell this row walks (finding 18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<super::matrix::Cell>,
+    /// Which of the cell's runs this row is, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,7 +363,32 @@ fn plan(
         let suite = (!manual)
             .then(|| config.suites.iter().find(|(_, s)| s.selects(journey)).map(|(n, _)| n.clone()))
             .flatten();
-        rows.push(PlannedRow { id: journey.id.clone(), journey: journey.id.clone(), suite, manual, why: why.into() });
+        if journey.is_golden_set() {
+            let expansion = super::matrix::expand(root, journey, config.max_cells).map_err(anyhow::Error::msg)?;
+            for cell in &expansion.cells {
+                for run in 1..=expansion.runs {
+                    rows.push(PlannedRow {
+                        id: super::matrix::row_id(&journey.id, cell, run),
+                        journey: journey.id.clone(),
+                        suite: suite.clone(),
+                        manual,
+                        why: why.into(),
+                        cell: Some(cell.clone()),
+                        run: Some(run),
+                    });
+                }
+            }
+            continue;
+        }
+        rows.push(PlannedRow {
+            id: journey.id.clone(),
+            journey: journey.id.clone(),
+            suite,
+            manual,
+            why: why.into(),
+            cell: None,
+            run: None,
+        });
     }
     Ok(rows)
 }
@@ -372,6 +403,7 @@ fn row(id: &str, journey: &str, verdict: RowVerdict) -> Row {
         frames: Vec::new(),
         readbacks: Vec::new(),
         manual_minutes: None,
+        identity: None,
         covers_prs: Vec::new(),
         covers_commits: Vec::new(),
     }
@@ -410,14 +442,26 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
     let served_start = preflight_served(root, &config, &env, &sha).map_err(anyhow::Error::msg)?;
     let base = scope_base(cas_root, root, &config, &sha);
     let plan = plan(&registry, &qa, &config, root, base.as_deref(), &sha)?;
-    let journeys: Vec<Journey> = plan
-        .iter()
-        .filter_map(|p| registry.journeys.iter().find(|j| j.id == p.journey).cloned())
-        .collect();
+    let mut journeys: Vec<Journey> = Vec::new();
+    for planned in &plan {
+        if !journeys.iter().any(|j| j.id == planned.journey)
+            && let Some(journey) = registry.journeys.iter().find(|j| j.id == planned.journey)
+        {
+            journeys.push(journey.clone());
+        }
+    }
     let flags = super::flags::read(root, &config, &env, &sha, &journeys)
         .map_err(|e| anyhow::anyhow!("FLAGS UNKNOWN: {e}"))?;
-    let uses: Vec<PlannedUse<'_>> =
-        journeys.iter().map(|journey| PlannedUse { journey, runs: 1, cells: 1 }).collect();
+    // A golden set needs consumes × runs × cells (finding 18).
+    let uses: Vec<PlannedUse<'_>> = journeys
+        .iter()
+        .map(|journey| {
+            let rows = plan.iter().filter(|p| p.journey == journey.id);
+            let runs = rows.clone().filter_map(|p| p.run).max().unwrap_or(1);
+            let cells = (rows.count() as u32 / runs).max(1);
+            PlannedUse { journey, runs, cells }
+        })
+        .collect();
     let resources = resources::preflight(root, cas_root, &config, &env, &sha, &registry.resources, &uses)
         .map_err(anyhow::Error::msg)?;
     let clocks: i64 = config
@@ -608,6 +652,7 @@ fn walk_manual(
     walked.frames = frames;
     walked.readbacks = readbacks;
     walked.manual_minutes = input.minutes;
+    walked.identity = identity(journey, &input.subjects);
     walked.covers_prs = input.covers_prs.clone();
     walked.covers_commits = input.covers_commits.clone();
     Ok(walked)
@@ -656,6 +701,15 @@ struct RunAnswer {
     frames: Vec<String>,
     #[serde(default)]
     subjects: BTreeMap<String, String>,
+    /// Golden-set measurements by criterion, graded against the cell's labels.
+    #[serde(default)]
+    measured: BTreeMap<String, f64>,
+}
+
+/// `<independence_key>=<id>` when the journey names a key and the run reported it.
+fn identity(journey: &Journey, subjects: &BTreeMap<String, String>) -> Option<String> {
+    let key = journey.independence_key.as_ref()?;
+    subjects.get(key).filter(|id| !id.is_empty()).map(|id| format!("{key}={}", printable(id)))
 }
 
 /// Everything a row walk reads; shared by a suite's worker threads.
@@ -712,11 +766,13 @@ impl Walk<'_> {
                 "spec": journey.spec,
                 "media_dir": media.to_string_lossy(),
                 "fixtures": outputs,
+                "cell": planned.cell,
+                "run": planned.run,
             }),
         };
         let answer = super::resources::call_metered(self.root, self.config, &meter, journey, Verb::Run, request);
         walked.verdict = match answer {
-            Ok(data) => self.grade(&mut walked, journey, data),
+            Ok(data) => self.grade(&mut walked, journey, planned, data),
             Err(MeteredError::Blocked(blocked)) => RowVerdict::BlockedExternal(blocked),
             Err(MeteredError::Budget { resource }) => {
                 not_exercised(NotExercisedCause::TimedOut, format!("no {resource} budget before the wall clock"))
@@ -753,7 +809,7 @@ impl Walk<'_> {
         walked
     }
 
-    fn grade(&self, walked: &mut Row, journey: &Journey, data: Value) -> RowVerdict {
+    fn grade(&self, walked: &mut Row, journey: &Journey, planned: &PlannedRow, data: Value) -> RowVerdict {
         // The parse error is dropped: it could quote adapter data.
         let Ok(answer) = serde_json::from_value::<RunAnswer>(data) else {
             return not_exercised(NotExercisedCause::Automation, "run data is not {status, frames, …}");
@@ -781,7 +837,14 @@ impl Walk<'_> {
                 .unwrap_or_else(crate::qa_readback::Outcome::Missing)
         });
         walked.readbacks.extend(readback_record(readback.as_ref()));
-        RowVerdict::grade(runner, walked.frames.len(), readback)
+        walked.identity = identity(journey, &answer.subjects);
+        let verdict = RowVerdict::grade(runner, walked.frames.len(), readback);
+        match (&verdict, &planned.cell) {
+            (RowVerdict::Pass, Some(cell)) => {
+                super::matrix::grade_measured(self.registry, cell, &answer.measured).unwrap_or(verdict)
+            }
+            _ => verdict,
+        }
     }
 }
 
@@ -994,6 +1057,25 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         if let Some(base) = &run.base {
             let prs = coverage::candidate_prs(root, base, sha)?;
             pack.coverage = coverage::coverage(&prs, Some(&registry), &qa, &pack.rows);
+        }
+        // Golden sets: every planned row names its cell and run, a duplicate
+        // run is rejected, and coverage counts cells × runs (finding 18).
+        for row in &mut pack.rows {
+            if let Some(planned) = run.plan.iter().find(|p| p.id == row.id && p.cell.is_some()) {
+                row.cell = planned.cell.as_ref().map(super::matrix::Cell::label);
+                row.run = planned.run;
+            }
+        }
+        let golden: Vec<&Journey> = registry
+            .journeys
+            .iter()
+            .filter(|j| run.plan.iter().any(|p| p.journey == j.id && p.cell.is_some()))
+            .collect();
+        pack.matrix = super::matrix::settle(&mut pack.rows, &golden);
+        for row in &pack.rows {
+            if run.row(&row.id).is_some_and(|r| r.verdict != row.verdict) {
+                run.put(row.clone());
+            }
         }
         pack.fixtures = run.fixtures.clone();
         pack.resources = Some(run.resources.clone());

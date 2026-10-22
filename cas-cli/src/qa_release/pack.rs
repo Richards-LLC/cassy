@@ -62,6 +62,10 @@ pub struct Row {
     /// Hand-walk minutes for a manual row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_minutes: Option<u32>,
+    /// `<independence_key>=<id>`: the result identity this run produced, so
+    /// a golden-set cell counts only distinct runs (cas-d863).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     /// PRs a manual row was recorded to cover.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub covers_prs: Vec<u64>,
@@ -144,6 +148,9 @@ pub struct Pack {
     pub suites: Vec<SuiteTiming>,
     #[serde(default)]
     pub media: Vec<Media>,
+    /// Golden-set coverage: cells × runs per journey (finding 18).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix: Vec<super::matrix::Coverage>,
     /// Hand-walk debt this gate measured (finding 21). Never affects the gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand_walk: Option<HandWalk>,
@@ -252,6 +259,7 @@ impl Pack {
             resources: None,
             suites: Vec::new(),
             media: Vec::new(),
+            matrix: Vec::new(),
             hand_walk: None,
             gate: gate([], Vec::new()),
         }

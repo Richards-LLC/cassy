@@ -336,6 +336,105 @@ pub struct PendingChecker {
     pub due: String,
 }
 
+impl Journey {
+    /// Live in `env`: its `env_status` entry, else the journey's `status`.
+    /// The release gate scopes its walk the same way.
+    pub fn live_in(&self, env: &str) -> bool {
+        self.env_status.get(env).map_or(self.status == "live", |s| s.status == "live")
+    }
+
+    /// A golden set: the journey expands into cells × runs.
+    pub fn is_golden_set(&self) -> bool {
+        self.fixture_set.is_some() || !self.matrix.is_empty() || self.runs.is_some_and(|runs| runs > 1)
+    }
+}
+
+/// The frozen artifact a golden-set record grades.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetArtifact {
+    pub sha256: String,
+    pub storage_key: String,
+}
+
+/// One golden-set record: a fixture id, its frozen artifact and the expected
+/// value of each labeled criterion (cas-c4b5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SetRecord {
+    pub id: String,
+    pub frozen: SetArtifact,
+    #[serde(default)]
+    pub labels: BTreeMap<String, Value>,
+}
+
+/// A plain token: letters, digits, `_` and `-` (row ids embed it).
+fn plain_token(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
+/// Reads a journey's `fixture_set`: JSONL records, or a TSV whose header
+/// names `id`, `sha256`, `storage_key` and optionally `labels` (a JSON object
+/// cell; empty is unlabeled). Every malformed record is named.
+pub fn load_fixture_set(project_root: &Path, path: &str) -> Result<Vec<SetRecord>, Vec<String>> {
+    let relative = Path::new(path);
+    if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(vec![format!("fixture_set {path:?} must stay inside the repository")]);
+    }
+    let text = std::fs::read_to_string(project_root.join(relative))
+        .map_err(|e| vec![format!("fixture_set {path:?} is unreadable: {e}")])?;
+    let mut problems = Vec::new();
+    let mut records = Vec::new();
+    if path.ends_with(".jsonl") {
+        for (index, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+            match serde_json::from_str::<SetRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(e) => problems.push(format!("{path}:{} is not a {{id, frozen, labels}} record: {e}", index + 1)),
+            }
+        }
+    } else if path.ends_with(".tsv") {
+        let mut lines = text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty());
+        let header: Vec<&str> = lines.next().map(|(_, h)| h.split('\t').map(str::trim).collect()).unwrap_or_default();
+        let column = |name: &str| header.iter().position(|h| *h == name);
+        let (Some(id), Some(sha), Some(key)) = (column("id"), column("sha256"), column("storage_key")) else {
+            return Err(vec![format!("{path} header needs id, sha256 and storage_key columns")]);
+        };
+        let labels = column("labels");
+        for (index, line) in lines {
+            let cells: Vec<&str> = line.split('\t').collect();
+            let cell = |at: usize| cells.get(at).map_or("", |c| c.trim());
+            let parsed = match labels.map(cell).filter(|l| !l.is_empty()) {
+                Some(json) => serde_json::from_str::<BTreeMap<String, Value>>(json),
+                None => Ok(BTreeMap::new()),
+            };
+            match parsed {
+                Ok(labels) => records.push(SetRecord {
+                    id: cell(id).into(),
+                    frozen: SetArtifact { sha256: cell(sha).into(), storage_key: cell(key).into() },
+                    labels,
+                }),
+                Err(e) => problems.push(format!("{path}:{} labels is not a JSON object: {e}", index + 1)),
+            }
+        }
+    } else {
+        return Err(vec![format!("fixture_set {path:?} must be a .tsv or .jsonl file")]);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for record in &records {
+        if !plain_token(&record.id) {
+            problems.push(format!("{path} record id {:?} must be 1-64 letters, digits, _ or -", record.id));
+        } else if !seen.insert(record.id.as_str()) {
+            problems.push(format!("{path} repeats record id {}", record.id));
+        }
+        let frozen = &record.frozen;
+        if frozen.sha256.len() != 64 || !frozen.sha256.bytes().all(|b| b.is_ascii_hexdigit()) || frozen.storage_key.trim().is_empty() {
+            problems.push(format!("{path} record {} needs a frozen sha256 (64 hex) and storage_key", record.id));
+        }
+    }
+    if records.is_empty() && problems.is_empty() {
+        problems.push(format!("{path} has no records"));
+    }
+    if problems.is_empty() { Ok(records) } else { Err(problems) }
+}
+
 /// Who turns a hand-walked journey (no `spec`, or walked through the release
 /// gate's `record`) into automation: cas-160c's manual-check debt, per journey.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,6 +678,17 @@ pub struct Journey {
     /// The automation owner while the journey is hand-walked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation: Option<Automation>,
+    /// Golden set: a tracked `.tsv` or `.jsonl` file of `{id, frozen, labels}`
+    /// records, one per fixture the matrix crosses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture_set: Option<String>,
+    /// Golden-set axes, for example `{route: [...], source: [...]}`; a cell
+    /// takes one value of every axis.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub matrix: BTreeMap<String, Vec<String>>,
+    /// Independent runs each golden-set cell needs (default 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs: Option<u32>,
     pub known_failure: Option<String>,
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
@@ -619,6 +729,9 @@ deserialize_with_extra!(Journey {
     traffic,
     spec,
     automation,
+    fixture_set,
+    matrix,
+    runs,
     known_failure,
     finisher,
     evidence,
@@ -696,13 +809,10 @@ pub fn check(project_root: &Path, registry_path: &Path) -> Result<ValidationRepo
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let paths = String::from_utf8(output.stdout).context("tracked paths must be UTF-8")?;
-    Ok(registry.validate(
-        &paths
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-    ))
+    let tracked: Vec<String> = paths.split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect();
+    let mut report = registry.validate(&tracked);
+    registry.validate_golden_sets(project_root, &tracked, &mut report);
+    Ok(report)
 }
 
 /// Compile GitHub-style path filters while treating route brackets literally.
@@ -896,9 +1006,17 @@ impl ValidationReport {
             return;
         };
         if let Some(due) = &automation.due {
-            let pending = PendingChecker { owner: automation.owner.clone(), due: due.clone() };
-            if self.pending_checker(subject, &pending, today).is_none() {
-                return;
+            match iso_date(due) {
+                None => {
+                    self.problem("automation", subject, "automation.due must be a YYYY-MM-DD date");
+                    return;
+                }
+                Some(due) if due < today => self.problem(
+                    "overdue_automation",
+                    subject,
+                    format!("automation is overdue ({}); automate it or move automation.due", automation.summary()),
+                ),
+                Some(_) => {}
             }
         }
         self.debt("hand_walk", subject, &format!("hand-walked: automation {}", automation.summary()));
@@ -914,6 +1032,61 @@ fn present(value: Option<&str>) -> bool {
 }
 
 impl Registry {
+    /// Golden sets (finding 18): the matrix, runs and the tracked fixture set
+    /// must be well formed; a record without a label for one of the journey's
+    /// labeled criteria is `unlabeled_cell` debt.
+    fn validate_golden_sets(&self, project_root: &Path, tracked: &[String], report: &mut ValidationReport) {
+        for journey in &self.journeys {
+            let id = journey.id.as_str();
+            if journey.runs == Some(0) {
+                report.problem("runs", id, "runs must be at least 1");
+            }
+            for (axis, values) in &journey.matrix {
+                if !plain_token(axis) || values.is_empty() || !values.iter().all(|v| plain_token(v)) {
+                    report.problem(
+                        "matrix",
+                        id,
+                        format!("matrix.{axis} needs a non-empty list; axes and values are 1-64 letters, digits, _ or -"),
+                    );
+                }
+            }
+            let Some(path) = &journey.fixture_set else { continue };
+            if !tracked.contains(path) {
+                report.problem("fixture_set", id, format!("fixture_set {path:?} is not tracked"));
+                continue;
+            }
+            let records = match load_fixture_set(project_root, path) {
+                Ok(records) => records,
+                Err(problems) => {
+                    for problem in problems {
+                        report.problem("fixture_set", id, problem);
+                    }
+                    continue;
+                }
+            };
+            let labeled: Vec<&String> = journey
+                .invariants
+                .iter()
+                .chain(&journey.manual_checks)
+                .filter(|c| self.criterion(c).is_some_and(|(_, labeled)| labeled))
+                .collect();
+            for record in &records {
+                let missing: Vec<&str> = labeled
+                    .iter()
+                    .filter(|c| record.labels.get(c.as_str()).is_none_or(Value::is_null))
+                    .map(|c| c.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    report.debt(
+                        "unlabeled_cell",
+                        &format!("{id}.{}", record.id),
+                        &format!("no label for {} in {path}", missing.join(", ")),
+                    );
+                }
+            }
+        }
+    }
+
     /// Resolve shared groups after the journey's direct owners in declared group order.
     pub fn owner_globs<'a>(&'a self, journey: &'a Journey) -> Vec<&'a str> {
         let mut globs = journey.owners.globs();
@@ -1340,7 +1513,7 @@ impl Registry {
             if journey.seeded {
                 report.debt("seeded", id, "seeded journey needs curation");
             }
-            if journey.status == "live" && !present(journey.spec.as_deref()) {
+            if ["staging", "prod"].iter().any(|env| journey.live_in(env)) && !present(journey.spec.as_deref()) {
                 report.hand_walk(id, journey.automation.as_ref(), today);
             }
             if journey.status == "live" {
@@ -1909,9 +2082,19 @@ journeys:
             hand_walk(&owned),
             ["hand_walk B2-home hand-walked: automation owner qa-team, task cas-9999, due 2999-12-31"]
         );
-        let unowned = yaml.replace("    spec: tests/signup.spec.ts\n", "");
+        // Live only in staging (per-env status, as the gate scopes it) still
+        // counts, and a malformed due date names automation.due.
+        let unowned = yaml
+            .replace("    spec: tests/signup.spec.ts\n", "")
+            .replace("    status: live\n", "    status: dark\n    status_reason: Staging pilot\n")
+            .replace("prod: {status: live}", "prod: {status: dark}");
         let unowned = check(repo(&unowned).path(), Path::new(DEFAULT_PATH)).unwrap();
         assert_eq!(hand_walk(&unowned)[0].split(' ').take(2).collect::<Vec<_>>(), ["hand_walk_unowned", "B2-home"]);
+        let bad_due = check(repo(&hand.replace("2999-12-31", "soon")).path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert_eq!(
+            bad_due.problems.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect::<Vec<_>>(),
+            [("automation", "automation.due must be a YYYY-MM-DD date")]
+        );
 
         // Manual rows carry minutes and the owner; the gate verdict ignores them.
         use crate::qa_release::pack::{HandWalk, Pack, Row};
@@ -1929,6 +2112,49 @@ journeys:
             "75 manual minutes over 3 rows; top: `B2-home` 45 min (owner qa-team, task cas-9999, due 2999-12-31), `promo` 30 min (unowned)"
         );
         assert_eq!(pack.derive_gate().verdict, crate::qa_release::verdict::GateVerdict::Clean);
+    }
+
+    /// Finding 18: a golden set's tracked TSV or JSONL loads into records;
+    /// a malformed set is a problem and an unlabeled record is debt.
+    #[test]
+    fn qa_registry_golden_set_loader() {
+        let yaml = GABBER
+            .replace(
+                "    check: Count workspaces and read claimed_at\n",
+                "    check: Count workspaces and read claimed_at\n    definition: Claimed workspaces\n    labeled: true\n",
+            )
+            .replace(
+                "  fresh: {description: New account, provider: account-seed}\n",
+                "  fresh: {description: New account, provider: account-seed, labels: {INV-CLAIM: 1}}\n",
+            )
+            .replace(
+                "    spec: tests/signup.spec.ts\n",
+                "    spec: tests/signup.spec.ts\n    fixture_set: tests/golden.tsv\n    matrix: {route: [web, app]}\n    runs: 2\n",
+            );
+        let sha = "a".repeat(64);
+        let golden = |name: &str, contents: &str| {
+            let dir = repo(&yaml.replace("tests/golden.tsv", name));
+            std::fs::write(dir.path().join(name), contents).unwrap();
+            assert!(Command::new("git").args(["add", "."]).current_dir(dir.path()).status().unwrap().success());
+            dir
+        };
+        let tsv = golden(
+            "tests/golden.tsv",
+            &format!("id\tsha256\tstorage_key\tlabels\nA\t{sha}\tgolden/a.mp4\t{{\"INV-CLAIM\": 3}}\nB\t{sha}\tgolden/b.mp4\t\n"),
+        );
+        let records = load_fixture_set(tsv.path(), "tests/golden.tsv").unwrap();
+        assert_eq!(records.iter().map(|r| (r.id.as_str(), r.labels.len())).collect::<Vec<_>>(), [("A", 1), ("B", 0)]);
+        assert_eq!(records[0].frozen.storage_key, "golden/a.mp4");
+        let report = check(tsv.path(), Path::new(DEFAULT_PATH)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        let cells: Vec<_> = report.debt.iter().filter(|d| d.code == "unlabeled_cell").map(|d| d.subject.as_str()).collect();
+        assert_eq!(cells, ["B2-home.B"]);
+
+        let line = |id: &str| format!(r#"{{"id":"{id}","frozen":{{"sha256":"{sha}","storage_key":"golden/{id}.mp4"}},"labels":{{"INV-CLAIM":1}}}}"#);
+        let jsonl = golden("tests/golden.jsonl", &format!("{}\n{}\n", line("A"), line("A")));
+        let report = check(jsonl.path(), Path::new(DEFAULT_PATH)).unwrap();
+        let problems: Vec<_> = report.problems.iter().map(|p| (p.code.as_str(), p.message.as_str())).collect();
+        assert_eq!(problems, [("fixture_set", "tests/golden.jsonl repeats record id A")]);
     }
 
     #[test]

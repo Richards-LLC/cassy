@@ -10,7 +10,8 @@
 #   grant:      answers FAKE_GRANT, the {resource: new balance} map.
 #   run:        writes one frame into args.media_dir and answers pass, or fail
 #               for a journey named in FAKE_RUN_FAIL; FAKE_RUN_ERROR_KIND answers
-#               run alone with that classified error.
+#               run alone with that classified error. FAKE_RUN_DIR/<row>.json, when
+#               present, adds its fields (for example measured, subjects).
 # FAKE_CALL_LOG records each request; FAKE_SLEEP delays the answer;
 # FAKE_ERROR_KIND answers any verb with that classified error instead, with
 # retry_after_s FAKE_RETRY_AFTER (default 30).
@@ -53,6 +54,8 @@ case "$1" in
     printf 'frame of %s' "$journey" >"$media/frame.txt"
     status=pass
     case " ${FAKE_RUN_FAIL:-} " in *" $journey "*) status=fail ;; esac
-    printf '{"v":1,"ok":true,"data":{"status":"%s","reason":"fake failure","frames":["media/%s/frame.txt"]}}\n' "$status" "$row" ;;
+    extra=
+    [ -z "${FAKE_RUN_DIR:-}" ] || [ ! -f "$FAKE_RUN_DIR/$row.json" ] || extra=",$(cat "$FAKE_RUN_DIR/$row.json")"
+    printf '{"v":1,"ok":true,"data":{"status":"%s","reason":"fake failure","frames":["media/%s/frame.txt"]%s}}\n' "$status" "$row" "$extra" ;;
   *) exit 1 ;;
 esac

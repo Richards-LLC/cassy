@@ -1,0 +1,4 @@
+Created task: cas-new - Followup discovered during QA (P2)
+Inherited epic: cas-09fb (active task cas-active-qa)
+  Repository: project:github.com/example/epic-lane
+  Branch: epic/burn-down-v57-ships-as-3-72-non-regression-follow-cas-09fb

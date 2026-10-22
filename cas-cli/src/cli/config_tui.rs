@@ -578,10 +578,12 @@ impl ConfigTuiApp {
             ));
             return Ok(());
         }
-        self.config.save(&self.cas_root)?;
-        for key in &self.pending_resets {
-            crate::cli::config::reset_config_value(key, &self.cas_root)?;
-        }
+        crate::cli::config::save_editor_changes(
+            &self.original_config,
+            &self.config,
+            &self.pending_resets,
+            &self.cas_root,
+        )?;
         if !self.pending_resets.is_empty() {
             self.pending_resets.clear();
             self.config = Config::load(&self.cas_root)?;

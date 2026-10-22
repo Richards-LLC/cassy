@@ -17354,6 +17354,8 @@ effort = "high"
         let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
         epoch.version = Some("3.70.0".into());
         SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
+        assert!(banner.contains("release-worker") && banner.contains("3.70.0 [STALE"), "{banner}");
         let core = CasCore::with_daemon(root, None, None);
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);

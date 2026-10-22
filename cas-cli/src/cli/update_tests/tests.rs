@@ -2865,6 +2865,9 @@ fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
         let root = if branch == "release/shared-state" {
             // A worktree may use the main checkout's store/config without a
             // project-local .cas. Exercise that actual sync call-site pattern.
+            // Remove generated rule WIP that needs the local store's authority;
+            // this row isolates commit policy after the store moves away.
+            cas_6718_git(&project, &["checkout", "--", ".claude/rules/cas/rule-fixture.md"]);
             let shared = home.join("shared-cas-state");
             std::fs::rename(project.join(".cas"), &shared).unwrap();
             shared

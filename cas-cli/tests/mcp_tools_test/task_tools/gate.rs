@@ -1371,7 +1371,9 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
         loop {
             match notice_socket.accept() {
                 Ok((stream, _)) => {
-                    stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                    // Events were written synchronously before accept. Darwin
+                    // rejects SO_RCVTIMEO once a sender has closed its socket.
+                    stream.set_nonblocking(true).unwrap();
                     let mut line = String::new();
                     std::io::BufReader::new(stream).read_line(&mut line).unwrap();
                     captured.push(serde_json::from_str::<cas::mcp::socket::DaemonEvent>(&line).unwrap());

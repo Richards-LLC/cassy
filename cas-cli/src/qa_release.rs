@@ -1118,7 +1118,8 @@ mod tests {
             }
             fn create(&self, _: &str, _: u64, body: &str) -> Result<u64, String> {
                 let mut comments = self.0.lock().unwrap();
-                comments.push((comments.len() as u64 + 1, body.into()));
+                let id = comments.len() as u64 + 1;
+                comments.push((id, body.into()));
                 Ok(comments.len() as u64)
             }
             fn update(&self, _: &str, id: u64, body: &str) -> Result<(), String> {

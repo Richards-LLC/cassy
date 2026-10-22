@@ -10824,6 +10824,25 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
     // supervisor explicitly accepts the stale assignment with an audit reason.
     std::fs::write(worker_path.join("README"), "uncommitted local work\n").unwrap();
     let reason = "reviewed the lane and scheduled a supervised refresh";
+    let missing_reason: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": worker,
+        "supervisor_override": true,
+    }))
+    .unwrap();
+    let refused = env
+        .service
+        .task(Parameters(missing_reason))
+        .await
+        .expect_err("an override needs an audit reason");
+    assert!(
+        refused
+            .message
+            .contains("supervisor_override=true requires a non-empty reason"),
+        "{refused}"
+    );
+
     let request: TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "update",
         "id": task_id,

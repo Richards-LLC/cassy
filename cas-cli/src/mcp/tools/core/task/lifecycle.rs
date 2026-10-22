@@ -1503,11 +1503,19 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
+        let mut assignee_override_audit = None;
         task.assignee = task.assignee.as_deref()
             .and_then(super::update::normalize_assignee_update_value)
             .map(|assignee| {
                 self.validate_task_assignee(
-                    task_store.as_ref(), &task, &assignee, task.status, &mut assignee_warnings,
+                    task_store.as_ref(),
+                    &task,
+                    &assignee,
+                    task.status,
+                    false,
+                    None,
+                    &mut assignee_override_audit,
+                    &mut assignee_warnings,
                 )
             })
             .transpose()

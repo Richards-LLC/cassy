@@ -1,7 +1,7 @@
 //! Violet v2 reader for managed Slack bindings (cas-146e, petra-stella-cloud#178).
 //!
-//! Cloud owns admission, dedupe and recovery. This reader keeps only Cloud's
-//! reader order (docs/API-REFERENCE.md, `lib/coordination/contract.ts`):
+//! Cloud owns admission, dedupe and recovery. This reader preserves Cloud's
+//! protocol order (docs/API-REFERENCE.md, `lib/coordination/contract.ts`):
 //!
 //! claim → ack `admitted` → fetch body → receipt `dispatch_uncertain` (wait
 //! for Cloud to accept it) → type → receipt `consumed`.
@@ -25,6 +25,9 @@
 //! sent, so Cloud never sees `consumed` or other false evidence. Freshly
 //! claimed deliveries are walked before the recovery listing, so a backlog
 //! never holds their leases. If activation cannot be read, nothing is admitted.
+//! cas-30c0: within each recovered page, sort defensively by numeric message_ts
+//! then delivery id, stably for equal keys, regardless of Cloud's array order.
+//! Existing activation, quarantine and already-typed guards remain authoritative.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -455,7 +458,14 @@ impl VioletReader {
                     return;
                 }
             };
-            for admission in page["admissions"].as_array().into_iter().flatten() {
+            let mut admissions: Vec<_> = page["admissions"].as_array().into_iter().flatten().collect();
+            admissions.sort_by_cached_key(|admission| {
+                let timestamp = admission["target"]["message_ts"].as_str().and_then(slack_ts_instant);
+                // Unknown times sort last; the existing admission guard still
+                // withholds their text. Cache parsed keys once per batch.
+                (timestamp.is_none(), timestamp, admission["delivery"]["id"].as_str().unwrap_or_default().to_owned())
+            });
+            for admission in admissions {
                 let Some(mut delivery) = parse_delivery(admission) else { continue };
                 if self.typed.contains(&delivery.id) {
                     continue;

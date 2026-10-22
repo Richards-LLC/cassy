@@ -90,7 +90,6 @@ def check_exit(binary, case, out):
                     "raw_restored": restored, "missing_resets": missing,
                     "pass": triggered and was_raw and restored and not missing and expected_exit,
                 }
-                (out / f"{case}.ansi").write_bytes(captured)
                 return result
         finally:
             if child and child.poll() is None:
@@ -98,6 +97,7 @@ def check_exit(binary, case, out):
                 child.wait()
             if peer:
                 peer.close()
+            (out / f"{case}.ansi").write_bytes(captured)
             os.close(master)
             os.close(slave)
 

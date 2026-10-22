@@ -142,18 +142,21 @@ pub(crate) fn snapshot_with_installed(
             latest.insert(pid, epoch);
         }
     }
-    let mut by_parent = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
+    let mut by_agent_pid = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
     for (server_pid, epoch) in latest {
         if !epoch_matches_live_start(server_pid, &epoch.started_at) {
             continue;
         }
-        let Some(parent_pid) = crate::agent_id::get_parent_of_pid(server_pid) else {
-            continue;
-        };
-        by_parent
-            .entry(parent_pid)
+        by_agent_pid
+            .entry(server_pid)
             .or_default()
-            .push((server_pid, epoch.version));
+            .push((server_pid, epoch.version.clone()));
+        if let Some(parent_pid) = crate::agent_id::get_parent_of_pid(server_pid) {
+            by_agent_pid
+                .entry(parent_pid)
+                .or_default()
+                .push((server_pid, epoch.version));
+        }
     }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
@@ -164,7 +167,7 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let matches = by_parent.get(&pid).cloned().unwrap_or_default();
+        let matches = by_agent_pid.get(&pid).cloned().unwrap_or_default();
         if matches.is_empty() {
             servers.push(ServerVersion {
                 name: agent.name,

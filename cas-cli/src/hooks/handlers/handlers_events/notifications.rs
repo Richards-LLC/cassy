@@ -224,7 +224,9 @@ pub fn handle_notification(
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
     // Config files can predate URL validation or be edited outside the CLI;
     // enforce the destination policy at the last point before sending data.
-    crate::config::validate_notification_webhook_url(url)?;
+    let Some(url) = crate::config::validate_notification_webhook_url(url)? else {
+        return Ok(());
+    };
 
     // Simple HTTP POST with JSON payload
     let payload = serde_json::json!({
@@ -235,6 +237,9 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
     // Use curl for simplicity (available on most systems)
     let output = std::process::Command::new("curl")
         .args([
+            "--globoff",
+            "--proto",
+            "=https,http",
             "-s",
             "-X",
             "POST",
@@ -242,7 +247,8 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
             "Content-Type: application/json",
             "-d",
             &payload.to_string(),
-            url,
+            "--",
+            url.as_str(),
         ])
         .output();
 

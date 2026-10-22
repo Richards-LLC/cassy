@@ -2,10 +2,21 @@ use crate::config::*;
 
 /// Only allow secure webhook destinations, except HTTP services bound to
 /// localhost/loopback for development.
-pub(crate) fn validate_notification_webhook_url(value: &str) -> Result<(), MemError> {
-    let value = value.trim();
+pub(crate) fn validate_notification_webhook_url(
+    value: &str,
+) -> Result<Option<url::Url>, MemError> {
     if value.is_empty() {
-        return Ok(());
+        return Ok(None);
+    }
+    if value
+        .chars()
+        .any(|character| {
+            character == '\\' || character.is_whitespace() || character.is_control()
+        })
+    {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must not contain backslashes or whitespace".into(),
+        ));
     }
 
     let url = url::Url::parse(value).map_err(|_| {
@@ -28,7 +39,7 @@ pub(crate) fn validate_notification_webhook_url(value: &str) -> Result<(), MemEr
                 .into(),
         ));
     }
-    Ok(())
+    Ok(Some(url))
 }
 
 impl Config {
@@ -74,7 +85,11 @@ impl Config {
                     match value.trim().to_ascii_lowercase().as_str() {
                         "true" | "yes" | "1" => "true",
                         "false" | "no" | "0" => "false",
-                        _ => unreachable!("registry validation accepted a non-boolean value"),
+                        _ => {
+                            return Err(MemError::Parse(format!(
+                                "Invalid boolean value for {key}: {value}"
+                            )));
+                        }
                     }
                 } else {
                     value
@@ -1187,12 +1202,11 @@ impl Config {
                 }
             }
             "notifications.webhook_url" => {
-                validate_notification_webhook_url(value)?;
+                let url = validate_notification_webhook_url(value)?;
                 let notifications = self
                     .notifications
                     .get_or_insert_with(NotificationConfig::default);
-                notifications.webhook_url = (!value.trim().is_empty())
-                    .then(|| value.trim().to_string());
+                notifications.webhook_url = url.map(|url| url.to_string());
             }
             // Notifications.tasks section
             "notifications.tasks.on_created" => {

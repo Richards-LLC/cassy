@@ -539,9 +539,14 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    for state in ["missing", "existing", "directory", "malformed"] {
+    for state in ["missing", "existing", "directory", "malformed", "malformed-grok"] {
         let temp = TempDir::new().unwrap();
-        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        if state == "malformed-grok" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            std::fs::create_dir(temp.path().join(".grok")).unwrap();
+        } else {
+            std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        }
         let mcp_path = temp.path().join(".mcp.json");
         let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
         match state {
@@ -551,16 +556,17 @@ fn test_init_json() {
             )
             .unwrap(),
             "directory" => std::fs::create_dir(&mcp_path).unwrap(),
-            "malformed" => std::fs::write(&mcp_path, b"{\"mcpServers\": {\"other\":").unwrap(),
+            "malformed" | "malformed-grok" => std::fs::write(&mcp_path, b"{\"mcpServers\": {\"other\":").unwrap(),
             _ => {}
         }
 
         let output = cas_cmd(temp.path())
             .current_dir(&temp)
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
             .args(["init", "--no-integrations", "--json"])
             .output()
             .unwrap();
-        if matches!(state, "directory" | "malformed") {
+        if matches!(state, "directory" | "malformed" | "malformed-grok") {
             assert!(
                 !output.status.success(),
                 "MCP provisioning failure must fail init"
@@ -652,7 +658,7 @@ fn test_init_failure_reports_force_retry() {
                 let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
                 assert_eq!(value["mcpServers"]["cas"]["command"], "cas");
             } else {
-                let value: toml::Value = std::fs::read_to_string(&blocked).unwrap().parse().unwrap();
+                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&blocked).unwrap()).unwrap();
                 assert_eq!(value["mcp_servers"]["cs"]["command"].as_str(), Some("cas"));
             }
         }

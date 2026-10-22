@@ -144,7 +144,7 @@ fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
     write(
         repo,
         crate::qa_registry::DEFAULT_PATH,
-        "version: 1\nupdated: '2026-10-22'\nsafety: {mode: fixture-only, forbidden_hosts: [quickbooks.api.intuit.com], protected_credentials: [QBO_REFRESH_TOKEN]}\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n",
+        "version: 1\nupdated: '2026-10-22'\nsafety: {mode: fixture-only, forbidden_hosts: [quickbooks.api.intuit.com], protected_credentials: [QBO_REFRESH_TOKEN]}\ninvariants:\n  INV: {statement: Saved, check: Read state}\njourneys:\n  - id: deals\n    status: live\n    entry: {url: /deals, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/**']\n    invariants: [INV]\n    traffic: {share_pct: null, basis: New accounts}\n",
     );
     let head = commit(repo);
     let report = analyze(
@@ -155,7 +155,7 @@ fn qa_impact_fixture_only_safety_never_sends_qa_to_staging() {
         Some(&head),
     )
     .unwrap();
-    assert!(report.registry.valid);
+    assert!(report.registry.valid, "{:?}", report.warnings);
     let note = crate::mcp::tools::core::task::lifecycle::qa_impact::render(
         &serde_json::to_value(&report).unwrap(),
     );

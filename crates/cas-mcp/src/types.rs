@@ -336,7 +336,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization for that worker). Live registered supervisor and non-empty reason required; decision logged. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
+        description = "Supervisor override: close gates, or update assignee on a peer's split child (one start authorization). Needs a live registered supervisor and a reason; decision logged. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,
@@ -364,7 +364,7 @@ pub struct TaskRequest {
 
     /// Successful docs/artifact delivery deliberately retained outside integration.
     #[schemars(
-        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a non-empty reason. The delivery history may hold only regular docs/artifacts files; the supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts."
+        description = "Supervisor-only evidence close: needs evidence_only_artifact_path, evidence_only_reference and a reason. The delivery may hold only regular docs/artifacts files; supervisor, SHA and paths are recorded. Excludes negative_result and completion/external verification receipts."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
@@ -448,7 +448,7 @@ pub struct TaskRequest {
     /// supervisor may present this receipt, and close revalidates its exact
     /// task, epic, factory session, gate, terminal verdict, and evidence.
     #[schemars(
-        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a completed passing receipt for this exact task, epic and factory session as zero-commit delivery evidence. It neither replaces completion_receipt nor bypasses other close gates."
+        description = "Receipt ID from verification action=external_verify. On close a live registered supervisor may present a passing receipt for this exact task, epic and factory session as zero-commit delivery evidence; it neither replaces completion_receipt nor bypasses other gates."
     )]
     #[serde(default)]
     pub external_verification_receipt: Option<String>,
@@ -489,7 +489,7 @@ pub struct TaskRequest {
     pub to_agent: Option<String>,
 
     /// Copy inherited task work to the receiver's own per-task branch.
-    #[schemars(description = "For transfer: fast-forward a clean registered receiver worktree to the task delivery tip on factory/<receiver>-<task>, and rebind its delivery anchor. Refuses dirty/divergent or foreign repositories; preserves the original branch.")]
+    #[schemars(description = "For transfer: fast-forward a clean registered receiver worktree to the delivery tip on factory/<receiver>-<task> and rebind its anchor. Refuses dirty, divergent or foreign repositories; keeps the original branch.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub adopt_branch: Option<bool>,
 

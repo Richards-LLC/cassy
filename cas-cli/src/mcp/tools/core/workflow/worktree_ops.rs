@@ -1527,15 +1527,20 @@ fn worktree_merge_mcp_error(
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree."
         ),
-        WorktreeError::Git(GitError::MergeInProgress(details)) => format!(
-            "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
+        WorktreeError::Git(GitError::MergeInProgress(details)) => {
+            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            format!(
+                "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Resolve and commit the \
              existing merge, or {abort_advice}, \
              before retrying the merge into {target_branch}."
-        ),
-        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
-            "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
+            )
+        }
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
+            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            format!(
+                "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
              tracked changes on paths this merge would write: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Residue on paths the merge \
              does NOT touch is ignored — the merge runs in an ephemeral worktree and \
@@ -1547,7 +1552,8 @@ fn worktree_merge_mcp_error(
              2. Or merge out of band without touching the shared checkout: \
              {detached_advice}\n\n\
              `force=true` does not bypass shared-checkout residue."
-        ),
+            )
+        }
         WorktreeError::Git(GitError::TargetTipChanged {
             ref branch,
             ref expected,
@@ -1555,15 +1561,18 @@ fn worktree_merge_mcp_error(
         }) => {
             let branch = crate::worktree::GitOperations::visible_git_label(branch);
             format!(
-            "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
-             {source_branch} was being merged.\n\n\
-             The merge ran in an ephemeral worktree and was discarded rather than \
-             published over the concurrent update — {target_branch} still points at the \
-             other writer's commit and no shared checkout was touched. Re-run the merge \
-             against the new tip."
+                "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
+                 {source_branch} was being merged.\n\n\
+                 The merge ran in an ephemeral worktree and was discarded rather than \
+                 published over the concurrent update — {target_branch} still points at the \
+                 other writer's commit and no shared checkout was touched. Re-run the merge \
+                 against the new tip."
             )
-        },
-        other => format!("Failed to merge worktree: {other}"),
+        }
+        other => format!(
+            "Failed to merge worktree: {}",
+            crate::worktree::GitOperations::visible_git_label(&other.to_string()),
+        ),
     };
     if let Err(refusal) = remedies {
         message.push_str("\n\n");
@@ -6592,6 +6601,8 @@ mod tests {
         for (source, visible) in [
             ("factory/worker", "factory/worker"),
             ("factory/control\u{85}label", "factory/control\\u{85}label"),
+            ("factory/line\u{2028}label", "factory/line\\u{2028}label"),
+            ("factory/paragraph\u{2029}label", "factory/paragraph\\u{2029}label"),
         ] {
             let error = worktree_merge_mcp_error(
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
@@ -6610,8 +6621,9 @@ mod tests {
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
             assert!(!message.contains('\u{85}'), "{message:?}");
+            assert!(!message.contains(['\u{2028}', '\u{2029}']), "{message:?}");
             assert_eq!(error.code, super::ErrorCode::INTERNAL_ERROR);
-            if source.contains('\u{85}') {
+            if source.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
                 // pin: refused rendering must explain why no command can be pasted.
                 assert!(message.contains("no copyable command"), "{message}");
             }
@@ -6650,6 +6662,20 @@ mod tests {
         assert!(dirty_message.contains("paths this merge would write"));
         assert!(dirty_message.contains("does NOT touch is ignored"));
         assert!(dirty_message.contains("git worktree add --detach"));
+
+        // The Git subprocess's text is untrusted even when branch names are safe.
+        let detail = "path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end";
+        for git_error in [
+            GitError::MergeInProgress(detail.into()),
+            GitError::MergeCheckoutDirty(detail.into()),
+            GitError::CommandFailed(detail.into()),
+        ] {
+            let message = worktree_merge_mcp_error(
+                WorktreeError::Git(git_error), "factory/worker", "epic/example",
+            ).message.into_owned();
+            assert!(message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"), "{message:?}");
+            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}']), "{message:?}");
+        }
     }
 
     // -----------------------------------------------------------------------

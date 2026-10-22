@@ -4031,6 +4031,7 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "codemap",
     "design-spec",
     "fallow",
+    "finish",
     "mcp-integration",
     "project-overview",
     // Retired: renamed cas-release-notes (it collided with Grok's built-in

@@ -6585,6 +6585,8 @@ mod tests {
         for (source, visible) in [
             ("factory/worker", "factory/worker"),
             ("factory/control\u{85}label", "factory/control\\u{85}label"),
+            ("factory/line\u{2028}label", "factory/line\\u{2028}label"),
+            ("factory/paragraph\u{2029}label", "factory/paragraph\\u{2029}label"),
         ] {
             let error = worktree_merge_mcp_error(
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
@@ -6603,8 +6605,9 @@ mod tests {
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
             assert!(!message.contains('\u{85}'), "{message:?}");
+            assert!(!message.contains(['\u{2028}', '\u{2029}']), "{message:?}");
             assert_eq!(error.code, super::ErrorCode::INTERNAL_ERROR);
-            if source.contains('\u{85}') {
+            if source.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
                 // pin: refused rendering must explain why no command can be pasted.
                 assert!(message.contains("no copyable command"), "{message}");
             }
@@ -6643,6 +6646,20 @@ mod tests {
         assert!(dirty_message.contains("paths this merge would write"));
         assert!(dirty_message.contains("does NOT touch is ignored"));
         assert!(dirty_message.contains("git worktree add --detach"));
+
+        // The Git subprocess's text is untrusted even when branch names are safe.
+        let detail = "path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end";
+        for git_error in [
+            GitError::MergeInProgress(detail.into()),
+            GitError::MergeCheckoutDirty(detail.into()),
+            GitError::CommandFailed(detail.into()),
+        ] {
+            let message = worktree_merge_mcp_error(
+                WorktreeError::Git(git_error), "factory/worker", "epic/example",
+            ).message.into_owned();
+            assert!(message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"), "{message:?}");
+            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}']), "{message:?}");
+        }
     }
 
     // -----------------------------------------------------------------------

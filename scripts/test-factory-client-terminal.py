@@ -7,6 +7,7 @@ No factory agents are started: a disposable Unix socket supplies the frame.
 """
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -69,7 +70,15 @@ def check_exit(binary, case, out):
                         peer, _ = listener.accept()
                         peer.sendall(b"\x1b[?1049hfixture frame\r\n")
                     if master in readable:
-                        captured.extend(os.read(master, 65536))
+                        try:
+                            data = os.read(master, 65536)
+                        except OSError as error:
+                            if error.errno != errno.EIO:
+                                raise
+                            data = b""  # Linux PTY EOF; macOS returns empty bytes.
+                        if not data:
+                            break
+                        captured.extend(data)
                     if not triggered and peer and b"\x1b[?1006h" in captured and b"fixture frame" in captured:
                         was_raw = not (termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON))
                         triggered = True

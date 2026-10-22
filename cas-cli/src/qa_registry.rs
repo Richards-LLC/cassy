@@ -361,6 +361,9 @@ pub struct Journey {
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
+    /// GH #1344: `planned` names a spec a later task will write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_status: Option<String>,
     pub known_failure: Option<String>,
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
@@ -960,8 +963,26 @@ impl Registry {
                 tracked,
                 journey.status != "dead",
             );
-            if let Some(spec) = &journey.spec {
-                if !tracked.contains(spec) {
+            let planned = match journey.spec_status.as_deref() {
+                None => false,
+                Some("planned") => true,
+                Some(other) => {
+                    report.problem(
+                        "spec_status",
+                        id,
+                        format!("unknown spec_status {other:?}; use planned or omit it"),
+                    );
+                    false
+                }
+            };
+            if let Some(spec) = journey.spec.as_ref().filter(|spec| !tracked.contains(spec)) {
+                if planned {
+                    report.debt(
+                        "planned_spec",
+                        id,
+                        &format!("planned spec {spec:?} is not written yet; drop spec_status once it is tracked"),
+                    );
+                } else {
                     report.problem(
                         "untracked_spec",
                         id,
@@ -1002,7 +1023,14 @@ impl Registry {
                     if journey.invariants.is_empty() {
                         report.problem("missing_invariants", id, "live journeys need invariants");
                     }
-                    if journey.traffic.is_none() {
+                    // GH #1344: with no snapshot there is no share to declare yet.
+                    if journey.traffic.is_none() && self.traffic_snapshot.is_none() {
+                        report.debt(
+                            "unmeasured_traffic",
+                            id,
+                            "no traffic_snapshot yet; the journey's share is unallocated",
+                        );
+                    } else if journey.traffic.is_none() {
                         report.problem(
                             "missing_traffic",
                             id,
@@ -1407,6 +1435,30 @@ journeys:
                 ),
                 vec![],
                 vec!["unmeasured_traffic"],
+            ),
+            (
+                "planned spec and a new journey without a traffic snapshot are pending",
+                GABBER
+                    .replace(
+                        "traffic_snapshot: {as_of: \"2026-10-20\", window_days: 30, accounts: 100}\n",
+                        "traffic_snapshot: null\n",
+                    )
+                    .replace(
+                        "    traffic: {share_pct: 80, basis: New accounts, source: Analytics}\n",
+                        "",
+                    )
+                    .replace(
+                        "    spec: tests/signup.spec.ts\n",
+                        "    spec: tests/new/x.spec.ts\n    spec_status: planned\n",
+                    ),
+                vec![],
+                vec!["planned_spec", "unmeasured_traffic"],
+            ),
+            (
+                "a shipped journey's missing spec still fails",
+                GABBER.replace("spec: tests/signup.spec.ts", "spec: tests/new/x.spec.ts"),
+                vec!["untracked_spec"],
+                vec![],
             ),
             (
                 "measured share needs a basis",

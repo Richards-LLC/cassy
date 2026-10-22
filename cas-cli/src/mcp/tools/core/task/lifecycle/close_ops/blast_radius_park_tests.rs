@@ -143,8 +143,8 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     }
 }
 
-/// cas-ba56: the real close path accepts a parent's capped selection when
-/// its delivery changes a sibling test mounted by #[path] and a child module.
+/// Declaration-only risk validation resolves real mounts without relying on
+/// receipt-derived scope or accepting lookalike filenames.
 #[test]
 fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
     let repo = tempfile::tempdir().unwrap();
@@ -154,7 +154,8 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
     let changed = vec!["cas-cli/src/nested/gear.rs".into(), "cas-cli/src/nested/gear_tests.rs".into()];
     let mut task = Task::new("cas-ba56-declaration".into(), "parent proof".into());
     task.risk = vec![TaskRisk::BlastRadius];
-    task.proof_targets = vec!["cas-cli nested::gear".into()];
+    for target in ["cas-cli nested::gear", "gear", "cas nested::gear::tests", "cas-cli/src/nested/gear.rs"] {
+    task.proof_targets = vec![target.into()];
     for (body, covered) in [
         ("#[cfg(test)]\n#[path = \"gear_tests.rs\"]\nmod tests;\n", true),
         ("#[path=\"gear_tests.rs\"] pub(crate) mod tests;\n", true),
@@ -164,6 +165,7 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         ("#[path = \"other_tests.rs\"] mod tests;\n", false),
         ("mod tests {}\n", false),
         ("mod gear_tests;\n", false),
+        ("#[path = \"gear_tests.rs\"] mod", false),
     ] {
         std::fs::write(src.join("gear.rs"), body).unwrap();
         // Exercise the live declaration gate without receipt widening or build
@@ -172,13 +174,26 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
             &task, &changed, repo.path(), repo.path(), None, None,
             BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
         );
-        assert_eq!(result.is_ok(), covered, "{body:?}: {result:?}");
+        assert_eq!(result.is_ok(), covered, "{target}, {body:?}: {result:?}");
         if let Err(error) = result {
             assert!(error.contains("nested::gear_tests"), "{error}");
         }
     }
+    }
+    // A mod.rs parent can mount the same sibling, even when only the tests
+    // changed. No changed-file heuristic may stand in for the declaration.
+    std::fs::remove_file(src.join("gear.rs")).unwrap();
+    std::fs::create_dir(src.join("gear")).unwrap();
+    std::fs::write(src.join("gear/mod.rs"), "#[path = \"../gear_tests.rs\"] mod tests;\n").unwrap();
+    task.proof_targets = vec!["cas-cli nested::gear".into()];
+    validate_risk_close_proofs_with_base_and_target_and_cache(
+        &task, &changed[1..], repo.path(), repo.path(), None, None,
+        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
+    ).expect("mounted tests remain covered without a changed parent");
 }
 
+/// A parent's capped tests cover a mounted sibling and exercised child through
+/// real worker park, merge and supervisor close; the audit names physical files.
 #[tokio::test]
 async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     let mut env = TestEnvGuard::temp_home();
@@ -217,8 +232,6 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     })).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
-    let note = f.task().notes;
-    assert!(note.lines().any(|line| line.contains("PROOF SCOPE derived") && line.contains("widget::gear_tests")), "{note}");
     git(f.dir.path(), &["merge", "--no-ff", "-m", "merge delivery", LANE]);
     git(f.dir.path(), &["push", "-q", "origin", "main"]);
     let closed = call(&f.supervisor, serde_json::json!({
@@ -226,6 +239,8 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     })).await;
     assert!(closed.contains("Closed task"), "{closed}");
     assert_eq!(f.task().status, TaskStatus::Closed);
+    let note = f.task().notes;
+    assert!(note.lines().any(|line| line.contains("PROOF SCOPE derived") && line.contains("widget::gear_tests")), "{note}");
     assert_eq!(f.task().proof_targets, ["unrelated"], "no administrative scope widening");
 }
 

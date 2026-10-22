@@ -7,6 +7,96 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Declared QA safety** — Carry the journey registry's fixture-only, staging or production-read-back policy into QA impact and briefs; preflight refuses declared protected credentials or forbidden configured origins.
+
+- **Shared ownership hints** — Report owner groups referenced by only one journey as curation debt, naming the sole journey without failing registry validation.
+
+- **Approved replacement branches** — Add supervisor-only MCP task action=rebind_branch with an existing branch and approval reason; validate the active assignment and clean checkout, audit the old branch/tip, and retain Git refs and normal close gates.
+
+### Changed
+
+- **Failures inside the promise** — Align generated QA instructions and refusal guidance so failures within the stated purpose, acceptance criteria, demo or edited journey invariant remain in scope even when base shares them; rate invariant-evading tests at least Normal in the review guidance.
+
+- **Verification rejection policy** — Update shipped verification instructions to reject high/critical findings and reproduced silent failures of the delivered behavior instead of approving them as warnings.
+
+- **Cleanup wording** — Clarify that GC dry-run previews destructive cleanup while baseline bookkeeping still runs, and separate WIP notices from the compact GC summary.
+
+### Fixed
+
+- **Artifact uploads** — Honor Cloud's signed upload headers, including Content-Type, and label uncommitted CLI/MCP publishes local-only rather than delivered.
+
+- **Complete checksums** — Print the complete SHA-256 in human artifact publish receipts, including under LC_ALL=C.
+
+- **Completion contention** — Retry only local artifact completion bookkeeping on bounded SQLite contention; exhausted retries retain uploaded state and cannot supply committed portable proof.
+
+- **Clean error output** — Decide top-level and command diagnostic styling from stderr, keeping redirected errors free of terminal color escapes.
+
+- **Visible unsafe paths** — Escape control and invisible Unicode characters in hook diagnostics, conflict-path lists and Git refusals, and avoid copyable remedies for unsafe paths.
+
+- **Multiline Git details** — Preserve structural line breaks in multi-line Git diagnostics while escaping unsafe characters within each row.
+
+- **Finished notifications** — Keep notification hooks alive for a bounded webhook result and distinguish delivered, failed and unconfirmed sends.
+
+- **Account-aware login checks** — Use the selected Claude account's macOS keychain service, cap cached authentication freshness, and explain the one-minute retry after login.
+
+- **Old launcher files** — Remove recognized launcher files for dead processes on hub launch while retaining live, malformed and unrelated files.
+
+- **Update connections** — Reconcile update bindings past unrelated inactive sessions and dead sessions whose project root no longer resolves; retain held or unknown endpoint refusals with a named cas kill remedy.
+
+- **Cloud receipts** — Keep guarded remote closes visible until the local delivery changes, deduplicate matching diagnostics across pull scopes, and include both scopes in transition totals.
+
+- **Readable sync warnings** — Shorten guarded cloud-pull receipts for an 80-column terminal by omitting redundant no-rows text when an error already explains the result.
+
+- **Plain-locale sync** — Use locale-aware separators in cloud push/pull receipts and preserve update cause/remedy extraction with either ASCII or Unicode separators.
+
+- **Readable diagnosis** — Fit the missing-backend footer from factory doctor within an 80-column terminal.
+
+- **Plan coverage first** — Treat explicitly planned specs and missing traffic shares without a traffic snapshot as curation debt, while keeping missing shipped specs and measured shares as validation problems.
+
+- **Unwritten tests stay clear** — Mark planned specs as unwritten in impact evidence, list them in journey status, and warn when a planned marker remains after the spec is tracked.
+
+- **Consistent journey status** — Separate working-tree validation from measured integration upkeep in qa journeys --status; the headline reports problems/debt rather than DRIFT or UNKNOWN.
+
+- **CODEMAP freshness** — Use the shared CODEMAP freshness calculation in QA impact, agreeing with codemap status and journey status for files added in the map's own commit.
+
+- **Find the right repository** — Resolve the caller's matching repository before a host-wide scan, reuse that probe, retain healthy matches when scans are incomplete, and distinguish unavailable scans from definite mismatches.
+
+- **Recorded delivery branches** — Resolve parked merge sources from the recorded task and assignee, supporting shortened task IDs and fix/resume/review-round suffixes while refusing ambiguous discovery; bind QA to the selected source.
+
+- **Recover old start references** — Recover a stale start reference from a different earlier delivery only with an attributable, already-integrated commit receipt; audit the old reference and retain normal close gates.
+
+- **Clearer start recovery** — Avoid repeating the prior-work ancestry scan and make start refusals mention untracked files and switching branches before starting.
+
+- **Less false overlap** — Discount multiline safety boilerplate shared across an epic's open siblings or declared in its description, while retaining real pair-only scope in overlap warnings.
+
+- **Accurate merge receipts** — Record confirmed, advisory and override CI admission in merge receipts and task details; explicit failed-CI overrides do not grant automatic closure.
+
+- **Keep approved QA evidence** — Reuse a cited, passed QA bundle after an integrated cherry-pick or squash only when the complete delivered diff is identical; retain the full proven range for safety checks.
+
+- **Current ownership repairs** — Check an integrated delivery's journey ownership against the target tip, recognizing ownership repairs added after its receipt.
+
+- **Net evidence changes** — Measure ordinary evidence-only deliveries by their net diff, allowing reverted intermediate code edits while preserving per-commit restrictions for never-merge workflow proofs.
+
+- **Readable reference proof** — Fall back to ordinary line proof when optional reference-history blob reads fail, retaining errors for malformed or unsupported history.
+
+- **Observation errors** — Return an internal error for busy rule-observation writes rather than invalid parameters, and log candidate-read failures instead of silently hiding them.
+
+- **Old reminder cleanup** — Expire already-due time reminders with no expiry when both owning and target sessions are gone; report remaining TTL-bound orphan counts only when the count changes.
+
+- **Durable review ownership** — Sync the containing directory after publishing a review checkout's owner file, making the rename durable before reporting success.
+
+- **Nested check isolation** — Clear inherited host test runners for capped checks and for test commands in managed review checkouts without their own lease runner.
+
+- **Progress lines from other projects** — Recognize complete downstream progress sentences such as Installing dependencies... in both terminal-QA copies, using the documented capitalized -ing verb and complete-noun pattern while retaining real truncation failures.
+
+- **Mounted sibling tests** — Resolve differently named sibling test parents through explicit Rust AST mounts, caching directory and parent parses within the changed-source batch instead of relying only on foo_tests.rs to foo.rs naming.
+
+- **Warm review builds** — Warm-seed eligible verifier review targets from the assigned quiescent target and mirror inherited rustflags/rustdocflags into private Cargo configuration so reusable artifacts keep matching fingerprints; retain a private cold-build fallback.
+
+- **Prebuild lookup fairness** — Bound per-run artifact retries, continue checking other completed runs, retry failed queries until the overall deadline, and label exit 137 as a timeout.
+
 ## [3.73.0] - 2026-10-22
 
 ### Added

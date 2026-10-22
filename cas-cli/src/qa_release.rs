@@ -1344,6 +1344,10 @@ mod tests {
         resealed.seal(&dir).unwrap();
         assert!(Pack::load(&dir).is_ok(), "a reseal (C6) reconciles pruned.json");
         assert!(!pack::pruned(&dir).unwrap().iter().any(|p| p.path == "media/frame.png"));
+        // A crash after the new pack.json but before pruned.json leaves the
+        // old superset record (frame.png, now present again): still loads.
+        std::fs::write(dir.join(pack::PRUNED_FILE), &record).unwrap();
+        assert!(Pack::load(&dir).is_ok(), "an old pruned.json after a reseal still loads");
     }
 
     /// Only added files under `migrations.paths` reach the `migrations` verb;

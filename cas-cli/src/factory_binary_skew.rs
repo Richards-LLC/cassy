@@ -354,7 +354,7 @@ mod tests {
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
         let child = DaemonChild(
             std::process::Command::new("sleep")
-                .arg("30")
+                .arg("120")
                 .spawn()
                 .unwrap(),
         );
@@ -390,16 +390,61 @@ mod tests {
         assert!(status.contains("old-worker (Worker"), "{status}");
         assert!(status.contains("9.99.1 [STALE"), "{status}");
 
+        // Eager MCP registration records the server PID itself. Both roster
+        // shapes must identify this same live daemon epoch.
+        let mut direct = Agent::new_with_role(
+            "worker-direct".into(),
+            "direct-worker".into(),
+            AgentRole::Worker,
+        );
+        direct.factory_session = Some("factory-release".into());
+        direct.pid = Some(child.0.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut direct, child.0.id());
+        open_agent_store(&root).unwrap().register(&direct).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
+        assert!(
+            snapshot
+                .servers
+                .iter()
+                .any(|row| row.name == "direct-worker" && row.pid == child.0.id() && row.older),
+            "{:?}",
+            snapshot.servers
+        );
+
+        // The bounded scan must retain the newest live epoch after more than
+        // 4096 older history rows have accumulated.
+        let history = SqliteHistoryStore::open(&root).unwrap();
+        let old_start = Utc::now() - chrono::Duration::days(30);
+        for index in 0..4096 {
+            let at = (old_start + chrono::Duration::seconds(index)).to_rfc3339();
+            let mut old = crate::history::epochs::current_daemon_epoch(&at);
+            old.pid = Some(500_000 + index);
+            old.ended_at = Some(at.clone());
+            old.recorded_at = at;
+            history.record_epoch(&old).unwrap();
+        }
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
+        assert_eq!(
+            snapshot.servers.iter().filter(|row| row.older).count(),
+            2,
+            "{:?}",
+            snapshot.servers
+        );
+
         // A dead/reused PID cannot borrow a historical version and generate
         // a false alert for another process.
         let mut reused = worker;
         reused.pid_starttime = Some(u64::MAX);
         open_agent_store(&root).unwrap().update(&reused).unwrap();
+        let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
         assert!(
-            snapshot_with_installed(&root, "9.99.2", Utc::now())
-                .unwrap()
-                .servers
-                .is_empty()
+            snapshot.servers.iter().all(|row| row.name != "old-worker")
+                && snapshot
+                    .servers
+                    .iter()
+                    .any(|row| row.name == "direct-worker" && row.older),
+            "{:?}",
+            snapshot.servers
         );
     }
 

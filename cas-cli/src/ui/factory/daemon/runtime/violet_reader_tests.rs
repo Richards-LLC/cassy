@@ -217,8 +217,8 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
     assert!(reader.managed(), "a completed v2 claim turns the legacy sweep off");
 }
 
-/// Forward contract fixture: REQ-cloud-delivery-event-kind-2026-10-22.md.
-/// Cloud has not shipped this optional target field yet; absent stays legacy.
+/// Cloud PR #204 puts optional source metadata on the delivery, not its target.
+/// Old journal entries without it keep their existing non-interrupting policy.
 #[test]
 fn managed_event_kind_classifies_mentions_without_escalating_other_activity_cas_c28b() {
     for (case, event_kind, root, mention) in [
@@ -227,6 +227,8 @@ fn managed_event_kind_classifies_mentions_without_escalating_other_activity_cas_
         ("mention-reply", Some(json!("app_mention")), false, true),
         ("plain-root", Some(json!("message")), true, false),
         ("plain-reply", Some(json!("message")), false, false),
+        ("edited-message", Some(json!("message_changed")), false, false),
+        ("null-kind", Some(Value::Null), false, false),
         ("future-kind", Some(json!("future_kind")), false, false),
         ("malformed-kind", Some(json!(true)), false, false),
     ] {
@@ -234,8 +236,8 @@ fn managed_event_kind_classifies_mentions_without_escalating_other_activity_cas_
         let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        if let Some(event_kind) = event_kind { cloud.claim["deliveries"][0]["delivery"]["event_kind"] = event_kind; }
         let target = &mut cloud.claim["deliveries"][0]["target"];
-        if let Some(event_kind) = event_kind { target["event_kind"] = event_kind; }
         if root { target["message_ts"] = target["external_ref"]["root_ts"].clone(); }
         let message_ts = target["message_ts"].clone();
         let root_ts = target["external_ref"]["root_ts"].clone();

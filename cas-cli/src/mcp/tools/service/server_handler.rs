@@ -1483,7 +1483,10 @@ mod tests {
         let merge = async {
             super::super::mutation_receipt::merge_committed("abc123", "epic/x", "pushed to origin");
             // Cassy's close found the task not eligible: its receipt is empty.
-            super::super::mutation_receipt::merge_followup("");
+            super::super::mutation_receipt::merge_followup(
+                &crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::NotEligible
+                    .followup("cas-merged"),
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             Err(rmcp::ErrorData {
                 code: rmcp::model::ErrorCode::INTERNAL_ERROR,

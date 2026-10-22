@@ -351,7 +351,14 @@ impl std::ops::DerefMut for CurrentDirGuard<'_> {
 impl Drop for CurrentDirGuard<'_> {
     fn drop(&mut self) {
         let saved = std::mem::take(&mut self.saved);
-        self.env.set_current_dir(saved);
+        // cas-3fc8: a failing test may already have deleted the saved
+        // directory. A panic here, during that test's unwind, would abort the
+        // whole test binary; TestEnvGuard::drop still restores the original.
+        if saved.is_dir() {
+            self.env.set_current_dir(saved);
+        } else {
+            eprintln!("test cwd: {} is gone; staying put", saved.display());
+        }
     }
 }
 

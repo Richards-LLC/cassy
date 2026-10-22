@@ -136,9 +136,23 @@ pub fn crate_root() -> PathBuf {
 ///
 /// `CARGO_MANIFEST_DIR` records the path on the machine that built an
 /// archived test. Nextest executes the archive from a checkout at a different
-/// path, so fixture directories must be created beneath the process cwd.
+/// path, so fixture directories are created beneath the runtime package
+/// directory, where the test process starts.
+///
+/// cas-3fc8: that directory comes from the runtime `CARGO_MANIFEST_DIR`
+/// (set by cargo and nextest, remapped for archives) and is read once, never
+/// from a cwd another test has entered: a fixture created there would be
+/// deleted with that test's directory.
 pub fn runtime_fixture_parent() -> PathBuf {
-    std::env::current_dir().expect("test current directory")
+    static PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PARENT
+        .get_or_init(|| {
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .unwrap_or_else(|| std::env::current_dir().expect("test current directory"))
+        })
+        .clone()
 }
 
 /// Finds the `cas` executable supplied alongside an archived test binary.

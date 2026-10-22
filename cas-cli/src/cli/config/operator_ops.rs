@@ -466,6 +466,47 @@ mod tests {
         assert_ne!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
 
         let mut config = Config::load(&root).unwrap();
+        let webhook = "https://hooks.example.test/services/secret";
+        let error = set_config_value(
+            &mut config,
+            "notifications.webhook_url",
+            webhook,
+            &root,
+            agent,
+        )
+        .expect_err("agents cannot choose a destination for notification text")
+        .to_string();
+        assert!(
+            error.contains("notifications.webhook_url") && error.contains("operator"),
+            "{error}"
+        );
+        assert_eq!(config.get("notifications.webhook_url").as_deref(), Some(""));
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some("")
+        );
+
+        // These event switches cause notification text to leave the machine
+        // when an operator has configured a webhook, so keep them under the
+        // same operator gate as the destination.
+        for key in [
+            "notifications.on_permission_prompt",
+            "notifications.on_idle_prompt",
+            "notifications.on_auth_success",
+        ] {
+            let mut config = Config::load(&root).unwrap();
+            let error = set_config_value(&mut config, key, "true", &root, agent)
+                .expect_err("agents cannot enable outbound notification events")
+                .to_string();
+            assert!(error.contains(key) && error.contains("operator"), "{key}: {error}");
+            assert_eq!(
+                Config::load(&root).unwrap().get(key).as_deref(),
+                Some("false"),
+                "{key}"
+            );
+        }
+
+        let mut config = Config::load(&root).unwrap();
         set_config_value(&mut config, "issues.repo", "example/project", &root, agent).unwrap();
         assert_eq!(
             Config::load(&root).unwrap().get("issues.repo").as_deref(),
@@ -475,6 +516,69 @@ mod tests {
         let mut config = Config::load(&root).unwrap();
         set_config_value(&mut config, "slack.transport", "any", &root, operator).unwrap();
         assert_eq!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
+
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(&mut config, "notifications.webhook_url", webhook, &root, operator).unwrap();
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some(webhook)
+        );
+    }
+
+    #[test]
+    fn notifications_webhook_url_accepts_https_or_http_loopback_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+
+        for url in [
+            "http://example.test/webhook",
+            "http://localhost.example.test/webhook",
+            "ftp://localhost/webhook",
+            "not a url",
+        ] {
+            let mut config = Config::load(&root).unwrap();
+            let error = set_config_value(
+                &mut config,
+                "notifications.webhook_url",
+                url,
+                &root,
+                operator,
+            )
+            .expect_err("unsafe webhook URL must be refused")
+            .to_string();
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{url}: {error}"
+            );
+            assert_eq!(
+                Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+                Some("")
+            );
+        }
+
+        for url in [
+            "https://hooks.example.test/services/secret",
+            "http://localhost:8123/webhook",
+            "http://127.0.0.1:8123/webhook",
+            "http://[::1]:8123/webhook",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let mut config = Config::load(&root).unwrap();
+            set_config_value(
+                &mut config,
+                "notifications.webhook_url",
+                url,
+                &root,
+                operator,
+            )
+            .unwrap();
+            assert_eq!(
+                Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+                Some(url)
+            );
+        }
     }
 
     #[test]

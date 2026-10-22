@@ -222,6 +222,10 @@ pub fn handle_notification(
 
 /// Send a webhook notification (blocking, for use in spawned thread)
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
+    // Config files can predate URL validation or be edited outside the CLI;
+    // enforce the destination policy at the last point before sending data.
+    crate::config::validate_notification_webhook_url(url)?;
+
     // Simple HTTP POST with JSON payload
     let payload = serde_json::json!({
         "text": message,
@@ -628,6 +632,17 @@ mod pre_compact_flush_tests {
     use crate::types::{Agent, AgentRole, Task, TaskStatus};
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn notification_webhook_sender_rejects_non_https() {
+        let error = send_webhook_notification(
+            "file:///dev/null",
+            "notification text must not leave over HTTP",
+        )
+        .expect_err("non-HTTPS destinations must be rejected before sending")
+        .to_string();
+        assert!(error.contains("HTTPS"), "{error}");
+    }
 
     // -------------------------------------------------------------------------
     // Test helpers

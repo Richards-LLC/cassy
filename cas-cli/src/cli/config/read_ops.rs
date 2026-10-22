@@ -957,8 +957,6 @@ mod tests {
 
     #[test]
     fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
-        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &["slack.stakeholder_contacts"];
-
         let registry = crate::config::registry();
         let mut keys = registry.all_keys();
         keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
@@ -970,11 +968,6 @@ mod tests {
                 let mut config = Config::default();
                 config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
                 toml_edit::Document::parse(toml::to_string(&config).unwrap())
-                    .unwrap()
-                    .into_mut()
-            } else if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
-                let (parent, leaf) = key.rsplit_once('.').expect("nested config key");
-                toml_edit::Document::parse(format!("[{parent}]\n{leaf} = \"sentinel\"\n"))
                     .unwrap()
                     .into_mut()
             } else {
@@ -992,7 +985,9 @@ mod tests {
                 } else if key == "qa.deployed_origins" {
                     candidates.push("https://example.com".into());
                 } else if key == "slack.stakeholder_contacts" {
-                    candidates.push("[]".into());
+                    candidates.push(
+                        r#"[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":60,"mode":"warn"}]"#.into(),
+                    );
                 } else if key.starts_with("issues.") {
                     candidates.push("example/repo".into());
                 }

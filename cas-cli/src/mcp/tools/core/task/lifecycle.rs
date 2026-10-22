@@ -3612,7 +3612,7 @@ mod related_recall_response_tests {
             let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
             assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
         }
-        let mut duplicate = child_request("Inspect payment journey", epic.id);
+        let mut duplicate = child_request("Inspect payment journey", epic.id.clone());
         duplicate.description = Some(format!(
             "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
         ));
@@ -3620,6 +3620,22 @@ mod related_recall_response_tests {
         assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
         assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
         assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+
+        // Shared scope in just a pair is not epic-wide boilerplate, even
+        // when the two briefs also repeat the real safety block.
+        let settlement = "Read ledgerStore in src/ledger.ts.\nRepair settlementReader in src/settlement.ts.";
+        for (title, scope, should_warn) in [
+            ("Inspect settlement storage", "Unique extraction scope.", false),
+            ("Repair settlement history", "Unique history scope.", true),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{settlement}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert_eq!(receipt.contains("SIBLING OVERLAP"), should_warn, "{title}: {receipt}");
+            if should_warn {
+                assert!(receipt.contains("ledgerStore"), "pair-only scope stays visible: {receipt}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -672,10 +672,15 @@ fn execute_set_internal(
                 warning.artifact, warning.drift_count, warning.unit
             ))?;
             fmt.newline()?;
-            fmt.write_raw(&crate::cli::qa::measured_ref_line(&warning.measured_ref))?;
+            let measured = crate::cli::qa::measured_ref_line(&warning.measured_ref);
+            fmt.write_raw(&measured)?;
             fmt.newline()?;
-            fmt.write_raw("Review: cas qa journeys --status --json")?;
+            fmt.write_raw("Review: cas qa journeys --status")?;
             fmt.newline()?;
+            if measured != format!("Measured ref: {}", warning.measured_ref) {
+                fmt.write_raw("Full ref: cas qa journeys --status --json")?;
+                fmt.newline()?;
+            }
         }
     }
     Ok(())

@@ -78,6 +78,7 @@
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment receipts and wake batching.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_build_guard.rs` - scratch paths and build-pressure admission.
+- `cas-cli/src/factory_review_scratch.rs` - task/dispatch-owned review proof checkouts, reuse and GC.
 - `cas-cli/src/factory_worker_check.rs` - capped checks/tests, receipt rebinding and supervisor-recorded evidence.
 - `cas-cli/src/factory_target_cache.rs`, `cas-cli/src/factory_target_cache/` - cache inventory/GC, ownership, baselines and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch, readiness and terminal snapshots.
@@ -119,6 +120,7 @@
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
 - **Contributor policy:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`.
 - **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs`; **release records:** `docs/release-notes/`, `docs/release-reports/`.
+- **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs, locale/width captures and `captures/`.
 - **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `cas-cli/src/cli/release_report.rs`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.
 - **Runbooks/config:** `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`, `.mcp.json`, `.env.worktree.template`, `.claude/settings.json`, `.codex/hooks.json`.

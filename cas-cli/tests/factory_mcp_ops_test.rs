@@ -33,6 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+// The grouped integration harness owns the process-wide env/cwd lock.
 use crate::test_env_guard::TestEnvGuard;
 
 // =============================================================================

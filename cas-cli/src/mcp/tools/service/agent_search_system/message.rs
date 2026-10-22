@@ -6379,6 +6379,10 @@ mod cas_89e1_post_merge_message_type_tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
         let worker = register_gh_1171_fleet(&core, false);
+        let agents = core.open_agent_store().unwrap();
+        let mut supervisor = agents.get("supervisor-a-id").unwrap();
+        supervisor.factory_session = worker.factory_session.clone();
+        agents.update(&supervisor).unwrap();
         core.set_agent_id_for_testing(worker.id.clone());
         let service = gh_1171_service(&core);
         for body in ["ok", "thanks"] {

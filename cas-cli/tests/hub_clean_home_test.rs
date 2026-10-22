@@ -6,8 +6,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -64,75 +62,25 @@ fn private_home() -> hub_fixture::PrivateHubTempDir {
     hub_fixture::private_hub_tempdir()
 }
 
-/// Keep a loopback port reserved without listening, so tests can model a dead
-/// prior Serve target without leaving a close/rebind window for other tests.
+/// Reserve an established client's local port, which cannot accept new
+/// connections. A merely bound, non-listening socket times out on macOS;
+/// this connected socket instead rejects unrelated connections on both OSes.
+/// Keeping both ends open excludes the port from automatic ephemeral allocation
+/// without any close/rebind window. This does not exclude an explicit bind with
+/// SO_REUSEADDR, which macOS permits over an established connection.
 #[cfg(unix)]
-fn reserve_unlistened_loopback_port() -> (u16, OwnedFd) {
-    use std::mem::{size_of, zeroed};
-
-    // SAFETY: these constants select a TCP/IPv4 socket and require no pointers.
-    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    assert!(
-        fd >= 0,
-        "create reserved loopback socket: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: fd is freshly created and ownership is transferred exactly once.
-    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: the descriptor is open and F_SETFD takes one integer flag.
-    assert_eq!(
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
-        0,
-        "mark reserved loopback socket close-on-exec: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: zero is a valid initial representation for sockaddr_in.
-    let mut address: libc::sockaddr_in = unsafe { zeroed() };
-    #[cfg(target_os = "macos")]
-    {
-        address.sin_len = size_of::<libc::sockaddr_in>() as u8;
-    }
-    address.sin_family = libc::AF_INET as libc::sa_family_t;
-    address.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
-    // SAFETY: address is initialized and its pointer/length match sockaddr_in.
-    let bind = unsafe {
-        libc::bind(
-            fd,
-            (&address as *const libc::sockaddr_in).cast(),
-            size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    assert_eq!(
-        bind,
-        0,
-        "bind reserved loopback socket: {}",
-        std::io::Error::last_os_error()
-    );
-
-    // SAFETY: the address buffer and length are initialized for getsockname.
-    let mut bound: libc::sockaddr_in = unsafe { zeroed() };
-    let mut length = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockname(
-            fd,
-            (&mut bound as *mut libc::sockaddr_in).cast(),
-            &mut length,
-        )
-    };
-    assert_eq!(
-        result,
-        0,
-        "read reserved loopback port: {}",
-        std::io::Error::last_os_error()
-    );
-    let port = u16::from_be(bound.sin_port);
+fn reserve_refused_loopback_port() -> (u16, (TcpStream, TcpStream)) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let port = client.local_addr().unwrap().port();
     let endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     assert!(
         TcpStream::connect_timeout(&endpoint, Duration::from_millis(100))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused),
         "reserved loopback target must be connection-refused"
     );
-    (port, socket)
+    (port, (client, peer))
 }
 
 #[cfg(unix)]
@@ -1120,7 +1068,7 @@ esac
 "##,
     );
 
-    let (dead_port, _dead_port_reservation) = reserve_unlistened_loopback_port();
+    let (dead_port, _dead_port_reservation) = reserve_refused_loopback_port();
     let old_target = format!("http://127.0.0.1:{dead_port}");
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
@@ -1233,7 +1181,7 @@ case "$*" in
 esac
 "##,
     );
-    let (dead_port, _dead_port_reservation) = reserve_unlistened_loopback_port();
+    let (dead_port, _dead_port_reservation) = reserve_refused_loopback_port();
     let old_target = format!("http://127.0.0.1:{dead_port}");
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({

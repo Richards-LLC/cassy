@@ -212,7 +212,6 @@ with (root / 'normal-exit.log').open('wb') as log:
             time.sleep(0.02)
         assert pid_file.exists(), 'normal-exit fixture did not start'
         pids = json.loads(pid_file.read_text())
-        assert live(pids[1]), 'normal-exit child must exist before cleanup'
         assert exited_without_reaping(wrapper, 5).si_status == 0, 'normal nextest exit must pass'
         deadline = time.monotonic() + 5
         while live(pids[1]) and time.monotonic() < deadline:

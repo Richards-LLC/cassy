@@ -465,6 +465,20 @@ async fn peer_start_is_refused_with_the_holders_identity_until_it_releases() {
         "no local lease either"
     );
 
+    // A stale pending release at bravo must not disturb alpha's live claim
+    // when the actual manual MCP entry is refused by the other machine.
+    let tasks = open_task_store(&bravo.cas_dir).unwrap();
+    let mut task = tasks.get("cas-p001").unwrap();
+    task.assignee = Some("bravo-sup".into());
+    tasks.update(&task).unwrap();
+    let pending = bravo.cas_dir.join("claim-releases.json");
+    std::fs::write(&pending, serde_json::json!({"cas-p001": Utc::now().timestamp()}).to_string()).unwrap();
+    let manual = claim(&bravo.core, "cas-p001").await.expect_err("the peer refuses manual claim too");
+    assert!(manual.contains("HELD BY A PEER") && manual.contains("alpha-sup"), "{manual}");
+    assert!(!pending.exists(), "manual acquisition cancels the old pending release before refusal");
+    assert_eq!(cloud.active_lock("cas-p001").unwrap().1.agent_id, alpha.agent_id);
+    assert!(open_agent_store(&bravo.cas_dir).unwrap().get_lease("cas-p001").unwrap().is_none());
+
     let released = release(&alpha.core, "cas-p001").await;
     assert!(cloud.active_lock("cas-p001").is_none(), "release frees the cloud claim: {released}");
     let taken = start(&bravo.core, "cas-p001", false).await.expect("bravo starts after release");
@@ -570,9 +584,40 @@ async fn file_freed(cloud: &FakeCloud, file: &str) -> bool {
     freed(cloud, &cas::cloud::file_leases::lease_id(file)).await
 }
 
+// Prove progress on this test's single-thread runtime while Cloud holds the
+// actual task release. The old inline blocking call cannot poll `progress`
+// until its own HTTP deadline returns; no elapsed-time assertion is needed.
+async fn with_release_progress<T>(
+    cloud: &FakeCloud, operation: impl std::future::Future<Output = T>,
+) -> (T, bool) {
+    let (entered, observed) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    let (notify, notified) = tokio::sync::oneshot::channel();
+    cloud.state.lock().unwrap().task_release_gate = Some((entered, held));
+    let observer = std::thread::spawn(move || {
+        observed.recv_timeout(std::time::Duration::from_secs(10)).expect("release reaches Cloud");
+        let _ = notify.send(());
+    });
+    let completed = std::cell::Cell::new(false);
+    let operation = async {
+        let answer = operation.await;
+        completed.set(true);
+        answer
+    };
+    let progress = async {
+        notified.await.expect("the Cloud release gate was reached");
+        let stalled = completed.get();
+        let _ = resume.send(());
+        stalled
+    };
+    let answer = tokio::join!(operation, progress);
+    observer.join().unwrap();
+    answer
+}
+
 /// cas-c55f, cas-978d: releasing, resetting or transferring a task frees the
 /// files edited for it, as close does, so another session may take them.
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn release_reset_and_transfer_free_the_tasks_file_leases_cas_c55f_978d() {
     use cas::cloud::file_leases::FileLease;
     let mut env = TestEnvGuard::temp_home();
@@ -583,40 +628,44 @@ async fn release_reset_and_transfer_free_the_tasks_file_leases_cas_c55f_978d() {
     alpha.put_task("cas-f001", TaskType::Task);
     start(&alpha.core, "cas-f001", false).await.unwrap();
     assert_eq!(edit(&alpha, "alpha-sup", "cas-f001", "src/released.rs").await, FileLease::Mine);
-    let released = release(&alpha.core, "cas-f001").await;
+    let (released, release_stalled) = with_release_progress(&cloud, release(&alpha.core, "cas-f001")).await;
     assert!(file_freed(&cloud, "src/released.rs").await, "release leaves the file held: {released}");
 
     alpha.put_task("cas-f002", TaskType::Task);
     start(&alpha.core, "cas-f002", false).await.unwrap();
     assert_eq!(edit(&alpha, "alpha-sup", "cas-f002", "src/reset.rs").await, FileLease::Mine);
-    let reset = alpha
-        .core
-        .cas_task_reset(Parameters(TaskReleaseRequest { task_id: "cas-f002".into(), force: Some(true) }))
-        .await
-        .map(extract_text)
-        .unwrap_or_else(|error| error.message.to_string());
+    let (reset, reset_stalled) = with_release_progress(&cloud, async {
+        alpha.core
+            .cas_task_reset(Parameters(TaskReleaseRequest { task_id: "cas-f002".into(), force: Some(true) }))
+            .await
+            .map(extract_text)
+            .unwrap_or_else(|error| error.message.to_string())
+    }).await;
     assert!(file_freed(&cloud, "src/reset.rs").await, "reset leaves the file held: {reset}");
 
     alpha.put_task("cas-f004", TaskType::Task);
     start(&alpha.core, "cas-f004", false).await.unwrap();
     assert_eq!(edit(&alpha, "alpha-sup", "cas-f004", "src/transferred.rs").await, FileLease::Mine);
     let _receiver = alpha.second_agent("bravo-wkr");
-    let transferred = alpha
-        .core
-        .cas_task_transfer(Parameters(TaskTransferRequest {
-            adopt_branch: None,
-            task_id: "cas-f004".into(),
-            to_agent: format!("bravo-wkr-session-{}", std::process::id()),
-            note: None,
-            supervisor_override: None,
-        }))
-        .await
-        .map(extract_text)
-        .unwrap_or_else(|error| error.message.to_string());
+    let (transferred, transfer_stalled) = with_release_progress(&cloud, async {
+        alpha.core
+            .cas_task_transfer(Parameters(TaskTransferRequest {
+                adopt_branch: None,
+                task_id: "cas-f004".into(),
+                to_agent: format!("bravo-wkr-session-{}", std::process::id()),
+                note: None,
+                supervisor_override: None,
+            }))
+            .await
+            .map(extract_text)
+            .unwrap_or_else(|error| error.message.to_string())
+    }).await;
     assert!(
         file_freed(&cloud, "src/transferred.rs").await,
         "transfer leaves the previous holder's file held: {transferred}"
     );
+    assert_eq!([release_stalled, reset_stalled, transfer_stalled], [false; 3],
+        "release/reset/transfer must let the async runtime progress while Cloud is held");
 }
 
 /// cas-c55f, cas-978d: a close does not wait for a slow Cloud to release
@@ -827,10 +876,17 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
 async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
-    for fail_lease in [false, true] {
+    let mut orphaned = Vec::new();
+    for (entry, fail_lease) in [("start", false), ("start", true), ("claim", true)] {
         let cloud = FakeCloud::start();
         let alpha = machine(&cloud.url, PROJECT, "start-worker");
         alpha.put_task("cas-start-rollback", TaskType::Task);
+        if entry == "claim" {
+            let tasks = open_task_store(&alpha.cas_dir).unwrap();
+            let mut task = tasks.get("cas-start-rollback").unwrap();
+            task.assignee = Some("start-worker".into());
+            tasks.update(&task).unwrap();
+        }
         let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
         let trigger = if fail_lease {
             "CREATE TRIGGER refuse_start BEFORE INSERT ON task_leases
@@ -842,12 +898,20 @@ async fn start_write_failure_leaves_no_new_lease_cas_d5f4() {
              BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;"
         };
         db.execute_batch(trigger).unwrap();
-        let error = start(&alpha.core, "cas-start-rollback", false).await.unwrap_err();
+        let error = if entry == "claim" {
+            claim(&alpha.core, "cas-start-rollback").await
+        } else {
+            start(&alpha.core, "cas-start-rollback", false).await
+        }.unwrap_err();
         assert!(error.contains("injected start write failure"), "{error}");
         assert_eq!(open_task_store(&alpha.cas_dir).unwrap().get("cas-start-rollback").unwrap().status, TaskStatus::Open);
         assert!(open_agent_store(&alpha.cas_dir).unwrap().list_agent_leases(&alpha.agent_id).unwrap().is_empty(),
             "a failed local start must not leave a new lease or an InProgress task");
+        if fail_lease && cloud.active_lock("cas-start-rollback").is_some() {
+            orphaned.push(entry);
+        }
     }
+    assert!(orphaned.is_empty(), "local claim errors left just-taken Cloud claims: {orphaned:?}");
 }
 
 /// A pulled task in progress under an assignee from another machine names

@@ -20,6 +20,7 @@ adapter = "./scripts/qa/cassy-adapter"
 env = ["STAGING_HEALTH_TOKEN"]
 timeout_secs = 120
 grant_envs = ["staging"]
+gate_env = "staging"
 target_env = "prod"
 
 [qa.release.components]
@@ -45,7 +46,7 @@ env = "staging"
 | `target_env` | Environment promotion serves; promotion reads its `flags` once (default `prod`). |
 | `migrations.paths` | Repository-relative patterns with exactly one `*`, which is the migration id. |
 | `migrations.env` | Environment whose applied migrations a merge into `integration_branch` needs. |
-| `gate_env` | The environment the gate walks, sent as every request's `env` (default `staging`). |
+| `gate_env` | The environment the gate walks, sent as every request's `env` (default `staging`). Not `target_env`, which is the environment promotion compares against. |
 | `suites` | Named suites, each `{journeys \| kinds, wall_clock_mins, concurrency}`; see [Running the gate](#running-the-gate). |
 
 `cas config set qa.release.components '{"backend":["apps/backend"]}'` takes

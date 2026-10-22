@@ -5132,8 +5132,7 @@ impl CasCore {
             && matches!(branch_ci_state, BranchCiState::Green { .. })
             && push_outcome.is_published();
         let push_note = match (task_id, merge_commit.as_deref()) {
-            (Some(task_id), Some(merge_sha)) if auto_close_expected =>
-            {
+            (Some(task_id), Some(merge_sha)) if auto_close_expected => {
                 let outcome = self.close_after_green_merge(task_id, merge_sha).await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 format!("{push_note}{}", outcome.receipt(task_id))

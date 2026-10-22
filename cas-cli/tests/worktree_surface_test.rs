@@ -2251,10 +2251,7 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         &repo.root,
     );
     let origin = "https://github.com/org/delivery-observation.git";
-    run_git(
-        &["remote", "add", "origin", origin],
-        &repo.root,
-    );
+    run_git(&["remote", "add", "origin", origin], &repo.root);
     run_git(
         &[
             "config",
@@ -2345,10 +2342,10 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         .await
         .expect_err("first request must surface the failed observation write");
     assert!(
-        first
-            .message
-            .contains("Retry `worktree_merge id=")
-            && first.message.contains("task_id=cas-8045-observation-retry`"),
+        first.message.contains("Retry `worktree_merge id=")
+            && first
+                .message
+                .contains("task_id=cas-8045-observation-retry`"),
         "{}",
         first.message
     );
@@ -2369,12 +2366,18 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     if conclusion == "success" {
         assert!(text.contains("VERIFICATION REQUIRED"), "{text}");
         assert_eq!(
-            dispatch.as_ref().expect("recovery must dispatch verification").state,
+            dispatch
+                .as_ref()
+                .expect("recovery must dispatch verification")
+                .state,
             cas::types::VerificationDispatchState::Pending
         );
     } else {
         assert!(!retry.is_error.unwrap_or(false), "{text}");
-        assert!(dispatch.is_none(), "advisory/override merges do not auto-close");
+        assert!(
+            dispatch.is_none(),
+            "advisory/override merges do not auto-close"
+        );
     }
     let observations: i64 = conn
         .query_row(
@@ -2396,20 +2399,38 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
     // A peer may advance the target before a repeated request. Recovery is
     // complete: the third call must neither republish nor observe that new tip.
     run_git(&["switch", "epic/observation"], &repo.root);
-    run_git(&["commit", "--allow-empty", "-m", "peer target advance"], &repo.root);
+    run_git(
+        &["commit", "--allow-empty", "-m", "peer target advance"],
+        &repo.root,
+    );
     run_git(&["push", "origin", "epic/observation"], &repo.root);
     let target = git_stdout(&repo.root, &["rev-parse", "epic/observation"]);
     let third = service.coordination(Parameters(request)).await.unwrap();
     let text = get_text(&third);
     assert!(text.contains("Already contained"), "{conclusion}: {text}");
-    assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/observation"]), target);
-    assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/observation"]), target);
-    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap(), dispatch);
-    let after: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
-        [task_id], |row| row.get(0),
-    ).unwrap();
-    assert_eq!(after, 1, "a repeated merge cannot observe the peer's new target");
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "epic/observation"]),
+        target
+    );
+    assert_eq!(
+        git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/observation"]),
+        target
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, task_id).unwrap(),
+        dispatch
+    );
+    let after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observed_delivery_merges WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, 1,
+        "a repeated merge cannot observe the peer's new target"
+    );
 }
 
 #[tokio::test]

@@ -79,6 +79,23 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+A nontransactional task merge records a recovery intent before Git changes and
+an immutable observation afterward. Once that observation is durable, advisory
+CI and explicit CI overrides finish the intent without requesting automatic
+close. Green published merges retain it only while close or verification
+dispatch still needs recovery. A repeated merge after completion returns
+`Already contained`, even if a peer advanced the target.
+
+While holding the target merge lock, the pending check (including first-use
+schema installation), intent write, observation write and intent clear each
+share a two-second bound across their SQLite busy waits and retries. Thus these
+four operations contribute at most eight seconds of deliberate contention
+waiting per request, rather than three independent roughly 32-second retry
+windows. Git commands and close/verification work have their own execution
+bounds; eight seconds is not a wall-clock timeout for the entire merge. A
+persistence failure reports the existing exact-merge retry action, preserving
+unfinished recovery state.
+
 Worker-idle merge notices wait for completed CI on the delivery's exact tip
 and a successful refresh of its integration target. Parked deliveries retry
 each minute, including when the director snapshot is unchanged. Pending CI

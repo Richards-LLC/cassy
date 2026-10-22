@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use toml::map::Map;
 
 /// Pretty-print JSON with every object recursively sorted by key.
@@ -650,39 +649,27 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
 
     // Read existing content for comparison
     let existing_content = if mcp_json_path.exists() {
-        Some(
-            std::fs::read_to_string(&mcp_json_path)
-                .context("Cannot read existing .mcp.json; file left unchanged")?,
-        )
+        std::fs::read_to_string(&mcp_json_path).ok()
     } else {
         None
     };
 
     // Read existing config or create new
-    let mut config: serde_json::Value = match existing_content.as_ref() {
-        Some(content) => serde_json::from_str(content)
-            .context("Invalid JSON in .mcp.json; file left unchanged")?,
-        None => serde_json::json!({}),
-    };
+    let mut config: serde_json::Value = existing_content
+        .as_ref()
+        .and_then(|c| serde_json::from_str(c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
 
-    // Validate before mutation: indexing a non-object can panic or replace null.
-    let root = config
-        .as_object_mut()
-        .context("Invalid JSON in .mcp.json: root must be an object; file left unchanged")?;
-    let servers = root
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .context("Invalid JSON in .mcp.json: mcpServers must be an object; file left unchanged")?;
+    // Ensure mcpServers object exists
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = serde_json::json!({});
+    }
 
     // Add or update Cassy server config
-    servers.insert(
-        "cas".to_string(),
-        serde_json::json!({
-            "command": "cas",
-            "args": ["serve"]
-        }),
-    );
+    config["mcpServers"]["cas"] = serde_json::json!({
+        "command": "cas",
+        "args": ["serve"]
+    });
 
     // Write back with pretty formatting
     let formatted = canonical_json_pretty(&config)?;

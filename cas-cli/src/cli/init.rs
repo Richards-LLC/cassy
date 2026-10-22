@@ -29,9 +29,6 @@ use crate::cli::hook::{configure_claude_hooks, configure_mcp_server, provision_c
 use crate::cli::interactive;
 use crate::ui::components::OutputMode;
 
-pub(crate) const INCOMPLETE_INIT_RECOVERY: &str =
-    "Initialization is incomplete.\nFix the reported error, then re-run: cas init --force";
-
 /// Default overall timeout for `cas init`. If init is still running past this,
 /// the watchdog aborts the process with a clear error so a hang never consumes
 /// a CPU core indefinitely (see cas-bf06). Opt out via `CAS_INIT_NO_TIMEOUT=1`,
@@ -462,8 +459,6 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
     );
     let started = Instant::now();
 
-    let store_was_present = cas_store_present(&cwd.join(".cas"));
-
     // JSON mode: non-interactive, use defaults
     let result = if cli.json {
         execute_json(&cwd, args)
@@ -486,11 +481,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
             "cas init: aborted with error"
         ),
     }
-    if result.is_err() && !store_was_present && cas_store_present(&cwd.join(".cas")) {
-        result.context(INCOMPLETE_INIT_RECOVERY)
-    } else {
-        result
-    }
+    result
 }
 
 // ============================================================================
@@ -559,8 +550,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         // Grok reads `.mcp.json` directly (verified via `grok mcp doctor`) —
         // no separate config writer needed, just make sure it exists.
         // Reuses the same idempotent writer Claude uses.
-        grok_configured = configure_mcp_server(cwd)
-            .context("Failed to configure Grok MCP server (.mcp.json)")?;
+        grok_configured = configure_mcp_server(cwd).unwrap_or(false);
 
         let builtins_result = sync_all_builtins_for_project(cas_mux::SupervisorCli::Grok, cwd).ok();
         builtins_count += builtins_result
@@ -650,10 +640,12 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Provisioning and force retries keep the operator's existing configuration,
-/// whether or not its store already exists (cas-563f, cas-e149).
+/// A .cas that carries its configuration but not its store (for example a
+/// committed `config.toml` in a fresh clone) keeps that configuration when
+/// init creates the store (cas-563f). A fully initialized .cas re-run with
+/// --force is reconfigured as before.
 fn keeps_existing_config(cas_dir: &Path) -> bool {
-    cas_config_present(cas_dir)
+    !cas_store_present(cas_dir) && cas_config_present(cas_dir)
 }
 
 /// Translate CLI args into the orchestration layer's [`IntegrationFlags`].
@@ -700,23 +692,13 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         println!("\n  Reconfiguring Cassy...");
     }
 
-    // A force retry repairs provisioning without resetting operator settings.
-    // The explicit non-force "Reconfigure settings" choice still reconfigures.
-    let keep_config = args.force && keeps_existing_config(&cas_dir_path);
-
     // Initialize .cas directory
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
     let wizard_config = WizardConfig::with_detected_agents(cwd);
 
     // Confirmation with file summary
-    if !confirm_and_apply(
-        &cas_dir,
-        cwd,
-        &wizard_config,
-        keep_config,
-        &integration_flags_from(args),
-    )? {
+    if !confirm_and_apply(&cas_dir, cwd, &wizard_config, &integration_flags_from(args))? {
         println!("\n  Initialization cancelled.");
         return Ok(());
     }
@@ -852,7 +834,6 @@ fn confirm_and_apply(
     cas_dir: &Path,
     cwd: &Path,
     config: &WizardConfig,
-    keep_config: bool,
     integration_flags: &super::integrate::integrations::IntegrationFlags,
 ) -> anyhow::Result<bool> {
     print_section_header("Confirmation")?;
@@ -874,9 +855,7 @@ fn confirm_and_apply(
     if !cas_exists {
         print_file_item(".cas/", "Cassy data directory", InitStyle::Text)?;
     }
-    if !keep_config {
-        print_file_item(".cas/config.toml", "Configuration", InitStyle::Text)?;
-    }
+    print_file_item(".cas/config.toml", "Configuration", InitStyle::Text)?;
     if !gitignore_exists {
         print_file_item(".gitignore", "Add .cas/ exclusion", InitStyle::Text)?;
     }
@@ -993,7 +972,7 @@ fn confirm_and_apply(
     // Telemetry is opt-in; don't enable by default
 
     // Apply with animation
-    apply_configuration(cas_dir, cwd, config, true, keep_config, integration_flags)?;
+    apply_configuration(cas_dir, cwd, config, true, false, integration_flags)?;
 
     Ok(true)
 }

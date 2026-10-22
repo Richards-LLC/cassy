@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::cli::Cli;
@@ -99,7 +99,7 @@ fn execute_edit_line_based_with_input(
 
     let mut stdout = std::io::stdout();
     let mut changes_made = 0;
-    let mut pending_resets = Vec::new();
+    let mut pending_resets = HashSet::new();
 
     for meta in configs_to_edit {
         let current_value = items
@@ -154,7 +154,7 @@ fn execute_edit_line_based_with_input(
                     crate::cli::config::config_key_has_override(meta.key, cas_root)?;
                 if current_value != meta.default || has_override {
                     config.set(meta.key, meta.default)?;
-                    pending_resets.push(meta.key.to_owned());
+                    pending_resets.insert(meta.key.to_owned());
                     changes_made += 1;
                     fmt.success(&format!("   Reset to: {}", meta.default))?;
                 } else {
@@ -197,10 +197,7 @@ fn execute_edit_line_based_with_input(
             &config,
             crate::config::operator_policy::InvocationContext::from_process,
         )?;
-        config.save(cas_root)?;
-        for key in pending_resets {
-            crate::cli::config::reset_config_value(&key, cas_root)?;
-        }
+        crate::cli::config::save_editor_changes(&original, &config, &pending_resets, cas_root)?;
         fmt.success(&format!("Saved {changes_made} change(s)"))?;
     } else {
         fmt.write_muted("No changes made")?;

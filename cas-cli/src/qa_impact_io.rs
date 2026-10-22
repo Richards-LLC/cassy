@@ -238,7 +238,7 @@ pub(super) fn analyze(
                 spec: journey.spec.clone(),
                 known_failure: None,
                 matches: vec![],
-                evidence_required: evidence_required(journey),
+                evidence_required: evidence_required(journey, None),
             });
         }
         sort_journeys(&mut report.journeys);

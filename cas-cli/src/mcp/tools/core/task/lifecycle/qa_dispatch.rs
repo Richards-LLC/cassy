@@ -386,9 +386,6 @@ impl CasCore {
     ) -> Option<crate::qa_pass::preflight::PreflightReport> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
-        if !crate::qa_pass::preflight::is_configured(&qa) {
-            return None;
-        }
         let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
             .unwrap_or_else(|_| {
                 self.cas_root

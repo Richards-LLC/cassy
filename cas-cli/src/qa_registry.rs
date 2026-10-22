@@ -37,9 +37,73 @@ pub struct Registry {
     pub manual_checks: BTreeMap<String, ManualCheck>,
     pub fixtures: Option<BTreeMap<String, Fixture>>,
     pub bug_families: BTreeMap<String, BugFamily>,
+    /// GH #1346: project QA safety policy every journey inherits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<Safety>,
     pub journeys: Vec<Journey>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// QA modes a project may declare; an unknown mode is treated as fixture-only.
+pub const SAFETY_MODES: [&str; 3] = ["fixture-only", "staging", "production-read-back"];
+const SAFETY_FIELDS: [&str; 3] = ["mode", "forbidden_hosts", "protected_credentials"];
+
+/// GH #1346: where QA may run and what it must never reach.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Safety {
+    pub mode: String,
+    /// Hosts QA must never contact (`api.example.com`, `*.example.com` or a URL).
+    pub forbidden_hosts: Vec<String>,
+    /// Environment variables carrying credentials QA must never be able to use.
+    pub protected_credentials: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Safety {
+    /// Fail safe: only an exact staging or read-back mode permits real systems.
+    pub fn fixture_only(&self) -> bool {
+        !matches!(self.mode.as_str(), "staging" | "production-read-back")
+    }
+
+    /// Whether `host` is, or is a subdomain of, a forbidden host.
+    pub fn forbids_host(&self, host: &str) -> Option<&str> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.forbidden_hosts.iter().map(String::as_str).find(|raw| {
+            let entry = url::Url::parse(raw)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| raw.trim().to_owned())
+                .to_ascii_lowercase();
+            let entry = entry.trim_start_matches("*.").trim_end_matches('.');
+            !entry.is_empty() && (host == entry || host.ends_with(&format!(".{entry}")))
+        })
+    }
+
+    /// One line for task notes and QA briefs.
+    pub fn brief(&self) -> String {
+        let mut out = if self.fixture_only() {
+            "QA safety: fixture-only. Walk against stubs; prove zero non-loopback requests."
+                .to_owned()
+        } else {
+            format!("QA safety: {}.", self.mode)
+        };
+        if !self.forbidden_hosts.is_empty() {
+            out.push_str(&format!(
+                " Never contact: {}.",
+                self.forbidden_hosts.join(", ")
+            ));
+        }
+        if !self.protected_credentials.is_empty() {
+            out.push_str(&format!(
+                " Never read, use or rotate: {}.",
+                self.protected_credentials.join(", ")
+            ));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -771,6 +835,20 @@ impl Registry {
                 }
                 report.misspelled_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
             }
+        }
+        if let Some(safety) = &self.safety {
+            if !SAFETY_MODES.contains(&safety.mode.as_str()) {
+                report.problem(
+                    "safety",
+                    "safety.mode",
+                    format!(
+                        "mode {:?} must be one of {}",
+                        safety.mode,
+                        SAFETY_MODES.join(", ")
+                    ),
+                );
+            }
+            report.misspelled_fields("safety", &safety.extra, &SAFETY_FIELDS);
         }
         report.globs(
             "ignore",

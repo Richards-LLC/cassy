@@ -163,7 +163,14 @@ pub(crate) fn render(report: &Impact, markdown: bool) -> String {
             clean(warning)
         ));
     }
-    if !report.warnings.is_empty() {
+    if let Some(safety) = &report.safety {
+        out.push_str(&format!(
+            "{}{}\n",
+            if markdown { "> " } else { "" },
+            clean(&safety.brief())
+        ));
+    }
+    if !report.warnings.is_empty() || report.safety.is_some() {
         out.push('\n');
     }
     out.push_str(&format!(

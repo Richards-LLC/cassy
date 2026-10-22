@@ -21,6 +21,13 @@ pub(crate) fn render(impact: &Value) -> String {
             out.push_str(&format!("> WARNING: {}\n", cell(text(warning))));
         }
     }
+    if let Some(safety) = impact
+        .get("safety")
+        .filter(|value| value.is_object())
+        .and_then(|value| serde_json::from_value::<crate::qa_registry::Safety>(value.clone()).ok())
+    {
+        out.push_str(&format!("> {}\n", cell(&safety.brief())));
+    }
     out.push_str("\n| Journey | Status | Share | Invariants and evidence required |\n| --- | --- | --- | --- |\n");
     if let Some(journeys) = impact["journeys"].as_array() {
         for journey in journeys {

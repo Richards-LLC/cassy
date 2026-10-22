@@ -32,6 +32,8 @@ struct DebtSummary {
     history_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     history_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_notice: Option<&'static str>,
 }
 
 impl DebtSummary {
@@ -49,6 +51,7 @@ impl DebtSummary {
             grew: None,
             history_status: "unavailable",
             history_error: None,
+            history_notice: None,
         };
         for debt in &report.debt {
             *summary.by_kind.entry(debt.code.clone()).or_default() += 1;
@@ -82,7 +85,7 @@ impl DebtSummary {
                 row.get(0)
             })
             .optional()?;
-        let previous_total = previous
+        let prior = previous
             .map(|raw| -> Result<usize> {
                 let receipt: serde_json::Value = serde_json::from_str(&raw)?;
                 anyhow::ensure!(
@@ -94,7 +97,13 @@ impl DebtSummary {
                     .context("journey check receipt has no debt total")?;
                 Ok(usize::try_from(total)?)
             })
-            .transpose()?;
+            .transpose();
+        // A damaged receipt is not debt growth. Replace only this registry's
+        // baseline, while genuine database/transaction failures still surface.
+        let (previous_total, reset_history) = match prior {
+            Ok(previous) => (previous, false),
+            Err(_) => (None, true),
+        };
         let delta = previous_total
             .map(|previous| -> Result<i64> {
                 Ok(i64::try_from(self.total)? - i64::try_from(previous)?)
@@ -115,6 +124,8 @@ impl DebtSummary {
         self.previous_total = previous_total;
         self.delta = delta;
         self.grew = delta.map(|change| change > 0);
+        self.history_notice = reset_history
+            .then_some("invalid prior record replaced; new baseline recorded.");
         Ok(())
     }
 }
@@ -313,7 +324,10 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     }
                     _ => println!("Debt history unavailable; current check was not recorded."),
                 }
-                if !report.debt.is_empty() || debt_summary.history_error.is_some() {
+                if let Some(notice) = debt_summary.history_notice {
+                    println!("History reset: {notice}");
+                }
+                if !cli.verbose && (!report.debt.is_empty() || debt_summary.history_error.is_some()) {
                     println!("Details: cas qa journeys --check --verbose");
                 }
                 println!("Registry: {registry_path}");

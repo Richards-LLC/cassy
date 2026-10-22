@@ -274,6 +274,26 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     assert_eq!(unchanged["debt_summary"]["delta"], 0);
     assert_eq!(unchanged["debt_summary"]["grew"], false);
 
+    // A corrupt receipt must restart history, not poison every future check.
+    let connection = rusqlite::Connection::open(root.join(".cas/cas.db")).unwrap();
+    let key: String = connection.query_row(
+        "SELECT key FROM metadata WHERE key LIKE 'qa_journeys_check:%'", [], |row| row.get(0),
+    ).unwrap();
+    connection.execute("UPDATE metadata SET value = '{' WHERE key = ?1", [&key]).unwrap();
+    let recovered = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "journeys", "--check", "--verbose"])
+        .assert().success().get_output().stdout.clone();
+    let recovered = String::from_utf8(recovered).unwrap();
+    assert!(recovered.contains("first recorded check")
+        && recovered.contains("History reset:")
+        && !recovered.contains("Details: cas qa journeys --check --verbose"), "{recovered}");
+    assert!(recovered.lines().all(|line| line.chars().count() <= 80), "{recovered}");
+    let after_recovery = json();
+    assert_eq!(after_recovery["debt_summary"]["history_status"], "recorded");
+    assert_eq!(after_recovery["debt_summary"]["previous_total"], 2);
+    assert_eq!(after_recovery["debt_summary"]["delta"], 0);
+
     let alternate = root.join("docs/qa/alternate.yaml");
     std::fs::write(&alternate, seeded).unwrap();
     cas_cmd(root)

@@ -7015,6 +7015,27 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        // cas-fd4c: a successor stacked on an open predecessor epic must not
+        // silently fall behind it until the predecessor lands.
+        if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+            use crate::mcp::tools::core::task::lifecycle::epic_lane;
+            let blockers: Vec<String> = task_store
+                .get_blockers(epic_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
+            if let Some((predecessor, predecessor_branch)) =
+                epic_lane::open_predecessor_epic(task_store.as_ref(), &blockers)
+            {
+                report.push_str(&epic_lane::stale_base_note(
+                    &close_project_root,
+                    branch,
+                    &predecessor,
+                    &predecessor_branch,
+                ));
+            }
+        }
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {
             report.push_str("\nStaged integration batch receipts:\n");

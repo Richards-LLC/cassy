@@ -184,6 +184,79 @@ fn on_branch(repo: &Path, commit: &str, branch: &str) -> bool {
     })
 }
 
+fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// cas-fd4c: a successor epic stacked on an open predecessor epic goes stale
+/// when the predecessor advances. Name the predecessor commit this epic's
+/// `branch` lacks, and whether merging it in is clean or would conflict.
+/// Read-only: nothing is merged here, and a conflict is refused with the
+/// files it would touch. Empty when the successor already has every commit.
+pub(crate) fn stale_base_note(
+    repo: &Path,
+    branch: &str,
+    predecessor_id: &str,
+    predecessor_branch: &str,
+) -> String {
+    let resolve = |name: &str| git_stdout(repo, &["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")]);
+    let Some(successor) = resolve(branch).or_else(|| resolve(&format!("origin/{branch}"))) else {
+        return String::new();
+    };
+    // The predecessor as this clone last saw it, locally or on origin.
+    let Some((source, tip)) = [predecessor_branch.to_string(), format!("origin/{predecessor_branch}")]
+        .into_iter()
+        .filter_map(|name| resolve(&name).map(|tip| (name, tip)))
+        .find(|(_, tip)| !git_ok(repo, &["merge-base", "--is-ancestor", tip, &successor]))
+    else {
+        return String::new();
+    };
+    let short = &tip[..tip.len().min(12)];
+    let lacking = git_stdout(repo, &["rev-list", "--count", &format!("{successor}..{tip}")])
+        .unwrap_or_else(|| "some".to_string());
+    let probe = std::process::Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["merge-tree", "--write-tree", "--name-only", "--no-messages", &successor, &tip])
+        .current_dir(repo)
+        .output();
+    match probe {
+        Ok(output) if output.status.code() == Some(0) => format!(
+            "\n⚠️ STALE BASE (cas-fd4c): stacked on open epic {predecessor_id} ({predecessor_branch}), \
+             which has advanced to {short}; {branch} lacks {lacking} of its commit(s). It merges \
+             cleanly: run `git merge --no-ff {source}` on {branch} and push, so work here builds \
+             on it.\n"
+        ),
+        Ok(output) if output.status.code() == Some(1) => {
+            let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            format!(
+                "\n⛔ STALE BASE, MERGE REFUSED (cas-fd4c): stacked on open epic {predecessor_id} \
+                 ({predecessor_branch}) @ {short}, which {branch} lacks ({lacking} commit(s)). \
+                 Merging it would conflict in: {}. Nothing was merged. Resolve that merge by hand \
+                 on {branch}, or land {predecessor_id} first.\n",
+                files.join(", ")
+            )
+        }
+        _ => format!(
+            "\n⚠️ STALE BASE (cas-fd4c): stacked on open epic {predecessor_id} ({predecessor_branch}), \
+             which has advanced to {short}; {branch} lacks {lacking} of its commit(s). Cassy could \
+             not check whether merging it is clean.\n"
+        ),
+    }
+}
+
 /// cas-1630: a follow-up created in `epic` that cites a commit its branch
 /// lacks cannot start until that code reaches the branch. Name each such
 /// commit, and the open epic that has it, so the base is fixed at create.

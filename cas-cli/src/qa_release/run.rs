@@ -14,7 +14,7 @@ use super::resources::{self, Meter, MeteredError, PlannedRow as PlannedUse, Reso
 use super::verdict::{Gate, GateVerdict, NotExercisedCause, RowVerdict};
 use super::{
     CallError, ReleaseConfig, Request, ServedComponent, ServedRefusal, Verb, configured,
-    preflight_served, printable,
+    preflight_served, printable, short,
 };
 use crate::qa_registry::{FixtureSource, Journey, Registry};
 use anyhow::{Context, Result, bail, ensure};
@@ -108,6 +108,9 @@ pub struct Run {
     pub generation: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abort_reason: Option<String>,
+    /// Sealed at `freeze_until` with rows still unwalked, not by its last row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ttl_sealed: bool,
     /// Best-effort publication and cleanup outcomes; never a verdict.
     #[serde(default)]
     pub notes: Vec<String>,
@@ -198,11 +201,6 @@ fn lock_file(path: PathBuf) -> Result<File> {
 /// Serializes writers of one run across processes (driver, `record`, `abort`).
 fn lock(cas_root: &Path, sha: &str) -> Result<File> {
     lock_file(run_path(cas_root, sha)?.with_extension("lock"))
-}
-
-/// The first 12 characters, or all of a shorter string; never panics.
-pub fn short(sha: &str) -> &str {
-    sha.get(..12).unwrap_or(sha)
 }
 
 /// Reads the run for `sha`. A run whose recorded SHA is not the 40-hex SHA
@@ -313,6 +311,14 @@ fn config(cas_root: &Path) -> Result<ReleaseConfig> {
 
 /// The run's hand-walk debt: manual minutes per journey with each journey's
 /// automation owner (an unreadable registry leaves every owner unknown).
+/// What `--json` prints: the run's fields at top level plus `hand_walk`,
+/// the debt summary the text status shows.
+pub fn status_json(cas_root: &Path, run: &Run) -> Result<Value> {
+    let mut value = serde_json::to_value(run)?;
+    value["hand_walk"] = serde_json::to_value(hand_walk(cas_root, run))?;
+    Ok(value)
+}
+
 pub fn hand_walk(cas_root: &Path, run: &Run) -> pack::HandWalk {
     let registry = registry(cas_root).ok().map(|(registry, _)| registry);
     pack::HandWalk::measure(&run.rows, registry.as_ref())
@@ -534,6 +540,7 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
         gate: None,
         generation: 0,
         abort_reason: None,
+        ttl_sealed: false,
         notes: Vec::new(),
     };
     run.note(format!("START {} rows; freeze until {}", run.plan.len(), run.freeze_until.to_rfc3339()));
@@ -588,6 +595,23 @@ pub struct Record {
     pub covers_commits: Vec<String>,
 }
 
+/// The run `record` targets. Without `--sha` it is the live run; when the
+/// TTL has just sealed that run, say so, because a retry with its SHA reseals.
+fn record_target(cas_root: &Path, sha: Option<&str>) -> Result<String> {
+    if sha.is_some() || active(cas_root)?.is_some() {
+        return Ok(resolve(cas_root, sha)?.sha);
+    }
+    let latest = scan(cas_root).0.into_iter().max_by_key(|run| run.updated_at);
+    match latest {
+        Some(run) if run.state == State::Sealed && run.ttl_sealed => bail!(
+            "the run for {} was sealed by the TTL; retry the record with --sha {} to reseal",
+            short(&run.sha),
+            run.sha
+        ),
+        _ => Ok(resolve(cas_root, None)?.sha),
+    }
+}
+
 /// Records a manual row. On a live run it fills a planned manual row (or adds
 /// a row that covers a PR). On a sealed OWED run it replaces an owed row
 /// (BLOCKED_EXTERNAL, NOT_EXERCISED, SERVED_DRIFT…) and reseals as a new pack
@@ -596,7 +620,7 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
     let config = config(cas_root)?;
     let root = project_root(cas_root)?;
     let (registry, _) = registry(cas_root)?;
-    let sha = resolve(cas_root, sha)?.sha;
+    let sha = record_target(cas_root, sha)?;
     let journey = {
         let run = load(cas_root, &sha)?.context("no release-gate run")?;
         let id = run.plan.iter().find(|p| p.id == input.row).map_or(input.row.as_str(), |p| p.journey.as_str());
@@ -936,6 +960,7 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     if run.state.live() && (expired || (automated_done && run.pending().next().is_none())) {
         update(cas_root, &sha, |run| {
             let timed_out: Vec<PlannedRow> = run.pending().cloned().collect();
+            run.ttl_sealed = !timed_out.is_empty();
             for p in timed_out {
                 run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not walked before the freeze ended")));
             }

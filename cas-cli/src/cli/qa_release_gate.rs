@@ -130,7 +130,7 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
         }
     };
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&run)?);
+        println!("{}", serde_json::to_string_pretty(&run::status_json(root, &run)?)?);
     } else {
         print!("{}", render(&run, &run::hand_walk(root, &run)));
     }
@@ -140,7 +140,7 @@ pub fn execute(args: &ReleaseGateArgs, cli: &super::Cli, cas_root: Option<&Path>
 /// The human status: state and freeze first, then counts, then what is owed.
 fn render(run: &Run, hand_walk: &crate::qa_release::pack::HandWalk) -> String {
     let state = serde_json::to_value(run.state).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-    let mut out = format!("Release gate {} on {}: {state}\n", run::short(&run.sha), run.env);
+    let mut out = format!("Release gate {} on {}: {state}\n", crate::qa_release::short(&run.sha), run.env);
     if let Some(gate) = &run.gate {
         let word = serde_json::to_value(gate.verdict).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
         out.push_str(&format!("Gate: {word} (pack generation {})\n", run.generation));

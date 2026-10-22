@@ -721,7 +721,8 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 ### Status, record and abort
 
 - `cas qa release-gate status [--sha <sha>]` shows the state, the freeze,
-  rows by verdict, owed rows and manual minutes. `--json` prints the run.
+  rows by verdict, owed rows and the hand-walk debt. `--json` prints the run's
+  fields at top level plus a `hand_walk` key with the same debt summary.
   An unreadable run file is warned about on stderr. It freezes nothing,
   because row-end `SERVED_DRIFT` still guards the verdicts.
 - `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
@@ -740,7 +741,9 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 **Sealing.** The pack is sealed when the last row gets its verdict. At
 the freeze TTL, merges are allowed again, so no suite starts or runs past it:
 every row still without a verdict, automated or manual, becomes
-`NOT_EXERCISED{timed_out}` and the pack is sealed. After the seal, Cassy does three things:
+`NOT_EXERCISED{timed_out}` and the pack is sealed. A `record` without
+`--sha` then refuses with "the run … was sealed by the TTL; retry the record
+with --sha <sha> to reseal". After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

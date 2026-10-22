@@ -2398,6 +2398,264 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
 }
 
 #[tokio::test]
+async fn cas_749f_repark_rebased_delivery_binds_close_message_and_merge() {
+    let mut env = test_env();
+    let fixture_cwd = std::env::current_dir().unwrap();
+    for corrected_after_rebase in [false, true] {
+        let repo = GitRepo::new();
+        std::fs::create_dir(repo.root.join("scripts")).unwrap();
+        std::fs::write(
+            repo.root.join("scripts/fast-rows-pre-push.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        run_git(&["add", "scripts"], &repo.root);
+        run_git(&["commit", "-m", "fixture fast rows contract"], &repo.root);
+        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(
+            &["init", "--bare", remote.path().to_str().unwrap()],
+            &repo.root,
+        );
+        let origin = "https://github.com/org/repark.git";
+        run_git(&["remote", "add", "origin", origin], &repo.root);
+        run_git(
+            &[
+                "config",
+                &format!("url.{}.insteadOf", remote.path().display()),
+                origin,
+            ],
+            &repo.root,
+        );
+        run_git(&["branch", "epic/repark"], &repo.root);
+        run_git(&["push", "origin", "main", "epic/repark"], &repo.root);
+        let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+        disable_system_a(&cas_root);
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[verification]\nenabled = false\n[project]\ncanonical_id = \"repark\"\n",
+        )
+        .unwrap();
+        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+        for (id, name, role) in [
+            ("repark-worker", "alice", AgentRole::Worker),
+            ("repark-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            register_delivery_agent(&cas_root, id, name, role, "repark-session");
+        }
+        let task_id = "cas-749f-repark";
+        let branch = format!("factory/alice-{task_id}");
+        let worker = cas_root.join("worktrees/alice");
+        repo.add_worktree(&worker, &branch);
+        let mut task = Task::new(task_id.into(), "Rebased delivery".into());
+        task.status = TaskStatus::InProgress;
+        task.depth = TaskDepth::Light;
+        task.assignee = Some("alice".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:repark".into(),
+            target_branch: "epic/repark".into(),
+        });
+        let tasks = open_task_store(&cas_root).unwrap();
+        tasks.add(&task).unwrap();
+        std::fs::write(worker.join("delivery.txt"), "task delivery\n").unwrap();
+        run_git(&["add", "delivery.txt"], &worker);
+        run_git(&["commit", "-m", "fix: task delivery"], &worker);
+        let old_anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        run_git(&["push", "origin", &branch], &worker);
+        let fast_rows = repo.root.join(".git/cas/fast-rows");
+        std::fs::create_dir_all(&fast_rows).unwrap();
+        let receipt_at = |head: &str| {
+            std::fs::write(
+                fast_rows.join(format!("{head}.pass")),
+                format!("fast-rows: PASS {head} fixture\n"),
+            )
+            .unwrap();
+        };
+        receipt_at(&old_anchor);
+        env.set_current_dir(&worker);
+        let service = delivery_service(&cas_root, "repark-worker");
+        let close_request = || {
+            task_req(serde_json::json!({
+                "action": "close", "id": task_id, "reason": "validated delivery ready",
+            }))
+        };
+        let first = service.task(Parameters(close_request())).await.unwrap();
+        assert!(
+            get_text(&first).contains("MERGE REQUIRED"),
+            "{}",
+            get_text(&first)
+        );
+        assert_eq!(
+            tasks
+                .get(task_id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor
+                .as_deref(),
+            Some(old_anchor.as_str())
+        );
+
+        // Retain a historical ref: a valid old anchor is still a Git object,
+        // but its reachability elsewhere must not freeze this task's branch.
+        run_git(&["branch", "audit/pre-rebase", &old_anchor], &repo.root);
+        run_git(&["checkout", "epic/repark"], &repo.root);
+        std::fs::write(repo.root.join("target.txt"), "independent target change\n").unwrap();
+        run_git(&["add", "target.txt"], &repo.root);
+        run_git(&["commit", "-m", "advance target"], &repo.root);
+        run_git(&["push", "origin", "epic/repark"], &repo.root);
+        run_git(&["rebase", "epic/repark"], &worker);
+        if corrected_after_rebase {
+            std::fs::write(worker.join("delivery.txt"), "corrected task delivery\n").unwrap();
+            run_git(
+                &["commit", "-am", "fix: correct delivery after rebase"],
+                &worker,
+            );
+        }
+        let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+        assert_ne!(tip, old_anchor);
+        run_git(&["push", "--force-with-lease", "origin", &branch], &worker);
+        let stale_receipt = service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close", "id": task_id, "commit_receipt": old_anchor,
+                "reason": "a retired receipt must not authorize a park",
+            }))))
+            .await
+            .unwrap();
+        let refused = get_text(&stale_receipt);
+        assert!(
+            !refused.contains("MERGE REQUIRED")
+                && refused.contains(&tip)
+                && refused.contains("action=close"),
+            "an absent receipt must refuse at close with the current-tip recovery: {refused}"
+        );
+        assert_eq!(
+            tasks
+                .get(task_id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor
+                .as_deref(),
+            Some(old_anchor.as_str())
+        );
+        // An identical rebase preserves a handed-off delivery. Corrections
+        // still require exclusive ownership, even without a sibling lease.
+        let mut sibling = Task::new("cas-749f-next".into(), "Later task".into());
+        sibling.status = TaskStatus::InProgress;
+        sibling.assignee = Some("alice".into());
+        tasks.add(&sibling).unwrap();
+        if corrected_after_rebase {
+            let held = service.task(Parameters(close_request())).await.unwrap();
+            let held = get_text(&held);
+            assert!(
+                held.contains("PARK REFUSED")
+                    && held.contains(&tip)
+                    && held.contains("action=close"),
+                "{held}"
+            );
+            assert_eq!(
+                tasks
+                    .get(task_id)
+                    .unwrap()
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref(),
+                Some(old_anchor.as_str())
+            );
+            sibling.status = TaskStatus::Closed;
+            tasks.update(&sibling).unwrap();
+        }
+        // The old anchor's receipt cannot authorize the rewritten tip.
+        let missing = service.task(Parameters(close_request())).await.unwrap();
+        assert!(
+            get_text(&missing).contains("FAST ROWS REQUIRED"),
+            "{}",
+            get_text(&missing)
+        );
+        assert_eq!(
+            tasks
+                .get(task_id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor
+                .as_deref(),
+            Some(old_anchor.as_str())
+        );
+        receipt_at(&tip);
+        let retry = service.task(Parameters(close_request())).await.unwrap();
+        assert!(
+            get_text(&retry).contains("MERGE REQUIRED"),
+            "{}",
+            get_text(&retry)
+        );
+        let parked = tasks.get(task_id).unwrap();
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(tip.as_str()),
+            "one close must bind the rebased pushed tip (corrected={corrected_after_rebase}): {}",
+            get_text(&retry)
+        );
+        assert!(
+            parked
+                .notes
+                .contains(&format!("advanced from `{old_anchor}` to `{tip}`"))
+        );
+        if corrected_after_rebase {
+            assert!(
+                parked
+                    .notes
+                    .contains("before attributable same-task corrections")
+            );
+        }
+
+        let mut message = coord_req("message");
+        message.target = Some("supervisor".into());
+        message.task_id = Some(task_id.into());
+        message.merge_request = Some(true);
+        message.summary = Some("Merge requested".into());
+        message.message = Some("status: ready\nproof: fixture delivery".into());
+        let sent = service.coordination(Parameters(message)).await.unwrap();
+        assert!(!sent.is_error.unwrap_or(false), "{}", get_text(&sent));
+        let rows = cas::store::open_prompt_queue_store(&cas_root)
+            .unwrap()
+            .poll_all(100)
+            .unwrap();
+        assert!(rows.iter().any(|row| {
+            // pin: the transport's JSON branch_tip is the immutable merge boundary.
+            row.prompt.contains(&format!("\"branch_tip\":\"{tip}\""))
+        }));
+        assert_eq!(
+            tasks
+                .get(task_id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor,
+            parked.deliverables.factory_branch_anchor
+        );
+
+        env.set_current_dir(&repo.root);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(branch);
+        merge.task_id = Some(task_id.into());
+        merge.cleanup = Some(false);
+        let result = delivery_service(&cas_root, "repark-supervisor")
+            .coordination(Parameters(merge))
+            .await
+            .expect("the re-parked branch must merge without another close");
+        assert!(
+            get_text(&result).contains("Merged worktree"),
+            "{}",
+            get_text(&result)
+        );
+        assert_eq!(
+            git_stdout(&repo.root, &["show", "epic/repark:delivery.txt"]),
+            std::fs::read_to_string(worker.join("delivery.txt"))
+                .unwrap()
+                .trim()
+        );
+        env.set_current_dir(&fixture_cwd);
+    }
+}
+
+#[tokio::test]
 async fn cas_8045_retries_failed_observation_and_dispatches_verification() {
     let mut env = test_env();
     let repo = GitRepo::new();

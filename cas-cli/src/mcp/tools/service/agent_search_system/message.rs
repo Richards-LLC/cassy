@@ -2324,6 +2324,21 @@ impl CasService {
                             )));
                         }
                         MergeRequestDecision::Pending { target_tip } => {
+                            // cas-749f: composing an envelope does not advance
+                            // the durable park or prove the new tip's checks.
+                            // The merge gate reads the persisted anchor, so
+                            // require close to reconcile it before queueing.
+                            if task.status == cas_types::TaskStatus::AwaitingMerge
+                                && let Some(anchor) = recorded_anchor.as_deref()
+                                && anchor != branch_tip
+                            {
+                                return Ok(Self::success(format!(
+                                    "MERGE REQUEST REQUIRES RE-PARK: {} is parked at {anchor}, but its pushed source is {branch_tip}. No merge request was queued and no anchor was advanced. Re-run `{}task action=close id={}` at {branch_tip} with checks for that tip, then send the merge request again.",
+                                    task.id,
+                                    crate::mcp::tools::core::guidance::caller_prefix(),
+                                    task.id,
+                                )));
+                            }
                             let anchor_tip = recorded_anchor
                                 .as_deref()
                                 .filter(|anchor| *anchor != branch_tip)
@@ -6070,10 +6085,10 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     /// A parked per-task branch can be rebased and force-pushed after the
-    /// merge request anchor was recorded. The envelope and its human summary
-    /// must describe the published branch head, not that retired anchor.
+    /// merge request anchor was recorded. A message cannot stand in for the
+    /// exact-tip checks at close or advertise an anchor the store never wrote.
     #[tokio::test(flavor = "current_thread")]
-    async fn merge_request_rebase_force_push_uses_live_origin_tip_for_envelope_and_summary_cas4a65() {
+    async fn merge_request_rebase_force_push_requires_repark_before_envelope_cas749f() {
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host repo schema");
         let origin = tempfile::tempdir().expect("bare origin");
@@ -6113,8 +6128,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .expect("updated target file");
         git(repo, &["add", "main-only.txt"]);
         git(repo, &["commit", "-qm", "advance target before rebase"]);
-        let target_tip = crate::git_evidence::resolve_branch_sha(repo, "HEAD")
-            .expect("updated target SHA");
         git(repo, &["push", "-q", "origin", "main"]);
         git(repo, &["checkout", "-q", branch]);
         git(repo, &["rebase", "--onto", "main", &base]);
@@ -6156,29 +6169,17 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.expect("merge request"));
-        assert_queued_receipt(&response);
+        assert!(response.contains("RE-PARK") && response.contains(&live_tip)
+            && response.contains("task action=close id=cas-4a65"), "{response}");
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(old_anchor.as_str()));
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)
             .expect("queued messages");
-        let (row, envelope) = rows
-            .iter()
-            .find_map(|row| {
-                let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)?;
-                (envelope.task_id == task.id).then_some((row, envelope))
-            })
-            .expect("typed request carries the merge envelope");
-
-        assert_eq!(row.target, "supervisor");
-        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
-        assert_eq!(envelope.branch_tip, live_tip);
-        assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
-        assert_eq!(envelope.target_branch_tip, target_tip);
-        let summary_heads = format!("{target_tip}\n  -> {live_tip}");
-        // pin: verify the generated diff summary is bound to the live source SHA.
-        assert!(row.prompt.contains(&summary_heads), "{}", row.prompt);
-        // pin: verify the rebased task's changed file appears in the summary.
-        assert!(row.prompt.contains("A\tdelivery.txt"), "{}", row.prompt);
+        assert!(!rows.iter().any(|row| {
+            crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                .is_some_and(|envelope| envelope.task_id == task.id)
+        }), "a mergeable envelope cannot be queued ahead of its persisted park");
     }
 
     #[tokio::test(flavor = "current_thread")]

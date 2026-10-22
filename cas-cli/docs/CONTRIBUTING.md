@@ -2628,6 +2628,12 @@ is not parked for merge. A valid integrated `commit_receipt` proves delivery
 even after a suffixed promotion branch was deleted and the canonical task
 branch never existed. If that receipt is invalid, close reports its validation
 reason before parking; `merged_into` does not override the declared work target.
+After rebasing a parked delivery, push the rewritten tip and re-run close with
+checks for that exact tip before requesting its merge. Close preserves the full
+parked patch set, allows attributable corrections while the worker exclusively
+owns the delivery, and audits the replacement anchor. An explicit receipt or
+stored anchor absent from the pushed source refuses at close with recovery
+guidance. Sending a merge request cannot advance the persisted park anchor.
 A transferred delivery also resolves its recorded parked or handoff branch
 when the receiving worker's lane belongs to another task, including a branch
 available only on origin. Already integrated work needs no branch adoption or

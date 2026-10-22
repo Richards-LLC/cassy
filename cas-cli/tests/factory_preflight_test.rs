@@ -148,8 +148,20 @@ fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
         .stdout
         .clone();
     let report = String::from_utf8(report).unwrap();
-    assert!(report.starts_with("Factory GC Report\n"), "{report}");
-    assert!(report.contains("TARGET_CACHE_STATUS_JSON="), "{report}");
+    assert!(report.starts_with("[INFO] GC review:"), "{report}");
+    assert!(report.is_ascii() && report.lines().all(|line| line.len() <= 79), "{report}");
+    assert!(!report.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report}");
+    let json = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert!(json["report_text"].as_str().unwrap().starts_with("[INFO] GC review:"));
+    assert!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
+    let full = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report", "--full"])
+        .assert().success().get_output().stdout.clone();
+    let full = String::from_utf8(full).unwrap();
+    assert!(full.starts_with("Factory GC Report\n") && full.contains("TARGET_CACHE_STATUS_JSON="), "{full}");
 
     let cleanup = gc_command_at(project.path(), &home)
         .args(["factory", "gc", "cleanup", "--force", "--no-dry-run"])

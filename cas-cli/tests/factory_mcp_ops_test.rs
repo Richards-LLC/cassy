@@ -473,6 +473,8 @@ fn integration_test_process_path_mutation_is_isolated() {
 
 fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
+        json: None,
+        full: None,
         action: action.to_string(),
         id: None,
         name: None,
@@ -527,6 +529,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         detail: None,
         peer: None,
         json: None,
+        full: None,
         scope: None,
         action: action.to_string(),
         id: None,
@@ -6018,20 +6021,7 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     );
     assert!(summary.contains("Stale agents: 240"), "{summary}");
     assert!(summary.contains("Stale agents: 240 items"), "{summary}");
-    let stale_category = summary
-        .lines()
-        .find(|line| line.starts_with("- Stale agents: 240 items, "))
-        .expect("stale-agent category count and byte summary");
-    let stale_bytes: usize = stale_category
-        .split(" items, ")
-        .nth(1)
-        .unwrap()
-        .split(" bytes")
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(stale_bytes > 100_000, "{stale_category}");
+    assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79), "{summary}");
     assert!(summary.contains("first up to 3 items per category"), "{summary}");
     assert!(
         summary.contains("stale-report-000-"),
@@ -6049,9 +6039,11 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink("/deleted/cassy-worktree/node_modules/backend", &link).unwrap();
 
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
     let report = env
         .service
-        .factory_request(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(request))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -6070,9 +6062,11 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
 async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
     let env = FactoryTestEnv::new();
 
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
     let report = env
         .service
-        .factory_request(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(request))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -6403,11 +6397,12 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         .await
         .unwrap();
     let report_text = get_text(&report);
-    assert!(
-        report_text.contains("TARGET_CACHE_STATUS_JSON="),
-        "{report_text}"
-    );
-    let machine = status(&report_text);
+    assert!(!report_text.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report_text}");
+    let mut full_request = factory_req("gc_report");
+    full_request.full = Some(true);
+    let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
+    let full_text = get_text(&full);
+    let machine = status(&full_text);
     assert_eq!(machine["schema_version"], 1);
     assert_eq!(machine["dry_run"], true);
     assert_eq!(machine["candidate_bytes"], 64);
@@ -6425,14 +6420,14 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         .find(|line| line.starts_with("- Cargo target cache pressure: "))
         .expect("target-cache category summary");
     assert!(
-        cache_category.starts_with("- Cargo target cache pressure: 1 items, "),
+        cache_category == "- Cargo target cache pressure: 1 items",
         "machine JSON must not count as a cache inventory item: {cache_category}"
     );
     assert!(
-        report_text.contains(&worker.join("target").display().to_string()),
+        full_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"
     );
-    assert!(report_text.contains("bytes=64"), "{report_text}");
+    assert!(full_text.contains("bytes=64"), "{full_text}");
     assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
@@ -7303,6 +7298,7 @@ fn coord_msg(
         detail: None,
         peer: None,
         json: None,
+        full: None,
         scope: None,
         action: action.to_string(),
         id: None,

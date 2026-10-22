@@ -224,6 +224,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         detail: None,
         peer: None,
         json: None,
+        full: None,
         scope: None,
         action: action.to_string(),
         id: None,

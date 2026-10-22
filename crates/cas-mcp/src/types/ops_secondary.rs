@@ -653,6 +653,16 @@ pub struct FactoryRequest {
     )]
     pub action: String,
 
+    /// Return complete GC inventory as one JSON document.
+    #[schemars(description = "gc_report: one JSON document with report_text, full_report and complete machine_status")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub json: Option<bool>,
+
+    /// Return the original unabridged GC report.
+    #[schemars(description = "gc_report: original full report including raw status; incompatible with limit/offset")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
+
     /// Generic id field used by entity-targeted actions. For
     /// `shutdown_workers`, this accepts either the worker's registered id or
     /// exact display name.
@@ -997,10 +1007,15 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub peer: Option<String>,
 
-    /// Machine-readable peer report with untruncated values.
-    #[schemars(description = "peers only: return one JSON document with untruncated values")]
+    /// Machine-readable peer or GC report with untruncated values.
+    #[schemars(description = "peers or gc_report: return one JSON document with untruncated values")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
+
+    /// Original GC report including complete machine-status lines.
+    #[schemars(description = "gc_report: unabridged report; incompatible with limit/offset. With json, returns complete JSON.")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
 
     /// cas-2a5a: `all` lists every supervisor of the caller's own account.
     #[schemars(description = "peers only: `all` lists your account's supervisors in every project")]
@@ -1612,6 +1627,8 @@ impl CoordinationRequest {
     pub fn to_factory_request(&self) -> super::FactoryRequest {
         super::FactoryRequest {
             action: self.action.clone(),
+            json: self.json,
+            full: self.full,
             id: self.id.clone(),
             name: self.name.clone(),
             count: self.count,

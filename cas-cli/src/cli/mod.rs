@@ -196,7 +196,7 @@ fn hub_tracing_root(
 /// Cassy - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
-#[command(about = "Cassy — a multi-agent coding factory with persistent memory and task coordination")]
+#[command(about = "Cassy - a multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
 #[command(before_help = CASSY_WORDMARK)]
 pub struct Cli {
@@ -204,7 +204,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Show full JSON content, service paths, or dry-run service definitions
+    /// Show complete JSON, service paths/definitions, or GC report details
     #[arg(long, global = true)]
     pub full: bool,
 
@@ -218,7 +218,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Interactive project picker — scan ~/projects/, select, launch or attach
+    /// Interactive project picker: scan ~/projects/, select, launch or attach
     Open(OpenArgs),
 
     /// Initialize Cassy in current directory
@@ -269,7 +269,7 @@ pub enum Commands {
 
     /// Set the default supervisor provider without launching (persist only)
     ///
-    /// `cas default codex` — persists `[llm.supervisor] harness = "codex"` to
+    /// `cas default codex` persists `[llm.supervisor] harness = "codex"` to
     /// `~/.cas/config.toml` and exits.  `cas default claude` is symmetric.
     /// `cas default grok` is symmetric. To launch immediately AND persist,
     /// use `cas factory --supervisor-cli <provider> --default`.
@@ -1026,6 +1026,10 @@ mod tests {
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+        // cas-a0f8: authored help stays ASCII when the destination uses the
+        // plain banner. The actual C-locale CLI also exercises that selection.
+        let help = Cli::command().before_help("Cassy").render_long_help().to_string();
+        assert!(help.is_ascii(), "plain global help must be ASCII: {help}");
     }
 
     #[test]

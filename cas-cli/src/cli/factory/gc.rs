@@ -9,12 +9,12 @@ use serde_json::json;
 
 use super::FactoryGcCommands;
 
-pub(super) fn execute(command: &FactoryGcCommands, cas_root: Option<&Path>) -> Result<()> {
+pub(super) fn execute(command: &FactoryGcCommands, cli: &crate::cli::Cli, cas_root: Option<&Path>) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow::anyhow!("factory GC requires a Cassy project"))?;
 
     let request = match command {
-        FactoryGcCommands::Report => json!({ "action": "gc_report" }),
+        FactoryGcCommands::Report => json!({ "action": "gc_report", "json": cli.json, "full": cli.full }),
         FactoryGcCommands::Cleanup {
             force,
             dry_run,

@@ -326,6 +326,8 @@ impl CasCore {
             }
         }
 
+        // Keep an old release excluded through local publication and any
+        // Cloud handoff or rollback decided by that local arbitration.
         drop(peer_claim_fence);
         match result {
             ClaimResult::Success(lease) => {

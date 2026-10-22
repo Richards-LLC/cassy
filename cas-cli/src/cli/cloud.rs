@@ -8297,6 +8297,19 @@ mod team_cmd_tests {
             tf.output(),
             "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · edges 6 pushed, 10 pulled · team + personal\n"
         );
+
+        // cas-45f4: both pull scopes can report the same durable guard.
+        let guard = "Task cas-peer: remote closed skipped; local awaiting_merge";
+        let result = crate::cloud::SyncResult {
+            errors: vec![guard.to_string()],
+            ..Default::default()
+        };
+        let mut combined = SyncSummary::pull(&result, true);
+        combined.merge_team_pull(&result);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+        render_sync_summary(&mut tf.fmt(), &combined, false).unwrap();
+        assert!(tf.output().contains("Pull incomplete · 1 errors"));
+        assert_eq!(tf.output().matches(guard).count(), 1);
     }
 
     /// `cas update` has to name what happened to edges: a bare "healed" count

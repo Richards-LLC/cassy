@@ -272,6 +272,19 @@ fn signed_out_hub_start_requires_explicit_loopback() {
         .unwrap();
     assert!(!start.status.success(), "signed-out start must fail");
     assert!(String::from_utf8_lossy(&start.stderr).contains("--loopback"));
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "restart", "--port", "0"])
+        .output().unwrap();
+    assert!(!restart.status.success(), "signed-out restart must fail");
+    for output in [&start, &restart] {
+        let text = String::from_utf8_lossy(&output.stderr);
+        let remedies: Vec<_> = text.lines().filter(|line|
+            line.starts_with("Retry:") || line.starts_with("Or run ")
+        ).collect();
+        assert!(!remedies.is_empty(), "missing refusal remedy: {text}");
+        assert!(remedies.iter().all(|line| line.chars().count() <= 80),
+            "required refusal remedy exceeds 80 columns: {text}");
+    }
 
     let json_start = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "start", "--port", "0"])

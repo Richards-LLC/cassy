@@ -76,6 +76,14 @@ fn report_modified_builtin_references(
     fmt.newline()
 }
 
+fn builtin_prune_reason(file: &str) -> &'static str {
+    if file == "skills/finish/SKILL.md" {
+        "personal finish takes precedence; removed"
+    } else {
+        "no longer shipped; removed"
+    }
+}
+
 fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()> {
     let mut out = io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
@@ -133,7 +141,7 @@ fn report_builtin_sync(
             fmt.success(&format!("{location}: built-ins up to date"))?;
         }
         for file in &result.pruned_files {
-            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
+            fmt.write_raw(&format!("    - {location}/{file} ({})", builtin_prune_reason(file)))?;
             fmt.newline()?;
         }
 
@@ -3432,7 +3440,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);
@@ -3473,7 +3481,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);
@@ -3508,7 +3516,7 @@ fn sync_user_builtins_with_discovery(
                 fmt.newline()?;
             }
             for file in &r.pruned_files {
-                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.write_raw(&format!("    - {file} ({})", builtin_prune_reason(file)))?;
                 fmt.newline()?;
             }
             drop(fmt);

@@ -722,7 +722,10 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     let customized = "---\nname: finish\ndescription: My wrap-up\n---\nKeep my personal procedure.\n";
     std::fs::create_dir_all(personal.parent().unwrap()).unwrap();
     std::fs::write(&personal, customized).unwrap();
-    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
+    assert!(human.contains("personal finish takes precedence; removed"), "{human}");
+    assert!(!human.contains("skills/finish/SKILL.md (no longer shipped"), "{human}");
     crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
     for builtin in &copies {
         assert_eq!([&personal, builtin].iter().filter(|path| path.is_file()).count(), 1,

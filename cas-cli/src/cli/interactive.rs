@@ -439,8 +439,18 @@ mod tests {
     fn picker_decorations_follow_locale_cas_ba0e() {
         use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
         use crate::ui::components::OutputMode;
-        use crossterm::style::Color;
+        use crossterm::style::{Color, Colored, force_color_output};
         let mut env = crate::test_support::TestEnvGuard::new();
+        // Crossterm memoizes NO_COLOR process-wide. Pin actual styled bytes
+        // independently of the harness environment, restoring even on panic.
+        struct RestoreColor(bool);
+        impl Drop for RestoreColor {
+            fn drop(&mut self) {
+                force_color_output(self.0);
+            }
+        }
+        let _restore = RestoreColor(!Colored::ansi_color_disabled_memoized());
+        force_color_output(true);
         let items = vec![
             PickerItem {
                 label: "Alpha".into(),
@@ -459,31 +469,41 @@ mod tests {
             "../../../docs/design/cli/interactive-picker.utf8.json"
         ))
         .unwrap();
-        for locale in ["C.UTF-8", "C"] {
-            env.set("LC_ALL", locale);
-            for mode in [OutputMode::Styled, OutputMode::Plain] {
-                let mut output = Vec::new();
-                render_picker(&mut output, "Destination", &items, 0, 0, &cols, mode).unwrap();
-                render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
-                render_completed(&mut output, "Destination", None, mode).unwrap();
-                let text = String::from_utf8(output).unwrap();
-                if locale == "C.UTF-8" && mode == OutputMode::Styled {
-                    assert_eq!(text, utf8_snapshot, "styled UTF-8 bytes must not change");
-                } else {
-                    assert!(
-                        text.is_ascii(),
-                        "non-ASCII decorations for {locale}/{mode:?}: {text:?}"
-                    );
-                    for expected in [
-                        "  > ",
-                        "  + ",
-                        "  x ",
-                        "  up/down navigate | enter select | q cancel",
-                    ] {
-                        assert!(
-                            text.contains(expected),
-                            "missing {expected:?} for {locale}/{mode:?}"
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            for locale in ["C.UTF-8", "C"] {
+                env.set("LC_ALL", locale);
+                for mode in [OutputMode::Styled, OutputMode::Plain] {
+                    let mut output = Vec::new();
+                    render_picker(&mut output, "Destination", &items, 0, 0, &cols, mode).unwrap();
+                    render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
+                    render_completed(&mut output, "Destination", None, mode).unwrap();
+                    let text = String::from_utf8(output).unwrap();
+                    if locale == "C.UTF-8" && mode == OutputMode::Styled {
+                        eprintln!(
+                            "CAS_BA0E_STYLED_RENDER={}",
+                            serde_json::to_string(&text).unwrap()
                         );
+                        assert_eq!(text, utf8_snapshot, "styled UTF-8 bytes must not change");
+                    } else {
+                        assert!(
+                            text.is_ascii(),
+                            "non-ASCII decorations for {locale}/{mode:?}: {text:?}"
+                        );
+                        for expected in [
+                            "  > ",
+                            "  + ",
+                            "  x ",
+                            "  up/down navigate | enter select | q cancel",
+                        ] {
+                            assert!(
+                                text.contains(expected),
+                                "missing {expected:?} for {locale}/{mode:?}"
+                            );
+                        }
                     }
                 }
             }

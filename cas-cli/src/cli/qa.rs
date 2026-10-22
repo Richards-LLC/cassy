@@ -345,6 +345,21 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                 if let Some(notice) = debt_summary.history_notice {
                     println!("History reset: {notice}");
                 }
+                for (group, journey) in &report.single_reference_owner_groups {
+                    let group = group.escape_debug().to_string();
+                    let journey = journey.escape_debug().to_string();
+                    let warning = format!("WARN owner group {group}: only journey {journey}");
+                    if warning.len() <= 80 {
+                        println!("{warning}");
+                    } else {
+                        let suffix = " (full: --json)";
+                        let room = 80 - "WARN owner group ".len() - ": only journey ".len() - suffix.len();
+                        let group_room = (room / 2).max(room.saturating_sub(journey.len()));
+                        let group = crate::ui::widgets::truncate(&group, group_room);
+                        let journey = crate::ui::widgets::truncate(&journey, room - group.len());
+                        println!("WARN owner group {group}: only journey {journey}{suffix}");
+                    }
+                }
                 if !cli.verbose && (!report.debt.is_empty() || debt_summary.history_error.is_some()) {
                     println!("Details: cas qa journeys --check --verbose");
                 }

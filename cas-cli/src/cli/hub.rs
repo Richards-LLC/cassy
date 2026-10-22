@@ -25,6 +25,8 @@ use crate::hub::{
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+// Leave the launcher's readiness budget time to observe a peer or child exit.
+const HUB_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
 const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -2038,7 +2040,22 @@ fn serve_foreground_logged(
         // machine-lock owner with no listener to diagnose or stop.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
-        let mut lock = paths.acquire_instance_lock()?;
+        let lock = paths.try_acquire_instance_lock()?;
+        if lock.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_STARTUP_LOCK_BARRIER",
+                "startup-lock-waiter",
+                "release-startup-lock",
+                std::process::id(),
+            )?;
+        }
+        // The launcher hands ownership to this process without an atomic lock
+        // transfer. Let a concurrent stop finish its bounded cleanup rather
+        // than treating a transient owner in that gap as a failed launch.
+        let mut lock = match lock {
+            Some(lock) => lock,
+            None => paths.wait_for_instance_lock(HUB_STARTUP_LOCK_TIMEOUT)?,
+        };
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
             .or_else(|| paths.read_process_record().ok().and_then(|previous| {

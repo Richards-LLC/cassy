@@ -98,3 +98,53 @@ this delivery proves the approved locale repair and UTF-8 preservation.
 Inspected actual C80 dark/light PNGs and plain captures for both paths.
 [Defaults capture](init-full-yes.ascii.capture.txt) and
 [interactive capture](init-full-interactive.ascii.capture.txt) retain full text.
+
+## Follow-up contract (cas-8bc8)
+
+The Next steps box derives one width from its actual title and content; every
+border and row shares that width and fits 80 columns. The command wording and
+styled UTF-8 bytes outside this box stay unchanged. With all three locale
+variables absent or empty, use the same ASCII decorations as C; explicit UTF-8
+keeps the existing styled output. Published captures use `<project>` for the
+project path so they remain portable. Full real-TTY defaults and interactive
+reconfigure/confirm flows must complete with durable files at 80/120 columns.
+
+## Follow-up evidence (cas-8bc8)
+
+Candidate `cd6681c37336946636a544283025bc30265f41e2`, `cas 3.71.0 (cd6681c 2026-10-22)`,
+SHA256 `88ce51031aa702b1b6fa2b3bd981b7e8b579562413c7d9a223f14e0d9aa243cc`. Real TTY defaults, fresh interactive and
+existing-config reconfigure/Proceed flows finish at80/120. Defaults/reconfigure
+also run underC,UTF8 and all3locale variables absent. Readbacks confirm config,
+tasks,hooks andMCP;77final init captures have8aligned61cell box rows.
+All tested C/plain/unset rawANSI is ASCII. Six styledUTF8 before/after captures
+are byte-identical outside the permitted box; no other normalization is used.
+The4published init captures use `<project>` rather than a machine scratch path.
+
+- terminal-qa: PASS yes-utf8-scoped · 11 runs · 0 fail · 0 warn · 269 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-utf8-scoped/report.json
+- terminal-qa: PASS yes-c-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-c-scoped/report.json
+- terminal-qa: PASS yes-unset-scoped · 11 runs · 0 fail · 0 warn · 249 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/yes-unset-scoped/report.json
+- terminal-qa: PASS fresh-utf8-scoped · 11 runs · 0 fail · 0 warn · 457 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/fresh-utf8-scoped/report.json
+- terminal-qa: PASS interactive-utf8-scoped · 11 runs · 0 fail · 0 warn · 473 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-utf8-scoped/report.json
+- terminal-qa: PASS interactive-c-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-c-scoped/report.json
+- terminal-qa: PASS interactive-unset-scoped · 11 runs · 0 fail · 0 warn · 413 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/interactive-unset-scoped/report.json
+- terminal-qa: PASS root-help-unset · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-8bc8/terminal-qa/root-help-unset/report.json
+
+These passes retain only the4exact inherited exception sets and tasks already
+approved4206333/4206384, reaffirmed4206624. All190entries remain byte-identical.
+The ledger preserves the automation-path mismatch and obsolete analysis-count
+failure; final reports pass without changing any allowance. Unfiltered reports
+remain FAIL. No whole-wizard visual-quality or JSON pass is claimed.
+
+| Dimension | Full-wizard score | Evidence / retained issue |
+| --- | --- | --- |
+| Hierarchy | 4 | Existing choices lead to Proceed, completed initialization and copyable commands. |
+| Fit | 2 | Assigned box fits80/120 at61cells; inherited tooling row still overflows undercas-0ba9. |
+| Craft | 4 | All8box rows/borders share one edge; documented project paths are portable. |
+| Theme safety | 1 | Inherited light-palette contrast remains undercas-f15f; UTF8 colors unchanged. |
+| Machine contract | 3 | C/unset/plain are ASCII; pipeCR remains undercas-3075. JSON not exercised. |
+
+Changed-box geometry scores5; full-wizard floors remain below target because of
+explicit inherited exceptions. Inspected80column dark/light PNGs and plain text
+for all3locales and both interactive entries. Task ledger lists every exception,
+binary identity, retained failures, readbacks and final reports. Targeted Rust
+proof is bound to the final documentation tip separately.

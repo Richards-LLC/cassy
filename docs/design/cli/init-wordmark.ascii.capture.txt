@@ -8,7 +8,7 @@
   | Multi-agent coding factory with persistent memory and task coordination.
 
 
-  Cassy is already initialized at /mnt/rewind/cas/scratch/232e/p/.cas
+  Cassy is already initialized at <project>/.cas
 
 What would you like to do:
   1. Reconfigure settings

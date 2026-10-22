@@ -516,6 +516,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         ("advisory-no-checks", "no-checks", Some("approved"), true),
         ("advisory-pending-docs", "pending", Some("approved"), true),
         ("red-override", "failure", None, false),
+        ("fresh-branch", "success", Some("approved"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let repo = GitRepo::new();
@@ -578,11 +579,6 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         let worker_path = cas_root.join("worktrees").join(&worker);
         repo.add_worktree(&worker_path, &format!("factory/{worker}"));
         let delivered_path = if conclusion == "pending" { "docs/delivery.md" } else { "delivered.txt" };
-        std::fs::create_dir_all(worker_path.join("docs")).unwrap();
-        std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
-        run_git(&["add", delivered_path], &worker_path);
-        run_git(&["commit", "-m", "parked delivery"], &worker_path);
-
         let task_store = open_task_store(&cas_root).unwrap();
         let mut task = Task::new(format!("cas-eda0-{row}"), "Parked delivery".to_string());
         task.task_type = TaskType::Task;
@@ -590,7 +586,76 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         task.depth = TaskDepth::Deep;
         task.assignee = Some(worker.clone());
         task.risk = vec![cas::types::TaskRisk::None];
+        if row == "fresh-branch" {
+            task.status = TaskStatus::Open;
+            // Managed linked checkouts share the factory's CAS identity/store.
+            std::os::unix::fs::symlink(&cas_root, worker_path.join(".cas")).unwrap();
+            std::fs::write(repo.root.join(".git/info/exclude"), ".cas\n").unwrap();
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: format!("project:github.com/org/{slug}"),
+                target_branch: "main".into(),
+            });
+            let agents = open_agent_store(&cas_root).unwrap();
+            let mut registration = agents.get(&worker_id).unwrap();
+            registration.metadata.insert("clone_path".into(), worker_path.display().to_string());
+            agents.update(&registration).unwrap();
+        }
         task_store.add(&task).unwrap();
+
+        if row == "fresh-branch" {
+            env.set("CAS_AGENT_ROLE", "worker");
+            delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
+                "action": "start", "id": task.id,
+            })))).await.expect("record the original delivery branch through real start");
+        }
+        std::fs::create_dir_all(worker_path.join("docs")).unwrap();
+        std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
+        run_git(&["add", delivered_path], &worker_path);
+        let subject = if row == "fresh-branch" {
+            format!("{}: parked delivery", task.id)
+        } else {
+            "parked delivery".to_string()
+        };
+        run_git(&["commit", "-m", &subject], &worker_path);
+
+        let mut delivery_branch = format!("factory/{worker}");
+        if row == "fresh-branch" {
+            let original = task_store.get(&task.id).unwrap();
+            let original_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+            assert_eq!(original.deliverables.factory_branch_start.as_ref().unwrap().branch, delivery_branch);
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+            delivery_branch = format!("factory/{worker}-{}-reviewed", task.id);
+            run_git(&["switch", "-c", &delivery_branch, "main"], &worker_path);
+            std::fs::write(worker_path.join(delivered_path), "fresh branch delivery\n").unwrap();
+            run_git(&["add", delivered_path], &worker_path);
+            run_git(&["commit", "-m", &format!("{}: fresh delivery", task.id)], &worker_path);
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+            let rebind = || task_req(serde_json::json!({
+                "action": "rebind_branch", "id": task.id, "branch": delivery_branch,
+                "reason": "Supervisor reviewed replacement branch after fresh-base recovery",
+            }));
+            let worker_denial = delivery_service(&cas_root, &worker_id)
+                .task(Parameters(rebind())).await.expect_err("workers cannot approve their own rebind");
+            assert!(worker_denial.message.contains("live registered supervisor"), "{worker_denial}");
+            assert_eq!(task_store.get(&task.id).unwrap().deliverables.factory_branch_start,
+                original.deliverables.factory_branch_start);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let supervisor = delivery_service(&cas_root, &supervisor_id);
+            run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);
+            let refused = supervisor.task(Parameters(rebind())).await.expect_err("foreign work cannot be hidden by a new base");
+            assert!(refused.message.contains("foreign"), "{refused}");
+            run_git(&["reset", "--hard", "HEAD^"], &worker_path);
+            supervisor.task(Parameters(rebind())).await.expect("supervisor rebinds fresh delivery");
+            let rebound = task_store.get(&task.id).unwrap();
+            let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
+            assert_eq!(start.branch, delivery_branch);
+            assert_eq!(start.base_sha, git_stdout(&repo.root, &["rev-parse", "main"]));
+            assert_eq!(rebound.assignee, original.assignee);
+            assert_eq!(rebound.deliverables.work_target, original.deliverables.work_target);
+            assert!(rebound.notes.contains(&original_tip), "old checkpoint tip must remain auditable");
+            supervisor.task(Parameters(rebind())).await.expect("same binding is idempotent");
+            assert_eq!(task_store.get(&task.id).unwrap().notes, rebound.notes);
+        }
 
         // The worker's own close parks the delivery and keeps its reason.
         let parked_reason = format!("PASS: delivered.txt for {row}");
@@ -605,11 +670,17 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         );
         let parked = task_store.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
+        if row == "fresh-branch" {
+            assert!(park.contains("MERGE REQUIRED"), "{park}");
+            assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(delivery_branch.as_str()));
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(),
+                Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]).as_str()));
+        }
 
         env.set("CAS_AGENT_ROLE", "supervisor");
         let supervisor = delivery_service(&cas_root, &supervisor_id);
         let mut merge = coord_req("worktree_merge");
-        merge.id = Some(format!("factory/{worker}"));
+        merge.id = Some(delivery_branch);
         merge.task_id = Some(task.id.clone());
         merge.allow_trunk = Some(true);
         merge.cleanup = Some(false);

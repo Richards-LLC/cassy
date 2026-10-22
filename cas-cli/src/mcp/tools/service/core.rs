@@ -744,6 +744,17 @@ impl CasService {
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_rebind_branch(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("task", "rebind_branch"))?;
+        let branch = req.branch.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "branch required for rebind_branch"))?;
+        let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for rebind_branch"))?;
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.rebind_task_branch(&id, &branch, &reason)
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("Branch approval failed: {error}"))))
+    }
+
     pub(super) async fn task_available(
         &self,
         req: TaskRequest,

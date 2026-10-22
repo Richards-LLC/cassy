@@ -345,7 +345,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle/dependencies. Workers start then close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (optional note_type). create project= files a cross-project proposal in the Cloud proposal_* inbox, never a task row. Supervisor cancel requires reason (optional superseded_by) for ended work without delivery. request_changes reopens AwaitingMerge or a blocked parked delivery after failed review, retaining assignee."
+        description = "Task lifecycle/dependencies. Workers start then close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (optional note_type). create project= files a cross-project proposal in the Cloud proposal_* inbox, never a task row. Supervisor cancel requires reason (optional superseded_by) for ended work without delivery. request_changes reopens AwaitingMerge or a blocked parked delivery after failed review, retaining assignee. Supervisor rebind_branch approves a fresh delivery branch with reason and an old-tip audit."
     )]
     pub async fn task(
         &self,
@@ -358,6 +358,10 @@ impl CasService {
             let mut req = req;
             let action = canonical_task_action(&req.action).to_string();
             req.action.clone_from(&action);
+            if req.branch.is_some() && action != "rebind_branch" {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "branch is supported only for task action=rebind_branch"));
+            }
             let event_task_id = req.id.clone().unwrap_or_default();
             let is_mutating = matches!(
                 action.as_str(),
@@ -378,6 +382,7 @@ impl CasService {
                     | "release"
                     | "reset"
                     | "transfer"
+                    | "rebind_branch"
             ) || (action == "notes" && req.notes.is_some());
 
             let result = match action.as_str() {
@@ -418,6 +423,7 @@ impl CasService {
                 "release" => this.task_release(req).await,
                 "reset" => this.task_reset(req).await,
                 "transfer" => this.task_transfer(req).await,
+                "rebind_branch" => this.task_rebind_branch(req).await,
                 "available" => this.task_available(req).await,
                 "mine" => this.task_mine(req).await,
                 _ => Err(Self::error(

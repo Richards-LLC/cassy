@@ -1503,6 +1503,15 @@ fn worktree_merge_mcp_error(
             "use a temporary worktree, merge there by hand, then move the branch ref and remove the temporary worktree.".to_string(),
         ),
     };
+    // Git details already contain structural line breaks (porcelain/status or
+    // stderr). Keep those rows, but escape controls and hidden text within each.
+    let visible_details = |details: &str| {
+        details
+            .split('\n')
+            .map(crate::worktree::GitOperations::visible_git_label)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let source_branch = crate::worktree::GitOperations::visible_git_label(source_branch);
     let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
     let mut message = match error {
@@ -1515,7 +1524,11 @@ fn worktree_merge_mcp_error(
              1. Resolve on {source_branch} by rebasing or merging {target_branch}, then retry.\n\
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree.",
-            paths.join(", ")
+            paths
+                .iter()
+                .map(|path| crate::worktree::GitOperations::visible_git_label(path))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         WorktreeError::Git(GitError::MergeConflict) => format!(
             "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}; \
@@ -1528,7 +1541,7 @@ fn worktree_merge_mcp_error(
              resolve and commit the conflicts, then remove the temporary worktree."
         ),
         WorktreeError::Git(GitError::MergeInProgress(details)) => {
-            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            let details = visible_details(&details);
             format!(
                 "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
@@ -1538,7 +1551,7 @@ fn worktree_merge_mcp_error(
             )
         }
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
-            let details = crate::worktree::GitOperations::visible_git_label(&details);
+            let details = visible_details(&details);
             format!(
                 "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
              tracked changes on paths this merge would write: {details}.\n\n\
@@ -1571,7 +1584,7 @@ fn worktree_merge_mcp_error(
         }
         other => format!(
             "Failed to merge worktree: {}",
-            crate::worktree::GitOperations::visible_git_label(&other.to_string()),
+            visible_details(&other.to_string()),
         ),
     };
     if let Err(refusal) = remedies {
@@ -3506,6 +3519,27 @@ impl CasCore {
         Ok((Box::new(task), worker))
     }
 
+    /// A server-recorded delivery keeps its assignee even when the approved
+    /// branch has a recovery suffix that cannot be parsed as a worker name.
+    fn recorded_task_merge_source(
+        &self, task: &cas_types::Task, branch: &str,
+    ) -> Result<Option<(String, String)>, McpError> {
+        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+            return Ok(None);
+        };
+        if start.branch != branch
+            || task.assignee.as_deref() != Some(start.assignee.as_str())
+            || task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        {
+            return Ok(None);
+        }
+        let agents = self.open_agent_store()?;
+        let worker = crate::mcp::tools::core::task::resolve_agent_identity(
+            agents.as_ref(), &start.assignee,
+        ).map(|agent| agent.name).unwrap_or_else(|| start.assignee.clone());
+        Ok(Some((worker, branch.to_string())))
+    }
+
     /// Prefer the task's recorded source, discovering names only if it is absent.
     /// The task/agent identity authorizes the worker independently of branch spelling.
     fn task_merge_source(
@@ -3530,6 +3564,7 @@ impl CasCore {
         let requested = id.strip_prefix("origin/").unwrap_or(id);
         if requested != anchor && !identity_belongs_to_worker(requested, &assignee, agents.as_ref())
             && !task_delivery_branch_matches(requested, &assignee, &task.id)
+            && self.recorded_task_merge_source(task, requested)?.is_none()
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -3542,7 +3577,9 @@ impl CasCore {
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
         let recorded = task.deliverables.parked_branch.as_deref().filter(|b| !b.trim().is_empty());
         if let Some(branch) = recorded {
-            if !task_delivery_branch_matches(branch, &assignee, &task.id) {
+            if !task_delivery_branch_matches(branch, &assignee, &task.id)
+                && self.recorded_task_merge_source(task, branch)?.is_none()
+            {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -6733,12 +6770,17 @@ mod tests {
             ("factory/worker", "factory/worker"),
             ("factory/control\u{85}label", "factory/control\\u{85}label"),
             ("factory/line\u{2028}label", "factory/line\\u{2028}label"),
-            ("factory/paragraph\u{2029}label", "factory/paragraph\\u{2029}label"),
+            (
+                "factory/paragraph\u{2029}label",
+                "factory/paragraph\\u{2029}label",
+            ),
         ] {
             let error = worktree_merge_mcp_error(
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
                     "src/one.rs".to_string(),
                     "src/two.rs".to_string(),
+                    "src/bidi\u{202e}name.rs".to_string(),
+                    "src/line\u{2028}name.rs".to_string(),
                 ])),
                 source,
                 "epic/example",
@@ -6748,6 +6790,9 @@ mod tests {
             assert!(message.contains("CONTENT CONFLICT"));
             assert!(message.contains("src/one.rs"));
             assert!(message.contains("src/two.rs"));
+            assert!(message.contains("src/bidi\\u{202e}name.rs"), "{message:?}");
+            assert!(message.contains("src/line\\u{2028}name.rs"), "{message:?}");
+            assert!(!message.contains('\u{202e}'), "{message:?}");
             assert!(message.contains("restored"));
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
@@ -6795,17 +6840,31 @@ mod tests {
         assert!(dirty_message.contains("git worktree add --detach"));
 
         // The Git subprocess's text is untrusted even when branch names are safe.
-        let detail = "path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end";
+        let detail = "UU path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end\n M second\tfile.rs\n";
         for git_error in [
             GitError::MergeInProgress(detail.into()),
             GitError::MergeCheckoutDirty(detail.into()),
             GitError::CommandFailed(detail.into()),
         ] {
             let message = worktree_merge_mcp_error(
-                WorktreeError::Git(git_error), "factory/worker", "epic/example",
-            ).message.into_owned();
-            assert!(message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"), "{message:?}");
-            assert!(!message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}']), "{message:?}");
+                WorktreeError::Git(git_error),
+                "factory/worker",
+                "epic/example",
+            )
+            .message
+            .into_owned();
+            assert!(
+                message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"),
+                "{message:?}"
+            );
+            assert!(
+                !message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}', '\t']),
+                "{message:?}"
+            );
+            assert!(
+                message.contains("end\n M second\\tfile.rs\n"),
+                "{message:?}"
+            );
         }
     }
 

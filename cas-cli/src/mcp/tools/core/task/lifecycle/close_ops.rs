@@ -17750,7 +17750,7 @@ fn preferred_diff_target_ref(repo_path: &std::path::Path, parent_branch: &str) -
     }
 }
 
-fn preferred_diff_target_ref_for_delivery(
+pub(crate) fn preferred_diff_target_ref_for_delivery(
     repo_path: &std::path::Path,
     parent_branch: &str,
     delivery_mode: cas_types::DeliveryMode,

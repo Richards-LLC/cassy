@@ -99,6 +99,7 @@
 - `cas-cli/src/mcp/tools/core/` - task, memory, knowledge, artifact, search, rule and workflow handlers.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates, epic lanes and merged-delivery closure.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - task-owned commit/diff attribution.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs` - supervisor approval and audited rebinding of a worker's replacement delivery branch.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` - receipt scope and delivery evolution checks.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/docs_upkeep.rs` - journey registry and documentation gates.
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded repository discovery for lifecycle operations.

@@ -62,9 +62,10 @@ impl CasService {
                 format!("qa_record: ledger_path {ledger_path} is not a file; write the ledger first"),
             ));
         }
-        // cas-e371 (GH #1023 finding 1): issues marked pre-existing are the
-        // page's backlog, not the delivery's defects. They never carry a
-        // rejection on their own, and each one becomes a linked follow-up.
+        // cas-e371 (GH #1023 finding 1): unrelated pre-existing issues become
+        // linked follow-ups. If one violates the delivery's purpose, criteria,
+        // demo statement, or a journey invariant the diff adds or edits, report
+        // it without this scope.
         let (mut pre_existing, delivery_issues) = crate::qa_pass::split_qa_issues(req.issues.as_deref())
             .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
         // cas-2849: a pre-existing issue takes its text from the ledger's

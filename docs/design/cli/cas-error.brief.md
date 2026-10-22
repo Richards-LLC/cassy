@@ -13,6 +13,23 @@ Redirecting stderr produces plain text even when stdout remains a terminal;
 terminal stderr remains styled even when stdout is piped. `NO_COLOR` suppresses
 styling in either case. Error text, JSON stdout, and exit codes remain unchanged.
 
+## Command-owned stderr (cas-62e0)
+
+The same destination rule applies to diagnostics emitted inside auth, cloud,
+config, factory and update commands, including update rollback warnings.
+Their stderr handles use `Formatter::stderr`; stdout handles keep
+`Formatter::stdout`. The first diagnostic line, its remedy, stream and exit
+code stay the same. Piped stderr is plain with terminal stdout, terminal
+stderr can be styled independently, and `NO_COLOR` remains authoritative.
+
+The representative regression extends the existing mixed-stream PTY table
+with `config export --format unsupported`: stdout is a real TTY, stderr a
+pipe, and the command's own error must have no escapes. A source audit tracks
+all 19 direct stderr sinks; it is not claimed as runtime coverage of every
+authentication, network or update failure. Fresh candidate evidence and
+critique belong to the cas-62e0 task ledger; earlier receipts below retain
+their original scope.
+
 ## Critique
 
 terminal-qa: PASS cas-error-renderer · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-d0b1/terminal-qa/error-renderer/report.json

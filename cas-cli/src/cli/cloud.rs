@@ -2593,7 +2593,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 } else {
                     let theme = ActiveTheme::default();
                     let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, theme);
+                    let mut fmt = Formatter::stderr(&mut err, theme);
                     let error_color = fmt.theme().palette.status_error;
                     fmt.write_colored("  \u{2717} ", error_color)?;
                     fmt.write_raw("Session expired")?;
@@ -3999,7 +3999,7 @@ fn execute_push_with_output(
             println!("{}", serde_json::json!({"status": "error", "message": msg}));
         } else if emit_output {
             let mut err = io::stderr();
-            let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
+            let mut fmt = Formatter::stderr(&mut err, ActiveTheme::default());
             let error_color = fmt.theme().palette.status_error;
             fmt.write_colored("  \u{2717} ", error_color)?;
             fmt.write_raw(&msg)?;
@@ -5630,7 +5630,7 @@ fn execute_projects(args: &CloudProjectsArgs, cli: &Cli, cas_root: &Path) -> any
             } else {
                 let theme = ActiveTheme::default();
                 let mut err = io::stderr();
-                let mut fmt = Formatter::stdout(&mut err, theme);
+                let mut fmt = Formatter::stderr(&mut err, theme);
                 let error_color = fmt.theme().palette.status_error;
                 fmt.write_colored("  \u{2717} ", error_color)?;
                 fmt.write_raw("Session expired")?;

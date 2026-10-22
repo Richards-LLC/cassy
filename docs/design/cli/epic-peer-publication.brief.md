@@ -67,3 +67,22 @@ interactive Bash, and reads back origin refs. The HTML captures were inspected
 on dark and light backgrounds. Playwright MCP could not launch because the host
 Chrome sandbox is misconfigured; disposable headless Chrome rendered the static
 capture HTML instead. No application server was started.
+
+## v58 follow-ups
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Keep the original stale-hook, spawn-create or merge-failure verdict and its cause before advice. |
+| Scannable | Main-checkout remedies remain the two existing alternatives; a refused merge remedy retains the original merge class and conflicting paths. |
+| Readable | Folder arguments preserve their exact shell argv; branch labels expose C1, bidi and default-ignorable characters as Unicode escapes. |
+| Machine output | Existing io::Error kind and MCP wire error code remain unchanged; only diagnostic and remedy text changes. |
+| Omitted | No automatic checkout, normalization, branch rename or merge is performed; unavailable remedies get a visible refusal. |
+
+Unicode policy: treat Unicode17 Default_Ignorable_Code_Point values plus control
+characters as unsafe for copyable shell advice, and escape them in displayed
+labels. Ordinary visible Unicode remains available through shell quoting.
+The property includes bidi controls, zero-width joiners/spaces, fillers and
+variation selectors ([Unicode UAX31](https://www.unicode.org/reports/tr31/#Layout_and_Format_Control_Characters),
+[pinned data](https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt)).
+This is a display policy for recovery advice; Git still receives the original
+refs through argv. It does not claim to detect every confusable identifier.

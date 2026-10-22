@@ -6359,23 +6359,34 @@ mod tests {
 
     #[test]
     fn conflict_error_names_paths_restored_checkout_and_manual_options() {
-        let error = worktree_merge_mcp_error(
-            WorktreeError::Git(GitError::MergeConflictPaths(vec![
-                "src/one.rs".to_string(),
-                "src/two.rs".to_string(),
-            ])),
-            "factory/worker",
-            "epic/example",
-        );
-        let message = error.message.as_ref();
+        for (source, visible) in [
+            ("factory/worker", "factory/worker"),
+            ("factory/control\u{85}label", "factory/control\\u{85}label"),
+        ] {
+            let error = worktree_merge_mcp_error(
+                WorktreeError::Git(GitError::MergeConflictPaths(vec![
+                    "src/one.rs".to_string(),
+                    "src/two.rs".to_string(),
+                ])),
+                source,
+                "epic/example",
+            );
+            let message = error.message.as_ref();
 
-        assert!(message.contains("CONTENT CONFLICT"));
-        assert!(message.contains("src/one.rs"));
-        assert!(message.contains("src/two.rs"));
-        assert!(message.contains("restored"));
-        assert!(message.contains("temporary worktree"));
-        assert!(message.contains("factory/worker"));
-        assert!(message.contains("epic/example"));
+            assert!(message.contains("CONTENT CONFLICT"));
+            assert!(message.contains("src/one.rs"));
+            assert!(message.contains("src/two.rs"));
+            assert!(message.contains("restored"));
+            assert!(message.contains("temporary worktree"));
+            assert!(message.contains(visible), "{message:?}");
+            assert!(!message.contains('\u{85}'), "{message:?}");
+            assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+            if source.contains('\u{85}') {
+                // pin: refused rendering must explain why no command can be pasted.
+                assert!(message.contains("no copyable command"), "{message}");
+            }
+            assert!(message.contains("epic/example"));
+        }
     }
 
     #[test]

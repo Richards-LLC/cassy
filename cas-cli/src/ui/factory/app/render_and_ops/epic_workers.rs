@@ -4639,6 +4639,30 @@ mod spawn_base_tests {
     }
 
     #[test]
+    fn spawn_parent_creation_failure_escapes_synced_branch_labels_cas_b010() {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        let branch = "epic/collision\u{85}/child";
+        let git = |repo: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&origin, &["branch", branch]);
+        let repo = tmp.path().join("repo");
+        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()]);
+        // A local prefix blocks materialization of the fetched child ref.
+        git(&repo, &["branch", "epic/collision\u{85}"]);
+        let error = ensure_local_spawn_parent(&repo, branch).unwrap_err();
+        assert!(error.contains("could not create local spawn base"), "{error}");
+        assert!(error.contains("epic/collision\\u{85}/child"), "{error:?}");
+        assert!(error.contains("origin/epic/collision\\u{85}/child"), "{error:?}");
+        assert!(!error.contains('\u{85}'), "raw C1 leaked through labels or Git cause: {error:?}");
+        assert!(full_sha(&repo, &format!("refs/heads/{branch}")).is_none());
+    }
+
+    #[test]
     fn absent_spawn_base_still_refuses_without_writing_local_branch_gh_1034() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");

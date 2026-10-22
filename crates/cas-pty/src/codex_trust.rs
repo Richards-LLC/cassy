@@ -1685,7 +1685,10 @@ mod tests {
             .replace("^(Bash|apply_patch)$", "^Bash$")
             .replace("\"timeout\":120", "\"timeout\":3");
         let dir = TempDir::new();
-        let (main, linked) = linked_pair(&dir, &stale, CURRENT_HOOKS);
+        let (plain_main, linked) = linked_pair(&dir, &stale, CURRENT_HOOKS);
+        let main = dir.join("main 'quote' {a,b}!e $(touch${IFS}SUBSTITUTED)");
+        std::fs::rename(&plain_main, &main).unwrap();
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/w").display())).unwrap();
         let main_hooks = main.join(".codex/hooks.json");
         let config_path = dir.join("config.toml");
         let message = prepare_codex_project_hooks_in(&config_path, &linked)
@@ -1699,10 +1702,29 @@ mod tests {
             message.contains(&main_hooks.display().to_string()),
             "{message}"
         );
-        assert!(
-            message.contains(&format!("git -C {} pull", main.display())),
-            "{message}"
-        );
+        // Exercise both printed alternatives in interactive Bash with history
+        // expansion enabled. Git is the subprocess boundary, not a parser fake.
+        let commands: Vec<_> = message.split('`').filter(|part| part.starts_with("git -C ")).collect();
+        assert_eq!(commands.len(), 2, "{message}");
+        for (command, tail) in commands.iter().zip([vec!["pull"], vec!["checkout", ".codex/hooks.json"]]) {
+            use std::io::Write;
+            let mut shell = std::process::Command::new("bash")
+                .args(["--noprofile", "--norc", "-i"])
+                .env("HISTFILE", "/dev/null").env("PS1", "")
+                .current_dir(&dir.0)
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()).spawn().unwrap();
+            writeln!(shell.stdin.take().unwrap(),
+                "set -H\nhistory -s 'echo history-expanded'\ngit() {{ printf '%s\\0' \"$@\"; }}\n{command}\nexit $?").unwrap();
+            let output = shell.wait_with_output().unwrap();
+            let args: Vec<_> = output.stdout.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).collect();
+            let main_text = main.to_str().unwrap();
+            let mut expected = vec![b"-C".as_slice(), main_text.as_bytes()];
+            expected.extend(tail.iter().map(|arg| arg.as_bytes()));
+            assert!(output.status.success(), "printed remedy failed: {command}: {output:?}");
+            assert_eq!(args, expected, "printed remedy changed argv: {command}");
+        }
+        assert!(!dir.join("SUBSTITUTED").exists(), "a printed remedy ran path substitution");
         assert_eq!(std::fs::read_to_string(&main_hooks).unwrap(), stale);
         let config = std::fs::read_to_string(&config_path).unwrap_or_default();
         assert!(

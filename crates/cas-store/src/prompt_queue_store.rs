@@ -6077,6 +6077,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         dedupe_key: &str,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
+        self.enqueue_idempotent_urgent(source, target, prompt, factory_session, summary, priority, false, dedupe_key, origin)
+    }
+
+    fn enqueue_idempotent_urgent(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        dedupe_key: &str,
+        origin: Option<&QueueOrigin>,
+    ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
         if target.trim().eq_ignore_ascii_case("operator") {
             return self
@@ -6088,6 +6103,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     metadata: OperatorTurnMetadata {
                         summary,
                         priority,
+                        urgent,
                         origin,
                         dedupe_key: Some(dedupe_key),
                         ..Default::default()
@@ -6115,7 +6131,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -6124,6 +6140,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     factory_session,
                     summary,
                     prio,
+                    urgent,
                     dedupe_key,
                     origin_agent_id,
                     origin_kind

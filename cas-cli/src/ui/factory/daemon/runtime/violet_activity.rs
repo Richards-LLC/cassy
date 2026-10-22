@@ -1711,7 +1711,7 @@ pub(crate) fn violet_activity_envelope(
     kind: &str,
     items: &[WakeItem],
 ) -> String {
-    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, |item| {
+    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, "violet", |item| {
         item.age_secs.to_string()
     })
 }
@@ -1730,7 +1730,7 @@ pub(crate) fn managed_violet_activity_envelope(
         .map(|seconds| seconds.to_string())
         .unwrap_or_else(|| "unknown".into());
     violet_activity_envelope_with_age(
-        channel_id, channel_name, kind, std::slice::from_ref(item), |_| age.clone(),
+        channel_id, channel_name, kind, std::slice::from_ref(item), "mention", |_| age.clone(),
     )
 }
 
@@ -1739,6 +1739,7 @@ fn violet_activity_envelope_with_age(
     channel_name: &str,
     kind: &str,
     items: &[WakeItem],
+    mention_addressed: &str,
     age_text: impl Fn(&WakeItem) -> String,
 ) -> String {
     use crate::prompt_revalidation::xml_attribute_value as attr;
@@ -1773,7 +1774,7 @@ fn violet_activity_envelope_with_age(
     let addressed = if all_handoffs {
         "human"
     } else if kind == "mention" {
-        "violet"
+        mention_addressed
     } else {
         "thread"
     };

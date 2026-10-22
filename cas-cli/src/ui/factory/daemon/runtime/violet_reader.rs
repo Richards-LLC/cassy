@@ -692,19 +692,26 @@ impl PromptQueueTyper<'_> {
             return Err(NamedRefusal::new("invalid_target", "claim target lacks channel, thread or message"));
         };
         let source_age = managed_message_age_secs(&message_ts, now);
+        // Forward-compatible contract requested from Cloud in
+        // REQ-cloud-delivery-event-kind-2026-10-22.md. Never infer a mention
+        // from Slack text, timestamps or missing metadata. An uncertain prior
+        // dispatch stays a recovery notice rather than a fresh interrupt.
+        let mention = kind == "delivery" && target["event_kind"].as_str() == Some("app_mention");
+        let kind = if mention { "mention" } else { kind };
         // The managed formatter uses source_age, including explicit unknown;
         // the legacy numeric carrier is unchanged for its other producers.
         let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
         let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
         prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), text);
         self.0
-            .enqueue_idempotent(
+            .enqueue_idempotent_urgent(
                 &format!("violet-activity:{channel}"),
                 "supervisor",
                 &prompt,
                 Some(session),
                 Some(&format!("Slack activity in #{channel}")),
                 Some(NotificationPriority::High),
+                mention,
                 &format!("{key}:{}", delivery.id),
                 Some(&QueueOrigin::Daemon),
             )

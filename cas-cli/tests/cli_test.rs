@@ -18,6 +18,7 @@ fn cas_cmd(root: &std::path::Path) -> Command {
     // Clear CAS_ROOT to prevent env pollution from parent shell
     // Tests should use current_dir() for isolation, not inherit env vars
     cmd.env_remove("CAS_ROOT");
+    cmd.env_remove("COLUMNS");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }

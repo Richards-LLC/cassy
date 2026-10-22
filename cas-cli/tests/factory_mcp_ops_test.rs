@@ -6641,6 +6641,7 @@ async fn test_verdict_reclaims_review_target_without_waiting_cas_f275() {
 async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     use fs2::FileExt;
     let env = review_target_env();
+    let mut failures = Vec::new();
     init_sync_repo(&env, "interrupted-review-trash");
     let project = env.cas_root.parent().unwrap();
     std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
@@ -6684,8 +6685,15 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
+    cleanup.full = Some(true);
     let deferred = get_text(&env.service.factory_request(Parameters(cleanup.clone())).await.unwrap());
     assert!(deferred.contains("deferred"), "busy collector must explain non-deletion: {deferred}");
+    let deferred_status: serde_json::Value = serde_json::from_str(deferred.lines()
+        .find_map(|line| line.strip_prefix("REVIEW_SCRATCH_STATUS_JSON="))
+        .unwrap_or_else(|| panic!("full deferred cleanup must include review status: {deferred}"))).unwrap();
+    if deferred_status["deferred"] != true {
+        failures.push(format!("busy collector JSON must say deferred: {deferred_status}"));
+    }
     assert_eq!(std::fs::read(trash.join("target/output")).unwrap(), b"queued-output");
     FileExt::unlock(&collector).unwrap();
 
@@ -6699,6 +6707,72 @@ async fn test_gc_recovers_interrupted_review_trash_cas_2f3b() {
     assert!(!trash.exists(), "interrupted trash must be fully drained: {result}");
     assert!(checkout.join("README").is_file(), "young source must remain");
     assert!(wrapper.join("owner.json").is_file());
+
+    // Pending bytes remain visible for an active dispatch, but cannot be
+    // advertised as reclaimable while its checkout is retained.
+    let mut retained_task = Task::new("cas-retained-trash".into(), "retained trash".into());
+    retained_task.assignee = Some("review-worker".into());
+    env.task_store().add(&retained_task).unwrap();
+    let active = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &retained_task.id, "review-worker", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let retained = cas::factory_review_scratch::create(
+        &env.cas_root, project, &retained_task.id, Some(&active.id), &head,
+    ).unwrap();
+    let retained_wrapper = retained.path.parent().unwrap().to_path_buf();
+    drop(retained);
+    let retained_trash = retained_wrapper.join("trash");
+    std::fs::create_dir(&retained_trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&retained_trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::copy(retained_wrapper.join("owner.json"), retained_trash.join("owner.json")).unwrap();
+    std::fs::create_dir(retained_trash.join("target")).unwrap();
+    std::fs::write(retained_trash.join("target/output"), b"held-payload").unwrap();
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    let retained_row = review["rows"].as_array().unwrap().iter()
+        .find(|row| row["path"].as_str() == retained_wrapper.to_str()).unwrap();
+    if review["pending_reclaim_bytes"] != 12 || retained_row["reclaimable_bytes"] != 0 {
+        failures.push(format!("active dispatch bytes must be pending but not reclaimable: {review}"));
+    }
+
+    // A crash inside write_owner leaves its NamedTempFile in the private trash.
+    // The validated parent still owns the queued payload; GC must drain both.
+    std::fs::create_dir(&trash).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(trash.join(".tmpABC123"), b"{\"schema_version\":").unwrap();
+    std::fs::create_dir(trash.join("target")).unwrap();
+    std::fs::write(trash.join("target/output"), b"temp-output").unwrap();
+    let mut request = factory_req("gc_report");
+    request.json = Some(true);
+    let report: serde_json::Value = serde_json::from_str(&get_text(
+        &env.service.factory_request(Parameters(request)).await.unwrap(),
+    )).unwrap();
+    let review = &report["machine_status"]["REVIEW_SCRATCH_STATUS_JSON"];
+    let stale_row = review["rows"].as_array().unwrap().iter()
+        .find(|row| row["path"].as_str() == wrapper.to_str()).unwrap();
+    if review["pending_reclaim_bytes"] != 23 || stale_row["reclaimable_bytes"] != 11 {
+        failures.push(format!("stale owner temp must leave 11 reclaimable and 23 pending bytes: {review}"));
+    }
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    if trash.exists() || !retained_trash.join("target/output").exists() {
+        failures.push("GC must drain stale-temp trash while preserving active-dispatch trash".into());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// Terminal dispatches may release targets on open tasks; active proof work

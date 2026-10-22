@@ -1,0 +1,31 @@
+80.dark (scoped warning block)
+  warning: Violet migration skipped ~/.claude-a@b.test/skills: target
+           /Users/…/cas-36cd/terminal-profiles/shared/skills is outside HOME and
+           explicit profile directories
+    Review the named profile/link target, then retry: cas update --user
+    Full paths: cas update --user --verbose
+  warning: Violet migration skipped
+           /Users/…/cas-36cd/terminal-profiles/account/skills: target
+           /Users/…/cas-36cd/terminal-profiles/shared/skills is outside HOME and
+           explicit profile directories
+    Review the named profile/link target, then retry: cas update --user
+    Full paths: cas update --user --verbose
+  warning: Violet update advisory: Violet update incomplete for 2 profile(s);
+           see the named warnings above; continuing builtin sync
+    Retry: cas update --user
+
+c-locale (scoped warning block)
+  warning: Violet migration skipped ~/.claude-a@b.test/skills: target
+           /Users/.../cas-36cd/terminal-profiles/shared/skills is outside HOME
+           and explicit profile directories
+    Review the named profile/link target, then retry: cas update --user
+    Full paths: cas update --user --verbose
+  warning: Violet migration skipped
+           /Users/.../cas-36cd/terminal-profiles/account/skills: target
+           /Users/.../cas-36cd/terminal-profiles/shared/skills is outside HOME
+           and explicit profile directories
+    Review the named profile/link target, then retry: cas update --user
+    Full paths: cas update --user --verbose
+  warning: Violet update advisory: Violet update incomplete for 2 profile(s);
+           see the named warnings above; continuing builtin sync
+    Retry: cas update --user

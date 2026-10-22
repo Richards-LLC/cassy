@@ -64,6 +64,21 @@ impl Drop for WorkerWaitSignals {
 }
 
 #[cfg(unix)]
+fn worker_group_has_live_members(group: libc::pid_t) -> bool {
+    let Ok(output) = Command::new("ps").args(["-A", "-o", "pgid=,stat="]).output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().any(|row| {
+        let mut fields = row.split_whitespace();
+        fields.next().and_then(|value| value.parse::<libc::pid_t>().ok()) == Some(group)
+            && fields.next().is_some_and(|state| !state.starts_with('Z'))
+    })
+}
+
+#[cfg(unix)]
 fn wait_for_worker_command(child: &mut std::process::Child) -> Result<std::process::ExitStatus> {
     use std::time::{Duration, Instant};
 
@@ -74,7 +89,11 @@ fn wait_for_worker_command(child: &mut std::process::Child) -> Result<std::proce
             // The group leader remains unreaped through both signals, so its
             // PGID cannot be reused while its Python supervisor clears Cargo.
             unsafe { libc::killpg(group, signum) };
-            std::thread::sleep(Duration::from_millis(800));
+            let grace_deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < grace_deadline && worker_group_has_live_members(group) {
+                // try_wait would reap the group leader before the final KILL.
+                std::thread::sleep(Duration::from_millis(50));
+            }
             unsafe { libc::killpg(group, libc::SIGKILL) };
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {

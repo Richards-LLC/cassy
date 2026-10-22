@@ -86,6 +86,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
 | `readback` | Optional `{subjects: [...], invariants: [...]}`: the subject kinds (for example `account_uid`) and invariant IDs the release gate may read back. Both lists must be non-empty identifiers, and unknown keys are rejected. See [release gate](release-gate.md#read-back). |
 | `consumes` | Optional `{resource: units}` that one run uses; each resource must be declared in the header and each amount positive. See [release gate](release-gate.md#resource-budgets). |
+| `release_always` | Optional boolean, default false. A main journey (a money path): the release gate walks it on every gate, impacted or not. See [release gate](release-gate.md#running-the-gate). |
 | `seeded` | Optional boolean, default false. A live seed is exempt from steps, invariants and traffic requirements until curated. |
 
 A seeded journey remains responsible for a valid entry, ownership and references.

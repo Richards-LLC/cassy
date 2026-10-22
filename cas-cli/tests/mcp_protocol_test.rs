@@ -1719,8 +1719,11 @@ async fn current_worktree_store_stays_readable_without_candidate_cloud_sync_cas_
         );
         assert!(
             client.list_tools().error.is_none(),
-            "{binding}: ordinary reads must work"
+            "{binding}: tool discovery must work"
         );
+        let read = client.call_tool("task", json!({"action": "list"}));
+        assert!(read.error.is_none(), "{binding}: ordinary reads must work: {:?}", read.error);
+        assert_ne!(read.result.as_ref().and_then(|result| result.get("isError")).and_then(Value::as_bool), Some(true), "{binding}: task list returned an error: {:?}", read.result);
         if sync_allowed {
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),

@@ -2,7 +2,7 @@
 //!
 //! A local receipt does not enable monitoring, resume jobs or prove a reboot.
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -301,6 +301,17 @@ fn bounded_output(program: &str, args: &[&str], timeout: Duration) -> Option<Com
     })
 }
 
+/// The launchd plist and `launchctl print` target for the hub's service in
+/// `domain` (for example `gui/501`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn launchd_service_paths(home: &Path, domain: &str) -> (PathBuf, String) {
+    let label = "dev.cas.commander-hub";
+    (
+        home.join("Library/LaunchAgents").join(format!("{label}.plist")),
+        format!("{domain}/{label}"),
+    )
+}
+
 fn boot_prerequisites(home: Option<&Path>) -> BootPrerequisites {
     let mut facts = BootPrerequisites {
         platform: std::env::consts::OS,
@@ -376,14 +387,12 @@ fn boot_prerequisites(home: Option<&Path>) -> BootPrerequisites {
     }
     #[cfg(target_os = "macos")]
     {
-        facts.service_installed = home
-            .join("Library/LaunchAgents/dev.cas.commander-hub.plist")
-            .is_file();
         // SAFETY: geteuid only reads this process's user identity.
         let domain = format!("gui/{}", unsafe { libc::geteuid() });
+        let (plist, target) = launchd_service_paths(home, &domain);
+        facts.service_installed = plist.is_file();
         facts.gui_session_available =
             bounded_output("/bin/launchctl", &["print", &domain], PROBE_TIMEOUT).map(|o| o.success);
-        let target = format!("{domain}/dev.cas.commander-hub");
         facts.service_active = bounded_output("/bin/launchctl", &["print", &target], PROBE_TIMEOUT)
             .filter(|o| o.success)
             .and_then(|o| {
@@ -439,6 +448,18 @@ fn linux_boot_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cas-0a3d: an isolated hub's status reads its own launchd service, the
+    /// label CAS_HUB_LAUNCHD_LABEL names, never the live hub's.
+    #[test]
+    fn launchd_status_reads_the_isolated_label_cas_0a3d() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_HUB_LAUNCHD_LABEL", "dev.cas.qa.cas-0a3d");
+        let home = env.home().to_path_buf();
+        let (plist, target) = launchd_service_paths(&home, "gui/501");
+        assert_eq!(plist, home.join("Library/LaunchAgents/dev.cas.qa.cas-0a3d.plist"));
+        assert_eq!(target, "gui/501/dev.cas.qa.cas-0a3d");
+    }
 
     #[test]
     fn missing_runtime_receipt_does_not_create_identity_sessions_or_enrollment() {

@@ -13388,6 +13388,23 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+#[derive(serde::Deserialize)]
+struct ReferenceHistory {
+    version: u64,
+    files: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    #[serde(flatten)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn parse_reference_history(bytes: &[u8]) -> Result<ReferenceHistory, String> {
+    let history: ReferenceHistory =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if history.version != 1 {
+        return Err(format!("unsupported reference history version {}", history.version));
+    }
+    Ok(history)
+}
+
 /// cas-2ea6: the most a keyed regeneration may take inside a close gate. A
 /// few keys took about 1 s on cas-src (40 keys: 6 s); a whole-history run
 /// takes about 30 s, which no close gate can spend.
@@ -13438,7 +13455,6 @@ fn dropped_ledger_keys_regenerate(
     anchor: &str,
     target: &str,
 ) -> Option<Vec<String>> {
-    type Entries = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
     let show = |revision: &str, path: &str| {
         std::process::Command::new("git")
             .args(["show", &format!("{revision}:{path}")])
@@ -13448,19 +13464,8 @@ fn dropped_ledger_keys_regenerate(
             .filter(|output| output.status.success())
             .map(|output| output.stdout)
     };
-    let entries = |bytes: &[u8]| -> Option<Entries> {
-        let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-        doc.get("files")?
-            .as_object()?
-            .iter()
-            .map(|(key, hashes)| {
-                let hashes = hashes.as_array()?.iter().map(|hash| hash.as_str().map(str::to_owned)).collect::<Option<_>>()?;
-                Some((key.clone(), hashes))
-            })
-            .collect()
-    };
-    let delivered = entries(&show(anchor, REFERENCE_HISTORY_LEDGER)?)?;
-    let landed = entries(&show(target, REFERENCE_HISTORY_LEDGER)?)?;
+    let delivered = parse_reference_history(&show(anchor, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
+    let landed = parse_reference_history(&show(target, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
     let dropped: Vec<String> = delivered
         .iter()
         .filter(|(key, hashes)| landed.get(*key).is_none_or(|kept| !hashes.is_subset(kept)))
@@ -13505,7 +13510,7 @@ fn dropped_ledger_keys_regenerate(
     if !output.ok()?.status.success() {
         return None;
     }
-    let regenerated = entries(&std::fs::read(&fresh).ok()?)?;
+    let regenerated = parse_reference_history(&std::fs::read(&fresh).ok()?).ok()?.files;
     dropped
         .iter()
         .all(|key| regenerated.get(key) == landed.get(key))

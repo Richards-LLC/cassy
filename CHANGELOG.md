@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.73.0] - 2026-10-22
+
 ### Added
 
 - **Shared /finish command** — Ship the finish command as a Cassy builtin across Claude, Codex and Grok, while preserving personal commands and reporting account refresh failures.

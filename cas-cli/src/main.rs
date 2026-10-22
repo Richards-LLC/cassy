@@ -157,7 +157,6 @@ fn main() -> ExitCode {
             cli.command.as_ref(),
             Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
         );
-    let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = cli::run(cli);
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
@@ -185,22 +184,17 @@ fn main() -> ExitCode {
                 let theme = ActiveTheme::default();
                 let mut fmt = Formatter::stdout(&mut err_out, theme);
 
-                let message = if init_command {
-                    cli::human_init_error_message(&e)
-                } else if let Some(err) = e.downcast_ref::<error::CasError>() {
-                    err.to_string()
-                } else {
-                    cli::human_error_message(&e)
-                };
-                let _ = fmt.error(&message);
-
                 if let Some(err) = e.downcast_ref::<error::CasError>() {
+                    let _ = fmt.error(&err.to_string());
+
                     // Show suggestion if available
                     if let Some(suggestion) = err.suggestion() {
                         let _ = fmt.newline();
                         let _ = fmt.warning("Suggestion:");
                         let _ = fmt.indent_block(suggestion);
                     }
+                } else {
+                    let _ = fmt.error(&cli::human_error_message(&e));
                 }
             }
 

@@ -583,25 +583,6 @@ pub fn json_error_message(error: &anyhow::Error) -> String {
         .unwrap_or_else(|| format!("{error:#}"))
 }
 
-/// Keep every init diagnostic readable, including forced retries of an
-/// existing store that do not carry the incomplete-initialization context.
-/// Reserve eight cells for the widest error mark. As with other presence
-/// prose, indivisible tokens stay whole on their own line.
-pub fn human_init_error_message(error: &anyhow::Error) -> String {
-    human_error_message(error)
-        .lines()
-        .map(|line| {
-            if line.is_empty() {
-                "\n".to_string()
-            } else {
-                crate::cloud::presence::wrap_line(line)
-            }
-        })
-        .collect::<String>()
-        .trim_end()
-        .to_owned()
-}
-
 /// Render the diagnostic for a person while leaving [`json_error_message`]
 /// as the stable machine-readable representation.
 pub fn human_error_message(error: &anyhow::Error) -> String {

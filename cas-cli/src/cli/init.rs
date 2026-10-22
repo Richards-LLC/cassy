@@ -1209,8 +1209,8 @@ where
             }
             print_colored("  ✗ ", InitStyle::ErrorMark)?;
             print_colored(label, InitStyle::Text)?;
-            // The final CLI diagnostic owns the complete cause and remedy.
-            // This completed phase row identifies only the failed operation.
+            print_colored(" — ", InitStyle::Text)?;
+            print_colored(&format!("{e}"), InitStyle::Text)?;
             println!();
             error!(
                 phase = label,

@@ -61,6 +61,53 @@ fn live_local_agent(agent: &Agent, now: DateTime<Utc>, local_machine: &str) -> O
     crate::mcp::daemon::pid_matches_fingerprint(pid, fingerprint).then_some(pid)
 }
 
+/// Convert the live server's process fingerprint to wall time so a recycled
+/// PID cannot inherit a historical epoch from another process.
+#[cfg(target_os = "macos")]
+fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
+    let micros = crate::mcp::daemon::read_pid_starttime(pid)?;
+    DateTime::<Utc>::from_timestamp_micros(i64::try_from(micros).ok()?)
+}
+
+#[cfg(target_os = "linux")]
+fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
+    let ticks = crate::mcp::daemon::read_pid_starttime(pid)?;
+    // SAFETY: sysconf only reads the system clock-tick rate.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 {
+        return None;
+    }
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let started = std::time::UNIX_EPOCH
+        + Duration::from_secs(boot)
+        + Duration::from_secs_f64(ticks as f64 / hz as f64);
+    Some(DateTime::<Utc>::from(started))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_started_at(_pid: u32) -> Option<DateTime<Utc>> {
+    None
+}
+
+fn epoch_matches_live_start(pid: u32, started_at: &str) -> bool {
+    let Some(process_start) = process_started_at(pid) else {
+        return false;
+    };
+    let Ok(epoch_start) = DateTime::parse_from_rfc3339(started_at) else {
+        return false;
+    };
+    // The epoch is written during daemon startup, after its process starts.
+    // A small tolerance covers timestamp precision and slow initialization.
+    let elapsed = (epoch_start.with_timezone(&Utc) - process_start).num_seconds();
+    (-1..=30).contains(&elapsed)
+}
+
 /// The supplied installed version lets tests exercise the real stores and
 /// worker-status handler without modifying the process-global PATH.
 pub(crate) fn snapshot_with_installed(
@@ -95,6 +142,19 @@ pub(crate) fn snapshot_with_installed(
             latest.insert(pid, epoch);
         }
     }
+    let mut by_parent = BTreeMap::<u32, Vec<(u32, Option<String>)>>::new();
+    for (server_pid, epoch) in latest {
+        if !epoch_matches_live_start(server_pid, &epoch.started_at) {
+            continue;
+        }
+        let Some(parent_pid) = crate::agent_id::get_parent_of_pid(server_pid) else {
+            continue;
+        };
+        by_parent
+            .entry(parent_pid)
+            .or_default()
+            .push((server_pid, epoch.version));
+    }
     let mut seen = BTreeSet::new();
     let mut servers = Vec::new();
     for agent in agents {
@@ -104,28 +164,35 @@ pub(crate) fn snapshot_with_installed(
         if !seen.insert(pid) {
             continue;
         }
-        let version = latest.get(&pid).and_then(|epoch| {
-            let observed = epoch.ended_at.as_deref().unwrap_or(&epoch.started_at);
-            DateTime::parse_from_rfc3339(observed)
-                .ok()
-                .filter(|at| at.with_timezone(&Utc) >= agent.registered_at)
-                .and_then(|_| epoch.version.clone())
-        });
-        let older = version
-            .as_deref()
-            .and_then(version_triplet)
-            .zip(version_triplet(installed))
-            .is_some_and(|(running, installed)| running < installed);
-        servers.push(ServerVersion {
-            name: agent.name,
-            role: agent.role,
-            session: agent.factory_session,
-            pid,
-            version,
-            older,
-        });
+        let matches = by_parent.get(&pid).cloned().unwrap_or_default();
+        if matches.is_empty() {
+            servers.push(ServerVersion {
+                name: agent.name,
+                role: agent.role,
+                session: agent.factory_session,
+                pid,
+                version: None,
+                older: false,
+            });
+            continue;
+        }
+        for (server_pid, version) in matches {
+            let older = version
+                .as_deref()
+                .and_then(version_triplet)
+                .zip(version_triplet(installed))
+                .is_some_and(|(running, installed)| running < installed);
+            servers.push(ServerVersion {
+                name: agent.name.clone(),
+                role: agent.role,
+                session: agent.factory_session.clone(),
+                pid: server_pid,
+                version,
+                older,
+            });
+        }
     }
-    servers.sort_by(|a, b| a.name.cmp(&b.name));
+    servers.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
     Ok(Snapshot {
         installed: installed.to_string(),
         servers,
@@ -285,7 +352,12 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Agent, DaemonChild) {
         let dir = tempfile::TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        let child = DaemonChild(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        let child = DaemonChild(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
         let mut epoch = crate::history::epochs::current_daemon_epoch(&Utc::now().to_rfc3339());
         epoch.pid = Some(child.0.id().into());
         epoch.version = Some("9.99.1".into());
@@ -306,8 +378,13 @@ mod tests {
 
     #[test]
     fn worker_status_flags_live_old_mcp_against_installed_binary() {
-        let (_dir, root, worker, _child) = fixture();
+        let (_dir, root, worker, child) = fixture();
+        assert!(!epoch_matches_live_start(
+            child.0.id(),
+            &(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()
+        ));
         let snapshot = snapshot_with_installed(&root, "9.99.2", Utc::now()).unwrap();
+        assert_eq!(snapshot.servers[0].pid, child.0.id());
         let status = render(&snapshot, Some("factory-release"));
         assert!(status.contains("installed 9.99.2"), "{status}");
         assert!(status.contains("old-worker (Worker"), "{status}");

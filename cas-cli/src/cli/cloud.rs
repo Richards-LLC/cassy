@@ -8564,7 +8564,7 @@ mod team_cmd_tests {
     /// queue commands count and name the team-only fix.
     #[test]
     fn cas_25c1_team_linked_push_receipt_reports_held_personal_rejections() {
-        let mut locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
         let mut summary = team_only_push_summary();
 
@@ -8617,7 +8617,7 @@ mod team_cmd_tests {
             verbose.contains("    Personal queue held (team-linked sync pushes team rows only): 1 pending, 3 failed/parked"),
             "{verbose}"
         );
-        locale.set("LC_ALL", "C");
+        locale_guard.set("LC_ALL", "C");
         let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
         render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
         let output = ascii.output();
@@ -8630,7 +8630,7 @@ mod team_cmd_tests {
     /// incomplete instead of reading "0 pending".
     #[test]
     fn cas_25c1_team_only_receipt_counts_team_backlog_without_the_fix_hint() {
-        let mut locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(true);
         let mut summary = team_only_push_summary();
 
@@ -8646,7 +8646,7 @@ mod team_cmd_tests {
         assert!(output.contains("3 failed/parked"), "{output}");
         assert!(output.contains("see `cas cloud queue`"), "{output}");
         assert!(!output.contains("cloud.team_only is off"), "{output}");
-        locale.set("LC_ALL", "C");
+        locale_guard.set("LC_ALL", "C");
         let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
         render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
         let output = ascii.output();
@@ -8735,7 +8735,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_successful_push_with_batch_and_pending_counts() {
-        let mut locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::push(
             &crate::cloud::SyncResult {
                 batches_run: 2,
@@ -8748,7 +8748,7 @@ mod team_cmd_tests {
             ("C.UTF-8", "[OK] Push complete · 2 batches · 0 pending\n"),
             ("C", "[OK] Push complete - 2 batches - 0 pending\n"),
         ] {
-            locale.set("LC_ALL", locale);
+            locale_guard.set("LC_ALL", locale);
             let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
             render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
             assert_eq!(tf.output(), expected, "locale={locale}");
@@ -8922,7 +8922,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_groups_identical_push_failures_once_with_retry_hint() {
-        let mut locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let message = "Client version 3.7.7 is below minimum 3.8.0";
         let mut summary = SyncSummary::push(
             &crate::cloud::SyncResult {
@@ -8942,7 +8942,7 @@ mod team_cmd_tests {
             tf.output(),
             "[WARN] Push incomplete · 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) · run cas cloud queue --retry\n"
         );
-        locale.set("LC_ALL", "C");
+        locale_guard.set("LC_ALL", "C");
         let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
         render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
         let output = ascii.output();

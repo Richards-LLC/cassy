@@ -1165,13 +1165,12 @@ where
             if is_tty {
                 print!("\r");
             }
-            print_colored("  ✓ ", InitStyle::SuccessMark)?;
-            print_colored(label, InitStyle::Text)?;
-            // Pad to clear any remnants
-            let padding = 40_usize.saturating_sub(label.len());
-            print_colored(&" ".repeat(padding), InitStyle::Text)?;
-            print_colored(&result, InitStyle::Text)?;
-            println!();
+            // Only a terminal wraps; a pipe keeps one completed line per phase.
+            let width = is_tty
+                .then(|| crossterm::terminal::size().ok())
+                .flatten()
+                .map(|(width, _)| usize::from(width));
+            write_step_success(&mut stdout, OutputMode::detect(), label, &result, width)?;
             info!(
                 phase = label,
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1199,6 +1198,62 @@ where
             Err(e)
         }
     }
+}
+
+/// Write one completed phase row: mark, label padded to the detail column,
+/// then the detail. With a terminal `width`, a detail that would overflow
+/// continues on rows aligned under the detail column. Rows break only between
+/// whitespace-separated items, so a path is never split or shortened. A pipe
+/// (`None`) keeps one line per phase.
+fn write_step_success(
+    out: &mut impl Write,
+    mode: OutputMode,
+    label: &str,
+    detail: &str,
+    width: Option<usize>,
+) -> anyhow::Result<()> {
+    use ratatui::text::Span;
+
+    let mark = "  ✓ ";
+    write_colored(out, mark, InitStyle::SuccessMark, mode)?;
+    write_colored(out, label, InitStyle::Text, mode)?;
+    // Pad to clear any remnants
+    let padding = 40_usize.saturating_sub(label.len());
+    write_colored(out, &" ".repeat(padding), InitStyle::Text, mode)?;
+    let column = Span::raw(init_text_for_mode(mark, mode)).width()
+        + Span::raw(label).width()
+        + padding;
+    let cells = |text: &str| Span::raw(init_text_for_mode(text, mode)).width();
+    let budget = width
+        .map(|width| width.saturating_sub(column))
+        .filter(|budget| cells(detail) > *budget);
+    let rows = match budget {
+        None => vec![detail.to_string()],
+        Some(budget) => {
+            let mut rows = vec![String::new()];
+            for item in detail.split_whitespace() {
+                let row = rows.last_mut().expect("rows starts non-empty");
+                if row.is_empty() {
+                    row.push_str(item);
+                } else if cells(row) + 1 + cells(item) <= budget {
+                    row.push(' ');
+                    row.push_str(item);
+                } else {
+                    rows.push(item.to_string());
+                }
+            }
+            rows
+        }
+    };
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            writeln!(out)?;
+            write_colored(out, &" ".repeat(column), InitStyle::Text, mode)?;
+        }
+        write_colored(out, row, InitStyle::Text, mode)?;
+    }
+    writeln!(out)?;
+    Ok(())
 }
 
 // ============================================================================
@@ -1545,6 +1600,45 @@ mod integration_flag_tests {
                     .all(|width| *width == widths[0] && *width <= 80),
                 "{locale}: border and content must align within 80 cells: {widths:?}\n{output}"
             );
+        }
+    }
+
+    #[test]
+    fn completed_phase_rows_fit_80_and_120_columns_without_splitting_items() {
+        use ratatui::text::Line;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let rows = [
+            (
+                "Setting up factory tooling",
+                ".env.worktree.template, scripts/worktree-boot.sh, .gitignore updated",
+            ),
+            (
+                "Configuring Codex MCP server",
+                ".codex/config.toml + .codex/hooks.json; project and Cassy hook trust registered",
+            ),
+        ];
+        for locale in ["C", "C.UTF-8"] {
+            env.set("LC_ALL", locale);
+            for (label, detail) in rows {
+                for width in [80, 120] {
+                    let mut out = Vec::new();
+                    write_step_success(&mut out, OutputMode::Plain, label, detail, Some(width))
+                        .unwrap();
+                    let text = String::from_utf8(out).unwrap();
+                    let widths: Vec<_> = text.lines().map(|line| Line::raw(line).width()).collect();
+                    assert!(
+                        widths.iter().all(|cells| *cells <= width),
+                        "{locale} {width}: {widths:?}\n{text}"
+                    );
+                    assert!(text.lines().next().unwrap().contains(label), "{text}");
+                    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(words.ends_with(&format!("{label} {detail}")), "{text}");
+                }
+                // A pipe keeps exactly one completed line per phase.
+                let mut out = Vec::new();
+                write_step_success(&mut out, OutputMode::Plain, label, detail, None).unwrap();
+                assert_eq!(String::from_utf8(out).unwrap().lines().count(), 1);
+            }
         }
     }
 

@@ -393,7 +393,7 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon escalates a recorded wait once after 20 minutes. Report an actual need for assistance immediately.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon can queue one supervisor notice per recorded wait after 20 minutes, subject to normal delivery readiness. Report an actual need for assistance immediately.")
 }
 
 #[derive(Debug)]

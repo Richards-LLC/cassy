@@ -1521,8 +1521,9 @@ capped command to be retried; it does not hold a builder slot while waiting.
 Registered workers retain their InProgress task and lease during capacity
 waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
-shows that episode once; the background reminder scan sends one capacity notice
-after 20 minutes, without a blocked-task page. A delivered explicit assistance
+shows that episode once; the background reminder scan queues at most one capacity
+notice after 20 minutes. Its wake request follows normal supervisor readiness
+policy and retains the task's active state. A delivered explicit assistance
 message consumes that episode's automatic notice even after a gap longer than
 four minutes between retries. A stale retry stops reserving queue position;
 the live task lease still preserves its original wait age and notice state.

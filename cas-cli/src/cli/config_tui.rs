@@ -8,7 +8,7 @@
 
 // #![allow(dead_code)] // Check unused
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
 use crossterm::{
@@ -82,6 +82,7 @@ pub struct ConfigTuiApp {
 
     // Unsaved changes indicator
     has_unsaved: bool,
+    pending_resets: HashSet<String>,
 
     // Status message
     status_message: Option<(String, bool)>, // (message, is_error)
@@ -146,6 +147,7 @@ impl ConfigTuiApp {
             value_edit: None,
             show_advanced: false,
             has_unsaved: false,
+            pending_resets: HashSet::new(),
             status_message: None,
             should_quit: false,
         })
@@ -352,7 +354,8 @@ impl ConfigTuiApp {
                         match meta.validate(&value) {
                             Ok(()) => {
                                 self.config.set(&key, &value)?;
-                                self.values.insert(key, value);
+                                self.values.insert(key.clone(), value);
+                                self.pending_resets.remove(&key);
                                 self.has_unsaved = true;
                                 self.value_edit = None;
                                 self.mode = ViewMode::SectionEdit;
@@ -500,6 +503,7 @@ impl ConfigTuiApp {
                 if let Some(meta) = self.registry.get(key) {
                     self.config.set(key, meta.default)?;
                     self.values.insert(key.clone(), meta.default.to_string());
+                    self.pending_resets.insert(key.clone());
                     self.has_unsaved = true;
                     self.status_message = Some((format!("Reset {key} to default"), false));
                 }
@@ -527,6 +531,13 @@ impl ConfigTuiApp {
             return Ok(());
         }
         self.config.save(&self.cas_root)?;
+        for key in &self.pending_resets {
+            crate::cli::config::reset_config_value(key, &self.cas_root)?;
+        }
+        if !self.pending_resets.is_empty() {
+            self.pending_resets.clear();
+            self.config = Config::load(&self.cas_root)?;
+        }
         self.original_config = self.config.clone();
         self.has_unsaved = false;
         self.refresh_sections();

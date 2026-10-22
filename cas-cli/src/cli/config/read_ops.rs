@@ -248,6 +248,21 @@ fn config_document_paths<'a>(
     (serialized_path, stored_path, remove_path)
 }
 
+fn remove_config_document_key(
+    document: &mut toml_edit::DocumentMut,
+    key: &str,
+) -> anyhow::Result<bool> {
+    let (_, stored_path, alternate_path) = config_document_paths(document, key);
+    let stored_exists = config_document_item(document, stored_path).is_some();
+    let alternate_exists = alternate_path
+        .is_some_and(|path| config_document_item(document, path).is_some());
+    set_config_document_item(document, stored_path, None)?;
+    if let Some(alternate_path) = alternate_path {
+        set_config_document_item(document, alternate_path, None)?;
+    }
+    Ok(stored_exists || alternate_exists)
+}
+
 fn upkeep_observe_marker_for_set(key: &str) -> Option<&'static str> {
     match key {
         "upkeep.codemap" => Some("upkeep.observe_since.codemap"),
@@ -321,7 +336,7 @@ fn set_config_document_path(
 
 /// Remove the stored override without serializing defaults back into the file.
 /// Keep the same operator guard and atomic writer as other config mutations.
-fn reset_config_value(
+pub(super) fn reset_config_value(
     key: &str,
     cas_root: &Path,
 ) -> anyhow::Result<(String, String)> {
@@ -336,12 +351,7 @@ fn reset_config_value(
     };
     let before: Config = toml::from_str(&raw)?;
     let mut document = toml_edit::Document::parse(&raw)?.into_mut();
-    let mut parts: Vec<_> = key.split('.').collect();
-    let leaf = parts.pop().expect("a config key has at least one part");
-    let parent = parts.into_iter().try_fold(document.as_item_mut(), |item, part| {
-        item.as_table_like_mut()?.get_mut(part)
-    });
-    let removed = parent.and_then(|item| item.as_table_like_mut()?.remove(leaf)).is_some();
+    let removed = remove_config_document_key(&mut document, key)?;
     let contents = document.to_string();
     let after: Config = toml::from_str(&contents)?;
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
@@ -953,7 +963,7 @@ mod tests {
         keys.dedup();
 
         for key in keys {
-            let document = if key == "factory.write_roots" {
+            let mut document = if key == "factory.write_roots" {
                 let mut config = Config::default();
                 config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
                 toml_edit::Document::parse(toml::to_string(&config).unwrap())
@@ -1014,11 +1024,16 @@ mod tests {
                 resolved.unwrap_or_else(|| panic!("no TOML value materialized registry key {key}"))
             };
 
-            let (_, stored_path, _) = config_document_paths(&document, key);
+            let (_, stored_path, alternate_path) = config_document_paths(&document, key);
             assert!(
                 config_document_item(document.as_item(), stored_path).is_some(),
                 "registry key {key} did not resolve to a serialized TOML path {stored_path} in:\n{document}"
             );
+            assert!(remove_config_document_key(&mut document, key).unwrap(), "{key}");
+            assert!(config_document_item(&document, stored_path).is_none(), "{key}");
+            if let Some(alternate_path) = alternate_path {
+                assert!(config_document_item(&document, alternate_path).is_none(), "{key}");
+            }
         }
     }
 

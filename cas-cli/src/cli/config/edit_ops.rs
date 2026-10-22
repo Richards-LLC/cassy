@@ -99,6 +99,7 @@ fn execute_edit_line_based_with_input(
 
     let mut stdout = std::io::stdout();
     let mut changes_made = 0;
+    let mut pending_resets = Vec::new();
 
     for meta in configs_to_edit {
         let current_value = items
@@ -149,16 +150,10 @@ fn execute_edit_line_based_with_input(
                 break;
             }
             "d" | "D" => {
-                // Reset to default
-                if current_value != meta.default {
-                    config.set(meta.key, meta.default)?;
-                    changes_made += 1;
-                    fmt.success(&format!("   Reset to: {}", meta.default))?;
-                } else {
-                    fmt.write_raw("   ")?;
-                    fmt.write_muted("Already at default")?;
-                    fmt.newline()?;
-                }
+                config.set(meta.key, meta.default)?;
+                pending_resets.push(meta.key.to_owned());
+                changes_made += 1;
+                fmt.success(&format!("   Reset to: {}", meta.default))?;
             }
             new_value => {
                 // Validate and set
@@ -195,6 +190,9 @@ fn execute_edit_line_based_with_input(
             crate::config::operator_policy::InvocationContext::from_process,
         )?;
         config.save(cas_root)?;
+        for key in pending_resets {
+            crate::cli::config::reset_config_value(&key, cas_root)?;
+        }
         fmt.success(&format!("Saved {changes_made} change(s)"))?;
     } else {
         fmt.write_muted("No changes made")?;

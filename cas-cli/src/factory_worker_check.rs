@@ -2030,6 +2030,10 @@ mod tests {
                 .env("PID_FILE", root.join("pids"))
                 .env("CARGO", root.join("fake-cargo.py"))
                 .env("PYTHONPATH", &root)
+                // CI runs the suite under run-verified-tests.sh with a
+                // relative VERIFIED_TEST_LOG; the nested runner must not
+                // inherit it, or it cannot open the log and never starts Cargo.
+                .env_remove("VERIFIED_TEST_LOG")
                 .stdout(Stdio::null()).stderr(Stdio::null());
             command.process_group(0);
             let signals = WorkerWaitSignals::install().unwrap();

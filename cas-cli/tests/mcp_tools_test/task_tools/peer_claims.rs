@@ -45,6 +45,9 @@ struct FakeState {
     renew_after_lock_reads: Option<(usize, bool)>,
     change_after_lock_read: Option<(usize, Option<String>)>,
     return_released_rows: bool,
+    // Apply a late release/competing claim in the claim-to-renew gap.
+    change_before_renew: Option<Option<String>>,
+    fail_renew: bool,
     // Pause exactly at the remote handoff, after the local lease has won.
     release_gate: Option<(tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     // cas-c55f: hold the next file-lease release until the test resumes it.
@@ -192,6 +195,19 @@ impl FakeCloud {
         let key = key.to_string();
         let agent_id = body["agent_id"].as_str().unwrap_or_default().to_string();
         let now = Utc::now();
+        if method == "POST" && action == "renew" {
+            if let Some(winner) = state.change_before_renew.take()
+                && let Some(lock) = state.locks.get_mut(&key)
+            {
+                match winner {
+                    Some(winner) => { lock.agent_id = winner; lock.epoch += 1; }
+                    None => lock.status = "released".into(),
+                }
+            }
+            if state.fail_renew {
+                return (500, serde_json::json!({"error": "injected renewal failure"}));
+            }
+        }
         let active = state.locks.get(&key).filter(|lock| lock.status == "active").cloned();
         match (method, action) {
             ("POST", "claim") => match active {
@@ -914,6 +930,100 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
         let taken = start(&worker, "cas-p008", false).await.expect("a local holder is not a peer");
         let (_, lock) = cloud.active_lock("cas-p008").unwrap();
         assert_ne!(lock.agent_id, alpha.agent_id, "{taken}");
+    }
+}
+
+/// A same-agent re-claim leaves the old Cloud snapshot unchanged until
+/// renewal; a late release can therefore win that one-round-trip gap.
+#[tokio::test]
+async fn cas_cfe6_start_repairs_or_honestly_reports_a_failed_claim_renewal() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    for outcome in ["released", "peer", "unavailable"] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+        let restart = machine(&cloud.url, PROJECT, "restart-worker");
+        let peer = machine(&cloud.url, PROJECT, "peer-worker");
+        let task = "cas-renew-gap";
+        for m in [&alpha, &restart] { m.put_task(task, TaskType::Task); }
+        cloud.live(&peer, "peer-worker");
+        start(&alpha.core, task, false).await.unwrap();
+        let before = cloud.active_lock(task).unwrap().1;
+        {
+            let mut state = cloud.state.lock().unwrap();
+            if outcome == "unavailable" {
+                state.fail_renew = true;
+            } else {
+                state.change_before_renew = Some((outcome == "peer").then(|| peer.agent_id.clone()));
+            }
+        }
+        let result = start(&restart.core, task, false).await;
+        let local = open_agent_store(&restart.cas_dir).unwrap().get_lease(task).unwrap();
+        match outcome {
+            "released" => {
+                let started = result.expect("restart repairs its Cloud claim before success");
+                let (_, lock) = cloud.active_lock(task).expect("the restarted claim exists immediately");
+                assert_eq!(lock.agent_id, restart.agent_id, "{started}");
+                assert!(lock.epoch > before.epoch, "a fresh claim replaced the released snapshot");
+                assert!(local.is_some(), "{started}");
+            }
+            "peer" => {
+                let error = result.expect_err("a peer winning the renewal gap refuses the start");
+                assert!(error.contains("peer-worker"), "{error}");
+                assert!(local.is_none(), "a refused restart publishes no local lease");
+                assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
+            }
+            _ => {
+                let started = result.expect("unavailable Cloud still permits a local lease");
+                assert!(started.to_lowercase().contains("unreachable"), "{started}");
+                assert!(local.is_some());
+                let renews = cloud.state.lock().unwrap().requests.iter()
+                    .filter(|r| r.ends_with("/renew")).count();
+                assert!(renews <= 3, "repair is bounded (including the initial start): {renews}");
+            }
+        }
+    }
+}
+
+/// Moving a local lease may find its Cloud mirror already moved to the winner.
+#[tokio::test]
+async fn cas_cfe6_local_transfer_classifies_the_current_cloud_holder() {
+    use cas::cloud::peer_claims::{Acquire, ClaimKind, PeerClaims};
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    for holder in ["self", "previous", "peer", "absent"] {
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "new-worker");
+        let previous = machine(&cloud.url, PROJECT, "old-worker");
+        let peer = machine(&cloud.url, PROJECT, "peer-worker");
+        cloud.live(&peer, "peer-worker");
+        let task = "cas-transfer-gap";
+        alpha.put_task(task, TaskType::Task);
+        start(&alpha.core, task, false).await.unwrap();
+        match holder {
+            "previous" => cloud.give_to(task, &previous.agent_id, None),
+            "peer" => cloud.give_to(task, &peer.agent_id, None),
+            "absent" => cloud.drop_lock(task),
+            _ => {}
+        }
+        let before = cloud.active_lock(task);
+        let claims = PeerClaims::for_project(&alpha.cas_dir).unwrap();
+        let answer = claims.take_from_local(task, ClaimKind::Task, &previous.agent_id,
+            &alpha.agent_id, "new-worker", 600);
+        if holder == "peer" {
+            assert!(matches!(answer, Acquire::PeerHolds(_)), "{answer:?}");
+            assert_eq!(cloud.active_lock(task).unwrap().1.agent_id, peer.agent_id);
+        } else {
+            assert!(matches!(answer, Acquire::Claimed), "{holder}: {answer:?}");
+            let after = cloud.active_lock(task).unwrap().1;
+            assert_eq!(after.agent_id, alpha.agent_id);
+            if holder == "self" {
+                let before = before.unwrap().1;
+                assert_eq!((after.epoch, after.renewal_count), (before.epoch, before.renewal_count));
+                assert!(!cloud.state.lock().unwrap().requests.iter().any(|r| r.ends_with("/release")),
+                    "a transfer must not release its winner's own claim");
+            }
+        }
     }
 }
 

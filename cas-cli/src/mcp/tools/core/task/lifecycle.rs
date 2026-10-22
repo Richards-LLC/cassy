@@ -1089,11 +1089,19 @@ impl CasCore {
             if task.status != TaskStatus::InProgress {
                 continue;
             }
-            let epic = task_store
-                .get_parent_epic(&task.id)
-                .map_err(inspect_error)?
-                .map(|t| t.id);
-            let target = task.deliverables.work_target;
+            let (epic, target) = if task.task_type == TaskType::Epic {
+                // A Standard caller also leases the epic when starting a child.
+                // Compare that lease using the same live lane a child inherits,
+                // rather than the epic's own PR/base target.
+                let target = super::repo_context::inherited_work_target_from_epic(&task);
+                (Some(task.id.clone()), target)
+            } else {
+                let epic = task_store
+                    .get_parent_epic(&task.id)
+                    .map_err(inspect_error)?
+                    .map(|t| t.id);
+                (epic, task.deliverables.work_target)
+            };
             if let Some((_, previous_epic, previous_target)) = &binding {
                 if previous_epic != &epic || previous_target != &target {
                     return Err(McpError {
@@ -1223,16 +1231,19 @@ impl CasCore {
             })
             .unwrap_or_default();
         let created_by = self.get_agent_id().ok();
-        let active_binding =
-            if req.epic.is_none() && target_repo.is_none() && target_branch.is_none() {
-                created_by
-                    .as_deref()
-                    .map(|agent| self.active_task_create_binding(task_store.as_ref(), agent))
-                    .transpose()?
-                    .flatten()
-            } else {
-                None
-            };
+        let active_binding = if task_type != TaskType::Epic
+            && req.epic.is_none()
+            && target_repo.is_none()
+            && target_branch.is_none()
+        {
+            created_by
+                .as_deref()
+                .map(|agent| self.active_task_create_binding(task_store.as_ref(), agent))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let epic_id = req
             .epic
             .as_deref()

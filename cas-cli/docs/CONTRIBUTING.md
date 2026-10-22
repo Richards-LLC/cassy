@@ -1137,9 +1137,12 @@ still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 ### Assignment on task creation
 
 When `epic`, `target_repo` and `target_branch` are all omitted, task creation
-inherits the caller's active task's epic and exact WorkTarget together. Only
-valid leases on InProgress tasks count; held or expired work does not. Multiple
-eligible tasks must agree on both bindings, or creation refuses and requests an
+inherits the caller's active task's epic and exact WorkTarget together. A leased
+epic supplies its own ID and live delivery lane, so an automatically leased
+parent agrees with its child. Creating a new epic never uses this default: it
+gets its own branch and target. Only valid leases on InProgress tasks count;
+held or expired work does not. Multiple eligible tasks must agree on both
+bindings, or creation refuses and requests an
 explicit binding. The receipt names the source task, epic, repository and branch.
 Any explicit binding keeps the explicit resolver: an alternate epic follows
 that epic's lane, and `epic=""` deliberately creates standalone work. Omitted

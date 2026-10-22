@@ -879,6 +879,12 @@ fn wait_for_lock_or_satisfying_hub(
         if let Some(lock) = paths.try_acquire_instance_lock()? {
             return Ok(LaunchWait::Acquired(lock));
         }
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_LAUNCH_WAIT_BARRIER",
+            "launch-waiter",
+            "release-launch-waiter",
+            std::process::id(),
+        )?;
         if let Ok(record) = paths.read_process_record()
             && running_hub_satisfies_request(
                 &record,
@@ -3095,6 +3101,12 @@ fn stop_with_output_before(
             return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
         }
     }
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_STOP_CLEANUP_BARRIER",
+        "stop-cleanup",
+        "release-stop-cleanup",
+        std::process::id(),
+    )?;
     if let Some(cgroup) = hub_cgroup {
         if let Err(error) = crate::ui::factory::cgroup::kill_scope(&cgroup) {
             tracing::warn!(

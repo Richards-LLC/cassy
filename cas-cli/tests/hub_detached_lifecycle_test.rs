@@ -331,6 +331,82 @@ fn hub_restart_json_emits_one_value_with_stop_and_start_outcomes() {
         String::from_utf8_lossy(&stop.stderr)
     );
 
+    // cas-bcef: hold an old stop after quiescence but before cleanup. A peer
+    // launch must wait for that cleanup, rather than publish a record which
+    // the old stop can subsequently unlink.
+    {
+        let race_home = private_home();
+        let paths = HubRuntimePaths::new(race_home.path().join(".cas/hub"));
+        let barrier = race_home.path().join("stop-cleanup-barrier");
+        fs::create_dir_all(&barrier).unwrap();
+        let initial = cas_command(race_home.path(), &path)
+            .args(["--json", "hub", "--no-tailscale-serve", "start", "--port", "0"])
+            .output()
+            .expect("start old generation before cleanup race");
+        assert!(initial.status.success(), "{initial:?}");
+        let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+        let stopper = cas_command(race_home.path(), &path)
+            .env("CAS_TEST_HUB_STOP_CLEANUP_BARRIER", &barrier)
+            .args(["--json", "hub", "stop"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("pause old stop before cleanup");
+        let cleanup_marker = barrier.join(format!("stop-cleanup-{}", stopper.id()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cleanup_marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !cleanup_marker.exists() {
+            fs::write(barrier.join("release-stop-cleanup"), b"release\n").unwrap();
+            let output = stopper.wait_with_output().unwrap();
+            panic!("old stop did not reach cleanup: {output:?}");
+        }
+        let mut starter = cas_command(race_home.path(), &path)
+            .env("CAS_TEST_HUB_LAUNCH_WAIT_BARRIER", &barrier)
+            .args(["--json", "hub", "--no-tailscale-serve", "start", "--port", "0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start replacement during old cleanup");
+        let launch_marker = barrier.join(format!("launch-waiter-{}", starter.id()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Either the peer contends on cleanup (correct), or it completes its
+        // launch before cleanup (the original record-loss interleaving).
+        while !launch_marker.exists()
+            && starter.try_wait().unwrap().is_none()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(barrier.join("release-stop-cleanup"), b"release\n").unwrap();
+        let stopped = stopper.wait_with_output().unwrap();
+        fs::write(barrier.join("release-launch-waiter"), b"release\n").unwrap();
+        let started = starter.wait_with_output().unwrap();
+        assert!(stopped.status.success(), "{stopped:?}");
+        assert!(started.status.success(), "{started:?}");
+        let replacement: Value = serde_json::from_slice(&started.stdout).unwrap();
+        assert_ne!(replacement["pid"], initial["pid"]);
+        let status = cas_command(race_home.path(), &path)
+            .args(["--json", "hub", "status"])
+            .output()
+            .expect("read replacement after old cleanup");
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(
+            status["running"], true,
+            "old stop erased the successful replacement's process record: {status}"
+        );
+        assert_eq!(status["record"]["pid"], replacement["pid"], "{status}");
+        assert!(paths.lock_holders().iter().any(|holder| {
+            Some(u64::from(holder.pid)) == replacement["pid"].as_u64()
+        }), "replacement record must identify the actual lock owner: {status}");
+        let stopped = cas_command(race_home.path(), &path)
+            .args(["--json", "hub", "stop"])
+            .output()
+            .expect("stop cleanup-race replacement");
+        assert!(stopped.status.success(), "{stopped:?}");
+    }
+
     // Force both restart parents past their old-hub stop and into launch before
     // releasing either new hub. Holding their result observers then makes one
     // parent deterministically see the peer's ready record. Other passes hold

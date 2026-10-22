@@ -915,6 +915,10 @@ mod supervisor_handoff_tests {
             }
             tasks.add(&task).unwrap();
         }
+        let mut leased = Task::new("cas-leased".into(), "Supervisor lease without assignee".into());
+        leased.status = TaskStatus::InProgress;
+        tasks.add(&leased).unwrap();
+        agents.try_claim(&leased.id, &ending.id, 600, None).unwrap();
         let mut worker = Agent::new("live-worker-id".into(), "live-worker".into());
         worker.role = AgentRole::Worker;
         worker.factory_session = ending.factory_session.clone();
@@ -1015,6 +1019,8 @@ mod supervisor_handoff_tests {
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(context.contains("\"id\":\"cas-leased\""), "supervisor lease ownership must survive even without an assignee: {context}");
+        assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
         let handoff_end = context.find("verify current liveness before recovery.").unwrap();
         assert!(handoff_end - handoff_start < 2800, "long history must stay in the full receipt, inside startup's context budget");

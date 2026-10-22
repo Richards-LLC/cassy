@@ -1345,9 +1345,17 @@ pub fn renew_split_claims(cas_root: &Path, claims: &PeerClaims, agent_id: &str, 
     let Ok(splits) = current_epic_splits(cas_root) else {
         return 0;
     };
-    let task_leases: std::collections::HashSet<String> = crate::store::open_agent_store(cas_root)
-        .and_then(|agents| agents.list_renewable_task_leases(agent_id))
-        .unwrap_or_default()
+    let Ok(agents) = crate::store::open_agent_store(cas_root) else {
+        return 0;
+    };
+    let task_leases = match agents.list_renewable_task_leases(agent_id) {
+        Ok(leases) => leases,
+        Err(error) => {
+            tracing::warn!(%error, agent = %agent_id, "could not read task leases before split renewal");
+            return 0;
+        }
+    };
+    let task_leases: std::collections::HashSet<String> = task_leases
         .into_iter()
         .filter(|lease| lease.is_valid())
         .map(|lease| lease.task_id)

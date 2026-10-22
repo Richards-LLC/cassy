@@ -357,6 +357,7 @@ impl Config {
             ("qa.release.timeout_secs".into(), self.get("qa.release.timeout_secs").unwrap()),
             ("qa.release.retention_days".into(), self.get("qa.release.retention_days").unwrap()),
             ("qa.release.components".into(), self.get("qa.release.components").unwrap()),
+            ("qa.release.target_env".into(), self.get("qa.release.target_env").unwrap()),
             ("qa.release.grant_envs".into(), self.get("qa.release.grant_envs").unwrap()),
             ("qa.release.migrations.paths".into(), self.get("qa.release.migrations.paths").unwrap()),
             ("qa.release.migrations.env".into(), self.get("qa.release.migrations.env").unwrap()),

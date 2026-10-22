@@ -329,13 +329,9 @@ fn put_pull_merge(tokens: &[&str]) -> Option<(u64, Option<String>)> {
     })
 }
 
-/// Run a command with a hard deadline; stdout on success.
-fn run_bounded(command: Command, timeout: Duration) -> Option<Vec<u8>> {
-    run_bounded_detailed(command, timeout).ok()
-}
-
-/// [`run_bounded`] that says why it produced nothing: the program could not
-/// start, it timed out, or it exited non-zero (with its first stderr line).
+/// Run a command with a hard deadline; stdout on success, else why it
+/// produced nothing: the program could not start, it timed out, or it exited
+/// non-zero (with its first stderr line).
 fn run_bounded_detailed(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
@@ -732,7 +728,7 @@ fn truncate_description(description: &str) -> String {
     short
 }
 
-fn github_status_enabled(cas_root: &Path) -> bool {
+pub(crate) fn github_status_enabled(cas_root: &Path) -> bool {
     crate::config::Config::load(cas_root)
         .map(|config| config.qa().github_status)
         .unwrap_or(false)
@@ -788,10 +784,12 @@ pub fn publish_not_required(cas_root: &Path, repo: &Path, head: &str) {
     );
 }
 
-/// The `gh api` arguments that publish one status on an explicit repo.
+/// The `gh api` arguments that publish one status under `context` on an
+/// explicit repo.
 pub fn status_publish_args(
     repo: &str,
     sha: &str,
+    context: &str,
     state: QaCommitState,
     description: &str,
 ) -> Vec<String> {
@@ -803,10 +801,85 @@ pub fn status_publish_args(
         "-f".to_string(),
         format!("state={}", state.as_str()),
         "-f".to_string(),
-        format!("context={QA_STATUS_CONTEXT}"),
+        format!("context={context}"),
         "-f".to_string(),
-        format!("description={description}"),
+        format!("description={}", truncate_description(description)),
     ]
+}
+
+/// The `owner/repo` statuses go to: the checkout's GitHub origin, canonical
+/// after a rename or transfer when GitHub can say so.
+fn publish_repo(repo: &Path, gh: &std::ffi::OsStr) -> Result<String, String> {
+    let timeout = Duration::from_secs(2);
+    let origin = match crate::github_repo::origin_slug(repo, timeout) {
+        Ok(Some(origin)) => origin,
+        Ok(None) => return Err("the checkout has no GitHub origin".to_string()),
+        Err(error) => return Err(error),
+    };
+    match crate::github_repo::resolve_slug(&origin, repo, Path::new(gh), timeout) {
+        Ok(resolved) => Ok(resolved.canonical),
+        Err(error) => {
+            // Try the explicit origin endpoint when metadata is unavailable;
+            // upstream/default selection must never suppress the status.
+            tracing::warn!(target: "cas::qa", %error, %origin, "canonical repository lookup failed; publishing against explicit origin");
+            Ok(origin)
+        }
+    }
+}
+
+/// Publishes one commit status now, through the same `gh` seam as every
+/// Cassy status. The error says why nothing was published.
+pub fn publish_status(
+    repo: &Path,
+    sha: &str,
+    context: &str,
+    state: QaCommitState,
+    description: &str,
+) -> Result<(), String> {
+    publish_with(gh_bin(), repo, sha, context, state, description)
+}
+
+fn publish_with(
+    gh: std::ffi::OsString,
+    repo: &Path,
+    sha: &str,
+    context: &str,
+    state: QaCommitState,
+    description: &str,
+) -> Result<(), String> {
+    let publish_repo = publish_repo(repo, &gh)?;
+    let mut command = Command::new(gh);
+    command
+        .env("GH_HOST", "github.com")
+        .args(status_publish_args(&publish_repo, sha, context, state, description))
+        .current_dir(repo);
+    run_bounded_detailed(command, GH_PUBLISH_TIMEOUT)?;
+    tracing::info!(target: "cas::qa", sha = %sha, state = state.as_str(), context, "published commit status");
+    Ok(())
+}
+
+/// The head commit of each open PR into `base`, by PR number.
+pub fn open_pr_heads(repo: &Path, base: &str) -> Result<Vec<(u64, String)>, String> {
+    let gh = gh_bin();
+    let publish_repo = publish_repo(repo, &gh)?;
+    let mut command = Command::new(gh);
+    command
+        .env("GH_HOST", "github.com")
+        .args(["pr", "list", "--repo", &publish_repo, "--base", base, "--state", "open"])
+        .args(["--limit", "100", "--json", "number,headRefOid"])
+        .current_dir(repo);
+    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    let prs: Vec<serde_json::Value> = serde_json::from_slice(&stdout)
+        .map_err(|error| format!("`gh pr list` returned unreadable JSON: {error}"))?;
+    Ok(prs
+        .iter()
+        .filter_map(|pr| {
+            let number = pr.get("number")?.as_u64()?;
+            let sha = pr.get("headRefOid")?.as_str()?;
+            let hex = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+            hex.then(|| (number, sha.to_ascii_lowercase()))
+        })
+        .collect())
 }
 
 fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: String) {
@@ -815,43 +888,15 @@ fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: 
     let spawned = std::thread::Builder::new()
         .name("cas-qa-github-status".to_string())
         .spawn(move || {
-            let timeout = Duration::from_secs(2);
-            let origin = match crate::github_repo::origin_slug(&repo, timeout) {
-                Ok(Some(origin)) => origin,
-                result => {
-                    tracing::warn!(target: "cas::qa", ?result, "QA STATUS PUBLISH FAILED: GitHub origin unavailable; required check stays unmet");
-                    return;
-                }
-            };
-            let publish_repo = match crate::github_repo::resolve_slug(&origin, &repo, Path::new(&gh), timeout) {
-                Ok(repo) => repo.canonical,
-                Err(error) => {
-                    // Try the explicit origin endpoint when metadata is unavailable;
-                    // upstream/default selection must never suppress the status.
-                    tracing::warn!(target: "cas::qa", %error, %origin, "independent QA canonical repository lookup failed; publishing against explicit origin");
-                    origin
-                }
-            };
-            let mut command = Command::new(gh);
-            command
-                .env("GH_HOST", "github.com")
-                .args(status_publish_args(&publish_repo, &sha, state, &description))
-                .current_dir(&repo);
-            match run_bounded(command, GH_PUBLISH_TIMEOUT) {
-                Some(_) => tracing::info!(
-                    target: "cas::qa",
-                    sha = %sha,
-                    state = state.as_str(),
-                    context = QA_STATUS_CONTEXT,
-                    "cas-2ee2: published independent QA commit status"
-                ),
-                None => tracing::warn!(
+            if let Err(error) = publish_with(gh, &repo, &sha, QA_STATUS_CONTEXT, state, &description) {
+                tracing::warn!(
                     target: "cas::qa",
                     sha = %sha,
                     state = state.as_str(),
                     repo = %repo.display(),
+                    %error,
                     "cas-2ee2: independent QA commit status not published; the required check stays unmet"
-                ),
+                );
             }
         });
     if let Err(error) = spawned {
@@ -999,6 +1044,7 @@ mod tests {
         let args = status_publish_args(
             "Richards-LLC/cassy",
             "abc123",
+            QA_STATUS_CONTEXT,
             QaCommitState::Pending,
             "round open",
         );
@@ -1017,6 +1063,15 @@ mod tests {
                 "description=round open",
             ]
         );
+        let gate = status_publish_args(
+            "acme/app",
+            "abc123",
+            crate::qa_release::promotion::RELEASE_GATE_CONTEXT,
+            QaCommitState::Failure,
+            &"FAILED rows: checkout ".repeat(20),
+        );
+        assert_eq!(gate[7], "context=cassy/release-gate");
+        assert_eq!(gate[9].chars().count(), "description=".len() + STATUS_DESCRIPTION_MAX);
     }
 
     #[test]

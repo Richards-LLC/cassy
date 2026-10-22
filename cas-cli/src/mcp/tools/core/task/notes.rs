@@ -52,12 +52,24 @@ impl CasCore {
             data: None,
         })?;
 
-        if let Some(message) = super::caller_note_marker_rejection(&req.note) {
+        if let Some(message) = super::forged_marker_rejection(&req.note) {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(message),
                 data: None,
             });
+        }
+        if crate::qa_release::promotion::names_override(&req.note) {
+            let well_formed = req.note_type.eq_ignore_ascii_case("decision")
+                && !req.note.contains('\n')
+                && crate::qa_release::promotion::is_override_note(&req.note);
+            if !well_formed || self.resolve_live_supervisor_authority().is_err() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(super::RELEASE_GATE_OVERRIDE_RULE),
+                    data: None,
+                });
+            }
         }
 
         let supervisor_override = req.supervisor_override.unwrap_or(false);

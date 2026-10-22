@@ -1782,6 +1782,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
             .env_remove("VERIFIED_TEST_LOG")
             .env("CARGO", cargo);
+        if test.is_some() {
+            command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
+        }
         command
     } else {
         let mut command = Command::new(cargo);
@@ -3910,6 +3913,7 @@ for key in ['VIKTOR_API_KEY', 'VIKTOR_KEY', 'NEON_API_KEY', 'NEON_TOKEN', 'VERCE
 assert os.environ.get('XDG_CONFIG_HOME') == {xdg:?}, 'private config directory lost'
 assert os.environ.get('CAS_SESSION_ID') == 'worker-env-fixture', 'runtime identity lost'
 assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target'), 'private target lost'
+assert os.environ.get('CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS') == '120', 'discovery bound lost'
 (Path.cwd() / 'target' / 'environment-observed').write_text('credential-free private config')
 PYENV
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'

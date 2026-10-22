@@ -44,14 +44,19 @@ expect() {
     fi
 }
 
-stub="$(make_stub green-nextest 0 <<'EOF'
-    Starting 2 tests across 1 binary (0 skipped)
-------------
-     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped
+stub="${tmpdir}/green-nextest"
+cat >"${stub}" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+echo '    Starting 2 tests across 1 binary (0 skipped)'
+sleep 0.4
+echo '------------'
+echo '     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped'
 EOF
-)"
+chmod +x "${stub}"
 expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
-    env CARGO="${stub}" "${guard}" nextest run -p cas --lib module
+    env CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib module
 
 count_file="${tmpdir}/count"
 expect pass 'PASS: 2 test(s) passed' 'embedded guard exports count in supplied worktree' \
@@ -81,6 +86,33 @@ echo 99 >"${count_file}"
 expect fail '0 tests passed' 'zero-match retry clears stale exported count' \
     env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
 expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
+
+# cas-7cb0: nextest may stall while a libtest child writes its --list output.
+# The capped wrapper must diagnose and stop discovery before tests start.
+cat >"${tmpdir}/stalled-nextest" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+trap 'echo TERM > "${CAS_TEST_TERM_MARKER}"' TERM
+sleep 2 &
+wait
+EOF
+chmod +x "${tmpdir}/stalled-nextest"
+cat >"${tmpdir}/sample" <<'EOF'
+#!/usr/bin/env bash
+echo 'fake libtest stack: StdoutLock::write'
+EOF
+chmod +x "${tmpdir}/sample"
+expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
+    env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
+    VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_TEST_TERM_MARKER="${tmpdir}/terminated" \
+    CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib -E 'test(stalled)'
+expect pass 'TERM' 'stalled discovery kills its process group' \
+    cat "${tmpdir}/terminated"
+expect pass 'phase=--list PID=' 'stalled discovery names phase and child PID' \
+    grep -F 'phase=--list PID=' "${tmpdir}/stalled.log"
+expect pass 'fake libtest stack: StdoutLock::write' 'stalled discovery logs a child sample' \
+    grep -F 'fake libtest stack: StdoutLock::write' "${tmpdir}/stalled.log"
 
 stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure

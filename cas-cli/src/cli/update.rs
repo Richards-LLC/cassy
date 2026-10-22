@@ -84,10 +84,36 @@ fn builtin_prune_reason(file: &str) -> &'static str {
     }
 }
 
+/// Wrap without losing path characters, including tokens wider than a row.
+fn wrap_builtin_receipt(message: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in message.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() { line.push(' '); }
+        for ch in word.chars() {
+            if line.chars().count() == width {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(ch);
+        }
+    }
+    if !line.is_empty() { lines.push(line); }
+    lines
+}
+
 fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()> {
     let mut out = io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
-    let (lines, shortened) = findings::wrap(message, usize::from(fmt.width()).saturating_sub(9), false);
+    let message = match dirs::home_dir() {
+        Some(home) => message.replace(&format!("{}/", home.display()), "~/"),
+        None => message.to_string(),
+    };
+    // The surrounding update phase indents captured output by two more cells.
+    let lines = wrap_builtin_receipt(&message, usize::from(fmt.width()).saturating_sub(11));
     for (index, line) in lines.iter().enumerate() {
         if index == 0 {
             fmt.write_raw("  ")?;
@@ -95,9 +121,6 @@ fn report_builtin_advisory(message: &str, theme: &ActiveTheme) -> io::Result<()>
         } else {
             fmt.write_raw(&format!("         {line}\n"))?;
         }
-    }
-    if shortened {
-        fmt.write_raw("    Full paths: cas update --user --json\n")?;
     }
     Ok(())
 }
@@ -3452,7 +3475,7 @@ fn sync_user_builtins_with_discovery(
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, theme.clone());
             fmt.write_raw("  ")?;
-            fmt.warning("~/.claude does not exist — skipping (Claude Code not installed?)")?;
+            fmt.warning("~/.claude does not exist; skipping (Claude Code not installed?)")?;
         }
         None
     };
@@ -3575,9 +3598,8 @@ fn sync_user_builtins_with_discovery(
                 let receipt = format!("{location}: finish {} updated, {} preserved, {} removed", result.total_updated(), preserved.len(), result.pruned_files.len());
                 let mut out = io::stdout();
                 let mut fmt = Formatter::stdout(&mut out, theme.clone());
-                let (lines, shortened) = findings::wrap(&receipt, usize::from(fmt.width()).saturating_sub(2), false);
+                let lines = wrap_builtin_receipt(&receipt, usize::from(fmt.width()).saturating_sub(4));
                 for line in lines { fmt.write_raw(&format!("  {line}\n"))?; }
-                if shortened { fmt.write_raw("  Full paths: cas update --user --json\n")?; }
                 drop(fmt);
                 for warning in &result.warnings { report_builtin_advisory(warning, &theme)?; }
             }

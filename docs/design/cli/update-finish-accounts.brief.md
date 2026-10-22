@@ -10,5 +10,5 @@
 
 Personal Codex finish takes precedence. A hash-proven pristine Cassy copy is
 removed; dual-custom conflicts preserve both paths for operator review. JSON
-retains full paths and causes; human rows shorten long paths with an explicit
-`cas update --user --json` escape.
+retains full paths and causes; human rows contract HOME to `~` and wrap long
+paths without elision. The absent-Claude advisory uses ASCII punctuation.

@@ -752,6 +752,18 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     let warning = warnings[0].as_str().unwrap();
     assert!(warning.contains(personal.to_str().unwrap()) && warning.contains(custom_copy.to_str().unwrap()), "{warning}");
     assert_eq!(std::fs::read_to_string(custom_copy).unwrap(), custom_body);
+    let long_profile = format!(".codex-{}@example.com", "operator".repeat(12));
+    let long_copy = home.join(&long_profile).join("skills/finish/SKILL.md");
+    std::fs::create_dir_all(long_copy.parent().unwrap()).unwrap();
+    std::fs::write(&long_copy, custom_body).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
+    assert!(human.contains("~/.agents/skills/finish/SKILL.md"), "{human}");
+    assert!(human.contains("~/.codex/skills/finish/SKILL.md"), "{human}");
+    let joined: String = human.split_whitespace().collect();
+    assert!(joined.contains(&format!("~/{long_profile}/skills/finish/SKILL.md")), "{human}");
+    assert!(human.lines().all(|line| line.chars().count() <= 78), "{human}");
+    assert!(!human.contains("...") && !human.contains('—'), "{human}");
     assert_eq!(std::fs::read_to_string(personal).unwrap(), customized);
 }
 

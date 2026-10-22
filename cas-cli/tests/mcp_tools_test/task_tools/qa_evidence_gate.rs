@@ -51,6 +51,7 @@ fn commit_file(repo: &Path, path: &str, body: &str) -> String {
 
 fn close_req(id: &str) -> TaskCloseRequest {
     TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("delivered".to_string()),

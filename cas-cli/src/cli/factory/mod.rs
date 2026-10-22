@@ -8,6 +8,7 @@
 mod cloud_attach;
 mod daemon;
 mod doctor;
+mod gc;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -315,10 +316,8 @@ pub struct FactoryArgs {
     #[arg(long = "worker-spec", value_name = "JSON")]
     pub worker_spec: Vec<String>,
 
-    /// Resolve workers through the embedded lane registry.
-    ///
-    /// A lane is mutually exclusive with explicit worker CLI/model/effort
-    /// recipe controls; names and account metadata may still be supplied.
+    /// Use a named lane instead of explicit CLI/model/effort controls.
+    // Names and account metadata may still be supplied with a lane.
     #[arg(long, global = true)]
     pub lane: Option<String>,
 
@@ -331,13 +330,8 @@ pub struct FactoryArgs {
     #[arg(long = "supervisor-spec", value_name = "JSON")]
     pub supervisor_spec: Option<String>,
 
-    /// Refuse to silently fall back when a resolved worker/supervisor spec
-    /// requests Codex but Codex is unavailable (binary missing, or missing
-    /// `~/.codex/auth.json` login) — bail with an actionable error instead
-    /// of rewriting the spec to Claude (cas-7199 / cas-a487). OR'd with
-    /// `[factory] strict_cli` in `.cas/config.toml`; either being true
-    /// enables strict mode. Default (this flag absent): fall back to
-    /// Claude with a loud warning — see `apply_codex_fallback`.
+    /// Refuse unavailable Codex instead of falling back to Claude.
+    // OR'd with factory.strict_cli; Codex availability includes its auth.json.
     #[arg(long = "strict-cli", global = true)]
     pub strict_cli: bool,
 
@@ -729,6 +723,22 @@ pub enum FactoryCommands {
         #[arg(long)]
         request: std::path::PathBuf,
     },
+    /// Publish a dead worker's explicit commit on the successor's own task ref.
+    RecoverBranch {
+        #[arg(long)]
+        task_id: String,
+        /// JSON request: branch, full head SHA, expected_remote (empty for absent).
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
+    /// Record an existing supervisor-run named test for an assigned task.
+    RecordTestReceipt {
+        #[arg(long)]
+        task_id: String,
+        /// JSON evidence: head, repo, cargo_args, log_path and exit_code.
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
     /// Internal capped runner installed by the worker PreToolUse guard.
     #[command(hide = true)]
     WorkerCheck {
@@ -737,6 +747,38 @@ pub enum FactoryCommands {
         /// Start the runner in its own session and return (backgrounded calls).
         #[arg(long)]
         detach: bool,
+        /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
+        #[arg(long)]
+        isolated_test_env: Option<std::path::PathBuf>,
+        #[arg(last = true, required = true)]
+        cargo_args: Vec<String>,
+    },
+    /// Create a disposable task-owned detached checkout; print its absolute path.
+    #[command(override_usage = "cas factory scratch-checkout [OPTIONS]\n       --cas-root <ROOT> --task-id <TASK> --head <SHA>")]
+    ScratchCheckout {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        dispatch_id: Option<String>,
+        #[arg(long)]
+        head: String,
+    },
+    /// Run a task's named tests at a verification's bound head under the
+    /// worker builder cap (task-verifier capped lane, cas-d95c)
+    VerifierTest {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        /// Task owning the disposable checkout
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        dispatch_id: Option<String>,
+        /// Full commit SHA of the verification's bound head
+        #[arg(long)]
+        head: String,
+        /// `nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -748,6 +790,12 @@ pub enum FactoryCommands {
         /// Explicit Cassy root (.cas directory)
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
+    },
+
+    /// Inspect or clean factory-owned state using the MCP GC handlers.
+    Gc {
+        #[command(subcommand)]
+        command: FactoryGcCommands,
     },
 
     /// Run as a factory daemon (internal use)
@@ -1135,6 +1183,39 @@ pub enum FactoryCommands {
     },
 }
 
+/// Factory garbage-collection commands.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+#[command(next_line_help = true)]
+pub enum FactoryGcCommands {
+    /// Show the same factory GC report as the coordination gc_report action.
+    Report,
+    /// Run the same cleanup as coordination gc_cleanup.
+    ///
+    /// Each run may mark stale agents and missing worktrees, purge dead agent
+    /// records, clear gone or recycled process-group records, and remove stale
+    /// skill markers.
+    ///
+    /// --force also reaps orphan worker process groups and prunes terminal
+    /// prompt entries.
+    ///
+    /// Target-cache reclamation, orphan-process kills, and journey-recording
+    /// cleanup require both --force and --no-dry-run.
+    ///
+    /// Artifact cleanup is available only through the MCP gc_cleanup action
+    /// with artifacts=true.
+    Cleanup {
+        /// Also reap orphan worker process groups and prune terminal prompts.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Keep cache, orphan-process, and journey cleanup in preview mode.
+        #[arg(long, conflicts_with = "no_dry_run")]
+        dry_run: bool,
+        /// Authorize cache, orphan-process, and journey cleanup with --force.
+        #[arg(long = "no-dry-run", conflicts_with = "dry_run")]
+        no_dry_run: bool,
+    },
+}
+
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
@@ -1149,20 +1230,58 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 println!("{result}");
                 Ok(())
             }
+            FactoryCommands::RecoverBranch { task_id, request } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("branch recovery requires a Cassy project"))?;
+                if std::fs::metadata(request)?.len() > 16 * 1024 {
+                    anyhow::bail!("branch recovery request exceeds 16 KiB");
+                }
+                let payload = std::fs::read_to_string(request)?;
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let receipt = crate::supervisor_branch_recovery::recover(&core, task_id, &payload)?;
+                if cli.json { println!("{}", serde_json::to_string(&receipt)?); }
+                else { println!("{}", receipt.render()); }
+                Ok(())
+            }
+            FactoryCommands::RecordTestReceipt { task_id, request } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("test receipt requires a Cassy project"))?;
+                if std::fs::metadata(request)?.len() > 512 * 1024 {
+                    anyhow::bail!("test receipt request exceeds 512 KiB");
+                }
+                let payload = std::fs::read_to_string(request)?;
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                println!("{}", crate::factory_worker_check::record_supervisor_test(&core, task_id, &payload)?);
+                Ok(())
+            }
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: true,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
+            FactoryCommands::ScratchCheckout { cas_root, task_id, dispatch_id, head } => {
+                let checkout = crate::factory_review_scratch::create(
+                    cas_root, &std::env::current_dir()?, task_id, dispatch_id.as_deref(), head,
+                )?;
+                if cli.json {
+                    println!("{}", serde_json::json!({"path": checkout.path, "task_id": task_id, "dispatch_id": dispatch_id, "head": head}));
+                } else {
+                    println!("{}", checkout.path.display());
+                }
+                Ok(())
+            }
+            FactoryCommands::VerifierTest { cas_root, task_id, dispatch_id, head, cargo_args } =>
+                crate::factory_worker_check::execute_verifier(cas_root, task_id, dispatch_id.as_deref(), head, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
+            FactoryCommands::Gc { command } => gc::execute(command, cli, cas_root),
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -2200,7 +2319,7 @@ fn check_factory_launch(
         match result {
             Ok(capacity) if capacity.pressure => {
                 let warning = format!(
-                    "Cargo target-cache disk pressure: {filesystem} is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
+                    "Cargo target-cache disk pressure: {filesystem} is {}% used (factory high watermark {}%, low watermark {}%). Run cas factory gc report --full or --json (MCP gc_report full=true), review cache details, then explicitly run gc_cleanup force=true dry_run=false.",
                     capacity.used_percent,
                     capacity.high_watermark_percent,
                     capacity.low_watermark_percent,

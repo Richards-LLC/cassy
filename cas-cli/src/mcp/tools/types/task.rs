@@ -283,6 +283,11 @@ pub struct TaskCloseRequest {
     #[serde(default)]
     pub reason: Option<String>,
 
+    /// Fresh declaration, measured and audited on each close attempt.
+    #[schemars(description = "Declare no delivery for this close attempt, with a non-empty reason. Requires registered caller and measured absence of recorded delivery, task commits and unmerged lane work. Verification and dirty-work checks remain required.")]
+    #[serde(default)]
+    pub no_delivery: Option<bool>,
+
     /// Supervisor override for close gates.
     ///
     /// The close handler accepts this only from a registered supervisor and

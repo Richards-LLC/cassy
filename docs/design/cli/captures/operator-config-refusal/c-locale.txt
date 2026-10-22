@@ -1,0 +1,8 @@
+[ERROR] Operator-only config change refused.
+  CAS_AGENT_NAME is set, so this runs inside an agent session.
+  verification.force_bypass_allowed is operator-only because it relaxes
+  a Cassy guard.
+  Run this command yourself from your own terminal:
+  cas config set verification.force_bypass_allowed <value>
+  If this is your own terminal, it inherited CAS_AGENT_NAME from an agent
+  pane: open a fresh terminal and run it there.

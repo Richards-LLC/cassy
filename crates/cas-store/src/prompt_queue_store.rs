@@ -1517,6 +1517,32 @@ const RELAY_SESSION_ENDED_SQL: &str = "NULLIF(factory_session, '') IS NOT NULL
              AND agents.status <> 'shutdown'
        )";
 
+/// A message whose body starts with this line (after an optional
+/// `[CAS reply: …]` first line) does not wake its recipient. cas-cli's
+/// `supervisor_message_wakes::QUIET` is this constant.
+pub const QUIET_MESSAGE_MARKER: &str = "<cas-message-quiet/>";
+
+/// Split off a message's quiet marker: whether it was quiet, and its text
+/// without the marker (an optional `[CAS reply: …]` first line is kept).
+fn split_quiet_marker(text: &str) -> (bool, String) {
+    let strip = |rest: &str| rest.strip_prefix(QUIET_MESSAGE_MARKER).map(|rest| rest.strip_prefix('\n').unwrap_or(rest).to_string());
+    if let Some(rest) = strip(text) {
+        return (true, rest);
+    }
+    if text.starts_with("[CAS reply:")
+        && let Some((head, rest)) = text.split_once('\n')
+        && let Some(rest) = strip(rest)
+    {
+        return (true, format!("{head}\n{rest}"));
+    }
+    (false, text.to_string())
+}
+
+/// cas-d1e0: the most rows one received-message history scan reads. It
+/// holds the connection lock, so even a filter that rejects every row
+/// stops here; a hit is logged.
+pub const RECEIVED_HISTORY_SCAN_CAP: usize = 2_000;
+
 impl SqlitePromptQueueStore {
     /// A local terminal task is positive evidence that its action alert expired.
     fn terminal_relay_task_status(
@@ -3437,6 +3463,120 @@ pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
 }
 
 impl SqlitePromptQueueStore {
+    /// Read consumed direct supervisor messages without changing delivery state.
+    /// The timestamp is the recipient's surfacing time, not enqueue/processing
+    /// time: a queued answer may only reach the worker after its checkpoint.
+    /// Transport reservations and handoffs alone do not prove body receipt.
+    pub fn received_supervisor_messages_since(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
+        self.received_supervisor_messages_since_matching(
+            recipient,
+            factory_session,
+            since,
+            limit,
+            |_, _| true,
+        )
+    }
+
+    /// Apply a caller's scope filter before counting the newest `limit` rows.
+    /// Stream rejected rows without retaining them. The predicate runs under
+    /// the connection lock and must not re-enter this store.
+    pub fn received_supervisor_messages_since_matching(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+        include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
+    ) -> Result<Vec<(QueuedPrompt, DateTime<Utc>)>> {
+        let (matched, hit_cap) = self.received_supervisor_messages_scan(
+            recipient,
+            factory_session,
+            since,
+            limit,
+            RECEIVED_HISTORY_SCAN_CAP,
+            include,
+        )?;
+        if hit_cap {
+            tracing::warn!(
+                recipient,
+                factory_session,
+                scan_cap = RECEIVED_HISTORY_SCAN_CAP,
+                "received-message history scan hit its row cap; older received messages were not considered"
+            );
+        }
+        Ok(matched)
+    }
+
+    /// The scan behind [`Self::received_supervisor_messages_since_matching`],
+    /// reading at most `scan_cap` rows, filtered or not. Also says whether
+    /// more rows lay beyond that cap when it stopped short of `limit` matches.
+    pub(crate) fn received_supervisor_messages_scan(
+        &self,
+        recipient: &str,
+        factory_session: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+        scan_cap: usize,
+        mut include: impl FnMut(&QueuedPrompt, DateTime<Utc>) -> bool,
+    ) -> Result<(Vec<(QueuedPrompt, DateTime<Utc>)>, bool)> {
+        if limit == 0 || scan_cap == 0 || recipient.is_empty() || factory_session.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at,
+                    q.summary, q.priority, q.acked_at, q.urgent, q.factory_session,
+                    q.origin_agent_id, q.origin_kind, q.operator_label,
+                    q.operator_device_id, q.operator_device_label, q.operator_scopes,
+                    q.operator_verified, q.recipient_device_id, q.kind, q.attachments,
+                    seen.seen_at
+               FROM prompt_queue q
+               JOIN prompt_queue_recipient_seen seen ON seen.prompt_id = q.id
+               JOIN agents a ON a.id = q.origin_agent_id
+              WHERE q.target = ?1 AND seen.recipient = ?1
+                AND q.factory_session = ?2 AND a.factory_session = ?2
+                AND q.origin_kind = 'registered_agent' AND a.role = 'supervisor'
+                AND seen.source IN {SURFACED_RECEIPT_SOURCES_SQL}
+                AND julianday(seen.seen_at) >= julianday(?3)
+              ORDER BY julianday(seen.seen_at) DESC, q.id DESC
+              LIMIT ?4"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                recipient,
+                factory_session,
+                since.to_rfc3339(),
+                i64::try_from(scan_cap.saturating_add(1)).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((Self::prompt_from_row(row)?, row.get::<_, String>(21)?)),
+        )?;
+        let mut matched = Vec::new();
+        // cas-e13c: one row past the cap is read only to learn whether the
+        // scan truly stopped short; it is never filtered or returned.
+        let mut scanned = 0usize;
+        for row in rows {
+            scanned += 1;
+            if scanned > scan_cap {
+                return Ok((matched, true));
+            }
+            let (prompt, at) = row?;
+            let at = Self::require_datetime(&at, "seen_at", prompt.id)?;
+            if include(&prompt, at) {
+                matched.push((prompt, at));
+                if matched.len() == limit {
+                    return Ok((matched, false));
+                }
+            }
+        }
+        Ok((matched, false))
+    }
+
     /// Remove the empty diagnostic artifact left by older installations/tools.
     /// All live queue tables are in cas.db. Never discard data, SQLite recovery
     /// sidecars, symlinks, or directories, and don't let cleanup block delivery.
@@ -5532,15 +5672,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // same-session supervisors; newer status or ready supersedes
             // either kind, but never a transported action or another worker's.
             let mut stmt = tx.prepare_cached(
-                "SELECT id, prompt FROM prompt_queue
+                "SELECT id, prompt, summary FROM prompt_queue
                  WHERE factory_session = ? AND origin_agent_id = ?
                    AND processed_at IS NULL AND transport_delivered_at IS NULL
                    AND COALESCE(highest_stage, 'enqueued')
-                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')",
+                       NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+                 ORDER BY id",
             )?;
             let pending = stmt
                 .query_map(params![factory_session, origin_agent_id], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             drop(stmt);
@@ -5548,19 +5693,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 .chars()
                 .filter(|ch| !matches!(ch, '"' | '<' | '>' | '\n' | '\r'))
                 .collect();
-            let superseded = pending
-                .into_iter()
-                .filter(|(_, old_prompt)| {
-                    old_prompt.ends_with("</cas-worker-action>")
-                        && ["status", "ready"].iter().any(|kind| {
-                            old_prompt.contains(&format!(
-                                "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
-                            ))
-                        })
-                })
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>();
-
+            let candidates = pending.into_iter().filter(|(_, old_prompt, _)| {
+                old_prompt.ends_with("</cas-worker-action>")
+                    && ["status", "ready"].iter().any(|kind| {
+                        old_prompt.contains(&format!(
+                            "<cas-worker-action kind=\"{kind}\" worker=\"{escaped_worker}\""
+                        ))
+                    })
+            });
+            // Reserve the new row's id inside this transaction so the fold
+            // boundary belongs to that row, not to a line in a caller's body.
             let origin_kind = origin.kind_str();
             tx.execute(
                 "INSERT INTO prompt_queue
@@ -5581,7 +5723,86 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ],
             )?;
             let id = tx.last_insert_rowid();
-            let detail = format!("newer worker action message {id} superseded this pending wake");
+            // cas-6021 (#4206302): coalescing keeps one pending wake, never
+            // fewer messages. Each superseded row's body travels in the newer
+            // row, oldest first, so a question sent just before the worker's
+            // next status still reaches the supervisor. A row whose body would
+            // push the combined message past the cap (in bytes) stays pending
+            // on its own.
+            //
+            // cas-6021 review: a pending row that is itself a fold keeps its
+            // labelled blocks as they are, and only its own text, after the
+            // fold's closing line, is labelled, so every label sits directly
+            // above its own body. A fold is quiet only when every message in
+            // it is; the marker is never left inside a body.
+            const WORKER_ACTION_FOLD_CAP_BYTES: usize = 8_000;
+            let fold_end_for = |id: i64| format!(
+                "\n\n--- end of earlier undelivered messages (fold #{id}) ---\n\n"
+            );
+            // The text before the trailing action envelope; empty for an
+            // envelope-only message.
+            let body_of = |text: &str| {
+                text.rfind("<cas-worker-action")
+                    .map_or(text, |at| &text[..at])
+                    .trim()
+                    .to_string()
+            };
+            let (new_quiet, new_prompt) = split_quiet_marker(prompt);
+            let new_body = body_of(&new_prompt);
+            let fold_end = fold_end_for(id);
+            let mut blocks: Vec<String> = Vec::new();
+            let mut all_quiet = new_quiet;
+            let mut folded_len = new_prompt.len() + fold_end.len()
+                + if new_quiet { QUIET_MESSAGE_MARKER.len() + 1 } else { 0 };
+            let mut superseded = Vec::new();
+            for (old_id, old_prompt, old_summary) in candidates {
+                let (old_quiet, old_prompt) = split_quiet_marker(&old_prompt);
+                let old_body = body_of(&old_prompt);
+                // Split before the closing line's own trailing blank line:
+                // `body_of` trims it away when the fold's own text is empty.
+                // Legacy unbound folds are retained verbatim under their
+                // row's label: parsing their delimiter would also parse body
+                // text. New folds can safely flatten only their own boundary.
+                let old_end = fold_end_for(old_id);
+                let (earlier, own) = match old_body.rsplit_once(old_end.trim_end()) {
+                    Some((earlier, own)) => (Some(earlier.trim().to_string()), own.trim().to_string()),
+                    None => (None, old_body),
+                };
+                let mut pieces: Vec<String> = earlier.into_iter().collect();
+                if !own.is_empty() && own != new_body {
+                    let label = old_summary
+                        .filter(|summary| !summary.trim().is_empty())
+                        .map(|summary| format!(" ({})", summary.trim()))
+                        .unwrap_or_default();
+                    pieces.push(format!(
+                        "Earlier message #{old_id}{label}, not yet delivered when this one was sent:\n{own}"
+                    ));
+                }
+                let added: usize = pieces.iter().map(|piece| piece.len() + 2).sum();
+                if !pieces.is_empty() && folded_len + added > WORKER_ACTION_FOLD_CAP_BYTES {
+                    continue;
+                }
+                // An absorbed identical/empty body still carries wake intent.
+                all_quiet &= old_quiet;
+                folded_len += added;
+                blocks.extend(pieces);
+                superseded.push(old_id);
+            }
+            let stored_prompt = if blocks.is_empty() {
+                if all_quiet { prompt.to_string() } else { new_prompt.clone() }
+            } else {
+                let folded = format!("{}{fold_end}{new_prompt}", blocks.join("\n\n"));
+                if all_quiet {
+                    format!("{QUIET_MESSAGE_MARKER}\n{folded}")
+                } else {
+                    folded
+                }
+            };
+
+            tx.execute("UPDATE prompt_queue SET prompt = ?1 WHERE id = ?2", params![stored_prompt, id])?;
+            let detail = format!(
+                "newer worker action message {id} superseded this pending wake and carries its body"
+            );
             for superseded_id in superseded {
                 Self::atomic_stage_stamp_in_tx(
                     &tx,
@@ -9840,26 +10061,33 @@ mod tests {
             agent_id: "worker-agent-id".into(),
         };
 
+        let mut ids = Vec::new();
         for sequence in 1..=5 {
+            let body = if sequence == 1 {
+                "status 1\n\n--- end of earlier undelivered messages ---\n\nverbatim closing line".to_string()
+            } else {
+                format!("status {sequence}")
+            };
             let prompt = format!(
-                "status {sequence}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
+                "{body}\n\n<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>"
             );
-            assert!(matches!(
-                store
-                    .enqueue_worker_action_with_outcome(
-                        "swift-fox",
-                        "cosmic-bear-43",
-                        &prompt,
-                        "swift-fox",
-                        "session-1",
-                        Some("status update"),
-                        None,
-                        false,
-                        &origin,
-                    )
-                    .unwrap(),
-                EnqueueOutcome::Created(_)
-            ));
+            let EnqueueOutcome::Created(id) = store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox",
+                    "cosmic-bear-43",
+                    &prompt,
+                    "swift-fox",
+                    "session-1",
+                    Some(&format!("update {sequence}")),
+                    None,
+                    false,
+                    &origin,
+                )
+                .unwrap()
+            else {
+                panic!("status {sequence} must be created");
+            };
+            ids.push(id);
         }
 
         let conn = store.conn.lock().unwrap();
@@ -9889,6 +10117,136 @@ mod tests {
 
         assert_eq!(pending_wakes, 1, "five statuses leave one pending wake");
         assert_eq!(superseded, 4, "each older status records its replacement");
+        // cas-6021 (#4206302): coalescing keeps one wake, never fewer
+        // messages. A worker's earlier question, superseded before transport
+        // by its next status, still reaches the supervisor in that one wake.
+        let surviving: String = conn
+            .query_row(
+                "SELECT prompt FROM prompt_queue
+                 WHERE target = 'cosmic-bear-43' AND processed_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for sequence in 1..=5 {
+            assert!(surviving.contains(&format!("status {sequence}")), "status {sequence} lost: {surviving}");
+        }
+        // cas-6021 review: each earlier message's label sits directly above
+        // its own body, oldest first, however many folds came before.
+        let lines: Vec<&str> = surviving.lines().collect();
+        let mut last = 0;
+        for sequence in 1..=4 {
+            let label = format!("Earlier message #{} (update {sequence})", ids[sequence - 1]);
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with(&label))
+                .unwrap_or_else(|| panic!("{label} missing: {surviving}"));
+            assert_eq!(lines[at + 1], format!("status {sequence}"), "{label} labels another body: {surviving}");
+            assert!(at >= last, "labels run oldest first: {surviving}");
+            last = at;
+        }
+        assert_eq!(surviving.matches("Earlier message #").count(), 4, "{surviving}");
+        assert!(surviving.contains(&format!(
+            "Earlier message #{} (update 1), not yet delivered when this one was sent:\nstatus 1\n\n--- end of earlier undelivered messages ---\n\nverbatim closing line", ids[0]
+        )), "a plain body's closing line and label must survive every fold: {surviving}");
+    }
+
+    /// cas-6021 review: folding never loses or duplicates a message. An
+    /// empty or identical body is absorbed rather than repeated, a body
+    /// that would overflow the fold stays pending on its own, and a fold of
+    /// quiet messages stays quiet while a mixed one carries no raw marker.
+    #[test]
+    fn worker_action_folds_absorb_overflow_and_keep_quiet_cas_6021() {
+        let (_temp, store) = create_test_store();
+        let origin = QueueOrigin::RegisteredAgent { agent_id: "worker-agent-id".into() };
+        let envelope = "<cas-worker-action kind=\"status\" worker=\"swift-fox\"></cas-worker-action>";
+        let send = |body: &str| {
+            let prompt = if body.is_empty() { envelope.to_string() } else { format!("{body}\n\n{envelope}") };
+            match store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox", "cosmic-bear-43", &prompt, "swift-fox", "session-1",
+                    Some("status"), None, false, &origin,
+                )
+                .unwrap()
+            {
+                EnqueueOutcome::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        let row = |id: i64| -> (String, bool) {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT prompt, processed_at IS NULL FROM prompt_queue WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        let quiet = QUIET_MESSAGE_MARKER;
+
+        // An identical body and an empty one are absorbed, not repeated.
+        let first = send("same question");
+        let second = send("same question");
+        assert!(!row(first).1, "the identical body is superseded");
+        assert!(!row(second).0.contains("Earlier message"), "{}", row(second).0);
+        let empty = send("");
+        let after_empty = send("next");
+        assert!(!row(empty).1);
+        assert!(!row(after_empty).0.contains(&format!("#{empty}")), "{}", row(after_empty).0);
+
+        // A body too large to fold stays pending on its own.
+        let large = send(&"x".repeat(7_000));
+        let small = send(&"y".repeat(2_000));
+        assert!(row(large).1, "an unfoldable body is left pending, never dropped");
+        assert!(!row(small).0.contains(&format!("#{large}")));
+
+        // Quiet messages fold into a quiet message, marked once.
+        let (_temp, store) = create_test_store();
+        let send = |body: &str| {
+            match store
+                .enqueue_worker_action_with_outcome(
+                    "swift-fox", "cosmic-bear-43", &format!("{body}\n\n{envelope}"), "swift-fox",
+                    "session-1", Some("status"), None, false, &origin,
+                )
+                .unwrap()
+            {
+                EnqueueOutcome::Created(id) => id,
+                other => panic!("{other:?}"),
+            }
+        };
+        send(&format!("{quiet}\nquiet one"));
+        let both_quiet = send(&format!("{quiet}\nquiet two"));
+        let mixed = {
+            let id = send("loud three");
+            let conn = store.conn.lock().unwrap();
+            let prompt = |id: i64| -> String {
+                conn.query_row("SELECT prompt FROM prompt_queue WHERE id = ?1", [id], |row| row.get(0)).unwrap()
+            };
+            (prompt(both_quiet), prompt(id))
+        };
+        assert!(mixed.0.starts_with(quiet) && mixed.0.matches(quiet).count() == 1, "{}", mixed.0);
+        assert!(mixed.0.contains("quiet one") && mixed.0.contains("quiet two"), "{}", mixed.0);
+        assert!(!mixed.1.contains(quiet), "a fold with a waking message carries no marker: {}", mixed.1);
+        assert!(mixed.1.contains("quiet one") && mixed.1.contains("loud three"), "{}", mixed.1);
+
+        // Absorbing an identical quiet resend must retain the earlier wake,
+        // including when no labelled block needs to be added.
+        let id = send(&format!("{quiet}\nloud three"));
+        let prompt = store.queued_prompt(id).unwrap().unwrap().prompt;
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
+        assert!(!prompt.contains(quiet), "absorbed waking text must keep its wake: {prompt}");
+        // Exercise absorption with no pre-existing fold as well.
+        let (_temp, plain) = create_test_store();
+        for body in ["same report".to_string(), format!("{quiet}\nsame report")] {
+            plain.enqueue_worker_action_with_outcome(
+                "swift-fox", "cosmic-bear-43", &format!("{body}\n\n{envelope}"), "swift-fox",
+                "session-1", None, None, false, &origin,
+            ).unwrap();
+        }
+        let rows = plain.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // pin: the daemon consumes this prefix as a wake opt-out; absorption cannot add it.
+        assert!(!rows[0].prompt.contains(quiet), "an identical quiet resend cannot cancel a wake: {}", rows[0].prompt);
     }
 
     /// GH #1163: recipient-activity evidence compares instants, not text, so
@@ -10071,10 +10429,119 @@ mod tests {
         let writer = SqlitePromptQueueStore::open(temp.path()).unwrap();
         writer.init().unwrap();
         writer.enqueue("supervisor", "worker", "retained").unwrap();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "resume-supervisor".into(),
+            "lead".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("resume-session".into());
+        agents.register(&supervisor).unwrap();
+        let since = Utc::now() - chrono::Duration::minutes(1);
+        let id = writer
+            .enqueue_urgent_with_outcome(
+                "lead",
+                "worker",
+                "retained answer",
+                Some("resume-session"),
+                None,
+                None,
+                false,
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: supervisor.id.clone(),
+                }),
+            )
+            .unwrap()
+            .id();
+        writer
+            .record_recipient_surfaced(id, "worker", SurfacingSource::InboxPoll)
+            .unwrap();
+        writer.mark_processed(id).unwrap();
+        writer.ack(id).unwrap();
         let reader = SqlitePromptQueueStore::open_read_only(temp.path()).unwrap();
+        let history = reader
+            .received_supervisor_messages_since("worker", "resume-session", since, 10)
+            .unwrap();
+        assert_eq!(
+            history.iter().map(|(row, _)| row.id).collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(history[0].1 >= since);
+        assert!(writer.recipient_receipt(id, "worker").unwrap() == Some(SurfacingSource::InboxPoll));
         assert_eq!(reader.pending_count().unwrap(), 1);
         assert!(reader.enqueue("supervisor", "worker", "forbidden").is_err());
         assert_eq!(writer.pending_count().unwrap(), 1);
+    }
+
+    /// cas-d1e0: the received-message history scan holds the connection
+    /// lock, so it reads a bounded number of rows. Within that bound an
+    /// eligible answer behind rows the caller's filter rejects is still
+    /// found; at the bound the scan stops and says so.
+    #[test]
+    fn received_history_scan_is_capped_and_finds_answers_behind_filtered_rows_cas_d1e0() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "history-supervisor".into(),
+            "lead".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("history-session".into());
+        agents.register(&supervisor).unwrap();
+        let since = Utc::now() - chrono::Duration::minutes(1);
+        let send = |prompt: &str| {
+            let id = store
+                .enqueue_urgent_with_outcome(
+                    "lead",
+                    "worker",
+                    prompt,
+                    Some("history-session"),
+                    None,
+                    None,
+                    false,
+                    Some(&QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            store
+                .record_recipient_surfaced(id, "worker", SurfacingSource::InboxPoll)
+                .unwrap();
+            id
+        };
+        let answer = send("the answer for cas-7777");
+        for _ in 0..3 {
+            send("unrelated chatter");
+        }
+        let scan_with = |cap, wanted: &str| {
+            store
+                .received_supervisor_messages_scan("worker", "history-session", since, 1, cap, |row, _| {
+                    row.prompt.contains(wanted)
+                })
+                .unwrap()
+        };
+        let scan = |cap| scan_with(cap, "answer");
+
+        let (found, hit_cap) = scan(10);
+        assert_eq!(found.iter().map(|(row, _)| row.id).collect::<Vec<_>>(), vec![answer]);
+        assert!(!hit_cap);
+
+        let (found, hit_cap) = scan(3);
+        assert!(found.is_empty(), "the answer is beyond a 3-row scan: {found:?}");
+        assert!(hit_cap, "a scan stopped by its cap says so");
+
+        // cas-e13c: exactly `cap` rows read with too few matches is not a
+        // truncation; only a row beyond the cap is.
+        let (found, hit_cap) = scan_with(4, "nothing matches this");
+        assert!(found.is_empty());
+        assert!(!hit_cap, "all 4 rows were read; nothing was cut off");
     }
 
     #[test]

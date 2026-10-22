@@ -7,6 +7,122 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.72.0] - 2026-10-22
+
+### Fixed — task claims stay exclusive across upgrades
+
+- **Persistent claim fences** — Was: released 3.71 had no per-task claim fence, while unreleased v57 development builds introduced fences but deleted settled files, allowing callers to lock different files for the same task. → Now: settlement retains the shared file and releases only its OS lock. Small per-task files intentionally remain until offline GC can prove quiescence.
+
+- **3.71 → 3.72 rollout** — After installing 3.72, restart every `cas serve`, hub and worker session on the host, including harness-owned MCP servers and pinned sessions. A running 3.71 process takes no per-task fence and can race a 3.72 process. `cas update` can restart the managed hub but does not restart or verify every other session; binary replacement and a hub restart alone are insufficient. This also retires unreleased development builds that deleted fences.
+
+- **Windows limitation** — Claim fencing remains unverified on Windows: its exclusive whole-file lock can reject the generation recheck through a second handle. The current advisory local-lease fallback does not establish cross-process claim exclusion, and restarting sessions does not fix this limitation. The release workflow builds no Windows asset.
+
+### Added — shared-file edits are coordinated across sessions
+
+- **Cross-session file leases** — Was: workers in two factory sessions on one repository could edit the same file without either learning about the other. → Now: an edit claims its repository path through the Cassy Cloud claim model. When another agent already holds that file, on any machine, the edit still goes ahead, with an advisory that names the holder, machine, task and path. Park, close and cancel release the task's file leases.
+
+- **Codex workers see contention** — Was: Codex workers edit through `apply_patch`, so they took no file lease and were never told who held a file. → Now: every file an `apply_patch` writes is claimed. A contended file is reported to the Codex worker as a message, at most once per file per ledger window.
+
+- **Leases follow the task** — Was: release, reset and force-transfer left file leases behind, and a worker yielding a task kept the task lease, so reassignment was refused until the lease expired. Close also waited on a Cloud release. → Now: release, reset, transfer and a yield free the task's leases, and a refusal names the actual holder. The Cloud claim release runs off the caller on park, close and cancel, and ledger writes are locked.
+
+### Fixed — a restarting task keeps its fresh claim
+
+- **Fenced claim releases** — Was: a background or synchronous claim-release retry, or a manual `task action=claim`, could release a restarting task's fresh Cloud claim. → Now: pending and synchronous releases and manual claims all go through the per-task claim fence and local-lease arbitration. An expired start is respected, and mixed-version callers keep the same fence file.
+
+- **Failed manual claims settle** — Was: a manual claim that failed locally left the Cloud claim it had just taken until that claim expired, and synchronous release calls could stall the async runtime. → Now: the failed claim's Cloud claim is released, and releases run on the blocking pool.
+
+### Fixed — merges report what actually happened
+
+- **No UNKNOWN for committed merges** — Was: `worktree_merge` could run past the 55 s MCP response budget and report `Mutation outcome: UNKNOWN`, even though the merge and push had committed. → Now: a merge answers COMMITTED only once it is published, before the task close, with its merge and push state. The close finishes in the background and writes its own outcome and the task's status to a task note.
+
+- **Origin-only and local-only targets** — Was: a target that existed only on origin failed with `not something we can merge`, and each merge fetched origin three times. Re-merging an already-contained source into a local-only epic branch failed with `CONTAINMENT COULD NOT BE VERIFIED`. → Now: an origin-only target is materialized before preflight, and one sync fetch is reused. A target is judged local-only only after origin confirms it lacks the branch, and a local no-op skips the origin sync. An unreachable origin is reported as not pushed, never as published.
+
+- **Merges pin the parked delivery** — Was: `worktree_merge` could merge a worker's unpushed local HEAD instead of the parked branch tip, and it treated the resulting HTTP 422 CI lookup as advisory. → Now: a merge binds to one parked delivery, with its guards and git operations pinned to the reviewed SHA. Parked-source drift and missing remote commits are refused.
+
+- **CI completion reminders** — Was: `ci_completed` fired while a check-run job was still in progress, and never fired for a run whose check-runs were all cancelled. → Now: it fires when merge admission would see CI as finished, including failed check-runs and cancelled ones with no rerun.
+
+- **Superseded merge alerts** — Was: fallback delivery paths kept the stale MERGE REQUIRED text for a superseded tip, along with its stale ref-disagreement and push-required lines. → Now: a superseded tip is delivered with its Superseded body, and refreshed alerts drop the stale lines.
+
+### Fixed — stacked and cross-host epics
+
+- **Stacked successor epics** — Was: a follow-on epic created while another epic was unreleased was cut from main, so its follow-ups on unreleased code could not start. → Now: a successor epic stacks on its open predecessor, falling back to trunk when the predecessor has no resolvable branch. `epic_status` warns when the successor falls behind, compares advanced tips correctly and bounds the conflict-file list. A follow-up that cites code still unreleased also warns.
+
+- **Local-only epic branches on another host** — Was: a peer supervisor on another host could not see a local-only epic branch, so its first child spawn failed with misleading advice. → Now: the unpublished lane is named together with the remedy to run on the source host. The advice tells the originating host apart from a safe peer publication, and synced branch names are sanitized.
+
+- **Epic status anchors** — Was: a reused lane's later commits counted against closed children in the stranded-branch gate, and an anchor that a later task deliberately rewrote was flagged as content dropped. → Now: closed children are summarized from their own delivery anchors, and an attributed supersession is reported as one.
+
+### Fixed — close and park accept the right evidence
+
+- **Doc-only changes after a receipt** — Was: close refused with FOCUSED PROOF REQUIRED when the only change since the passing test receipt was a doc file, and the proof-input check read the checkout's current HEAD. → Now: a doc-only change rebinds the receipt range, while files embedded into a crate still count as proof inputs. Inputs and Cargo manifests are read from the delivered tree and classified once per close.
+
+- **Re-close and amended anchors** — Was: a re-close after a supervisor merge rejected its receipt as `commit predates this task work cycle`. Park could also record a pre-amend commit as the delivery anchor. → Now: approved verification receipts are trusted after a re-claim, and amended orphan anchors are rebound to the real tip.
+
+- **Reused-lane delivery ranges** — Was: close refused with DELIVERY BRANCH UNRESOLVED when a reused lane's commits did not name the task, and the close report could attribute unrelated branch diff to an earlier delivery. → Now: delivery binds to the task's start base and leaves out integrated target history, and the report is bounded to the accepted receipt.
+
+- **Multi-commit QA range** — Was: QA measured only `head^1..head` for a multi-commit rebase or fast-forward delivery. → Now: it measures from the recorded task base.
+
+- **Genuinely empty work** — Was: a helper task with no delivery could not close without QA and factory-branch gates. → Now: an audited no-delivery declaration closes genuinely empty work, and ambiguous empty work keeps its gates.
+
+- **Concurrent close writes** — Was: `proof_scope_fix=true` reported the proof targets as widened while close kept the old ones, and the terminal close write overwrote a note appended during the close. → Now: the terminal write keeps a concurrent proof-scope fix and every stored note.
+
+- **Supervisor-run test evidence** — Was: when the disk guard refused every worker build, red and green runs executed by the supervisor could not be recorded as park receipts. → Now: authenticated supervisor test evidence is recorded for the worker's park.
+
+- **Assignments and prior work** — Was: anchors not reachable from the worker's tip counted as prior work, an idle clean worker behind its target was refused as an assignee, and `task create assignee=` silently dropped a refused assignee. → Now: only anchors on the worker's branch count, and clean owned lanes refresh on assignment and start. Moving a parked per-task delivery branch is refused, and create reports the outcome of each assignment.
+
+### Fixed — messages reach the right reader
+
+- **Folded worker messages** — Was: a worker's question to its supervisor could be silently dropped as superseded by a control-policy message, and `message_status` could not answer for a local id. → Now: coalesced worker actions carry every superseded body, labelled once and oldest first. Acknowledgements and quiet messages no longer absorb a waking one, and `message_status` answers for local ids.
+
+- **Reminder attribution** — Was: a worker's own reminder reached the supervisor marked as coming from the supervisor, and a retired worker's never-expiring internal reminder stayed pending forever. → Now: retired workers' reminders keep their target and issuer. Never-expiring internal reminders expire, and orphans are counted and logged.
+
+- **Resume briefs** — Was: `recycle_worker` left out supervisor messages received after the last checkpoint, and `clear_context` sent no resume brief at all. → Now: both send a brief that includes the received answers. The history scan is capped, warns only on real truncation, and names the session supervisor as the sender.
+
+- **Supervisor handoff** — Was: a supervisor's session end lost the lane: its owned tasks, live workers, parked PRs and pending asks. → Now: the handoff keeps lease-owned tasks and their original lease evidence and is bound to the successor's registration epoch. Startup shows a bounded preview while the complete receipt is kept, and SessionStart keeps the compact handoff pointer for every role within its budget.
+
+### Fixed — builds wait in priority order
+
+- **Build priority** — Was: a P0 release-repair build waited behind P2 builds at the builder cap. → Now: queued worker builds are admitted by task priority. Workers cannot raise their own task's priority, even through a reopen; the guard applies only to a real priority change, after the proof-scope check. A stale high-priority waiter no longer blocks lower builds, and explicit wait notices are kept.
+
+- **Capped verifier lane** — Was: task-verifier subagents built with plain Cargo outside the builder cap, which pushed host memory pressure up and starved capped worker checks. → Now: `cas factory verifier-test --cas-root <R> --head <sha> -- nextest run ...` runs at the bound head inside the counted, capped lane, and the guard sends a verifier's plain Cargo build there.
+
+- **Capacity waits** — Was: each build-guard capacity refusal made workers toggle the task to blocked, which paged the supervisor every time. → Now: a bounded capacity wait keeps the task's lease and status and makes its retries visible. A wait that outlasts its bound sends one notice that wakes an idle supervisor.
+
+- **Admission GC cooldown** — Was: build-guard admission repeated a full scratch-target scan on every spawn and capped check while the disk stayed near full with nothing to reclaim. → Now: a scan that reclaims nothing cools down before it runs again.
+
+- **Capped test children** — Was: capped worker tests had no supported clean-environment route, and task-sync recovery aborted admission with an unclassified intent revision after progress notes. A target-lease fd of 10 or higher failed to close under dash. → Now: capped test children get fixed credential isolation, and the validated sync revision is kept. The runner closes high-numbered lease fds.
+
+### Fixed — gc reclaims scratch and explains itself
+
+- **Review scratch checkouts** — Was: verifier and supervisor scratch checkouts outlived their task, and gc never reclaimed them. → Now: review checkouts belong to their task, are reused across admission retries and are collected by gc. Dirty checkouts are preserved, and scratch usage fits 80 columns.
+
+- **`cas factory gc`** — Was: `gc_report` and `gc_cleanup` were MCP-only, so an exact-tip candidate binary could not prove its cleanup behaviour before release. → Now: `cas factory gc report` and `cas factory gc cleanup` run the same actions from the CLI, with the cleanup tiers documented.
+
+- **Readable gc reports** — Was: the report called the default cleanup a preview although baseline metadata cleanup still mutates. Its output could overflow the terminal: 64 findings and a 598-cell line. → Now: the report describes each cleanup tier and shows a bounded summary, with the full and JSON views on request. Durable-artifact counts sit on their own row, ahead of long paths, within 80 columns.
+
+### Fixed — hub restarts under contention
+
+- **Concurrent restarts** — Was: two concurrent `cas hub restart` calls could both report `status:error`, with the new hub killed, and still leave a hub running. A new hub could also give up the startup lock at once. → Now: restart outcomes are attributed to the peer that holds the lock or satisfied the start. Startup waits for a transient cleanup lock and reserves its readiness budget, and a lock-wait timeout keeps its own diagnostic.
+
+- **Cleanup after a stop or restart** — Was: a concurrent stop or restart could lose `process.json` while the winning hub ran, and an empty old-generation cgroup could remain. → Now: the machine lock is held through stopped-generation cleanup. Worker cgroups are isolated by generation, and peer adoption removes the empty old scope.
+
+### Fixed — configuration keys behave as advertised
+
+- **Registered keys** — Was: the config registry advertised keys, such as `hooks.stop.duplicate_detection_enabled`, that `cas config set` and `get` rejected as unknown. → Now: every registered stop and notification key is supported. `notifications.webhook_url` is operator-only, and its URL is normalized before use.
+
+- **Reset in the editors** — Was: the TUI `d` key and the interactive editor wrote the default value instead of removing the key. → Now: both remove the override, and a reset of an absent default does nothing.
+
+- **Operator-only refusal** — Was: the operator-only config refusal printed one 354-cell line. → Now: it wraps to the terminal and keeps its remedy intact.
+
+### Fixed — terminal output respects the locale
+
+- **ASCII under non-UTF-8 locales** — Was: under `LC_ALL=C`, or with no locale set, the `cas init` splash and frames, the global `--help` wordmark and the shared confirm and select prompts printed Unicode glyphs. → Now: they fall back to ASCII. The init Next steps box fits its rows, and piped init phase output is append-only, without carriage-return redraws.
+
+- **Shell-safe git remedies** — Was: printed git remedies left `{ } , !` unquoted, which bash expands, and synced branch names were not sanitized. → Now: remedies are quoted atomically across callers, and doctor's JSON remediation keeps standalone git advice.
+
+### Fixed — other
+
+- **Rule observation under load** — Was: `rule action=observe` failed with `database is locked` under load, so rule candidates were silently lost. → Now: observation writes retry under contention.
+
 ## [3.71.0] - 2026-10-21
 
 ### Added — QA checks describe what good looks like

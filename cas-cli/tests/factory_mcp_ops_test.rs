@@ -33,9 +33,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+// The grouped integration harness owns the process-wide env/cwd lock.
+use crate::test_env_guard::TestEnvGuard;
 
 // =============================================================================
 // Test Fixture
@@ -473,6 +472,8 @@ fn integration_test_process_path_mutation_is_isolated() {
 
 fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
+        json: None,
+        full: None,
         action: action.to_string(),
         id: None,
         name: None,
@@ -527,6 +528,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         detail: None,
         peer: None,
         json: None,
+        full: None,
         scope: None,
         action: action.to_string(),
         id: None,
@@ -5378,17 +5380,52 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
 /// session so `worker_status` reflects the reset.
 #[tokio::test]
 async fn test_clear_context_confirms_reset_from_new_session_transcript() {
-    let (guard, fixture) = clear_context_fixture("otter", "claude", "10");
+    let (mut guard, mut fixture) = clear_context_fixture("otter", "claude", "10");
+    guard._guard.set("CAS_FACTORY_SESSION", "resume-clear");
+    fixture.worker.factory_session = Some("resume-clear".into());
     let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
     let store = env.agent_store();
-    store
-        .register(&Agent::new(
-            "test-sup".to_string(),
-            "supervisor".to_string(),
-        ))
-        .expect("register supervisor");
+    let mut supervisor = Agent::new_with_role(
+        "test-sup".into(),
+        "supervisor".into(),
+        AgentRole::Supervisor,
+    );
+    supervisor.factory_session = Some("resume-clear".into());
+    store.register(&supervisor).unwrap();
     store.register(&fixture.worker).expect("register worker");
+
+    let mut task = Task::new("cas-ac92".into(), "Resume clear task".into());
+    task.assignee = Some("otter".into());
+    task.status = TaskStatus::InProgress;
+    let checkpoint = chrono::Utc::now() - chrono::Duration::minutes(2);
+    task.notes = format!(
+        "[{}] PROGRESS checkpoint",
+        checkpoint.format("%Y-%m-%d %H:%M")
+    );
+    env.task_store().add(&task).unwrap();
+    let answer = "Use the supplied candidate; the supervisor already answered this.";
+    let queue = env.prompt_queue();
+    let answer_id = queue
+        .enqueue_urgent_with_outcome(
+            "supervisor",
+            "otter",
+            answer,
+            Some("resume-clear"),
+            None,
+            None,
+            false,
+            Some(&cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: supervisor.id.clone(),
+            }),
+        )
+        .unwrap()
+        .id();
+    queue
+        .record_recipient_surfaced(answer_id, "otter", cas_store::SurfacingSource::InboxPoll)
+        .unwrap();
+    queue.ack(answer_id).unwrap();
+    queue.mark_processed(answer_id).unwrap();
 
     // Stand in for the daemon + harness. The new transcript must appear after
     // the control row is queued, because clear_context snapshots existing
@@ -5407,6 +5444,14 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
                         && row.prompt == cas::factory_context_reset::CONTEXT_RESET_CONTROL
                 });
             if queued {
+                assert!(
+                    !queue
+                        .peek_all(20)
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.prompt.contains(answer)),
+                    "resume brief must wait for confirmed reset"
+                );
                 break;
             }
             assert!(
@@ -5427,7 +5472,10 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 
     let mut req = factory_req("clear_context");
     req.target = Some("otter".to_string());
-    let (result, ()) = tokio::join!(env.service.factory_request(Parameters(req)), write_transcript);
+    let (result, ()) = tokio::join!(
+        env.service.factory_request(Parameters(req)),
+        write_transcript
+    );
 
     let text = get_text(&result.expect("a confirmed reset must succeed"));
     assert!(text.contains("CONFIRMED"), "{text}");
@@ -5446,6 +5494,25 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
         Some("11112222-3333-4444-5555-666677778888"),
         "worker_status resolves transcripts by cc_session_id — it must follow the new session"
     );
+    let prompts = env.prompt_queue().peek_all(20).unwrap();
+    let briefs: Vec<_> = prompts
+        .iter()
+        // pin: a resume brief must tell the cleared worker how to re-take this task lease.
+        .filter(|row| row.prompt.contains("task action=start id=cas-ac92"))
+        .collect();
+    assert_eq!(
+        briefs.len(),
+        1,
+        "a confirmed clear queues one task resume brief: {prompts:?}"
+    );
+    // pin: the resume must remain in the cleared worker's authenticated factory session.
+    assert_eq!(briefs[0].factory_session.as_deref(), Some("resume-clear"));
+    assert!(
+        briefs[0].prompt.contains(answer),
+        "received answer must survive clear: {}",
+        briefs[0].prompt
+    );
+    assert!(briefs[0].prompt.contains(&format!("#{answer_id}")));
 }
 
 /// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
@@ -5953,20 +6020,7 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
     );
     assert!(summary.contains("Stale agents: 240"), "{summary}");
     assert!(summary.contains("Stale agents: 240 items"), "{summary}");
-    let stale_category = summary
-        .lines()
-        .find(|line| line.starts_with("- Stale agents: 240 items, "))
-        .expect("stale-agent category count and byte summary");
-    let stale_bytes: usize = stale_category
-        .split(" items, ")
-        .nth(1)
-        .unwrap()
-        .split(" bytes")
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(stale_bytes > 100_000, "{stale_category}");
+    assert!(summary.is_ascii() && summary.lines().all(|line| line.len() <= 79), "{summary}");
     assert!(summary.contains("first up to 3 items per category"), "{summary}");
     assert!(
         summary.contains("stale-report-000-"),
@@ -5984,9 +6038,11 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink("/deleted/cassy-worktree/node_modules/backend", &link).unwrap();
 
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
     let report = env
         .service
-        .factory_request(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(request))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -6005,9 +6061,11 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
 async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
     let env = FactoryTestEnv::new();
 
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
     let report = env
         .service
-        .factory_request(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(request))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -6024,7 +6082,7 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 #[tokio::test]
 async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248() {
     let env = FactoryTestEnv::new();
-    let base = env.cas_root.join("durable-artifacts");
+    let base = env.cas_root.join("durable-artifacts-with-a-deliberately-long-root");
     let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
     let task_store = env.task_store();
     let closed_id = task_store.generate_id().expect("generate closed task id");
@@ -6091,9 +6149,25 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         .lines()
         .find(|line| line.starts_with("- Durable task artifacts:"))
         .expect("durable artifact heading and summary");
-    assert!(artifact_summary.contains(&format!("root={}", root.display())));
-    assert!(artifact_summary.contains("closed-task candidates=1"));
-    assert!(artifact_summary.contains("stray inventory=2 mode=review-only"));
+    // Counts belong in the bounded preview; the exact long root belongs in
+    // full detail. Requiring them on the same heading defeats the 80-column UI.
+    assert!(artifact_summary.contains("Durable task artifacts"));
+    assert!(report_text.contains("stray inventory=2 mode=review-only"), "{report_text}");
+    assert!(
+        report_text.is_ascii() && report_text.lines().all(|line| line.len() <= 79),
+        "{report_text}"
+    );
+    let mut full_request = factory_req("gc_report");
+    full_request.full = Some(true);
+    let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
+    assert!(
+        get_text(&full).contains(&format!(
+            "Durable task artifacts: root={} closed-task candidates=1 stray inventory=2 mode=review-only",
+            root.display()
+        )),
+        "full report must retain the complete root and counts: {}",
+        get_text(&full)
+    );
     assert!(
         report_text.contains("review-only stray artifact"),
         "{report_text}"
@@ -6338,11 +6412,12 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         .await
         .unwrap();
     let report_text = get_text(&report);
-    assert!(
-        report_text.contains("TARGET_CACHE_STATUS_JSON="),
-        "{report_text}"
-    );
-    let machine = status(&report_text);
+    assert!(!report_text.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report_text}");
+    let mut full_request = factory_req("gc_report");
+    full_request.full = Some(true);
+    let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
+    let full_text = get_text(&full);
+    let machine = status(&full_text);
     assert_eq!(machine["schema_version"], 1);
     assert_eq!(machine["dry_run"], true);
     assert_eq!(machine["candidate_bytes"], 64);
@@ -6360,14 +6435,14 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
         .find(|line| line.starts_with("- Cargo target cache pressure: "))
         .expect("target-cache category summary");
     assert!(
-        cache_category.starts_with("- Cargo target cache pressure: 1 items, "),
+        cache_category == "- Cargo target cache pressure: 1 items",
         "machine JSON must not count as a cache inventory item: {cache_category}"
     );
     assert!(
-        report_text.contains(&worker.join("target").display().to_string()),
+        full_text.contains(&worker.join("target").display().to_string()),
         "dry-run must report the exact cache path: {report_text}"
     );
-    assert!(report_text.contains("bytes=64"), "{report_text}");
+    assert!(full_text.contains("bytes=64"), "{full_text}");
     assert_preserved();
 
     let mut preview = factory_req("gc_cleanup");
@@ -6441,6 +6516,297 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 // =============================================================================
 // gc_cleanup tests
 // =============================================================================
+
+/// A terminal task must not leave a registered proof checkout and its target
+/// behind forever. The fixture uses the managed ownership record, real Git,
+/// SQLite task state and the public factory GC handler.
+#[tokio::test]
+async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    init_sync_repo(&env, "review-control");
+    let project = env.cas_root.parent().unwrap();
+    // Real Cargo output is ignored; untracked reviewer notes are not.
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let scratch = project.join("scratch");
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nscratch_root = {:?}\n",
+            scratch.display().to_string()
+        ),
+    )
+    .unwrap();
+    let task = Task::new("cas-review-fixture".into(), "review owner".into());
+    env.task_store().add(&task).unwrap();
+    let head = git_stdout(project, &["rev-parse", "HEAD"]);
+    let managed =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    let checkout = managed.path.clone();
+    let owned = checkout.parent().unwrap().to_path_buf();
+    assert!(checkout.starts_with(
+        cas_types::factory_scratch::project_scratch_dir(&scratch, &env.cas_root).join("verify")
+    ));
+    drop(managed);
+    let marker = owned.join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let retried =
+        cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head).unwrap();
+    assert_eq!(
+        retried.path, checkout,
+        "admission retries must reuse the same task/head checkout"
+    );
+    drop(retried);
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_ne!(
+        owner["last_used_at"],
+        serde_json::json!("2020-01-01T00:00:00Z"),
+        "successful reuse must refresh last-used age"
+    );
+    std::fs::create_dir_all(checkout.join("target")).unwrap();
+    std::fs::write(checkout.join("target/output"), b"regenerable").unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(checkout.is_dir(), "open task checkout must be retained");
+    let mut task = env.task_store().get(&task.id).unwrap();
+    task.status = TaskStatus::Closed;
+    env.task_store().update(&task).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "young terminal checkout must be retained");
+    // Legacy markers without last_used_at still age from creation.
+    owner.as_object_mut().unwrap().remove("last_used_at");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let lease_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(owned.join("lease"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lease_file).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(
+        owned.is_dir(),
+        "active review lease must prevent reclamation"
+    );
+    drop(lease_file);
+    // Force alone is still a preview for disposable checkout removal.
+    let mut preview = cleanup.clone();
+    preview.dry_run = None;
+    env.service
+        .factory_request(Parameters(preview))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "preview removed review checkout");
+    owner["schema_version"] = serde_json::json!(999);
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "unknown ownership schema must be retained");
+    owner["schema_version"] = serde_json::json!(1);
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    git_stdout(&checkout, &["checkout", "--detach", "epic/foreign"]);
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "changed review head must be retained");
+    git_stdout(&checkout, &["checkout", "--detach", &head]);
+    let file = std::fs::File::open(checkout.join("target/output")).unwrap();
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "open proof output must prevent reclamation");
+    drop(file);
+    // A terminal task does not make source edits or untracked notes disposable.
+    // Exercise both alongside the clean checkout through the same public GC.
+    // The guard must not inherit a config that hides untracked reviewer notes.
+    git_stdout(project, &["config", "status.showUntrackedFiles", "no"]);
+    let mut preserved = Vec::new();
+    for (kind, filename) in [("edited", "README"), ("untracked", "notes.txt")] {
+        let mut task = Task::new(format!("cas-review-{kind}"), kind.into());
+        env.task_store().add(&task).unwrap();
+        let managed =
+            cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, &head)
+                .unwrap();
+        let checkout = managed.path.clone();
+        let marker = checkout.parent().unwrap().join("owner.json");
+        drop(managed);
+        let mut owner: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+        std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+        let contents = format!("{kind} reviewer work\n").into_bytes();
+        std::fs::write(checkout.join(filename), &contents).unwrap();
+        task.status = TaskStatus::Closed;
+        env.task_store().update(&task).unwrap();
+        preserved.push((kind, checkout, filename, contents));
+    }
+
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        !owned.exists(),
+        "terminal managed checkout leaked: {}",
+        get_text(&output)
+    );
+    assert!(
+        !git_stdout(project, &["worktree", "list", "--porcelain"])
+            .contains(checkout.to_str().unwrap()),
+        "GC must remove the Git registration as well as the files"
+    );
+
+    let registrations = git_stdout(project, &["worktree", "list", "--porcelain"]);
+    let mut lost = Vec::new();
+    for (kind, checkout, filename, contents) in preserved {
+        if std::fs::read(checkout.join(filename)).ok().as_deref() != Some(contents.as_slice()) {
+            lost.push(format!("{kind} reviewer bytes deleted or changed"));
+        }
+        if !registrations.contains(checkout.to_str().unwrap()) {
+            lost.push(format!("{kind} checkout registration deleted"));
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "GC lost non-disposable work: {}; output: {}",
+        lost.join("; "),
+        get_text(&output)
+    );
+
+    // A resolved dispatch releases its own proof checkout even if the task
+    // stays open (for example, a rejected delivery receiving another round).
+    let task = Task::new("cas-dispatch-fixture".into(), "dispatch owner".into());
+    env.task_store().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root,
+        &task.id,
+        "test-supervisor-id",
+        "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+        false,
+    )
+    .unwrap();
+    let managed = cas::factory_review_scratch::create(
+        &env.cas_root,
+        project,
+        &task.id,
+        Some(&dispatch.id),
+        &head,
+    )
+    .unwrap();
+    let owned = managed.path.parent().unwrap().to_path_buf();
+    drop(managed);
+    let marker = owned.join("owner.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    owner["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    owner["last_used_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(&marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup.clone()))
+        .await
+        .unwrap();
+    assert!(owned.is_dir(), "pending dispatch must be retained");
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        "test-supervisor-id",
+        None,
+        true,
+    )
+    .unwrap();
+    drop(conn);
+    let output = env
+        .service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        !owned.exists(),
+        "resolved dispatch scratch leaked: {}",
+        get_text(&output)
+    );
+    assert_eq!(
+        env.task_store().get(&task.id).unwrap().status,
+        TaskStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_gc_reports_large_unmanaged_scratch_cas_3fb4() {
+    let env = FactoryTestEnv::with_server_supervisor();
+    let scratch = env.cas_root.parent().unwrap().join("scratch");
+    let unmanaged = scratch.join("old-supervisor-walk");
+    std::fs::create_dir_all(&unmanaged).unwrap();
+    // Sparse file makes the logical-size threshold deterministic and cheap.
+    std::fs::File::create(unmanaged.join("output"))
+        .unwrap()
+        .set_len(1024 * 1024 * 1024)
+        .unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        format!(
+            "[factory]\nscratch_root = {:?}\n",
+            scratch.display().to_string()
+        ),
+    )
+    .unwrap();
+    let mut request = factory_req("gc_report");
+    request.full = Some(true);
+    let output = env
+        .service
+        .factory_request(Parameters(request))
+        .await
+        .unwrap();
+    let text = get_text(&output);
+    assert!(
+        text.contains("Large unmanaged scratch directories"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "{}: at least 1073741824 bytes (never auto-deleted)",
+            unmanaged.display()
+        )),
+        "{text}"
+    );
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    env.service
+        .factory_request(Parameters(cleanup))
+        .await
+        .unwrap();
+    assert!(
+        unmanaged.join("output").is_file(),
+        "unmanaged output is review-only"
+    );
+}
 
 #[tokio::test]
 async fn test_gc_cleanup_without_force() {
@@ -7238,6 +7604,7 @@ fn coord_msg(
         detail: None,
         peer: None,
         json: None,
+        full: None,
         scope: None,
         action: action.to_string(),
         id: None,
@@ -7971,6 +8338,7 @@ async fn cas_85fd_answered_urgent_does_not_block_later_unrelated_close() {
     let close = worker_service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: task_id.clone(),
             reason: Some("already merged before the urgent status check".to_string()),
@@ -8036,6 +8404,7 @@ async fn cas_4a8e1_interrupt_answered_by_ordinary_reply_does_not_block_later_clo
     task.assignee = Some("someone-else".to_string());
     env.task_store().add(&task).expect("add unrelated task");
     let close = |reason: &str| cas::mcp::tools::TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: task_id.clone(),
         reason: Some(reason.to_string()),
@@ -8489,6 +8858,35 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         status_text.contains(&format!("Message {notification_id} status:")),
         "status response must describe the same returned ID: {status_text}"
     );
+
+    // cas-6021: the same local id given as `id` is this queue's message,
+    // not a peer-mailbox lookup that answers 404.
+    let mut by_id = coord_msg("message_status", "swift-fox", "unused", None);
+    by_id.id = Some(notification_id.to_string());
+    let by_id_text = get_text(
+        &env.service
+            .coordination(Parameters(by_id))
+            .await
+            .expect("a local id given as id= resolves locally"),
+    );
+    // pin: the local report's header names the queue message (cas-6021).
+    assert!(by_id_text.contains(&format!("Message {notification_id} status:")), "{by_id_text}");
+    assert!(!by_id_text.contains("Peer message"), "{by_id_text}");
+
+    // A present local row whose required text cannot be decoded is a local
+    // read failure, never a missing peer receipt. Preserve the SQLite error.
+    rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap()
+        .execute("UPDATE prompt_queue SET source = x'FF' WHERE id = ?1", [notification_id]).unwrap();
+    for via_id in [false, true] {
+        let mut request = coord_msg("message_status", "swift-fox", "unused", None);
+        if via_id { request.id = Some(notification_id.to_string()); }
+        else { request.notification_id = Some(notification_id); }
+        let error = env.service.coordination(Parameters(request)).await
+            .expect_err("corrupt local row must report a read error");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains("Failed to query message status"), "{error:?}");
+        assert!(!error.message.contains("peer"), "{error:?}");
+    }
 }
 
 #[tokio::test]
@@ -9341,6 +9739,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
         .service
         .inner
         .cas_task_close(Parameters(cas::mcp::tools::TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: "cas-062d-close".to_string(),
             reason: Some("lifecycle close proof".to_string()),
@@ -10038,200 +10437,249 @@ async fn test_assignment_is_not_blocked_by_the_workers_own_merged_lane_cas_f8bc(
 
 #[tokio::test]
 async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
-    let home = TempDir::new().expect("home tempdir");
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "c54f-idle-worker";
-    // The task's explicit branch differs from its parent epic's branch.
-    let worker_path = init_sync_repo(&env, worker);
-    std::fs::write(
-        env.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"c54f-fixture\"\n",
-    )
-    .unwrap();
-    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
-
-    {
-        let store = env.agent_store();
-        let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
-        agent.role = AgentRole::Worker;
-        agent.factory_session = Some("session-f8bc-stale".to_string());
-        agent.metadata.insert(
-            "clone_path".to_string(),
-            worker_path.to_str().unwrap().to_string(),
-        );
-        store.register(&agent).expect("register worker");
-    }
-
-    let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
-    let store = env.task_store();
-    let mut targeted = store.get(&task_b).unwrap();
-    targeted.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:c54f-fixture".to_string(),
-        target_branch: "epic/foreign".to_string(),
-    });
-    store.update(&targeted).unwrap();
-    let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
-    active.assignee = Some(worker.to_string());
-    active.status = TaskStatus::InProgress;
-    env.task_store().add(&active).unwrap();
-    let busy = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a mid-task worker must still be refused");
-    assert!(busy.contains("commits behind"), "{busy}");
-    active.status = TaskStatus::Closed;
-    env.task_store().update(&active).unwrap();
-
-    std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
-    let dirty = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a dirty worker must still be refused");
-    assert!(dirty.contains("commits behind"), "{dirty}");
-    git_stdout(&worker_path, &["checkout", "--", "README"]);
-
-    // Clean is insufficient when the worker still carries unmerged commits.
-    std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
-    git_stdout(&worker_path, &["add", "unmerged.txt"]);
-    git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
-    let stale = assign(&env, &task_b, worker)
-        .await
-        .expect_err("genuinely stale worker must be refused");
-    assert!(
-        stale.contains("commits behind") && stale.contains("epic/foreign"),
-        "{stale}"
-    );
-    git_stdout(&worker_path, &["reset", "--hard", "main"]);
-
-    let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-        "action": "update", "id": task_b, "assignee": worker, "status": "blocked"
-    }))
-    .unwrap();
-    let blocked = env
-        .service
-        .task(Parameters(blocked_assignment))
-        .await
-        .expect_err("a batched status change must not promise a reset");
-    assert!(blocked.message.contains("commits behind"), "{blocked}");
-    assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-
-    // An assignment must not promise a reset that task start would skip.
-    let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
-    for (label, declared, status, current_anchor, historical_anchor) in [
-        ("no declared target", false, TaskStatus::Open, false, false),
-        ("not Open", true, TaskStatus::Blocked, false, false),
-        ("prior anchor", true, TaskStatus::Open, true, false),
-        ("historical anchor", true, TaskStatus::Open, false, true),
+    for (worker_branch, assignee) in [
+        ("factory/c54f-idle-worker", "c54f-idle-worker"),
+        ("factory/c54f-idle-worker", "test-agent-id"),
+        ("factory/c54f-idle-worker-cas-prior", "c54f-idle-worker"),
+        ("factory/c54f-idle-worker-cas-prior", "test-agent-id"),
     ] {
-        let mut candidate = targeted.clone();
-        if !declared {
-            candidate.deliverables.work_target = None;
+        let home = TempDir::new().expect("home tempdir");
+        let _guard = EnvGuard::set_optional(&[
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
+            ("HOME", Some(home.path().to_str().unwrap())),
+        ]);
+        let env = FactoryTestEnv::new();
+        let worker = "c54f-idle-worker";
+        // The task's explicit branch differs from its parent epic's branch.
+        let worker_path = init_sync_repo(&env, worker);
+        // cas-17e34: the previous delivery is merged, but this owned branch is
+        // still behind the target. Both the base lane and per-task lane qualify.
+        if worker_branch != format!("factory/{worker}") {
+            git_stdout(&worker_path, &["checkout", "-b", worker_branch]);
         }
-        candidate.status = status;
-        candidate.deliverables.factory_branch_anchor = current_anchor.then(|| head.clone());
-        candidate.deliverables.historical_factory_branch_anchors = if historical_anchor {
-            vec![head.clone()]
-        } else {
-            Vec::new()
-        };
-        store.update(&candidate).unwrap();
-        let refused = assign(&env, &task_b, worker).await.expect_err(label);
-        assert!(refused.contains("commits behind"), "{label}: {refused}");
+        std::fs::write(worker_path.join("prior.txt"), "landed prior delivery\n").unwrap();
+        git_stdout(&worker_path, &["add", "prior.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "prior delivery"]);
+        let clean_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        let project = env.cas_root.parent().unwrap();
+        git_stdout(project, &["checkout", "epic/foreign"]);
+        git_stdout(
+            project,
+            &[
+                "merge",
+                "--no-ff",
+                worker_branch,
+                "-m",
+                "land prior delivery",
+            ],
+        );
+        git_stdout(project, &["checkout", "main"]);
+        std::fs::write(
+            env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"c54f-fixture\"\n",
+        )
+        .unwrap();
+        add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+        {
+            let store = env.agent_store();
+            let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
+            agent.role = AgentRole::Worker;
+            agent.status = AgentStatus::Idle;
+            agent.factory_session = Some("session-f8bc-stale".to_string());
+            agent.metadata.insert(
+                "clone_path".to_string(),
+                worker_path.to_str().unwrap().to_string(),
+            );
+            store.register(&agent).expect("register worker");
+        }
+
+        let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
+        let store = env.task_store();
+        let mut targeted = store.get(&task_b).unwrap();
+        targeted.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:c54f-fixture".to_string(),
+            target_branch: "epic/foreign".to_string(),
+        });
+        store.update(&targeted).unwrap();
+        let mut active = Task::new("cas-active".to_string(), "prior active work".to_string());
+        active.assignee = Some(worker.to_string());
+        active.status = TaskStatus::InProgress;
+        env.task_store().add(&active).unwrap();
+        let busy = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a mid-task worker must still be refused");
+        assert!(busy.contains("commits behind"), "{busy}");
+        active.status = TaskStatus::Closed;
+        env.task_store().update(&active).unwrap();
+
+        std::fs::write(worker_path.join("README"), "uncommitted work\n").unwrap();
+        let dirty = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a dirty worker must still be refused");
+        assert!(dirty.contains("commits behind"), "{dirty}");
+        git_stdout(&worker_path, &["checkout", "--", "README"]);
+
+        // Clean is insufficient when the worker still carries unmerged commits.
+        std::fs::write(worker_path.join("unmerged.txt"), "genuinely stale work\n").unwrap();
+        git_stdout(&worker_path, &["add", "unmerged.txt"]);
+        git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
+        let stale = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("genuinely stale worker must be refused");
+        assert!(
+            stale.contains("commits behind") && stale.contains("epic/foreign"),
+            "{stale}"
+        );
+        git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
+
+        let blocked_assignment: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task_b, "assignee": assignee, "status": "blocked"
+        }))
+        .unwrap();
+        let blocked = env
+            .service
+            .task(Parameters(blocked_assignment))
+            .await
+            .expect_err("a batched status change must not promise a reset");
+        assert!(blocked.message.contains("commits behind"), "{blocked}");
+        assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+
+        // An assignment must not promise a reset that task start would skip.
+        let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        for (label, declared, status, current_anchor, historical_anchor) in [
+            ("no declared target", false, TaskStatus::Open, false, false),
+            ("not Open", true, TaskStatus::Blocked, false, false),
+            ("prior anchor", true, TaskStatus::Open, true, false),
+            ("historical anchor", true, TaskStatus::Open, false, true),
+        ] {
+            let mut candidate = targeted.clone();
+            if !declared {
+                candidate.deliverables.work_target = None;
+            }
+            candidate.status = status;
+            candidate.deliverables.factory_branch_anchor = current_anchor.then(|| head.clone());
+            candidate.deliverables.historical_factory_branch_anchors = if historical_anchor {
+                vec![head.clone()]
+            } else {
+                Vec::new()
+            };
+            store.update(&candidate).unwrap();
+            let refused = assign(&env, &task_b, assignee).await.expect_err(label);
+            assert!(refused.contains("commits behind"), "{label}: {refused}");
+            assert!(store.get(&task_b).unwrap().assignee.is_none());
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+        }
+        store.update(&targeted).unwrap();
+
+        // A valid checkout for a different project must be refused before reset.
+        let foreign = FactoryTestEnv::new();
+        let foreign_path = init_sync_repo(&foreign, worker);
+        std::fs::write(
+            foreign.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"different-c54f-repo\"\n",
+        )
+        .unwrap();
+        let foreign_head = git_stdout(&foreign_path, &["rev-parse", "HEAD"]);
+        let agents = env.agent_store();
+        let mut agent = agents.get("test-agent-id").unwrap();
+        agent.metadata.insert(
+            "clone_path".into(),
+            foreign_path.to_string_lossy().into_owned(),
+        );
+        agents.update(&agent).unwrap();
+        let foreign_assignment = assign(&env, &task_b, assignee)
+            .await
+            .expect_err("a different repository cannot receive the clean-idle waiver");
+        assert!(
+            foreign_assignment.contains("commits behind"),
+            "{foreign_assignment}"
+        );
         assert!(store.get(&task_b).unwrap().assignee.is_none());
-        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+        let start: cas_mcp::TaskRequest =
+            serde_json::from_value(serde_json::json!({"action":"start", "id": task_b})).unwrap();
+        let different_repo = env
+            .service
+            .task(Parameters(start))
+            .await
+            .expect_err("foreign repository must be refused");
+        assert!(
+            different_repo
+                .message
+                .contains("belongs to another repository"),
+            "{different_repo}"
+        );
+        assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+        assert_eq!(
+            git_stdout(&foreign_path, &["rev-parse", "HEAD"]),
+            foreign_head
+        );
+        agent.metadata.insert(
+            "clone_path".into(),
+            worker_path.to_string_lossy().into_owned(),
+        );
+        agents.update(&agent).unwrap();
+
+        // cas-21db: assignment and start straddle another worker's merge. Keep
+        // the local epic ref stale, as it is in an idle worker's private clone.
+        let project = env.cas_root.parent().unwrap();
+        let remote = home.path().join("origin.git");
+        git_stdout(project, &["init", "--bare", remote.to_str().unwrap()]);
+        git_stdout(
+            project,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_stdout(project, &["push", "origin", "epic/foreign"]);
+        let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
+
+        let assigned = assign(&env, &task_b, assignee)
+            .await
+            .expect("a clean idle worker may accept work behind its target");
+        assert!(
+            assigned.contains("assignee") && assigned.contains("epic/foreign"),
+            "{assigned}"
+        );
+        assert_eq!(
+            store.get(&task_b).unwrap().assignee.as_deref(),
+            Some(worker)
+        );
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
+        git_stdout(project, &["checkout", "epic/foreign"]);
+        std::fs::write(project.join("merged.txt"), "another worker landed\n").unwrap();
+        git_stdout(project, &["add", "merged.txt"]);
+        git_stdout(
+            project,
+            &["commit", "-m", "merge between assignment and start"],
+        );
+        let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
+        git_stdout(project, &["push", "origin", "epic/foreign"]);
+        git_stdout(project, &["reset", "--hard", &assigned_target]);
+        git_stdout(
+            project,
+            &[
+                "update-ref",
+                "refs/remotes/origin/epic/foreign",
+                &assigned_target,
+            ],
+        );
+
+        let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_b
+        }))
+        .unwrap();
+        let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
+        assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
+        assert_eq!(
+            git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+            merged_target,
+            "start must fetch the epic that moved after assignment"
+        );
+        assert_eq!(
+            git_stdout(&worker_path, &["branch", "--show-current"]),
+            worker_branch
+        );
     }
-    store.update(&targeted).unwrap();
-
-    // A valid checkout for a different project must be refused before reset.
-    let foreign = FactoryTestEnv::new();
-    let foreign_path = init_sync_repo(&foreign, worker);
-    std::fs::write(
-        foreign.cas_root.join("config.toml"),
-        "[project]\ncanonical_id = \"different-c54f-repo\"\n",
-    )
-    .unwrap();
-    let foreign_head = git_stdout(&foreign_path, &["rev-parse", "HEAD"]);
-    let agents = env.agent_store();
-    let mut agent = agents.get("test-agent-id").unwrap();
-    agent.metadata.insert(
-        "clone_path".into(),
-        foreign_path.to_string_lossy().into_owned(),
-    );
-    agents.update(&agent).unwrap();
-    let foreign_assignment = assign(&env, &task_b, worker)
-        .await
-        .expect_err("a different repository cannot receive the clean-idle waiver");
-    assert!(
-        foreign_assignment.contains("commits behind"),
-        "{foreign_assignment}"
-    );
-    assert!(store.get(&task_b).unwrap().assignee.is_none());
-    let start: cas_mcp::TaskRequest =
-        serde_json::from_value(serde_json::json!({"action":"start", "id": task_b})).unwrap();
-    let different_repo = env
-        .service
-        .task(Parameters(start))
-        .await
-        .expect_err("foreign repository must be refused");
-    assert!(
-        different_repo
-            .message
-            .contains("belongs to another repository"),
-        "{different_repo}"
-    );
-    assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-    assert_eq!(
-        git_stdout(&foreign_path, &["rev-parse", "HEAD"]),
-        foreign_head
-    );
-    agent.metadata.insert(
-        "clone_path".into(),
-        worker_path.to_string_lossy().into_owned(),
-    );
-    agents.update(&agent).unwrap();
-
-    // cas-21db: assignment and start straddle another worker's merge. Keep
-    // the local epic ref stale, as it is in an idle worker's private clone.
-    let project = env.cas_root.parent().unwrap();
-    let remote = home.path().join("origin.git");
-    git_stdout(project, &["init", "--bare", remote.to_str().unwrap()]);
-    git_stdout(project, &["remote", "add", "origin", remote.to_str().unwrap()]);
-    git_stdout(project, &["push", "origin", "epic/foreign"]);
-    let assigned_target = git_stdout(project, &["rev-parse", "epic/foreign"]);
-
-    let assigned = assign(&env, &task_b, worker)
-        .await
-        .expect("a clean idle worker may accept work behind its target");
-    assert!(
-        assigned.contains("assignee") && assigned.contains("epic/foreign"),
-        "{assigned}"
-    );
-    git_stdout(project, &["checkout", "epic/foreign"]);
-    std::fs::write(project.join("merged.txt"), "another worker landed\n").unwrap();
-    git_stdout(project, &["add", "merged.txt"]);
-    git_stdout(project, &["commit", "-m", "merge between assignment and start"]);
-    let merged_target = git_stdout(project, &["rev-parse", "HEAD"]);
-    git_stdout(project, &["push", "origin", "epic/foreign"]);
-    git_stdout(project, &["reset", "--hard", &assigned_target]);
-    git_stdout(
-        project,
-        &["update-ref", "refs/remotes/origin/epic/foreign", &assigned_target],
-    );
-
-    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
-        "action": "start", "id": task_b
-    }))
-    .unwrap();
-    let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
-    assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
-    assert_eq!(
-        git_stdout(&worker_path, &["rev-parse", "HEAD"]),
-        merged_target,
-        "start must fetch the epic that moved after assignment"
-    );
 }
 
 /// A review hold must preserve this task's work without admitting a prior task.
@@ -10268,7 +10716,9 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
     env.task_store().add(&task).unwrap();
     let base = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
     for (message, anchor, prior, after, allowed) in [
+        ("", None, "", "fresh-transferred-dirty", false),
         ("", None, "", "fresh-dirty", false),
+        ("", None, "", "fresh-sync-dirty", false),
         ("fix(cas-5eb1a): own work", None, "", "", true),
         ("unnamed delivery", Some("current"), "", "", true),
         ("unnamed delivery", Some("historical"), "", "", true),
@@ -10341,7 +10791,33 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             }))
             .unwrap()
         };
-        if after == "fresh-dirty" {
+        if after.starts_with("fresh-") {
+            let project = env.cas_root.parent().unwrap();
+            if after == "fresh-transferred-dirty" {
+                // cas-32fa: transferred from another worker, whose delivery
+                // anchor is not on this worker's branch.
+                git_stdout(project, &["checkout", "-B", "transferred-side", &base]);
+                git_stdout(
+                    project,
+                    &["commit", "--allow-empty", "-m", "fix(cas-5eb1a): previous worker's delivery"],
+                );
+                let mut transferred = env.task_store().get(&task.id).unwrap();
+                transferred.deliverables.factory_branch_anchor =
+                    Some(git_stdout(project, &["rev-parse", "HEAD"]));
+                env.task_store().update(&transferred).unwrap();
+                git_stdout(project, &["checkout", "main"]);
+            }
+            if after == "fresh-sync-dirty" {
+                // cas-32fa: ahead of the target only by a target-sync merge.
+                std::fs::write(project.join("target.txt"), "new target work\n").unwrap();
+                git_stdout(project, &["add", "target.txt"]);
+                git_stdout(project, &["commit", "-m", "target advances"]);
+                git_stdout(
+                    &worker_path,
+                    &["merge", "--no-ff", "main", "-m", "Merge branch 'main' from target"],
+                );
+            }
+            let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
             std::fs::write(worker_path.join("README"), "prior task left edits\n").unwrap();
             git_stdout(&worker_path, &["add", "README"]);
             let status = git_stdout(
@@ -10353,7 +10829,12 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 .task(Parameters(start()))
                 .await
                 .expect_err("a fresh task cannot inherit prior uncommitted tracked edits");
-            assert!(error.message.contains("uncommitted changes"), "{error}");
+            assert!(error.message.contains("uncommitted changes"), "{after}: {error}");
+            // pin: a fresh start is told to stash, not commit, the earlier edits (cas-32fa).
+            assert!(
+                error.message.contains("git stash push") && !error.message.contains("Commit or stash"),
+                "{after}: {error}"
+            );
             assert_eq!(
                 env.task_store().get(&task.id).unwrap().status,
                 TaskStatus::Open
@@ -10364,7 +10845,7 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                     .unwrap()
                     .is_empty()
             );
-            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), base);
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
             assert_eq!(
                 git_stdout(
                     &worker_path,
@@ -10544,72 +11025,102 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
 /// proceed and say so instead of refusing.
 #[tokio::test]
 async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
-    let home = TempDir::new().expect("home tempdir");
-    let _guard = EnvGuard::set_optional(&[
-        ("CAS_FACTORY_MODE", Some("1")),
-        ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
-        ("HOME", Some(home.path().to_str().unwrap())),
-    ]);
-    let env = FactoryTestEnv::new();
-    let worker = "gh1006-parked-worker";
-    // epic/requested is one real commit ahead of the worker's branch, as for
-    // the genuinely stale worker above; the difference is the parked delivery.
-    let worker_path = init_sync_repo(&env, worker);
-    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
-    for args in [&["add", "."][..], &["commit", "-q", "-m", "parked delivery"][..]] {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(&worker_path)
-            .env("GIT_AUTHOR_NAME", "CAS Test")
-            .env("GIT_AUTHOR_EMAIL", "test@cas")
-            .env("GIT_COMMITTER_NAME", "CAS Test")
-            .env("GIT_COMMITTER_EMAIL", "test@cas")
-            .output()
-            .expect("git");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    }
-    let parked_tip = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&worker_path)
-            .output()
-            .expect("rev-parse")
-            .stdout,
-    )
-    .trim()
-    .to_string();
-    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
-
-    {
-        let store = env.agent_store();
-        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
-        agent.role = AgentRole::Worker;
-        agent.factory_session = Some("session-1006-parked".to_string());
-        agent.metadata.insert(
-            "clone_path".to_string(),
-            worker_path.to_str().unwrap().to_string(),
+    for per_task in [false, true] {
+        let home = TempDir::new().expect("home tempdir");
+        let _guard = EnvGuard::set_optional(&[
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
+            ("HOME", Some(home.path().to_str().unwrap())),
+        ]);
+        let env = FactoryTestEnv::new();
+        let worker = "gh1006-parked-worker";
+        let worker_path = init_sync_repo(&env, worker);
+        let branch = if per_task {
+            format!("factory/{worker}-cas-pk01")
+        } else {
+            format!("factory/{worker}")
+        };
+        if per_task {
+            git_stdout(&worker_path, &["checkout", "-b", &branch]);
+        }
+        std::fs::write(
+            env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"gh1006-fixture\"\n",
+        )
+        .unwrap();
+        std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
+        git_stdout(&worker_path, &["add", "parked.txt"]);
+        git_stdout(
+            &worker_path,
+            &["commit", "-m", "fix(cas-pk01): parked delivery"],
         );
-        store.register(&agent).expect("register worker");
-    }
-    // The delivery parked for merge (on another epic), anchored at the tip.
-    {
-        let store = env.task_store();
-        let mut parked = Task::new("cas-pk01".to_string(), "Parked hub delivery".to_string());
-        parked.status = TaskStatus::AwaitingMerge;
-        parked.assignee = Some(worker.to_string());
-        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
-        store.add(&parked).expect("add parked delivery");
-    }
+        let parked_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
 
-    let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
-    let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
-        panic!("a worker parked for another epic must be assignable: {error}")
-    });
-    assert!(text.contains("parked at") && text.contains("cas-pk01"), "{text}");
-    assert_eq!(
-        env.task_store().get(&task_b).expect("task").assignee.as_deref(),
-        Some(worker)
-    );
+        let mut agent = Agent::new("test-agent-id".into(), worker.into());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-1006-parked".into());
+        agent.metadata.insert(
+            "clone_path".into(),
+            worker_path.to_string_lossy().into_owned(),
+        );
+        env.agent_store().register(&agent).unwrap();
+
+        let store = env.task_store();
+        let mut parked = Task::new("cas-pk01".into(), "Parked hub delivery".into());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some(worker.into());
+        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+        parked.deliverables.parked_branch = Some(branch.clone());
+        store.add(&parked).unwrap();
+
+        let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
+        let mut task = store.get(&task_b).unwrap();
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:gh1006-fixture".into(),
+            target_branch: "epic/requested".into(),
+        });
+        store.update(&task).unwrap();
+        let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
+            panic!("a worker parked for another epic must be assignable: {error}")
+        });
+        assert!(
+            text.contains("parked at") && text.contains("cas-pk01"),
+            "{text}"
+        );
+        assert_eq!(
+            store.get(&task_b).unwrap().assignee.as_deref(),
+            Some(worker)
+        );
+
+        let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "start", "id": task_b,
+        }))
+        .unwrap();
+        let started = env.service.task(Parameters(start)).await;
+        if per_task {
+            let error = started.expect_err("a parked per-task branch must stay frozen");
+            assert!(error.message.contains("parked for cas-pk01"), "{error}");
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), parked_tip);
+            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+            assert!(
+                !cas::worktree::GitOperations::new(worker_path.clone())
+                    .branch_exists(&format!("{branch}-cas-pk01"))
+                    .unwrap()
+            );
+        } else {
+            let text = get_text(&started.unwrap());
+            assert!(text.contains("PARKED BRANCH MOVED"), "{text}");
+            assert_eq!(
+                git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+                git_stdout(&worker_path, &["rev-parse", "epic/requested"])
+            );
+            assert_eq!(
+                git_stdout(&worker_path, &["rev-parse", &format!("{branch}-cas-pk01")]),
+                parked_tip
+            );
+        }
+    }
 }
 
 // ===========================================================================
@@ -10718,6 +11229,137 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
         !text.contains("Stacked on"),
         "an epic cut straight from trunk must not claim a stack: {text}"
     );
+}
+
+/// cas-fd4c: a successor epic stacked on an open predecessor shows a stale
+/// base in epic_status once the predecessor advances. A clean advance names
+/// the predecessor commit and the merge; a conflicting one is refused with
+/// the files it would touch, and nothing is merged.
+#[tokio::test]
+async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+    let git = |args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let commit = |name: &str, body: &str| {
+        std::fs::write(project.join(name), body).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", name]);
+        git(&["rev-parse", "HEAD"])
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    commit("seed.txt", "seed");
+    git(&["checkout", "-b", "epic/{a,b}!e"]);
+    commit("pred.txt", "pred");
+    git(&["checkout", "-b", "epic/succ"]);
+    let local_successor = commit("succ.txt", "succ");
+    let origin = home.path().join("origin.git");
+    git(&["init", "--bare", origin.to_str().unwrap()]);
+    git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&["push", "origin", "epic/{a,b}!e", "epic/succ"]);
+    add_epic_with_id(&env, "cas-pred", TaskStatus::Open, "epic/{a,b}!e");
+    add_epic_with_id(&env, "cas-succ", TaskStatus::Open, "epic/succ");
+    env.task_store()
+        .add_dependency(&cas::types::Dependency::new(
+            "cas-succ".into(),
+            "cas-pred".into(),
+            cas::types::DependencyType::Blocks,
+        ))
+        .unwrap();
+    let status = || async {
+        let mut req = factory_req("epic_status");
+        req.id = Some("cas-succ".to_string());
+        get_text(&env.service.factory_request(Parameters(req)).await.expect("status"))
+    };
+
+    let in_sync = status().await;
+    assert!(!in_sync.contains("STALE BASE"), "a successor with every predecessor commit is current: {in_sync}");
+
+    git(&["checkout", "epic/{a,b}!e"]);
+    let advanced = commit("pred-2.txt", "pred advances");
+    let clean = status().await;
+    // pin: the receipt must name the predecessor commit and the merge to run (cas-fd4c).
+    assert!(
+        clean.contains("STALE BASE") && clean.contains(&advanced[..12]) && clean.contains("git merge --no-ff 'epic/{a,b}!e'"),
+        "{clean}"
+    );
+
+    // cas-6a32: inspect the last-fetched tips, not whichever local ref was
+    // encountered first. Keep every outcome so RED exposes all three defects.
+    let mut failures = Vec::new();
+    let remote_predecessor = commit("pred-3.txt", "origin advances further");
+    git(&["push", "origin", "epic/{a,b}!e"]);
+    git(&["checkout", "main"]);
+    git(&["update-ref", "refs/heads/epic/{a,b}!e", &advanced]);
+    let furthest = status().await;
+    if !furthest.contains(&remote_predecessor[..12]) || !furthest.contains("lacks 2 of its commit(s)") {
+        failures.push(format!("furthest predecessor gap was understated: {furthest}"));
+    }
+    git(&["branch", "-D", "epic/{a,b}!e"]);
+    let origin_only = status().await;
+    // pin: origin-only recovery preserves the predecessor ref as one shell argument.
+    assert!(origin_only.contains(&remote_predecessor[..12])
+        && origin_only.contains("git merge --no-ff 'origin/epic/{a,b}!e'"), "{origin_only}");
+    git(&["checkout", "epic/succ"]);
+    git(&["merge", "--no-ff", "origin/epic/{a,b}!e", "-m", "successor includes predecessor"]);
+    let remote_successor = git(&["rev-parse", "HEAD"]);
+    git(&["push", "origin", "epic/succ"]);
+    git(&["checkout", "main"]);
+    git(&["update-ref", "refs/heads/epic/succ", &local_successor]);
+    let current_on_origin = status().await;
+    if current_on_origin.contains("STALE BASE") {
+        failures.push(format!("successor behind origin falsely warned: {current_on_origin}"));
+    }
+    assert_eq!(git(&["rev-parse", "epic/succ"]), local_successor, "status must not advance a local ref");
+    assert_eq!(git(&["rev-parse", "origin/epic/succ"]), remote_successor);
+
+    // Both copies now agree before introducing an actual twelve-file conflict.
+    git(&["update-ref", "refs/heads/epic/succ", &remote_successor]);
+    git(&["branch", "epic/{a,b}!e", "origin/epic/{a,b}!e"]);
+    git(&["checkout", "epic/succ"]);
+    for i in 1..12 {
+        std::fs::write(project.join(format!("shared-{i:02}.txt")), "successor edit").unwrap();
+    }
+    commit("shared-00.txt", "successor edit");
+    git(&["push", "origin", "epic/succ"]);
+    git(&["checkout", "epic/{a,b}!e"]);
+    for i in 1..12 {
+        std::fs::write(project.join(format!("shared-{i:02}.txt")), "predecessor edit").unwrap();
+    }
+    let conflicting = commit("shared-00.txt", "predecessor edit");
+    let successor_before = git(&["rev-parse", "epic/succ"]);
+    let refused = status().await;
+    // pin: a conflict is refused with its files, never offered as a clean merge (cas-fd4c).
+    assert!(
+        refused.contains("MERGE REFUSED") && refused.contains("shared-00.txt") && refused.contains(&conflicting[..12]),
+        "{refused}"
+    );
+    assert!(!refused.contains("git merge --no-ff"), "{refused}");
+    assert_eq!(git(&["rev-parse", "epic/succ"]), successor_before, "epic_status merges nothing");
+    // pin: show eight file names and an omitted count, rather than an unbounded notice.
+    if !refused.contains("shared-07.txt") || refused.contains("shared-08.txt") || !refused.contains("+4 more") {
+        failures.push(format!("conflict preview was not capped: {refused}"));
+    }
+    assert_eq!(git(&["rev-parse", "origin/epic/succ"]), successor_before, "status must not fetch or move origin refs");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// cas-d4fc: a project-level encode chore is visible even without an epic link.

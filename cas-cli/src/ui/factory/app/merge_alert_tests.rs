@@ -362,7 +362,13 @@ fn cas_9efb_live_target_suppresses_relay_with_origin_prefixed_target() {
 /// only the GitHub response is replaced, using a real bare Git remote.
 #[test]
 fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
-    for outcome in ["pending", "merged", "superseded"] {
+    for outcome in [
+        "pending",
+        "merged",
+        "superseded",
+        "refs_converged",
+        "refs_diverged",
+    ] {
         let mut f = Fixture::new();
         if outcome == "pending" {
             std::fs::write(
@@ -377,6 +383,12 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
             task.deliverables.factory_branch_anchor =
                 Some(git(f.repo.path(), &["rev-parse", "HEAD"]));
             store.update(&task).unwrap();
+        }
+        if outcome == "refs_converged" {
+            git(
+                f.repo.path(),
+                &["branch", "-f", "epic/test", "factory/merge-w"],
+            );
         }
         let mut prompt = f.relay().pop().expect("settled CI builds a merge signal");
         let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
@@ -410,6 +422,21 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
             task.status = TaskStatus::Open;
             store.update(&task).unwrap();
         }
+        if outcome == "refs_converged" {
+            // An unpushed local merge was reset; both refs now agree that a merge is needed.
+            assert!(prompt.merge_alert.as_ref().unwrap().push_required);
+            git(
+                f.repo.path(),
+                &["branch", "-f", "epic/test", "origin/epic/test"],
+            );
+        } else if outcome == "refs_diverged" {
+            // The local merge just landed, but origin still needs the push.
+            assert!(!prompt.merge_alert.as_ref().unwrap().push_required);
+            git(
+                f.repo.path(),
+                &["branch", "-f", "epic/test", "factory/merge-w"],
+            );
+        }
         let deliver = f
             .app
             .deliverability_request()
@@ -430,6 +457,21 @@ fn cas_3f728_release_uses_original_delivery_and_labels_request_changes() {
                 );
                 // pin: this heading asks the supervisor to merge and must disappear on supersession.
                 assert!(!prompt.text.contains("MERGE REQUIRED"), "{}", prompt.text);
+            }
+            "refs_converged" | "refs_diverged" => {
+                assert!(deliver, "a pending merge or push still releases");
+                let push_required = outcome == "refs_diverged";
+                // pin: ref-disagreement must reflect the same live evidence as the action.
+                let disagreement = prompt.text.contains("Git ref disagreement detected:");
+                // pin: this action applies only while the local merge needs a push.
+                let push_action = prompt.text.contains("2. Push required:");
+                // pin: the alternative action must ask for the still-outstanding merge.
+                let merge_action = prompt.text.contains("2. Merge factory/merge-w into epic/test");
+                assert_eq!(
+                    (disagreement, push_action, merge_action),
+                    (push_required, push_required, !push_required),
+                    "{}", prompt.text,
+                );
             }
             _ => {
                 assert!(deliver, "a genuinely outstanding merge still releases");
@@ -635,7 +677,7 @@ fn cas_9efb_failed_target_fetch_defers_cached_positive_evidence() {
         "failed fetch cannot call cached origin live"
     );
     f.reroute_origin(&missing, &remote);
-    let recovered = f.relay();
+    let mut recovered = f.relay();
     assert_eq!(
         recovered.len(),
         1,
@@ -643,7 +685,7 @@ fn cas_9efb_failed_target_fetch_defers_cached_positive_evidence() {
     );
     f.reroute_origin(&remote, &missing);
     assert!(
-        !f.app.prompt_is_still_deliverable(&recovered[0]),
+        !f.app.refresh_prompt_for_delivery(&mut recovered[0]),
         "a late failed fetch must defer transport too"
     );
 }

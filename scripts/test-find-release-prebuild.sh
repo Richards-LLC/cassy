@@ -16,13 +16,25 @@ set -euo pipefail
 unset $(git rev-parse --local-env-vars)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lookup="$script_dir/find-release-prebuild.sh"
+lookup_script="$script_dir/find-release-prebuild.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
 
 pass=0
 fail=0
+
+# Exercise the real lookup with logical time: process scheduling must not use
+# up a fixture's one-second deadline. Unsetting Bash's special SECONDS makes it
+# an ordinary variable; the real retry sleeps advance it deterministically.
+# API timeouts are represented by the fake gh's exit124, the timeout process
+# boundary's public result, rather than waiting for a real child to be killed.
+run_lookup() (
+    unset SECONDS
+    SECONDS=0
+    sleep() { SECONDS=$((SECONDS + $1)); }
+    source "$lookup_script" "$@"
+)
 
 expect_field() {
     local output="$1" field="$2" expected="$3" label="$4" actual
@@ -74,7 +86,7 @@ case "$2" in
       sequence_file="$FAKE_RUNS_SEQUENCE_DIR/$count.json"
       if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.fail" ]]; then
         echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
-        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then sleep 5; fi
+        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then exit 124; fi
         exit 1
       fi
       [[ -f "$sequence_file" ]] || sequence_file="$FAKE_RUNS_SEQUENCE_DIR/last.json"
@@ -126,23 +138,23 @@ export FAKE_ARTIFACTS_DIR="$tmp/artifacts"
 
 # 1. Complete prebuild -> adopt it.
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found true 'a complete prebuild for the commit is adopted'
 expect_field "$out" run-id 111 'adoption names the prebuild run'
 
 # 2. Linux built, macOS missing -> decline (never publish half a release).
 printf '%s' "$linux_only" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'a partial prebuild is not adopted'
 
 # 3. Artifact aged out of retention -> decline.
 printf '%s' "$macos_expired" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'an expired artifact is not adopted'
 
 # 4. No prebuild run for the commit -> decline.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'a commit with no prebuild falls back to building'
 
 # 5. Newest incomplete run must not mask an older complete one.
@@ -151,12 +163,12 @@ echo '{"workflow_runs":[
   {"id":111,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
 printf '%s' "$linux_only" >"$tmp/artifacts/222.json"
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found true 'a complete older prebuild is still adopted'
 expect_field "$out" run-id 111 'adoption skips the incomplete run'
 
 # 6. API outage -> decline, exit 0. The release must still be able to ship.
-out="$(FAKE_RUNS_STATUS=1 "$lookup" deadbeef)"
+out="$(FAKE_RUNS_STATUS=1 run_lookup deadbeef)"
 expect_field "$out" found false 'an API failure declines instead of failing the release'
 
 # 7. A tag racing an in-flight prebuild waits, then adopts its completed assets.
@@ -168,7 +180,7 @@ echo '{"workflow_runs":[{"id":333,"status":"completed","conclusion":"success"}]}
 printf '%s' "$both_live" >"$tmp/artifacts/333.json"
 rm -f "$tmp/runs-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/runs-sequence"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=1 RELEASE_PREBUILD_POLL_SECONDS=0 "$lookup" racecommit)"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=1 RELEASE_PREBUILD_POLL_SECONDS=0 run_lookup racecommit)"
 expect_field "$out" found true 'an in-flight prebuild is awaited and adopted'
 expect_field "$out" run-id 333 'the completed racing prebuild run is adopted'
 unset FAKE_RUNS_SEQUENCE_DIR
@@ -186,7 +198,7 @@ touch "$tmp/artifacts/555.fail-once"
 rm -f "$tmp/transient-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/transient-sequence"
 out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
-  "$lookup" transientcommit 2>"$tmp/transient.err")"
+  run_lookup transientcommit 2>"$tmp/transient.err")"
 expect_field "$out" found true 'a failed in-flight poll and artifacts query are retried before adoption'
 expect_field "$out" run-id 555 'retry adoption names the completed run'
 if grep -qF 'attempt 1 failed (HTTP 502)' "$tmp/transient.err" \
@@ -211,7 +223,7 @@ touch "$tmp/timeout-sequence/2.fail" "$tmp/timeout-sequence/2.timeout"
 rm -f "$tmp/timeout-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
 out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
-  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 "$lookup" timeoutcommit 2>&1)"
+  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
 expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
 if grep -qF 'falling back to the cold release build' <<<"$out"; then
   printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
@@ -231,7 +243,7 @@ fi
 unset FAKE_RUNS_SEQUENCE_DIR
 
 # 10. A missing commit declines rather than crash the workflow step.
-out="$(GITHUB_SHA= "$lookup")"
+out="$(GITHUB_SHA= run_lookup)"
 expect_field "$out" found false 'an unset commit declines'
 
 # 11. A hand run without GITHUB_REPOSITORY resolves the repository and makes
@@ -263,7 +275,7 @@ export GIT_CEILING_DIRECTORIES="$tmp"
 
 make_repo origin https://github.com/Example/from-origin.git upstream https://github.com/Other/upstream-project
 : >"$FAKE_GH_LOG"
-out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' FAKE_REPO_VIEW=Example/from-gh "$lookup" deadbeef 2>"$tmp/err")"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' FAKE_REPO_VIEW=Example/from-gh run_lookup deadbeef 2>"$tmp/err")"
 expect_field "$out" found true 'an unset repository uses the gh default repository'
 looked_up Example/from-gh 'the lookup asks the gh default repository'
 if grep -qF 'using Example/from-gh (gh repo view)' "$tmp/err"; then
@@ -273,7 +285,7 @@ else
 fi
 
 : >"$FAKE_GH_LOG"
-out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>/dev/null)"
 expect_field "$out" found true 'without a gh default the origin remote is used'
 looked_up Example/from-origin 'origin wins over the upstream remote'
 
@@ -281,7 +293,7 @@ for url in git@github.com:Example/scp-form.git ssh://git@github.com/Example/ssh-
     make_repo origin "$url"
     expected="$(sed -E 's#^(git@github.com:|ssh://git@github.com/|https://github.com/)##; s#/$##; s#\.git$##' <<<"$url")"
     : >"$FAKE_GH_LOG"
-    out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+    out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>/dev/null)"
     expect_field "$out" found true "origin $url resolves"
     looked_up "$expected" "origin $url is looked up as $expected"
 done
@@ -291,7 +303,7 @@ done
 unresolvable() {
     local dir="$1" label="$2" status=0
     : >"$FAKE_GH_LOG"
-    out="$(cd "$dir" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>"$tmp/err")" || status=$?
+    out="$(cd "$dir" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>"$tmp/err")" || status=$?
     if [[ "$status" -eq 2 ]] && ! grep -q '^found=' <<<"$out" \
         && grep -qF 'GITHUB_REPOSITORY is unset and the repository could not be resolved' "$tmp/err" \
         && [[ ! -s "$FAKE_GH_LOG" ]]; then
@@ -319,19 +331,19 @@ echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 printf '{"workflow_runs":[{"id":222,"status":"completed","conclusion":"success","head_sha":"35a177531","head_commit":{"tree_id":"%s"}}]}' \
     "$tree" >"$tmp/recent.json"
 printf '%s' "$both_live" >"$tmp/artifacts/222.json"
-out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" "$lookup" 5fe54c3d5 2>/dev/null)"
+out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" run_lookup 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found true 'a merge-queue prebuild of the identical tree is adopted at land'
 expect_field "$out" run-id 222 'adoption names the merge-queue run'
 
 # 14. A complete run of a different tree is never adopted: the tag rebuilds.
 out="$(FAKE_TREE=1111111111111111111111111111111111111111 FAKE_RECENT_RUNS_JSON="$tmp/recent.json" \
-    "$lookup" 5fe54c3d5 2>/dev/null)"
+    run_lookup 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found false 'a prebuild of a different tree is not adopted'
 
 # Every path exits 0.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 for scenario in 'deadbeef'; do
-    if "$lookup" "$scenario" >/dev/null; then
+    if run_lookup "$scenario" >/dev/null; then
         printf 'ok   lookup exits 0 for %s\n' "$scenario"
         pass=$((pass + 1))
     else

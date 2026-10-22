@@ -1,6 +1,7 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -27,13 +28,47 @@ struct TestReceipt {
     count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supervisor_recorded: Option<SupervisorRecordedProof>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SupervisorRecordedProof {
+    supervisor_id: String,
+    task_id: String,
+    tested_repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    log_sha256: String,
+    recorded_at: String,
+}
+
+/// An authenticated supervisor attests the exit code of an existing run;
+/// recording never starts Cargo or relaxes worker admission.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorTestEvidence {
+    head: String,
+    repo: PathBuf,
+    cargo_args: Vec<String>,
+    log_path: PathBuf,
+    exit_code: i32,
 }
 
 impl TestReceipt {
     fn path_note(&self) -> String {
-        self.host_path_opt_out.as_ref()
+        let mut note = self
+            .host_path_opt_out
+            .as_ref()
             .map(|reason| format!(" [host PATH opt-out: {reason}]"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(proof) = &self.supervisor_recorded {
+            note.push_str(&format!(
+                " [supervisor-recorded by {} for {}; log sha256={}]",
+                proof.supervisor_id, proof.task_id, proof.log_sha256
+            ));
+        }
+        note
     }
 }
 
@@ -128,17 +163,42 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
     let Some(harness) = &test.harness else {
         return Ok(());
     };
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(repo.join("Cargo.toml"))?)?;
-    let mut manifests = vec![repo.join("Cargo.toml")];
+    let (path, value) = package_manifest(repo, &test.package)?;
+    let found = value
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
+                    && target
+                        .get("path")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|source| {
+                            path.parent().is_some_and(|dir| dir.join(source).is_file())
+                        })
+            })
+        });
+    if !found {
+        bail!(
+            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
+            test.package
+        );
+    }
+    Ok(())
+}
+
+fn package_manifest(repo: &Path, package: &str) -> Result<(PathBuf, toml::Value)> {
+    let root = repo.join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(&root)?)?;
+    let mut manifests = vec![root];
     if let Some(members) = manifest
         .get("workspace")
         .and_then(|w| w.get("members"))
         .and_then(toml::Value::as_array)
     {
         for member in members.iter().filter_map(toml::Value::as_str) {
-            let pattern = repo.join(member).join("Cargo.toml");
             manifests.extend(
-                glob::glob(&pattern.to_string_lossy())?
+                glob::glob(&repo.join(member).join("Cargo.toml").to_string_lossy())?
                     .collect::<std::result::Result<Vec<_>, _>>()?,
             );
         }
@@ -149,36 +209,174 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(toml::Value::as_str)
-            != Some(test.package.as_str())
+            == Some(package)
         {
-            continue;
+            return Ok((path, value));
         }
-        let found = value
-            .get("test")
-            .and_then(toml::Value::as_array)
-            .is_some_and(|targets| {
-                targets.iter().any(|target| {
-                    target.get("name").and_then(toml::Value::as_str) == Some(harness.as_str())
-                        && target
-                            .get("path")
-                            .and_then(toml::Value::as_str)
-                            .is_some_and(|source| {
-                                path.parent().is_some_and(|dir| dir.join(source).is_file())
-                            })
-                })
-            });
-        if found {
-            return Ok(());
+    }
+    bail!("Worker test refused: package {package} not found in workspace")
+}
+
+/// Record an existing supervisor-run selection under the assigned worker's
+/// normal receipt key. The authority, task binding and provenance are checked
+/// here so MCP and CLI use exactly the same path.
+pub(crate) fn record_supervisor_test(
+    core: &crate::mcp::CasCore,
+    task_id: &str,
+    payload: &str,
+) -> Result<String> {
+    let supervisor = core.resolve_live_supervisor_authority().map_err(|_| {
+        anyhow::anyhow!("record_test_receipt requires a live registered supervisor")
+    })?;
+    if payload.len() > 512 * 1024 {
+        bail!("supervisor evidence payload exceeds 512 KiB");
+    }
+    let evidence: SupervisorTestEvidence = serde_json::from_str(payload)
+        .context("payload must contain head, repo, cargo_args, log_path and exit_code")?;
+    if !valid_git_oid(&evidence.head) {
+        bail!("head must be the full tested commit SHA");
+    }
+    if !evidence.repo.is_absolute() || !evidence.log_path.is_absolute() {
+        bail!("repo and log_path must be absolute paths");
+    }
+    let test = targeted_test(&evidence.cargo_args).context(
+        "cargo_args must be nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'",
+    )?;
+    let root = core.cas_root.canonicalize()?;
+    let tasks = crate::store::open_task_store(&root)?;
+    let task = tasks.get(task_id)?;
+    if task.status == cas_types::TaskStatus::Closed {
+        bail!("cannot record new test evidence for a closed task");
+    }
+    let agents = crate::store::open_agent_store(&root)?;
+    let worker = task
+        .assignee
+        .as_deref()
+        .and_then(|assignee| {
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+        })
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .context("task must be assigned to a registered worker")?;
+    // Same metadata/convention precedence as the factory worker roster.
+    let repo = worker
+        .metadata
+        .get("clone_path")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| root.join("worktrees").join(&worker.name))
+        .canonicalize()
+        .context("assigned worker checkout is unavailable")?;
+    let tested_repo = evidence
+        .repo
+        .canonicalize()
+        .context("tested checkout is unavailable")?;
+    for checkout in [&repo, &tested_repo] {
+        if PathBuf::from(git(checkout, &["rev-parse", "--show-toplevel"])?).canonicalize()?
+            != *checkout
+            || clean_head(checkout)? != evidence.head
+        {
+            bail!(
+                "task worker checkout and tested checkout must both be clean at {}",
+                evidence.head
+            );
         }
+    }
+    package_manifest(&repo, &test.package)?;
+    validate_harness(&repo, &test)?;
+    let _lane = try_lock_lane(&root, &repo)?
+        .context("worker has an active capped run; retry recording later")?;
+    let path = test_receipt_path(&root, &repo, &evidence.head, &test);
+    // Just like an executed retry, failed evidence invalidates only this
+    // exact command's earlier receipt, never another selection's proof.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if evidence.exit_code != 0 {
         bail!(
-            "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
-            test.package
+            "supervisor test exited {}; no PASS receipt recorded",
+            evidence.exit_code
         );
     }
-    bail!(
-        "Worker test refused: package {} not found in workspace",
-        test.package
-    )
+    let log_path = evidence.log_path.canonicalize()?;
+    if !std::fs::metadata(&log_path)?.is_file() {
+        bail!("supervisor log must be a regular file");
+    }
+    let mut log_file = File::open(&log_path)?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    (&mut log_file)
+        .take(25 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
+        bail!("supervisor log must be non-empty and at most 25 MiB");
+    }
+    let log = std::str::from_utf8(&bytes).context("supervisor log must be UTF-8")?;
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")?;
+    let log = ansi.replace_all(log, "");
+    let summary = regex::Regex::new(
+        r"(?m)^ *Summary +\[[^\r\n]*\] +([0-9]+) tests? run: ([0-9]+) passed(?:, [^\r\n]*)?$",
+    )?;
+    let summaries = summary.captures_iter(&log).collect::<Vec<_>>();
+    if summaries.len() != 1 {
+        bail!("supervisor log must contain exactly one selected nextest summary");
+    }
+    let run: u64 = summaries[0][1].parse()?;
+    let count: u64 = summaries[0][2].parse()?;
+    if count == 0 || count != run {
+        bail!("supervisor log must show a nonzero selection with every executed test passed");
+    }
+    // A receipt is not transferable across ownership or source mutations
+    // while the log was read. The worker lane lock also fences capped writers.
+    if tasks.get(task_id)?.assignee != task.assignee
+        || clean_head(&repo)? != evidence.head
+        || clean_head(&tested_repo)? != evidence.head
+    {
+        bail!("task assignment or checkout changed while recording; no PASS receipt recorded");
+    }
+    let provenance = SupervisorRecordedProof {
+        supervisor_id: supervisor.id,
+        task_id: task_id.to_string(),
+        tested_repo,
+        cargo_args: evidence.cargo_args,
+        log_path,
+        log_sha256: hex::encode(Sha256::digest(&bytes)),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let record = CheckReceipt {
+        head: evidence.head,
+        repo,
+        packages: vec![test.package],
+        test: Some(TestReceipt {
+            filter: test.filter,
+            harness: test.harness,
+            count,
+            host_path_opt_out: None,
+            supervisor_recorded: Some(provenance),
+        }),
+    };
+    let proof = record.test.as_ref().expect("test receipt");
+    let receipt = format!(
+        "test: PASS {} {} {} {}{}",
+        record.head,
+        record.packages[0],
+        proof.filter,
+        proof.count,
+        proof.path_note()
+    );
+    tasks.append_note(
+        task_id,
+        &format!(
+            "[{}] SUPERVISOR-RECORDED TEST: {}; provenance={}",
+            chrono::Utc::now().to_rfc3339(),
+            receipt,
+            serde_json::to_string(&proof.supervisor_recorded)?
+        ),
+    )?;
+    std::fs::create_dir_all(path.parent().context("receipt directory")?)?;
+    std::fs::write(path, serde_json::to_vec(&record)?)?;
+    Ok(receipt)
 }
 
 fn lock_file(path: &Path) -> Result<File> {
@@ -195,7 +393,32 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nRetry the same capped Cargo command when host pressure or a builder slot clears.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon can queue one supervisor notice per recorded wait after 20 minutes, subject to normal delivery readiness. Report an actual need for assistance immediately.")
+}
+
+#[derive(Debug)]
+struct CapacityRefusal(String);
+impl std::fmt::Display for CapacityRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&waiting_for_admission(&self.0))
+    }
+}
+impl std::error::Error for CapacityRefusal {}
+
+fn recorded_refusal(root: &Path, repo: &Path, cause: &str) -> anyhow::Error {
+    match crate::factory_capacity_wait::record_refusal(root, repo, cause, chrono::Utc::now()) {
+        Ok(Some(wait)) => {
+            let mut message = waiting_for_admission(&wait.cause);
+            message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
+            anyhow::anyhow!(message)
+        }
+        Ok(None) => anyhow::anyhow!(waiting_for_admission(cause)),
+        Err(error) => {
+            let mut message = waiting_for_admission(cause);
+            message.push_str(&format!("\nCapacity wait could not be recorded: {error}. Report storage/ownership assistance if needed."));
+            anyhow::anyhow!(message)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -242,7 +465,21 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<BuilderSlot> {
             Err(error) => return Err(error.into()),
         }
     }
-    bail!("{}", waiting_for_admission(&format!("max_concurrent_builders={cap} slots are occupied")))
+    Err(CapacityRefusal(format!("max_concurrent_builders={cap} slots are occupied")).into())
+}
+
+fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
+    std::fs::create_dir_all(root)?;
+    let mut available = 0;
+    for index in 0..cap {
+        let slot = lock_file(&root.join(format!("slot-{index}.lock")))?;
+        match slot.try_lock_exclusive() {
+            Ok(()) => available += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(available)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -532,33 +769,78 @@ fn test_receipt_path(cas_root: &Path, repo: &Path, head: &str, test: &TargetedTe
     receipt_path(cas_root, repo, head).with_file_name(format!("{head}-test-{key}.json"))
 }
 
+/// One close's evidence at an immutable delivery. Construction does no I/O;
+/// package coverage and audit lines share the first read, including its Git
+/// classification work. A new close gets a fresh view of receipt files.
+pub(crate) struct PassingTests<'a> {
+    cas_root: &'a Path,
+    repo: &'a Path,
+    head: &'a str,
+    records: std::sync::OnceLock<Vec<(String, String, TestReceipt)>>,
+}
+
+impl<'a> PassingTests<'a> {
+    pub(crate) fn new(cas_root: &'a Path, repo: &'a Path, head: &'a str) -> Self {
+        Self {
+            cas_root,
+            repo,
+            head,
+            records: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn records(&self) -> &[(String, String, TestReceipt)] {
+        self.records
+            .get_or_init(|| passing_test_records(self.cas_root, self.repo, self.head))
+    }
+
+    pub(crate) fn receipts(&self) -> Vec<String> {
+        let mut receipts = self.records().iter()
+            .map(|(receipt_head, package, test)| {
+                let head = self.head;
+                let rebind = (receipt_head != head)
+                    .then(|| format!(" rebound from {receipt_head} to {head}"))
+                    .unwrap_or_default();
+                format!(
+                    "test: PASS {receipt_head} {package} {} {}{}{rebind}",
+                    test.filter, test.count, test.path_note()
+                )
+            }).collect::<Vec<_>>();
+        receipts.sort();
+        receipts.dedup();
+        receipts
+    }
+
+    pub(crate) fn packages(&self) -> Vec<String> {
+        let mut packages = self.records().iter()
+            .map(|(_, package, _)| package.clone()).collect::<Vec<_>>();
+        packages.sort();
+        packages.dedup();
+        packages
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
-    let mut receipts = passing_test_records(cas_root, repo, head)
-        .into_iter()
-        .map(|(package, test)| {
-            format!("test: PASS {head} {package} {} {}{}", test.filter, test.count, test.path_note())
-        })
-        .collect::<Vec<_>>();
-    receipts.sort();
-    receipts.dedup();
-    receipts
+    PassingTests::new(cas_root, repo, head).receipts()
 }
 
 /// cas-b38a: the packages with at least one passing targeted test at `head`
 /// in this worktree, sorted and once each. The close gate counts a delivered
 /// crate as tested when its package is listed here.
 pub(crate) fn passing_test_packages(cas_root: &Path, repo: &Path, head: &str) -> Vec<String> {
-    let mut packages = passing_test_records(cas_root, repo, head)
-        .into_iter()
-        .map(|(package, _)| package)
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages.dedup();
-    packages
+    PassingTests::new(cas_root, repo, head).packages()
 }
 
-/// Every valid passing targeted-test receipt for `head` in this worktree.
-fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String, TestReceipt)> {
+/// Exact test receipts plus ancestor receipts whose full commit range contains
+/// no Rust, test or build inputs. The latter saves an identical rerun after a
+/// documentation-only delivery commit while keeping proof tied to its tested
+/// tree.
+fn passing_test_records(
+    cas_root: &Path,
+    repo: &Path,
+    head: &str,
+) -> Vec<(String, String, TestReceipt)> {
     let Ok(repo) = repo.canonicalize() else {
         return Vec::new();
     };
@@ -569,39 +851,324 @@ fn passing_test_records(cas_root: &Path, repo: &Path, head: &str) -> Vec<(String
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
-    let mut records = Vec::new();
-    for entry in entries.flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(&format!("{head}-test-"))
-        {
-            continue;
-        }
-        let record = std::fs::read(entry.path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<CheckReceipt>(&bytes).ok());
-        let Some(mut record) = record else {
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let mut exact = BTreeMap::new();
+    let mut ancestors = Vec::new();
+    for entry in entries {
+        let Some((receipt_head, package, test)) =
+            read_passing_test_record(cas_root, &repo, &entry)
+        else {
             continue;
         };
-        let Some(test) = record.test.take() else {
-            continue;
-        };
-        if record.repo == repo
-            && record.head == head
-            && record.packages.len() == 1
-            && valid_package(&record.packages[0])
-            && named_filter(&test.filter)
-            && test.count > 0
-            && test
-                .harness
-                .as_ref()
-                .is_none_or(|harness| valid_package(harness))
-        {
-            records.push((record.packages.remove(0), test));
+        if receipt_head == head {
+            exact.insert(
+                (package, test.harness.clone(), test.filter.clone()),
+                (receipt_head, test),
+            );
+        } else {
+            ancestors.push((receipt_head, package, test));
         }
     }
-    records
+
+    let mut ranges = BTreeMap::new();
+    let mut named_sources = BTreeMap::new();
+    for (receipt_head, package, test) in ancestors {
+        let key = (package, test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key)
+            || !*ranges.entry(receipt_head.clone()).or_insert_with(|| {
+                receipt_range_has_no_proof_inputs(&repo, &receipt_head, head, &mut named_sources)
+            })
+        {
+            continue;
+        }
+        match exact.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert((receipt_head, test));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot)
+                if receipt_head_is_ancestor(&repo, &slot.get().0, &receipt_head) =>
+            {
+                slot.insert((receipt_head, test));
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+
+    exact
+        .into_iter()
+        .map(|((package, _, _), (receipt_head, test))| (receipt_head, package, test))
+        .collect()
+}
+
+fn read_passing_test_record(
+    cas_root: &Path,
+    repo: &Path,
+    entry: &std::fs::DirEntry,
+) -> Option<(String, String, TestReceipt)> {
+    if !entry.file_type().ok()?.is_file() {
+        return None;
+    }
+    let mut record = serde_json::from_slice::<CheckReceipt>(&std::fs::read(entry.path()).ok()?).ok()?;
+    let test = record.test.take()?;
+    if record.repo != repo
+        || record.packages.len() != 1
+        || !valid_package(&record.packages[0])
+        || !named_filter(&test.filter)
+        || test.count == 0
+        || test
+            .harness
+            .as_ref()
+            .is_some_and(|harness| !valid_package(harness))
+    {
+        return None;
+    }
+    let package = record.packages.remove(0);
+    let targeted_test = TargetedTest {
+        package: package.clone(),
+        harness: test.harness.clone(),
+        filter: test.filter.clone(),
+    };
+    (entry.path() == test_receipt_path(cas_root, repo, &record.head, &targeted_test))
+        .then_some((record.head, package, test))
+}
+
+fn receipt_range_has_no_proof_inputs(
+    repo: &Path,
+    receipt_head: &str,
+    delivered_head: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
+    if !valid_git_oid(receipt_head)
+        || !valid_git_oid(delivered_head)
+        || !receipt_head_is_ancestor(repo, receipt_head, delivered_head)
+    {
+        return false;
+    }
+    let range = format!("{receipt_head}..{delivered_head}");
+    let Ok(changes) = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "-m",
+            "-z",
+            &range,
+        ])
+        .current_dir(repo)
+        .output()
+    else {
+        return false;
+    };
+    changes.status.success()
+        && changes.stdout.split(|byte| *byte == 0).all(|path| {
+            path.is_empty()
+                || std::str::from_utf8(path)
+                    .is_ok_and(|path| {
+                        !is_test_or_build_input_path(repo, delivered_head, path, named_sources)
+                    })
+        })
+}
+
+fn receipt_head_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    valid_git_oid(ancestor)
+        && valid_git_oid(descendant)
+        && Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .current_dir(repo)
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn valid_git_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_test_or_build_input_path(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if is_workspace_crate_path(repo, delivered_head, path)
+        || lower == ".env"
+        || lower.ends_with(".capture.txt")
+        || lower == "hub-web/dist"
+        || lower.starts_with("hub-web/dist/")
+    {
+        return true;
+    }
+    let parts = lower.split('/').collect::<Vec<_>>();
+    let name = parts.last().copied().unwrap_or_default();
+    if parts.iter().any(|part| {
+        matches!(
+            *part,
+            "test" | "tests" | "__tests__" | "spec" | "specs" | "fixture" | "fixtures"
+                | "testdata" | "snapshots" | "benches" | "build" | "scripts" | "ci"
+                | ".cargo" | ".github" | "xtask"
+        )
+    }) {
+        return true;
+    }
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    if name.starts_with("test_")
+        || name.starts_with("test-")
+        || [".test.", "_test.", "-test.", ".spec.", "_spec.", "-spec."]
+            .iter()
+            .any(|marker| name.contains(marker))
+        || matches!(stem, "test" | "spec")
+        || matches!(
+            name,
+            "cargo.toml"
+                | "cargo.lock"
+                | "build.rs"
+                | "makefile"
+                | "gnumakefile"
+                | "justfile"
+                | "taskfile"
+                | "cmakelists.txt"
+                | "build.ninja"
+                | "dockerfile"
+                | "rust-toolchain"
+                | "rust-toolchain.toml"
+                | ".rust-toolchain"
+                | "nextest.toml"
+                | "clippy.toml"
+                | "rustfmt.toml"
+                | ".rustfmt.toml"
+        )
+    {
+        return true;
+    }
+    let extension = name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
+    matches!(
+        extension,
+        "rs" | "c" | "cc" | "cpp" | "h" | "hpp" | "go" | "py" | "pyi" | "js"
+            | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "sh" | "bash" | "java" | "kt"
+            | "kts" | "cs" | "php" | "swift" | "lua" | "sql" | "pl" | "r" | "ex"
+            | "exs" | "scala" | "clj" | "vue" | "svelte" | "toml" | "lock" | "json"
+            | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
+            | "proto" | "graphql" | "nix"
+    ) || is_named_by_tracked_rust_source(repo, delivered_head, path, named_sources)
+}
+
+/// A Rust source file can embed assets outside its crate directory with
+/// `include_str!` or `include_bytes!`. Use the basename to find candidate
+/// sources, then confirm the repo-relative or source-relative path. Treat git
+/// errors conservatively as proof inputs rather than reusing an unvalidated receipt.
+fn is_named_by_tracked_rust_source(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    // The basename only discovers possible source files. Confirm the full
+    // repo-relative path or its spelling relative to each source file; matching
+    // only a basename makes unrelated assets invalidate each other's receipts.
+    *named_sources.entry(path.to_owned()).or_insert_with(|| {
+        let sources = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["grep", "-lF", "-z", "-e", name, delivered_head, "--", "*.rs"])
+            .current_dir(repo)
+            .output();
+        let Ok(sources) = sources else {
+            return true;
+        };
+        if !sources.status.success() {
+            return sources.status.code() != Some(1);
+        }
+        let sources = sources.stdout.split(|byte| *byte == 0);
+        for source in sources {
+            if source.is_empty() {
+                continue;
+            }
+            let Ok(source) = std::str::from_utf8(source) else {
+                return true;
+            };
+            let tree_prefix = format!("{delivered_head}:");
+            let source = source.strip_prefix(&tree_prefix).unwrap_or(source);
+            let Some(relative_path) = relative_path_from_source(source, path) else {
+                return true;
+            };
+            let matches = Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .arg("grep")
+                .arg("-lF")
+                .arg("-e")
+                .arg(path)
+                .arg("-e")
+                .arg(&relative_path)
+                .arg(delivered_head)
+                .arg("--")
+                .arg(source)
+                .current_dir(repo)
+                .output();
+            match matches {
+                Ok(matches) if matches.status.success() => return true,
+                Ok(matches) if matches.status.code() == Some(1) => {}
+                Ok(_) | Err(_) => return true,
+            }
+        }
+        false
+    })
+}
+
+fn relative_path_from_source(source: &str, target: &str) -> Option<String> {
+    let mut source_dir = source.split('/').collect::<Vec<_>>();
+    source_dir.pop()?;
+    let target = target.split('/').collect::<Vec<_>>();
+    if source_dir
+        .iter()
+        .chain(&target)
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return None;
+    }
+    let shared = source_dir
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = vec![".."; source_dir.len() - shared];
+    relative.extend_from_slice(&target[shared..]);
+    Some(relative.join("/"))
+}
+
+/// Cargo inputs are not limited to source-code extensions: `include_str!`,
+/// `include_bytes!`, and package build scripts can consume any file beneath a
+/// crate directory. Treat those files as proof inputs regardless of suffix.
+fn is_workspace_crate_path(repo: &Path, delivered_head: &str, path: &str) -> bool {
+    let path = Path::new(path);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component.as_os_str());
+        if prefix != Path::new(".") {
+            let prefix_for_git = prefix.to_string_lossy().replace('\\', "/");
+            let manifest = format!("{delivered_head}:{prefix_for_git}/Cargo.toml");
+            match Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["cat-file", "-e", &manifest])
+                .stderr(std::process::Stdio::null())
+                .current_dir(repo)
+                .status()
+            {
+                Ok(status) if status.success() => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+    }
+    false
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates
@@ -632,6 +1199,7 @@ pub(crate) fn record_passing_test_for_tests(
             harness: None,
             count: 1,
             host_path_opt_out: None,
+            supervisor_recorded: None,
         }),
     };
     std::fs::write(
@@ -749,13 +1317,19 @@ fn discard_shared_fingerprints(target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
+/// The fixed provider credential-free test profile; never an arbitrary env override.
+pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 6] = [
+    "VIKTOR_API_KEY", "VIKTOR_KEY", "NEON_API_KEY", "NEON_TOKEN", "VERCEL_TOKEN", "VERCEL_API_TOKEN",
+];
+
+pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
     execute_at_with_scope(
         cas_root,
         args,
         &std::env::current_dir()?,
         Path::new("cargo"),
         cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+        isolated_test_env,
     )
 }
 
@@ -768,11 +1342,11 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
 /// session is outside that group. Its stdout and stderr both go to this
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
-pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
-    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args);
+    let command = detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env);
     let child = spawn_detached(command).context("starting the detached worker-check runner")?;
     println!(
         "worker-check: detached pid {} in its own session; this log receives its output and receipt",
@@ -784,15 +1358,17 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String]) -> Result<()> {
 /// The detached runner, ending its log with `worker-check: EXIT <code>` so a
 /// refused or failed run is distinguishable from one still running (cas-6591).
 #[cfg(unix)]
-fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String]) -> Command {
+fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
         .arg(executable)
         .args(["factory", "worker-check", "--cas-root"])
-        .arg(cas_root)
-        .arg("--")
-        .args(args);
+        .arg(cas_root);
+    if let Some(directory) = isolated_test_env {
+        command.arg("--isolated-test-env").arg(directory);
+    }
+    command.arg("--").args(args);
     command
 }
 
@@ -820,13 +1396,57 @@ fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String]) -> Result<()> {
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>) -> Result<()> {
     bail!("worker-check --detach needs a Unix session; run the check in the foreground")
 }
 
 #[cfg(test)]
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
-    execute_at_with_scope(cas_root, args, cwd, cargo, None)
+    execute_at_with_scope(cas_root, args, cwd, cargo, None, None)
+}
+
+/// cas-d95c: run a task's named tests at a verification's bound head under the
+/// same admission as a worker check (PSI and builder cap, a counted builder
+/// slot, a private target, the zero-test guard). A verifier otherwise has no
+/// clean checkout of that head under the worktrees root, and fell back to
+/// plain Cargo that no admission saw.
+pub(crate) fn execute_verifier(
+    cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
+    head: &str,
+    args: &[String],
+) -> Result<()> {
+    execute_verifier_at(
+        cas_root,
+        task_id,
+        dispatch_id,
+        head,
+        args,
+        &std::env::current_dir()?,
+        Path::new("cargo"),
+        cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
+    )
+}
+
+fn execute_verifier_at(
+    cas_root: &Path,
+    task_id: &str,
+    dispatch_id: Option<&str>,
+    head: &str,
+    args: &[String],
+    cwd: &Path,
+    cargo: &Path,
+    scope_runner: Option<&Path>,
+) -> Result<()> {
+    if targeted_test(args).is_none() {
+        bail!(
+            "Verifier tests run named tests only: `nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`"
+        );
+    }
+    let checkout =
+        crate::factory_review_scratch::create(cas_root, cwd, task_id, dispatch_id, head)?;
+    execute_at_with_scope(cas_root, args, &checkout.path, cargo, scope_runner, None)
 }
 
 /// Prefer the active task's declared integration target, never the pushed
@@ -857,8 +1477,13 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
         .or_else(|_| git(repo, &["rev-parse", "HEAD"]))
 }
 
-fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>) -> Result<()> {
+fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {
     let test = targeted_test(args);
+    if let Some(directory) = isolated_test_env {
+        if test.is_none() || !directory.is_absolute() || !directory.is_dir() {
+            bail!("Isolated worker test environment needs a named targeted test and an existing absolute private XDG_CONFIG_HOME directory");
+        }
+    }
     let packages = match &test {
         Some(test) => vec![test.package.clone()],
         None => check_packages(args).context("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed")?,
@@ -866,7 +1491,8 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
     // Check only isolated, seeded worker caches; never use a shared target.
-    if !repo.starts_with(cas_root.join("worktrees")) {
+    if !repo.starts_with(cas_root.join("worktrees"))
+        && !crate::factory_review_scratch::is_managed_checkout(&cas_root, &repo) {
         bail!(
             "Worker check requires an isolated worktree under {}",
             cas_root.join("worktrees").display()
@@ -909,7 +1535,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.admission_violations(load_admitted);
     if !violations.is_empty() {
-        bail!("{}", waiting_for_admission(&violations.join("; ")));
+        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "));
+        drop(admission);
+        return Err(refusal);
     }
     if load_admitted && !snapshot.violations().is_empty() {
         println!(
@@ -919,7 +1547,40 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
-    let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
+    let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
+    match crate::factory_capacity_wait::priority_refusal(
+        &cas_root,
+        &repo,
+        chrono::Utc::now(),
+        available_slots,
+    ) {
+        Ok(Some(cause)) => {
+            let refusal = recorded_refusal(&cas_root, &repo, &cause);
+            drop(admission);
+            return Err(refusal);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                checkout = %repo.display(),
+                "capacity priority lookup failed; continuing build admission"
+            );
+        }
+    }
+    let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
+        Ok(slot) => slot,
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
+                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0);
+                drop(admission);
+                return Err(refusal);
+            }
+            drop(admission);
+            return Err(error);
+        }
+    };
+    crate::factory_capacity_wait::admitted(&cas_root, &repo)?;
     // A parked target may contain proof logs but no debug artifacts. Seed only
     // missing children from the published immutable baseline under the lane lock.
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
@@ -996,6 +1657,13 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         // Never let a long-lived compiler cache retain the target lease.
         .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "");
+    // Bootstrap/admission keep their inherited identity and credentials. Only
+    // the final Cargo/test child receives this fixed isolation profile.
+    if let Some(directory) = isolated_test_env {
+        for key in ISOLATED_TEST_CREDENTIALS { command.env_remove(key); }
+        command.env("XDG_CONFIG_HOME", directory);
+        println!("Worker test environment: provider credentials removed; private XDG_CONFIG_HOME");
+    }
     let scope_directory = tempfile::tempdir_in(&slots)?;
     let high = crate::factory_build_memory::memory_high(
         config.worker_memory_high_gib,
@@ -1048,6 +1716,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
                 harness: test.harness,
                 count,
                 host_path_opt_out,
+                supervisor_recorded: None,
             })
         }
         None => None,
@@ -1074,6 +1743,54 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn capacity_test_root(base: &Path, cap: usize) -> PathBuf {
+        let root = base.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[factory]\nmax_concurrent_builders={cap}\n"),
+        )
+        .unwrap();
+        crate::store::open_agent_store(&root).unwrap().init().unwrap();
+        crate::store::open_task_store(&root).unwrap().init().unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    fn register_capacity_worker(
+        root: &Path,
+        worker_id: &str,
+        worker_name: &str,
+        task_id: &str,
+        priority: cas_types::Priority,
+        checkout: &Path,
+    ) {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+
+        let agents = open_agent_store(root).unwrap();
+        let tasks = open_task_store(root).unwrap();
+        let mut agent = Agent::new_with_role(
+            worker_id.into(),
+            worker_name.into(),
+            AgentRole::Worker,
+        );
+        agent.factory_session = Some(format!("session-{worker_name}"));
+        agent
+            .metadata
+            .insert("clone_path".into(), checkout.display().to_string());
+        agents.register(&agent).unwrap();
+        let mut task = Task::new(task_id.into(), "wait for a builder slot".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker_name.into());
+        task.priority = priority;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(task_id, worker_id, 3600, Some("working"))
+            .unwrap();
+    }
 
     /// cas-c53a: on btrfs and overlayfs `/proc/locks` can name a different
     /// device than `stat`; a held FLOCK on the lane file's inode is still busy.
@@ -1112,7 +1829,7 @@ mod tests {
     fn detached_runner_log_ends_with_the_runner_exit_code() {
         // `false` stands in for a runner that refuses: it exits 1.
         let args = vec!["-p".to_string(), "cas".into(), "--lib".into()];
-        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args)
+        let output = detached_runner_command(Path::new("false"), Path::new("/cas-root"), &args, None)
             .output()
             .unwrap();
         let log = String::from_utf8(output.stdout).unwrap();
@@ -1164,6 +1881,113 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
+    }
+
+    #[test]
+    fn ancestor_test_receipt_uses_delivered_manifest_after_head_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/widget\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/widget/assets")).unwrap();
+        std::fs::write(
+            repo.join("crates/widget/Cargo.toml"),
+            "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("crates/widget/assets/theme.brief.md"), "old\n").unwrap();
+        fixture_commit_as(&repo, "workspace fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        std::fs::write(repo.join("crates/widget/assets/theme.brief.md"), "new\n").unwrap();
+        fixture_commit_as(&repo, "delivered asset");
+        let delivered_head = fixture_head(&repo);
+        std::fs::remove_file(repo.join("crates/widget/Cargo.toml")).unwrap();
+        fixture_commit_as(&repo, "later manifest removal");
+        let later_head = fixture_head(&repo);
+        git(&repo, &["checkout", "--detach", &later_head]).unwrap();
+        assert_ne!(fixture_head(&repo), delivered_head, "the worktree must be on a later HEAD");
+
+        assert!(
+            passing_test_receipts(&root, &repo, &delivered_head).is_empty(),
+            "the delivered tree still has a crate manifest, so its changed asset invalidates the old test receipt"
+        );
+    }
+
+    #[test]
+    fn ancestor_test_receipt_ignores_same_basename_outside_delivered_include_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("crates/widget/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/widget/Cargo.toml"),
+            "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("docs/maintenance")).unwrap();
+        std::fs::create_dir_all(repo.join("docs/release")).unwrap();
+        std::fs::write(
+            repo.join("docs/maintenance/update-managed-files.brief.md"),
+            "maintenance\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/release/update-managed-files.brief.md"),
+            "release v1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("crates/widget/src/lib.rs"),
+            "const MAINTENANCE: &str = include_str!(\"../../../docs/maintenance/update-managed-files.brief.md\");\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "include fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        std::fs::write(
+            repo.join("docs/release/update-managed-files.brief.md"),
+            "release v2\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "unreferenced same-name asset");
+        let delivered_head = fixture_head(&repo);
+        std::fs::write(
+            repo.join("docs/maintenance/update-managed-files.brief.md"),
+            "maintenance v2\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "referenced asset change");
+        let referenced_head = fixture_head(&repo);
+        assert!(
+            passing_test_receipts(&root, &repo, &referenced_head).is_empty(),
+            "a change to the exact included repo-relative path invalidates the old test receipt"
+        );
+        std::fs::write(
+            repo.join("crates/widget/src/lib.rs"),
+            "const MAINTENANCE: &str = include_str!(\"../../../docs/maintenance/update-managed-files.brief.md\");\nconst RELEASE: &str = include_str!(\"../../../docs/release/update-managed-files.brief.md\");\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "later include change");
+        let later_head = fixture_head(&repo);
+        git(&repo, &["checkout", "--detach", &later_head]).unwrap();
+        assert_ne!(fixture_head(&repo), delivered_head, "the worktree must be on a later HEAD");
+
+        assert_eq!(
+            passing_test_receipts(&root, &repo, &delivered_head),
+            [format!(
+                "test: PASS {receipt_head} cas test(cached) 1 rebound from {receipt_head} to {delivered_head}"
+            )],
+            "the delivered source refers to a different repo-relative path with the same basename"
+        );
     }
 
     #[cfg(unix)]
@@ -1425,7 +2249,7 @@ if [ -d /proc/self/fd ]; then
     [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 6
 fi
 printf '%s\n' "$@" > target/cargo-args"#);
-        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap();
+        execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope), None).unwrap();
         let scope_args = std::fs::read_to_string(repo.join("target/scope-args")).expect("build must enter a memory-limited scope");
         assert!(scope_args.contains("--user\n--scope\n"), "{scope_args}");
         assert!(scope_args.contains("MemoryHigh=3221225472\n"), "{scope_args}");
@@ -1482,7 +2306,7 @@ printf '%s\n' "$@" > target/cargo-args"#);
         for (name, runner) in [("no-session", Some(rejected.as_path())), ("missing", Some(missing.as_path())), ("other-platform", None)] {
             let repo = root.join("worktrees").join(name);
             fixture_commit(&repo);
-            execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, runner).unwrap();
+            execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, runner, None).unwrap();
             // pin: unavailable scopes must execute the external build once.
             assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1, "fallback must execute Cargo once: {name}");
             assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some(), "{name}");
@@ -1499,10 +2323,10 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, "echo run >> target/runs\nexit 7");
-        let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope)).unwrap_err();
+        let error = execute_at_with_scope(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo, Some(&scope), None).unwrap_err();
         assert!(error.to_string().contains("FAIL"), "{error}");
         assert_eq!(std::fs::read_to_string(repo.join("target/runs")).unwrap().lines().count(), 1);
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_none());
@@ -1518,14 +2342,14 @@ printf '%s\n' "$@" > target/cargo-args"#);
         let repo = root.join("worktrees/worker");
         fixture_commit(&repo);
         let scope = dir.path().join("scope");
-        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
         let cargo = dir.path().join("cargo");
         fake_cargo(&cargo, r#"[ "$1" = nextest ] || exit 3
 [ -e "/proc/self/fd/$CAS_TARGET_LEASE_FD" ] || exit 4
 [ -n "$CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER$CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER" ] || exit 5
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         let args = ["nextest", "run", "-p", "cas", "-E", "test(worker)"].map(str::to_string);
-        execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope)).unwrap();
+        execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope), None).unwrap();
         let receipts = passing_test_receipts(&root, &repo, &fixture_head(&repo));
         assert_eq!(receipts.len(), 1);
         assert!(receipts[0].ends_with("test(worker) 2"), "{receipts:?}");
@@ -1600,6 +2424,9 @@ fi"#);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        // A capped outer test already has a release runner. Observe only what
+        // this fixture's check/test invocation installs, not inherited state.
+        env.remove(&variable);
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,
@@ -1686,7 +2513,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         );
         let later = now + CONTINUATION_WINDOW + std::time::Duration::from_secs(60);
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, later), "stale PASS");
-        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None })));
+        write(&pass("abc", &packages, Some(TestReceipt { filter: "test(x)".into(), harness: None, count: 1, host_path_opt_out: None, supervisor_recorded: None })));
         assert!(!continuation_admits_load(&receipt, &repo, "abc", &packages, now), "a test receipt");
     }
 
@@ -1964,6 +2791,23 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         .unwrap();
     }
 
+    fn fixture_commit_as(repo: &Path, message: &str) {
+        git(repo, &["add", "-A"]).unwrap();
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                message,
+            ],
+        )
+        .unwrap();
+    }
+
     #[cfg(unix)]
     fn fake_scope(path: &Path, body: &str) {
         fake_cargo(path, &format!(
@@ -2207,10 +3051,471 @@ PY"#);
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
     }
 
+    /// Capacity is waiting for local resources, not a yielded task.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capacity_refusals_keep_lease_and_escalate_once_cas_dd28() {
+        use crate::mcp::{CasCore, CasService};
+        use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::RawContent;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_FACTORY_SESSION", "capacity-fixture");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_ROOT", &root);
+        std::fs::write(root.join("config.toml"), "[factory]\nmax_concurrent_builders=1\n").unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        for (id, name, role) in [
+            ("capacity-worker", "worker", AgentRole::Worker),
+            ("capacity-supervisor", "supervisor", AgentRole::Supervisor),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("capacity-fixture".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-dd28".into(), "wait for build capacity".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("working")).unwrap();
+        let lease = agents.get_lease(&task.id).unwrap().unwrap();
+        let notices = open_supervisor_queue_store(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-supervisor".into());
+        let service = CasService::new(core, None);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        for _ in 0..3 {
+            let refused = execute_at(&root, &args, &repo, &fake).unwrap_err().to_string();
+            assert!(refused.contains("Waiting for build admission"), "{refused}");
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+            assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), 0);
+        }
+        let result = service.factory(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "worker_status", "summary_mode": true,
+        })).unwrap())).await.unwrap();
+        let status = result.content.into_iter().filter_map(|content| match content.raw {
+            RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // pin: capacity wait and next retry identify resource waiting to workers and supervisors.
+        assert!(status.to_ascii_lowercase().contains("capacity wait"), "{status}");
+        assert!(status.contains("next retry"), "{status}");
+        assert!(status.contains("max_concurrent_builders=1"), "{status}");
+        assert_eq!(status.matches("Capacity wait:").count(), 1);
+        let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        let retry_at = wait.since + chrono::Duration::minutes(2);
+        let repeated = crate::factory_capacity_wait::record_refusal(&root, &repo,
+            "memory PSI some avg10 25% exceeds 10%", retry_at).unwrap().unwrap();
+        assert_eq!(repeated.since, wait.since, "retry cannot reset the escalation deadline");
+        assert_eq!(repeated.next_retry, retry_at + chrono::Duration::seconds(120));
+        for (minutes, expected_pages) in [(19, 0), (20, 1), (21, 1), (30, 1)] {
+            // The daemon uses this same reconciliation entry with wall time;
+            // passing time here needs neither a sleep nor a fake store.
+            crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"),
+                wait.since + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), expected_pages);
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+        }
+        // The actual deadline row must reach a quiet supervisor, not merely
+        // exist in the outbox. Use its stored origin and the daemon's real
+        // pane-wake policy; queue acceptance alone cannot prove AC3.
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
+        let wake_rows: Vec<_> = rows.iter().filter(|row| row.source.starts_with("supervisor-notice:")).collect();
+        assert_eq!(wake_rows.len(), 1, "one episode queues one supervisor wake row");
+        let row = wake_rows[0];
+        use crate::ui::factory::daemon::{FactoryDaemon, runtime::queue_and_events::{PaneWakeState, ToolCallEvidence}};
+        let data = cas_factory::DirectorData::load_fast(&root).unwrap();
+        let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
+        let wake = FactoryDaemon::supervisor_wake_decision(
+            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt,
+            PaneWakeState { composer_dirty: false, ready_for_injection: true,
+                silent_for: Some(std::time::Duration::from_secs(45)), tool_call: ToolCallEvidence::Idle },
+            wait.since + chrono::Duration::minutes(30));
+        assert!(wake.allowed, "deadline notice must wake a quiet supervisor: {}", wake.reason);
+        drop(held);
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "admission clears the episode");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().epoch, lease.epoch);
+
+        // Explicit need uses the existing durable worker message immediately,
+        // and consumes the same episode's later automatic escalation.
+        let _held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        assert!(execute_at(&root, &args, &repo, &fake).is_err());
+        let mut explicit = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
+        // The worker has not retried for six minutes. Admission no longer
+        // reserves a slot, but the live episode must consume its explicit page.
+        explicit.since -= chrono::Duration::minutes(6);
+        explicit.next_retry = explicit.since + chrono::Duration::seconds(120);
+        let explicit_path = std::fs::read_dir(root.join("capacity-waits")).unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json")).unwrap();
+        std::fs::write(explicit_path, serde_json::to_vec(&explicit).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none(), "gap exceeds admission freshness");
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("capacity-worker".into());
+        let worker = CasService::new(core, None);
+        let need = "Need storage assistance to repair the scratch volume";
+        let delivered = worker.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": task.id,
+            "blocker": true, "summary": "Storage repair needed", "message": need,
+        })).unwrap())).await.unwrap();
+        assert_ne!(delivered.is_error, Some(true), "{delivered:?}");
+        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap()
+            .iter().filter(|prompt| prompt.target == "supervisor" && prompt.prompt.contains(need)).count(), 1,
+            "exactly one explicit assistance page is durably queued");
+        let after_need = notices.pending_count("capacity-supervisor").unwrap();
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(25)).unwrap();
+        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+
+        // A replacement lease cannot inherit an earlier wait or its deadline.
+        assert!(agents.release_lease_if_owner_epoch(&task.id, "capacity-worker", lease.epoch, "new ownership generation").unwrap());
+        agents.try_claim(&task.id, "capacity-worker", 3600, Some("resumed")).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().is_none());
+        crate::factory_capacity_wait::reconcile(&root, Some("capacity-fixture"), explicit.since + chrono::Duration::minutes(30)).unwrap();
+        assert_eq!(notices.pending_count("capacity-supervisor").unwrap(), after_need);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn higher_priority_capacity_waiter_gets_next_slot_and_lower_priority_progresses() {
+        use crate::store::{open_agent_store, open_task_store};
+        use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus};
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders=1\n",
+        )
+        .unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+
+        let mut repos = Vec::new();
+        for (worker_id, worker_name, task_id, priority) in [
+            (
+                "priority-p2-worker",
+                "priority-p2",
+                "cas-priority-p2",
+                Priority::MEDIUM,
+            ),
+            (
+                "priority-p0-worker",
+                "priority-p0",
+                "cas-priority-p0",
+                Priority::CRITICAL,
+            ),
+        ] {
+            let mut agent = Agent::new_with_role(
+                worker_id.into(),
+                worker_name.into(),
+                AgentRole::Worker,
+            );
+            agent.factory_session = Some(format!("session-{worker_name}"));
+            agents.register(&agent).unwrap();
+            let mut task = Task::new(task_id.into(), "wait for a builder slot".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some(worker_name.into());
+            task.priority = priority;
+            tasks.add(&task).unwrap();
+            agents
+                .try_claim(task_id, worker_id, 3600, Some("working"))
+                .unwrap();
+            let repo = root.join("worktrees").join(worker_name);
+            fixture_commit(&repo);
+            repos.push(repo);
+        }
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        let p2_wait = execute_at(&root, &args, &repos[0], &fake)
+            .unwrap_err()
+            .to_string();
+        let p0_wait = execute_at(&root, &args, &repos[1], &fake)
+            .unwrap_err()
+            .to_string();
+        drop(held);
+
+        let p2_retried = execute_at(&root, &args, &repos[0], &fake)
+            .err()
+            .map(|error| error.to_string());
+        let p0_admitted_first = execute_at(&root, &args, &repos[1], &fake).is_ok();
+        let p2_admitted_after = execute_at(&root, &args, &repos[0], &fake).is_ok();
+
+        // A long-waiting P2 ages into P0 and breaks ties by its earlier wait
+        // time, so a stream of newly queued P0 work cannot starve it forever.
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        execute_at(&root, &args, &repos[0], &fake).unwrap_err();
+        execute_at(&root, &args, &repos[1], &fake).unwrap_err();
+        let p2_wait_path = std::fs::read_dir(root.join("capacity-waits"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|wait| wait["worker_id"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("priority-p2-worker")
+            })
+            .unwrap();
+        let mut p2_wait_record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&p2_wait_path).unwrap()).unwrap();
+        p2_wait_record["since"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339()
+        );
+        p2_wait_record["next_retry"] = serde_json::json!(
+            (chrono::Utc::now() - chrono::Duration::minutes(43)).to_rfc3339()
+        );
+        std::fs::write(&p2_wait_path, serde_json::to_vec(&p2_wait_record).unwrap()).unwrap();
+        assert!(crate::factory_capacity_wait::view(&root, "priority-p2-worker", chrono::Utc::now()).unwrap().is_none());
+        let aged = crate::factory_capacity_wait::record_refusal(
+            &root, &repos[0], "retry after a gap longer than four minutes", chrono::Utc::now(),
+        ).unwrap().unwrap();
+        assert_eq!(aged.since, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(p2_wait_record["since"].clone()).unwrap(), "retry preserves aging across the gap");
+        assert!(aged.cause.starts_with("priority=P0"), "{}", aged.cause);
+        drop(held);
+
+        let p0_aged_p2_block = execute_at(&root, &args, &repos[1], &fake)
+            .err()
+            .map(|error| error.to_string());
+        let p2_aged_admitted = execute_at(&root, &args, &repos[0], &fake).is_ok();
+        let p0_admitted_after_aged_p2 = execute_at(&root, &args, &repos[1], &fake).is_ok();
+
+        let mut failures = Vec::new();
+        if !p2_wait.contains("priority=P2") {
+            failures.push(format!("P2 refusal omitted its priority: {p2_wait}"));
+        }
+        if !p0_wait.contains("priority=P0") {
+            failures.push(format!("P0 refusal omitted its priority: {p0_wait}"));
+        }
+        if !p2_retried
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("P2 retry was not queued behind P0: {p2_retried:?}"));
+        }
+        if !p0_admitted_first || !p2_admitted_after {
+            failures.push("P0 did not go first while P2 later progressed".to_string());
+        }
+        if !p0_aged_p2_block
+            .as_deref()
+            .is_some_and(|message| message.contains("queued behind priority=P0"))
+        {
+            failures.push(format!("aged P2 did not precede fresh P0: {p0_aged_p2_block:?}"));
+        }
+        if !p2_aged_admitted || !p0_admitted_after_aged_p2 {
+            failures.push("aged P2 or the following P0 failed to make progress".to_string());
+        }
+        assert!(
+            failures.is_empty(),
+            "priority admission failed: {}",
+            failures.join("; ")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_higher_priority_waiter_does_not_reserve_multiple_free_slots() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 3);
+        let lower_repo = root.join("worktrees/priority-lower");
+        let higher_repo = root.join("worktrees/priority-higher");
+        fixture_commit(&lower_repo);
+        fixture_commit(&higher_repo);
+        register_capacity_worker(
+            &root,
+            "lower-worker",
+            "priority-lower",
+            "cas-lower",
+            Priority::MEDIUM,
+            &lower_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "higher-worker",
+            "priority-higher",
+            "cas-higher",
+            Priority::CRITICAL,
+            &higher_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let slots = root.join("worker-check-slots");
+        let occupied = (0..3).map(|_| acquire_slot(&slots, 3).unwrap()).collect::<Vec<_>>();
+        assert!(execute_at(&root, &args, &higher_repo, &fake).is_err());
+        drop(occupied);
+
+        // One occupied slot leaves two available; one higher-ranked waiter
+        // consumes one of them, so the lower-ranked build can use the other.
+        let occupied = acquire_slot(&slots, 3).unwrap();
+        let lower_result = execute_at(&root, &args, &lower_repo, &fake);
+        drop(occupied);
+        assert!(
+            lower_result.is_ok(),
+            "one free slot remains beyond the higher-priority waiter's demand: {lower_result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_capacity_wait_does_not_block_lower_priority_build() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let lower_repo = root.join("worktrees/priority-lower");
+        let higher_repo = root.join("worktrees/priority-higher");
+        fixture_commit(&lower_repo);
+        fixture_commit(&higher_repo);
+        register_capacity_worker(
+            &root,
+            "lower-worker",
+            "priority-lower",
+            "cas-lower",
+            Priority::MEDIUM,
+            &lower_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "higher-worker",
+            "priority-higher",
+            "cas-higher",
+            Priority::CRITICAL,
+            &higher_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "exit 0");
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+        let held = acquire_slot(&root.join("worker-check-slots"), 1).unwrap();
+        assert!(execute_at(&root, &args, &higher_repo, &fake).is_err());
+        drop(held);
+
+        let wait_path = std::fs::read_dir(root.join("capacity-waits"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|wait| wait["worker_id"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some("higher-worker")
+            })
+            .unwrap();
+        let expired = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let mut wait: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&wait_path).unwrap()).unwrap();
+        wait["next_retry"] = serde_json::json!(expired.to_rfc3339());
+        std::fs::write(&wait_path, serde_json::to_vec(&wait).unwrap()).unwrap();
+
+        assert!(
+            execute_at(&root, &args, &lower_repo, &fake).is_ok(),
+            "an expired higher-priority wait must not refuse the lower build"
+        );
+        assert!(
+            crate::factory_capacity_wait::view(&root, "higher-worker", chrono::Utc::now())
+                .unwrap()
+                .is_none(),
+            "an admission-expired wait is no longer shown as queued"
+        );
+        crate::factory_capacity_wait::reconcile(
+            &root,
+            Some("session-priority-higher"),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert!(
+            wait_path.exists(),
+            "reconciliation must retain escalation history for a live task lease"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_capacity_wait_binding_does_not_abort_build() {
+        use cas_types::Priority;
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_BUILD_GUARD",
+            "off",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = capacity_test_root(dir.path(), 1);
+        let shared_repo = root.join("worktrees/shared");
+        fixture_commit(&shared_repo);
+        register_capacity_worker(
+            &root,
+            "worker-one",
+            "worker-one",
+            "cas-one",
+            Priority::MEDIUM,
+            &shared_repo,
+        );
+        register_capacity_worker(
+            &root,
+            "worker-two",
+            "worker-two",
+            "cas-two",
+            Priority::MEDIUM,
+            &shared_repo,
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, "printf called >> \"$PWD/target/cargo-ran\"\nexit 0");
+        std::fs::create_dir_all(shared_repo.join("target")).unwrap();
+        let args = ["-p", "cas", "--lib"].map(str::to_string);
+
+        let result = execute_at(&root, &args, &shared_repo, &fake);
+        assert!(
+            result.is_ok(),
+            "ambiguous capacity-wait binding should warn and continue: {result:?}"
+        );
+        assert!(
+            shared_repo.join("target/cargo-ran").exists(),
+            "Cargo still runs when task ownership cannot be resolved"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
-        let _env =
+        let mut env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
@@ -2232,7 +3537,59 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
             "test(worker)".into(),
         ];
         let head = fixture_head(&repo);
-        execute_at(&root, &args, &repo, &fake).unwrap();
+        // Real hook/CLI transport plus the normal capped runner, after the
+        // runtime has already inherited provider credentials.
+        let xdg = dir.path().join("private-xdg");
+        std::fs::create_dir(&xdg).unwrap();
+        for key in ISOLATED_TEST_CREDENTIALS { env.set(key, "fixture-provider-sentinel"); }
+        env.set("XDG_CONFIG_HOME", dir.path().join("inherited-xdg"));
+        env.set("CAS_SESSION_ID", "worker-env-fixture");
+        env.set("CAS_CLONE_PATH", &repo);
+        env.set("CAS_HOOK_HARNESS", "claude");
+        let request = cas_core::hooks::types::HookInput {
+            cwd: repo.display().to_string(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
+            tool_input: Some(serde_json::json!({"command": format!(
+                "env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME={} cargo nextest run -p cas -E 'test(worker)' > target/tests.log 2>&1 &", xdg.display())})),
+            ..Default::default()
+        };
+        let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+        let value = serde_json::to_value(output).unwrap();
+        let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command").and_then(|v| v.as_str()).expect("isolated request is rewritten");
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach }) = factory.command else { panic!("worker-check command") };
+        assert!(detach);
+        assert_eq!(cas_root, root);
+        assert_eq!(cargo_args, args);
+        assert_eq!(isolated_test_env.as_deref(), Some(xdg.as_path()));
+        let detached = detached_runner_command(Path::new("cas"), &root, &cargo_args, isolated_test_env.as_deref());
+        let detached_args = detached.get_args().collect::<Vec<_>>();
+        assert!(detached_args.windows(2).any(|pair| pair == [std::ffi::OsStr::new("--isolated-test-env"), xdg.as_os_str()]));
+        fake_cargo(&fake, &format!(r#"set -e
+python3 - <<'PYENV'
+import os
+from pathlib import Path
+for key in ['VIKTOR_API_KEY', 'VIKTOR_KEY', 'NEON_API_KEY', 'NEON_TOKEN', 'VERCEL_TOKEN', 'VERCEL_API_TOKEN']:
+    assert key not in os.environ, key + ' leaked into test child'
+assert os.environ.get('XDG_CONFIG_HOME') == {xdg:?}, 'private config directory lost'
+assert os.environ.get('CAS_SESSION_ID') == 'worker-env-fixture', 'runtime identity lost'
+assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target'), 'private target lost'
+(Path.cwd() / 'target' / 'environment-observed').write_text('credential-free private config')
+PYENV
+printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
+"#, xdg=xdg.to_str().unwrap()));
+        let scope = dir.path().join("scope");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
+        for scope in [None, Some(scope.as_path())] {
+            execute_at_with_scope(&root, &cargo_args, &repo, &fake, scope, isolated_test_env.as_deref()).unwrap();
+        }
+        assert!(repo.join("target/environment-observed").is_file(), "environment-checking child must execute");
+        for key in ISOLATED_TEST_CREDENTIALS { assert!(std::env::var_os(key).is_some(), "parent {key} changed"); }
+        assert_eq!(std::env::var_os("XDG_CONFIG_HOME"), Some(dir.path().join("inherited-xdg").into_os_string()));
+        fake_cargo(&fake, "printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\\n'");
         assert_eq!(
             passing_test_receipts(&root, &repo, &head),
             [format!("test: PASS {head} cas test(worker) 2")]
@@ -2391,6 +3748,85 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
     /// runner only reads git state, so a builder-cap refusal, like every other
     /// path, must not take the optional index lock at all.
     #[cfg(unix)]
+    /// cas-d95c: a verifier's named-test run at a bound head is admitted
+    /// against the same builder cap as a worker check, in a checkout under the
+    /// counted worktrees root, instead of running as uncounted plain Cargo.
+    #[test]
+    fn verifier_tests_are_admitted_against_the_builder_cap_cas_d95c() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = git(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\nmax_concurrent_builders = 1\n",
+        )
+        .unwrap();
+        let slots = root.join("worker-check-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let _held = acquire_slot(&slots, 1).unwrap();
+        let args: Vec<String> = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(x)"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &args,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("the only builder slot is held");
+        assert!(
+            error.to_string().contains("max_concurrent_builders=1"),
+            "{error}"
+        );
+        let run = std::fs::read_dir(root.join("review-scratch/cas-proof"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            git(&run.join("repo"), &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim(),
+            head
+        );
+
+        let unnamed: Vec<String> = ["nextest", "run", "-p", "cas"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect();
+        let error = execute_verifier_at(
+            &root,
+            "cas-proof",
+            None,
+            &head,
+            &unnamed,
+            &repo,
+            Path::new("/nonexistent/cargo"),
+            None,
+        )
+        .expect_err("verifiers run named tests only");
+        assert!(error.to_string().contains("named tests only"), "{error}");
+    }
+
     #[test]
     fn builder_cap_refusal_never_takes_the_index_lock_cas_39f3() {
         use std::os::unix::fs::MetadataExt;

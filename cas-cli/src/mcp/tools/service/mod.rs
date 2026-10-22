@@ -616,7 +616,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers stop only their own); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: one disposable Neon branch per task; DATABASE_URL goes to the worker's .env.cas-db, never printed; deleted at task close; workers request one by blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack); Slack-thread authority, authenticated supervisor only (claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent). clear_context types the harness's own reset command and verifies it in the new transcript; an unproven reset is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, record_test_receipt, recover_branch, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers stop only their own); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: one disposable Neon branch per task, deleted at close; DATABASE_URL only in the worker's .env.cas-db; workers ask by blocker); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack); Slack-thread authority, authenticated supervisor only (claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent). clear_context types the harness's reset command and verifies it in the new transcript; an unproven reset errors. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
     )]
     pub async fn factory(
         &self,
@@ -1239,6 +1239,8 @@ impl CasService {
             }
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
+            let capacity_assistance = matches!(action.as_str(), "message" | "interrupt")
+                && req.blocker == Some(true) && req.target.as_deref() == Some("supervisor");
 
             // Destructive operations fail closed on fields that belong to
             // another action in this unified request. Serde catches unknown
@@ -1380,6 +1382,32 @@ impl CasService {
                 "db_branch_create" => this.db_branch_create(&req).await,
                 "db_branch_show" => this.db_branch_show(&req).await,
                 "db_branch_delete" => this.db_branch_delete(&req).await,
+
+                "recover_branch" => {
+                    let task_id = req.task_id.as_deref().ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS, "recover_branch requires task_id"))?;
+                    let payload = req.payload.as_deref().ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS, "recover_branch requires payload with branch, head and expected_remote"))?;
+                    let recovery = this.clone();
+                    let task_id = task_id.to_string();
+                    let payload = payload.to_string();
+                    tokio::task::spawn_blocking(move || crate::supervisor_branch_recovery::recover(&recovery.inner, &task_id, &payload))
+                        .await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("branch recovery worker failed: {error}")))?
+                        .map(|receipt| Self::success(receipt.render()))
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("BRANCH RECOVERY REFUSED: {error:#}")))
+                }
+
+                // Supervisor attestation for a run performed outside a
+                // refused worker lane; never executes Cargo during record.
+                "record_test_receipt" => {
+                    let task_id = req.task_id.as_deref().ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS, "record_test_receipt requires task_id"))?;
+                    let payload = req.payload.as_deref().ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS, "record_test_receipt requires payload"))?;
+                    crate::factory_worker_check::record_supervisor_test(&this.inner, task_id, payload)
+                        .map(Self::success)
+                        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
+                }
 
                 // ---- Factory domain ----
                 "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
@@ -1531,6 +1559,15 @@ impl CasService {
                 )),
             };
 
+            if capacity_assistance && result.as_ref().is_ok_and(|result| result.is_error != Some(true))
+                && let Ok(worker_id) = this.inner.get_registered_agent_id_read_only()
+            {
+                if let Err(error) = crate::factory_capacity_wait::assistance_queued(
+                    &this.inner.cas_root, &worker_id,
+                    (!event_task_id.is_empty()).then_some(event_task_id.as_str()), chrono::Utc::now())
+                { tracing::warn!(%error, "capacity assistance queued but wait stamp failed"); }
+            }
+
             // cas-0033: the supervisor's calls retry queued branch deletions
             // and delete branches whose task ended or whose worktree is gone
             // (for example right after worktree_cleanup). A no-op otherwise.
@@ -1591,6 +1628,7 @@ impl CasService {
                     | "server_stop"
                     | "server_list"
                     | "restart_spawn_queue"
+                    | "record_test_receipt"
                     | "db_branch_create"
                     | "db_branch_show"
                     | "db_branch_delete"

@@ -25,7 +25,13 @@ If the task has a ParentChild dependency, run `task action=dep_list id=<task-id>
 
 For every cited `art-` id used as proof, run `artifact action=fetch task_id=<task-id> id=<art-id>`, then read the downloaded copy at the returned path. A citation alone does not prove its contents.
 
-The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, work in the worker's clone (`factory action=worker_status` gives its path). Diff against the task's own delivery base, never a fixed commit count:
+The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, inspect the delivery in a managed disposable checkout:
+
+```bash
+cas factory scratch-checkout --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA>
+```
+
+The command prints the checkout path; use it as your working directory for review. Omit `--dispatch-id` only when the task has no dispatch. The checkout lives under the configured project scratch namespace at `verify/<task-id>/<run>/repo` (or `<cas root>/review-scratch/` when unset). Publish durable logs and captures to the task artifacts directory. GC removes disposable source/build output after the task is terminal or the dispatch is resolved, after two hours and only with no lease or live user; it also removes the Git worktree registration. This ownership record makes cleanup independent of whether your session exits normally. Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)
@@ -52,6 +58,8 @@ rg -n 'unwrap\(\)|todo!|unimplemented!|console\.log|@ts-(ignore|expect-error)|ex
 ```
 
 Back every finding with a command output or an exact line reference.
+
+To run the task's tests yourself, use the counted verifier lane at the dispatch's bound head, never plain Cargo, which builds outside the host's builder cap: `cas factory verifier-test --cas-root <cas root> --task-id <task-id> --dispatch-id <dispatch-id> --head <full bound head SHA> -- nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`. Omit `--dispatch-id` only if the task has no dispatch. This command creates its managed task/dispatch checkout, resolves Zig and a private target, and holds a review lease across the existing capped runner. A "Waiting for build admission" refusal means retry later; if it persists, mark the item NOT VERIFIED with that reason instead of building another way.
 
 ### Step 6: Impact, wiring and co-changes (blocking when missing)
 

@@ -8,7 +8,7 @@
 
 // #![allow(dead_code)] // Check unused
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
 use crossterm::{
@@ -82,6 +82,7 @@ pub struct ConfigTuiApp {
 
     // Unsaved changes indicator
     has_unsaved: bool,
+    pending_resets: HashSet<String>,
 
     // Status message
     status_message: Option<(String, bool)>, // (message, is_error)
@@ -146,6 +147,7 @@ impl ConfigTuiApp {
             value_edit: None,
             show_advanced: false,
             has_unsaved: false,
+            pending_resets: HashSet::new(),
             status_message: None,
             should_quit: false,
         })
@@ -352,7 +354,8 @@ impl ConfigTuiApp {
                         match meta.validate(&value) {
                             Ok(()) => {
                                 self.config.set(&key, &value)?;
-                                self.values.insert(key, value);
+                                self.values.insert(key.clone(), value);
+                                self.pending_resets.remove(&key);
                                 self.has_unsaved = true;
                                 self.value_edit = None;
                                 self.mode = ViewMode::SectionEdit;
@@ -498,10 +501,25 @@ impl ConfigTuiApp {
         if let Some(i) = self.option_state.selected() {
             if let Some(key) = self.option_keys.get(i) {
                 if let Some(meta) = self.registry.get(key) {
-                    self.config.set(key, meta.default)?;
-                    self.values.insert(key.clone(), meta.default.to_string());
-                    self.has_unsaved = true;
-                    self.status_message = Some((format!("Reset {key} to default"), false));
+                    let current_value = self
+                        .values
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| meta.default.to_string());
+                    let has_override = crate::cli::config::config_key_has_override(
+                        key,
+                        &self.cas_root,
+                    )?;
+                    if current_value != meta.default || has_override {
+                        self.config.set(key, meta.default)?;
+                        self.values.insert(key.clone(), meta.default.to_string());
+                        self.pending_resets.insert(key.clone());
+                        self.has_unsaved = true;
+                        self.status_message = Some((format!("Reset {key} to default"), false));
+                    } else {
+                        self.status_message =
+                            Some((format!("{key} is already at default"), false));
+                    }
                 }
             }
         }
@@ -527,6 +545,13 @@ impl ConfigTuiApp {
             return Ok(());
         }
         self.config.save(&self.cas_root)?;
+        for key in &self.pending_resets {
+            crate::cli::config::reset_config_value(key, &self.cas_root)?;
+        }
+        if !self.pending_resets.is_empty() {
+            self.pending_resets.clear();
+            self.config = Config::load(&self.cas_root)?;
+        }
         self.original_config = self.config.clone();
         self.has_unsaved = false;
         self.refresh_sections();
@@ -637,12 +662,90 @@ mod tests {
         let (message, is_error) = app.status_message.clone().unwrap();
         assert!(is_error && message.contains("operator"), "{message}");
         let saved = Config::load(&root).unwrap();
-        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
+        assert_eq!(
+            saved.get("qa.evidence_gate"),
+            app.original_config.get("qa.evidence_gate")
+        );
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config
+            .set(
+                "notifications.webhook_url",
+                "https://hooks.example.test/services/secret",
+            )
+            .unwrap();
+        app.has_unsaved = true;
+        app.save_config_with(agent).unwrap();
+        assert!(
+            app.has_unsaved,
+            "operator-only webhook edit must remain unsaved"
+        );
+        let (message, is_error) = app.status_message.clone().unwrap();
+        assert!(
+            is_error
+                && message.contains("notifications.webhook_url")
+                && message.contains("operator"),
+            "{message}"
+        );
+        assert_eq!(
+            Config::load(&root)
+                .unwrap()
+                .get("notifications.webhook_url")
+                .as_deref(),
+            Some("")
+        );
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("sync.min_helpful", "5").unwrap();
         app.save_config_with(agent).unwrap();
         assert!(!app.has_unsaved);
         assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn config_tui_reset_removes_override_and_restores_hub_fallback() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("hub".into());
+        app.option_keys = vec!["hub.transport_mode".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
+        app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
+        app.save_config_with(|| InvocationContext::default()).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["hub"].get("transport_mode").is_none(), "{saved}");
+        assert_eq!(
+            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
+            crate::config::HubTransportMode::Loopback
+        );
+    }
+
+    #[test]
+    fn config_tui_reset_of_absent_default_does_not_mark_unsaved() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let original = "# keep this comment\n";
+        std::fs::write(root.join("config.toml"), original).unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("hub".into());
+        app.option_keys = vec!["hub.transport_mode".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
+        app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
+
+        assert!(!app.has_unsaved);
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
     }
 }

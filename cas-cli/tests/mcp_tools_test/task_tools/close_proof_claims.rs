@@ -111,6 +111,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         store.update(&task).unwrap();
         let response = service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: id.clone(),
                 reason: Some(reason.to_string()),
                 stranded_branch_override: None,

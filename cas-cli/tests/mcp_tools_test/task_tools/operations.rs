@@ -328,6 +328,7 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
     let started = std::time::Instant::now();
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: Some(narrative.clone()),
             id: epic_id.clone(),
             reason: Some("override incident-shaped epic close".to_string()),
@@ -3202,6 +3203,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("done".to_string()),
@@ -3352,6 +3354,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         .expect("verification add should succeed");
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("peer board shipped".to_string()),
@@ -5162,6 +5165,89 @@ fn make_task_create_req(title: &str) -> TaskCreateRequest {
     }
 }
 
+/// A hold or a supervisor's reassignment ends the old execution lease.
+/// An unrelated worker cannot revoke that lease through an assignee update.
+#[tokio::test]
+async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe() {
+    for path in ["yield", "supervisor", "retained"] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, source) = setup_cas_as(&mut env, AgentRole::Worker);
+        let cas_dir = temp.path().join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let source_id = format!("test-session-{}", std::process::id());
+        let receiver =
+            Agent::new_with_role("receiver-id".into(), "new-worker".into(), AgentRole::Worker);
+        agents.register(&receiver).unwrap();
+        let supervisor = Agent::new_with_role(
+            "supervisor-id".into(),
+            "supervisor".into(),
+            AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor_core.set_agent_id_for_testing(supervisor.id.clone());
+        let receiver_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        receiver_core.set_agent_id_for_testing(receiver.id.clone());
+
+        let id = create_task_titled(&source, "Lease ownership handoff").await;
+        let mut task = tasks.get(&id).unwrap();
+        task.assignee = Some("test-agent".into());
+        tasks.update(&task).unwrap();
+        source
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        let original = agents.get_lease(&id).unwrap().unwrap();
+        assert_eq!(original.agent_id, source_id);
+
+        if path == "yield" {
+            update_task_json(&source, serde_json::json!({
+                "id": id, "status": "blocked", "notes": "Yielding task ownership to supervisor; no source changes",
+            })).await;
+            assert!(
+                agents.get_lease(&id).unwrap().is_none(),
+                "yield must release its lease"
+            );
+            assert!(tasks.get_execution_state(&id).unwrap().unwrap()["blocked_hold"].is_object());
+        }
+        let actor = if path == "retained" {
+            &receiver_core
+        } else {
+            &supervisor_core
+        };
+        // Spoofing the environment does not grant registered supervisor authority.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": id, "assignee": receiver.name, "status": "open",
+        }))
+        .unwrap();
+        let text = extract_text(actor.cas_task_update(Parameters(request)).await.unwrap());
+        env.set("CAS_AGENT_ROLE", "worker");
+        let started = receiver_core
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await;
+        if path == "retained" {
+            // Retaining a blocking lease must identify its current holder.
+            assert!(text.contains(&source_id), "{text}");
+            let error = started.expect_err("a peer update must not revoke the live lease");
+            assert!(error.message.contains("locked"), "{error}");
+            assert_eq!(
+                agents.get_lease(&id).unwrap().unwrap().epoch,
+                original.epoch
+            );
+        } else {
+            started.unwrap_or_else(|error| {
+                panic!("{path}: new assignee must start without override: {error}")
+            });
+            let lease = agents.get_lease(&id).unwrap().unwrap();
+            assert_eq!(lease.agent_id, receiver.id);
+            assert!(lease.epoch > original.epoch);
+            assert_eq!(agents.get(&source_id).unwrap().active_tasks, 0);
+        }
+    }
+}
+
 /// Happy path: supervisor force-transfers a task claimed by a live worker.
 ///
 /// AC: Supervisor has a documented, supported path to reassign a
@@ -5250,6 +5336,11 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         .expect("supervisor force-transfer should succeed");
 
     let text = extract_text(result);
+
+    // The issuer and previous holder differ on supervisor force-transfer.
+    let receipt = text.lines().next().unwrap();
+    assert!(receipt.contains(&worker_session_id), "{receipt}");
+    assert!(!receipt.contains(&supervisor_id), "{receipt}");
 
     // Response must confirm transfer and note the override was used.
     assert!(
@@ -5731,6 +5822,7 @@ async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
         let close = extract_text(
             recipient
                 .cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     id: task_id.clone(),
                     reason: Some("delivery ready".to_string()),
                     supervisor_override: None,
@@ -6352,7 +6444,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    git(&upstream, &["init", "-q", "-b", "main"]);
+    git(&upstream, &["init", "-q", "-b", "main{a,b}!e"]);
     git(&upstream, &["config", "user.email", "test@test.com"]);
     git(&upstream, &["config", "user.name", "Test"]);
     std::fs::write(upstream.join("seed.txt"), "seed\n").unwrap();
@@ -6381,6 +6473,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         "clone_path".to_string(),
         worker_checkout.to_string_lossy().into_owned(),
     );
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("assignment-session".into());
     agent_store.register(&worker).unwrap();
 
     let created = service
@@ -6417,9 +6511,10 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         }))
         .await
         .expect_err("stale assignment must reject the batch");
-    test_env.remove("CAS_FACTORY_MODE");
 
     let message = error.message.to_string();
+    // pin: stale-assignment remedy preserves the actual upstream ref.
+    assert!(message.contains("git rebase 'origin/main{a,b}!e'"), "{message}");
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
     assert!(
         message.contains("no requested task fields were applied"),
@@ -6429,6 +6524,52 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     let stored = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(stored.execution_note.is_none());
     assert!(stored.assignee.is_none());
+
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let before = task_store.list(None).unwrap().len();
+    // Both entry points must reject the same stale name/session identity before
+    // persistence or dispatch; the worker is on main, not a resettable own lane.
+    for assignee in [&worker.name, &worker.id] {
+        let mut request = make_task_create_req("stale assigned creation");
+        request.assignee = Some(assignee.clone());
+        let error = service.cas_task_create(Parameters(request)).await
+            .expect_err("create must refuse the stale assignee just as update does");
+        assert!(error.message.contains("commits behind"), "{error}");
+        assert!(error.message.contains("not created"), "{error}");
+        assert_eq!(task_store.list(None).unwrap().len(), before);
+        assert!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+            .unwrap().is_empty(), "refused creation must never dispatch");
+    }
+
+    git(&worker_checkout, &["fetch", "-q", "origin"]);
+    git(&worker_checkout, &["merge", "--ff-only", "origin/main{a,b}!e"]);
+    for (assignee, title) in [
+        (&worker.name, "Reconcile invoice payments"),
+        (&worker.id, "Calibrate satellite antenna"),
+    ] {
+        let mut request = make_task_create_req(title);
+        request.assignee = Some(assignee.clone());
+        let receipt = extract_text(service.cas_task_create(Parameters(request)).await.unwrap());
+        let id = extract_task_id(&receipt).unwrap().to_string();
+        let stored = task_store.get(&id).unwrap();
+        assert_eq!(stored.assignee.as_deref(), Some(worker.name.as_str()));
+        // pin: Assignee is the operator-visible field in create/show receipts.
+        assert!(receipt.contains(&format!("Assignee: {}", worker.name)), "{receipt}");
+        let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+            id: id.clone(), with_deps: false,
+        })).await.unwrap());
+        assert!(shown.contains(&format!("Assignee: {}", worker.name)), "{shown}");
+        let dispatch = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        // pin: the worker consumes this copyable task-start command from its queued assignment.
+        assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
+            "accepted creation must reach the same worker it displays");
+    }
+    let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+        id: task_id, with_deps: false,
+    })).await.unwrap());
+    // pin: task show must explicitly distinguish an unassigned task from an omitted field.
+    assert!(shown.contains("Assignee: (unassigned)"), "{shown}");
 }
 
 /// When CAS_FACTORY_MODE is set and a supervisor assigns a task using a

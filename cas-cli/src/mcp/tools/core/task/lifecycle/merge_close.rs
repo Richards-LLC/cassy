@@ -81,6 +81,7 @@ impl CasCore {
             format!("Merged at {merge_commit}; closed by Cassy after the merge.")
         });
         let request = TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: task_id.to_string(),
             reason: Some(reason),

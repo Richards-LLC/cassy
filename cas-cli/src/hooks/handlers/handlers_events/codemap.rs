@@ -1024,7 +1024,7 @@ mod tests {
         git(&["add", ".claude"]);
         git(&["commit", "-qm", "initial"]);
         git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        git(&["checkout", "-qb", "staging"]);
+        git(&["checkout", "-qb", "epic/{a,b}!e"]);
         std::fs::create_dir(repo.join("docs")).unwrap();
         std::fs::write(repo.join("docs/PRODUCT_OVERVIEW.md"), "# Product\n<!-- cas:project-overview\ndomain_paths = []\nwatch_dirs = [\"src\"]\n-->\n").unwrap();
         std::fs::write(repo.join(".claude/CODEMAP.md"), "# Current map\n").unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
         std::fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
         git(&["add", "src"]);
         git(&["commit", "-qm", "one relevant change"]);
-        git(&["update-ref", "refs/remotes/origin/staging", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/epic/{a,b}!e", "HEAD"]);
         git(&["checkout", "-q", "main"]);
         git(&["worktree", "add", "-qb", "factory/upkeep-worker", worker.to_str().unwrap(), "main"]);
         let store = SqliteTaskStore::open(&cas_root).unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
         task.assignee = Some("upkeep-worker".into());
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:upkeep-fixture".into(),
-            target_branch: "staging".into(),
+            target_branch: "epic/{a,b}!e".into(),
         });
         store.add(&task).unwrap();
         // Another assignment can be queued without changing the active task.
@@ -1062,9 +1062,9 @@ mod tests {
         let measurement = super::super::docs_freshness::Measurement::for_store(&cas_root);
         assert_eq!(measurement.root, worker);
         let message = measurement.annotate("<codemap-freshness>\nDrift\n</codemap-freshness>".into());
-        assert!(message.contains("Measured ref: origin/staging"));
+        assert!(message.contains("Measured ref: origin/epic/{a,b}!e"));
         let evaluation = evaluate_codemap_freshness(&cas_root).unwrap();
-        assert_eq!(evaluation.evaluated_ref, "origin/staging");
+        assert_eq!(evaluation.evaluated_ref, "origin/epic/{a,b}!e");
         assert!(matches!(evaluation.staleness, Some(CodemapStaleness::Stale { total_changes: 1, .. })));
         let overview = super::super::project_overview::check_freshness(&worker, None).unwrap();
         assert!(matches!(overview, Some(super::super::project_overview::ProjectOverviewStaleness::Stale { total_changes: 1, .. })), "{overview:?}");
@@ -1109,13 +1109,13 @@ mod tests {
                 plain_measurement.root, plain_measurement.store));
         }
         // Target advances while the worker also has an independent commit.
-        git(&["checkout", "-q", "staging"]);
+        git(&["checkout", "-q", "epic/{a,b}!e"]);
         for n in 0..10 {
             std::fs::write(repo.join(format!("src/remote_{n}.rs")), "pub fn added() {}\n").unwrap();
         }
         git(&["add", "src"]);
         git(&["commit", "-qm", "remote structural drift"]);
-        git(&["update-ref", "refs/remotes/origin/staging", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/epic/{a,b}!e", "HEAD"]);
         std::fs::write(worker.join("local.md"), "worker change\n").unwrap();
         git(&["-C", worker.to_str().unwrap(), "add", "local.md"]);
         git(&["-C", worker.to_str().unwrap(), "commit", "-qm", "worker diverges"]);
@@ -1133,7 +1133,7 @@ mod tests {
         let output = serde_json::to_value(output).unwrap();
         let reason = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
         if output["hookSpecificOutput"]["permissionDecision"] != "deny"
-            || !reason.contains("git merge origin/staging") || !reason.contains("git rebase origin/staging")
+            || !reason.contains("git merge 'origin/epic/{a,b}!e'") || !reason.contains("git rebase 'origin/epic/{a,b}!e'")
         {
             failures.push(format!("diverged checkout denial must name target sync: {output}"));
         }

@@ -770,9 +770,14 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
 /// Reviewable paths a delivery brought into `target`: its own content commits
 /// before the first merge on the ancestry path, or its unmerged content
 /// commits. A non-merge receipt on the target's first-parent chain is itself
-/// the delivery, measured against its own parent (cas-a173). `None` when the
-/// delivery boundary cannot be found.
-pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
+/// the delivery, measured from its recorded base or its own parent (cas-420af).
+/// `None` when the delivery boundary cannot be found.
+pub fn integrated_paths(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    recorded_base: Option<&str>,
+) -> Option<Vec<String>> {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
         out.status
@@ -788,12 +793,11 @@ pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<Str
         // A squash/FF receipt is already an integration commit. Looking for
         // a later merge instead collapses merge-base(M^1, head) onto head.
         // Keep merge receipts on their existing content-selection path.
-        let full_head = git(&["rev-parse", "--verify", head])?;
         if git(&["rev-parse", "--verify", &format!("{head}^2")]).is_none()
-            && git(&["rev-list", "--first-parent", target])?
-                .lines().any(|commit| commit == full_head)
+            && crate::qa_evidence::receipt_on_first_parent(repo, head, target)?
         {
-            return delivery_content_paths(repo, &format!("{head}^1"), head).ok();
+            let base = crate::qa_evidence::receipt_delivery_base(repo, head, recorded_base)?;
+            return delivery_content_paths(repo, &base, head).ok();
         }
         let merges = git(&[
             "rev-list",
@@ -1374,6 +1378,14 @@ pub fn qa_task_description(
             delivery.id, ledger_dir.display(),
         );
     }
+    let [baseline] = match crate::worktree::GitOperations::git_remedies([&[
+        "merge-base",
+        parent_branch,
+        &pass.bound_head,
+    ]]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {
@@ -1401,7 +1413,7 @@ pub fn qa_task_description(
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
          screenshots. When a check fails, repeat it on the base build \
-         (git merge-base {parent} {head}) before you count it: a failure the base shares is \
+         ({baseline}) before you count it: a failure the base shares is \
          pre-existing. For visual QA, run the base build over the same pages into \
          visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
          files.visual_qa_baseline_json; only findings the base lacks count. Every finding \
@@ -1427,9 +1439,9 @@ pub fn qa_task_description(
         round = pass.round,
         implementer = pass.implementer_agent_id,
         title = delivery.title.trim(),
-        branch = pass.branch,
+        branch = crate::worktree::GitOperations::visible_git_label(&pass.branch),
         head = pass.bound_head,
-        parent = parent_branch,
+        parent = crate::worktree::GitOperations::visible_git_label(parent_branch),
         reasons = reasons.join(", "),
         ledger = ledger_dir.display(),
         deadline = pass.deadline_at.to_rfc3339(),
@@ -1607,7 +1619,7 @@ mod tests {
         let delivery_head = String::from_utf8(delivery_head.stdout).unwrap();
         git(&["switch", "-q", "main"]);
         git(&["merge", "-q", "--no-ff", "-m", "land worker", "factory/worker"]);
-        let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
+        let integrated = integrated_paths(repo, delivery_head.trim(), "main", None).unwrap();
         assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
         assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
     }
@@ -1953,6 +1965,10 @@ mod tests {
     /// supervisor brief and no installed skill reference to decide.
     #[test]
     fn qa_task_description_states_the_rejection_bar_and_evidence_path() {
+        let special = qa_task_description(&task(), &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".into()], Path::new("/artifacts/qa"), "epic/{a,b}!e");
+        // pin: the baseline command must preserve the configured parent ref.
+        assert!(special.contains("git merge-base 'epic/{a,b}!e' aaaa1111"), "{special}");
         let round = pass("aaaa1111", cas_types::QaPassState::Pending);
         let text = qa_task_description(
             &task(),

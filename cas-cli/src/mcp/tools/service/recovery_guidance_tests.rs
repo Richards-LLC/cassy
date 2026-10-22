@@ -503,3 +503,115 @@ async fn recovery_guidance_pending_close_uses_registered_supervisor_verification
         );
     }
 }
+
+/// One public action rescues an explicit unpushed commit without assuming the
+/// dead worker's identity. The original checkout and source ref remain intact.
+#[tokio::test]
+async fn recover_dead_worker_branch_uses_successor_authority_cas_790e() {
+    use crate::types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+    use std::path::Path;
+    use std::process::Command;
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let (dir, service) = service("codex", AgentRole::Supervisor);
+    let root = dir.path();
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "fixture@example.test"]);
+    git(root, &["config", "user.name", "Fixture"]);
+    let source = "factory/dead-worker-cas-recover";
+    git(root, &["switch", "-c", source]);
+    git(root, &["commit", "--allow-empty", "-m", "base"]);
+    let anchor = git(root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("unpublished.txt"), "rescued work").unwrap();
+    git(root, &["add", "unpublished.txt"]);
+    git(root, &["commit", "-m", "unpublished"]);
+    let tip = git(root, &["rev-parse", "HEAD"]);
+    let remote = tempfile::TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare"]);
+    git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    let agents = service.inner.open_agent_store().unwrap();
+    crate::store::open_event_store(&service.inner.cas_root).unwrap();
+    let mut dead = Agent::new_with_role("dead-worker-id".into(), "dead-worker".into(), AgentRole::Worker);
+    dead.status = AgentStatus::Shutdown;
+    agents.register(&dead).unwrap();
+    let tasks = service.inner.open_task_store().unwrap();
+    let mut task = Task::new("cas-recover".into(), "Rescue unpushed work".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(dead.name.clone());
+    task.deliverables.factory_branch_anchor = Some(anchor);
+    task.deliverables.parked_branch = Some(source.into());
+    tasks.add(&task).unwrap();
+    let payload = serde_json::json!({"branch":source,"head":tip,"expected_remote":""});
+    // All refusal rows must leave Git and task ownership alone. These exercise
+    // registered identity, source ownership, liveness and exact expected tips.
+    for mode in ["worker-caller", "live-owner", "moved-source", "foreign-source", "remote-mismatch", "retired-live-process"] {
+        let mut input = payload.clone();
+        let mut caller = agents.get("recovery-caller").unwrap();
+        let mut owned_child = None;
+        match mode {
+            "worker-caller" => { caller.role = AgentRole::Worker; agents.update(&caller).unwrap(); }
+            "live-owner" => { dead.status = AgentStatus::Active; agents.update(&dead).unwrap(); }
+            "moved-source" => input["head"] = "0000000000000000000000000000000000000000".into(),
+            "foreign-source" => input["branch"] = "factory/unrelated".into(),
+            "remote-mismatch" => input["expected_remote"] = tip.clone().into(),
+            "retired-live-process" => {
+                let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+                dead.pid = Some(child.id());
+                agents.update(&dead).unwrap();
+                agents.unregister(&dead.id).unwrap();
+                owned_child = Some(child);
+            }
+            _ => unreachable!(),
+        }
+        let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":input.to_string()})).unwrap();
+        let result = service.factory(Parameters(request)).await;
+        if let Some(mut child) = owned_child { let _ = child.kill(); let _ = child.wait(); }
+        dead.pid = None;
+        agents.register(&dead).unwrap();
+        assert!(result.is_err(), "{mode} must refuse: {result:?}");
+        caller.role = AgentRole::Supervisor; agents.update(&caller).unwrap();
+        dead.status = AgentStatus::Shutdown; agents.update(&dead).unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee, "{mode}");
+        assert_eq!(git(root, &["rev-parse", "HEAD"]), tip, "{mode}");
+        assert!(git(remote.path(), &["for-each-ref", "--format=%(refname)"]).is_empty(), "{mode}");
+    }
+    agents.unregister(&dead.id).unwrap();
+    let request = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
+    let result = service.factory(Parameters(request)).await.expect("authenticated successor must rescue unpushed work");
+    let receipt = text(result);
+    // pin: the command receipt is readable at 80 columns and has a JSON escape.
+    assert_eq!(receipt.replace(&tip, "0123456789012345678901234567890123456789").trim(), include_str!("../../../../../docs/design/cli/factory-recover-branch.capture.txt").trim());
+    let destination = "refs/heads/factory/recovery-caller-cas-recover";
+    assert_eq!(git(remote.path(), &["rev-parse", destination]), tip);
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), tip, "source checkout untouched");
+    let after = tasks.get(&task.id).unwrap();
+    assert_eq!(after.assignee.as_deref(), Some("recovery-caller"));
+    assert!(agents.get_lease(&task.id).unwrap().is_none(), "bounded recovery releases only its own lease");
+    assert!(after.notes.contains("BRANCH RECOVERED"), "{}", after.notes);
+    for expected in [source, &tip, "recovery-caller"] {
+        assert!(after.notes.contains(expected), "missing audit {expected}");
+        assert!(receipt.contains(expected), "missing receipt {expected}");
+    }
+    let replay = serde_json::from_value(serde_json::json!({"action":"recover_branch","task_id":task.id,"payload":payload.to_string()})).unwrap();
+    assert_eq!(text(service.factory(Parameters(replay)).await.unwrap()), receipt, "same exact recovery is idempotent");
+    // The real private pre-push guard still refuses a supervisor's ordinary
+    // push from the dead worker's checkout. Recovery has no foreign-ref bypass.
+    let hooks = tempfile::TempDir::new().unwrap();
+    let hook = hooks.path().join("pre-push");
+    std::fs::write(&hook, crate::ui::factory::daemon::runtime::teams::TeamsManager::WORKER_PRE_PUSH_HOOK).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let denied = Command::new("git").arg("-C").arg(root)
+        .arg("-c").arg(format!("core.hooksPath={}", hooks.path().display()))
+        .args(["push", "origin", &format!("{source}:refs/heads/{source}")])
+        .env("CAS_AGENT_NAME", "recovery-caller").output().unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("PUSH GUARD"));
+}

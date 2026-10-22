@@ -2,6 +2,7 @@
 //!
 //! Enables syncing Cassy data with Cassy Cloud service.
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -447,6 +448,25 @@ pub enum CloudQueueCommand {
         /// Enqueue the previewed snapshots; requires cloud.team_only=true.
         #[arg(long)]
         apply: bool,
+    },
+    /// Inspect or quarantine task-sync intents whose revision evidence is ambiguous.
+    TaskIntents {
+        #[command(subcommand)]
+        command: TaskSyncIntentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskSyncIntentCommand {
+    /// List blocked intent evidence and prior resolution decisions.
+    List,
+    /// Stop replay of one still-ambiguous intent while retaining its evidence.
+    Quarantine {
+        /// Intent ID from `cas cloud queue task-intents list`.
+        intent_id: i64,
+        /// Why this intent is being quarantined for later manual reconciliation.
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -2633,8 +2653,120 @@ fn execute_queue_migrate_to_team(cas_root: &Path, json: bool, apply: bool, out: 
     Ok(())
 }
 
+fn authenticated_task_sync_supervisor(cas_root: &Path) -> anyhow::Result<String> {
+    let session_id = std::env::var("CAS_SESSION_ID")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("task sync quarantine requires an authenticated supervisor session")
+        })?;
+    let agents = open_agent_store(cas_root).context("could not open the registered agent store")?;
+    let agent = agents
+        .get(&session_id)
+        .context("the current Cassy session is not registered")?;
+    anyhow::ensure!(
+        agent.role == crate::types::AgentRole::Supervisor,
+        "task sync intent quarantine is available only to the authenticated supervisor"
+    );
+    Ok(agent.id)
+}
+
+fn execute_queue_task_intents(
+    command: &TaskSyncIntentCommand,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    let queue = SyncQueue::open(cas_root)?;
+    queue.init()?;
+    match command {
+        TaskSyncIntentCommand::List => {
+            let records = queue.task_sync_recovery_records()?;
+            let unresolved = records
+                .iter()
+                .filter(|record| record.resolved_at.is_none())
+                .count();
+            let resolved = records.len() - unresolved;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "unresolved": unresolved,
+                        "resolved": resolved,
+                        "records": records,
+                    })
+                );
+            } else if records.is_empty() {
+                println!("No blocked task-sync intents.");
+            } else {
+                println!("Task-sync recovery: {unresolved} unresolved, {resolved} resolved");
+                for record in records {
+                    println!(
+                        "{} {} {} (previous revision {})",
+                        record.intent_id,
+                        record.resolution.as_deref().unwrap_or("blocked"),
+                        record.entity_id,
+                        record.previous_revision
+                    );
+                    println!("  {}", record.blocked_reason);
+                    if let Some(at) = record.resolved_at {
+                        println!(
+                            "  resolved at {at} by {}",
+                            record.resolved_by.unwrap_or_default()
+                        );
+                        println!("  reason: {}", record.resolution_reason.unwrap_or_default());
+                    }
+                }
+                println!(
+                    "Review evidence before resolving: cas cloud queue task-intents quarantine <intent-id> --reason \"...\""
+                );
+            }
+        }
+        TaskSyncIntentCommand::Quarantine { intent_id, reason } => {
+            let actor = authenticated_task_sync_supervisor(cas_root)?;
+            queue.quarantine_task_sync_intent(*intent_id, &actor, reason)?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "quarantined",
+                        "intent_id": intent_id,
+                        "actor": actor,
+                        "reason": reason,
+                    })
+                );
+            } else {
+                println!(
+                    "Quarantined ambiguous task-sync intent {intent_id}; original intent and observed evidence are retained."
+                );
+                println!("Actor: {actor}");
+                println!("Reason: {reason}");
+                println!("Audit: cas cloud queue task-intents list");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     use crate::cloud::SyncQueue;
+
+    if let Some(CloudQueueCommand::TaskIntents { command }) = &args.command {
+        anyhow::ensure!(
+            !args.purge_team_owned
+                && !args.purge_pull_echoes
+                && !args.dry_run
+                && args.ids.is_empty()
+                && !args.verbose
+                && args.limit == 20
+                && !args.clear
+                && !args.retry
+                && args.retry_reason.is_none()
+                && args.prune.is_none(),
+            "task-intents cannot be combined with queue maintenance flags"
+        );
+        return execute_queue_task_intents(command, cli, cas_root);
+    }
 
     if let Some(CloudQueueCommand::MigrateToTeam { apply }) = args.command {
         anyhow::ensure!(!args.purge_team_owned && !args.clear && !args.retry && args.prune.is_none(),
@@ -8220,6 +8352,32 @@ mod team_cmd_tests {
         let applied: serde_json::Value = serde_json::from_slice(&applied).unwrap();
         assert_eq!(applied["enqueued"], 1); assert_eq!(applied["personal_retired"], 0);
         assert_eq!(queue.personal_row_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn task_sync_intent_quarantine_requires_an_explicit_reason() {
+        let parsed = CloudQueueArgs::try_parse_from([
+            "queue",
+            "task-intents",
+            "quarantine",
+            "17",
+            "--reason",
+            "reviewed ambiguous revision evidence",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(CloudQueueCommand::TaskIntents {
+                command: TaskSyncIntentCommand::Quarantine { intent_id: 17, .. }
+            })
+        ));
+        assert!(CloudQueueArgs::try_parse_from([
+            "queue",
+            "task-intents",
+            "quarantine",
+            "17",
+        ])
+        .is_err());
     }
 
     #[test]

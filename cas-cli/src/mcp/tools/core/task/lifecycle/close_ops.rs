@@ -2035,38 +2035,71 @@ fn validate_inherited_scoped_failures(
     ))
 }
 
-/// Resolve a conventional sibling `foo_tests.rs` only when `foo.rs` (or
-/// `foo/mod.rs`) actually mounts that file. Filename similarity alone proves
-/// nothing: a standalone module, comment or example must remain uncovered.
-fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
-    let file = std::path::Path::new(path);
-    let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
-    if parent_name.is_empty() {
-        return None;
+/// Mount discovery is local to one changed-source batch: each directory is
+/// listed once and each candidate parent is read/parsed once with one parser.
+struct SiblingTestParents {
+    parser: Option<cas_code::parser::RustParser>,
+    directories: std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+    mounts: std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+}
+
+impl SiblingTestParents {
+    fn new() -> Self {
+        Self {
+            parser: cas_code::parser::RustParser::new().ok(),
+            directories: Default::default(),
+            mounts: Default::default(),
+        }
     }
-    let directory = file.parent()?;
-    let changed_file = proof_repo.join(file).canonicalize().ok()?;
-    let mut parser = cas_code::parser::RustParser::new().ok()?;
-    for parent in [
-        directory.join(format!("{parent_name}.rs")),
-        directory.join(parent_name).join("mod.rs"),
-    ] {
-        let absolute = proof_repo.join(&parent);
-        let Ok(body) = std::fs::read_to_string(&absolute) else {
-            continue;
-        };
-        let Ok(mounts) = parser.explicit_external_modules(&body) else {
-            continue;
-        };
-        for (_name, relative) in mounts {
-            if absolute
-                .parent()?
-                .join(relative)
-                .canonicalize()
-                .ok()
-                .as_ref()
-                != Some(&changed_file)
-            {
+
+    /// Resolve a sibling only through an explicit AST mount whose canonical
+    /// target is the changed file. Comments and lookalike names prove nothing.
+    fn parent(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
+        let file = std::path::Path::new(path);
+        let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
+        if parent_name.is_empty() {
+            return None;
+        }
+        let directory = file.parent()?;
+        let changed_file = proof_repo.join(file).canonicalize().ok()?;
+        let parser = self.parser.as_mut()?;
+        let candidates = self
+            .directories
+            .entry(directory.to_path_buf())
+            .or_insert_with(|| {
+                let mut candidates: Vec<_> = std::fs::read_dir(proof_repo.join(directory))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| directory.join(entry.file_name()))
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+                    .collect();
+                candidates.sort();
+                candidates
+            });
+        // Keep conventional foo/mod.rs mounts, including ../foo_tests.rs.
+        for parent in candidates
+            .iter()
+            .cloned()
+            .chain(std::iter::once(directory.join(parent_name).join("mod.rs")))
+        {
+            if parent == file {
+                continue;
+            }
+            let mounts = self.mounts.entry(parent.clone()).or_insert_with(|| {
+                let absolute = proof_repo.join(&parent);
+                let Some(directory) = absolute.parent() else {
+                    return Vec::new();
+                };
+                std::fs::read_to_string(&absolute)
+                    .ok()
+                    .and_then(|body| parser.explicit_external_modules(&body).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(_name, relative)| directory.join(relative).canonicalize().ok())
+                    .collect()
+            });
+            if !mounts.contains(&changed_file) {
                 continue;
             }
             let normalized = parent.to_str()?.replace('\\', "/");
@@ -2075,8 +2108,8 @@ fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<S
             let source = source.strip_suffix("/mod").unwrap_or(source);
             return Some(source.split('/').map(str::to_string).collect());
         }
+        None
     }
-    None
 }
 
 /// Convert changed Rust source paths into crate-relative module paths that
@@ -2089,6 +2122,7 @@ pub(crate) fn changed_source_modules(
     paths: &[String],
 ) -> Vec<SourceModule> {
     let mut modules = std::collections::BTreeSet::new();
+    let mut sibling_tests = None;
     for path in paths {
         let normalized = path.replace('\\', "/");
         let Some((crate_path, source)) = normalized.split_once("/src/") else {
@@ -2105,7 +2139,13 @@ pub(crate) fn changed_source_modules(
                 .unwrap_or(crate_path)
                 .to_ascii_lowercase(),
             segments: source.split('/').map(str::to_string).collect(),
-            test_parent: sibling_test_parent(proof_repo, &normalized),
+            test_parent: if normalized.ends_with("_tests.rs") {
+                sibling_tests
+                    .get_or_insert_with(SiblingTestParents::new)
+                    .parent(proof_repo, &normalized)
+            } else {
+                None
+            },
         });
     }
     modules.into_iter().collect()

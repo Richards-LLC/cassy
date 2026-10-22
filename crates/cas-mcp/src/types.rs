@@ -493,6 +493,11 @@ pub struct TaskRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub adopt_branch: Option<bool>,
 
+    /// Existing replacement delivery branch approved by the task's supervisor.
+    #[schemars(description = "For rebind_branch: existing branch checked out by the assigned worker. A live registered supervisor and non-empty reason are required; records the old tip without changing Git, assignment or target.")]
+    #[serde(default)]
+    pub branch: Option<String>,
+
     /// Limit for list operations
     #[schemars(description = "Maximum items to return")]
     #[serde(default, deserialize_with = "deser::option_usize")]

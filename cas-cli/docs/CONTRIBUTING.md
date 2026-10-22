@@ -878,6 +878,21 @@ integration can close through the MCP task tool with `action=close`,
 `reason`. Only a live registered supervisor can authorize this disposition.
 There is no CLI task-lifecycle command; the unified MCP task tool owns dispatch.
 
+After approving a worker's fresh delivery branch, a live registered supervisor
+can run `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"`.
+Use the caller harness's normal tool prefix. The task must be unparked and keep
+its assignee and declared target; use `request_changes` first for a parked delivery.
+The assigned worker must have the existing replacement branch checked out cleanly
+in its registered repository. Canonical worker branches, the worker's per-task
+branch, and that per-task branch with a recovery suffix are supported. Cassy
+derives the base from the unchanged target and refuses foreign task history;
+callers cannot supply a base that hides commits. The old branch/base/observed tip,
+new binding, approving supervisor and reason are recorded together. A missing
+old ref is recorded as unavailable. Repeating the same binding leaves its base
+and audit unchanged. Rebinding does not change Git, assignment, leases or claims,
+and it does not waive proof, merge, QA or verification. The worker closes normally;
+the supervisor merges the recorded branch with an explicit task id.
+
 CAS measures the recorded delivery anchor (or the assigned worker branch before
 parking) against the fresh integration target. Every unmerged commit must touch
 only regular, non-executable evidence formats under `docs/` or `artifacts/`:

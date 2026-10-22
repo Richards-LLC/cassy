@@ -462,6 +462,8 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
     );
     let started = Instant::now();
 
+    let store_was_present = cas_store_present(&cwd.join(".cas"));
+
     // JSON mode: non-interactive, use defaults
     let result = if cli.json {
         execute_json(&cwd, args)
@@ -484,7 +486,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
             "cas init: aborted with error"
         ),
     }
-    if result.is_err() && cas_store_present(&cwd.join(".cas")) {
+    if result.is_err() && !store_was_present && cas_store_present(&cwd.join(".cas")) {
         result.context(INCOMPLETE_INIT_RECOVERY)
     } else {
         result
@@ -648,12 +650,10 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A .cas that carries its configuration but not its store (for example a
-/// committed `config.toml` in a fresh clone) keeps that configuration when
-/// init creates the store (cas-563f). A fully initialized .cas re-run with
-/// --force is reconfigured as before.
+/// Provisioning and force retries keep the operator's existing configuration,
+/// whether or not its store already exists (cas-563f, cas-e149).
 fn keeps_existing_config(cas_dir: &Path) -> bool {
-    !cas_store_present(cas_dir) && cas_config_present(cas_dir)
+    cas_config_present(cas_dir)
 }
 
 /// Translate CLI args into the orchestration layer's [`IntegrationFlags`].
@@ -700,13 +700,23 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         println!("\n  Reconfiguring Cassy...");
     }
 
+    // A force retry repairs provisioning without resetting operator settings.
+    // The explicit non-force "Reconfigure settings" choice still reconfigures.
+    let keep_config = args.force && keeps_existing_config(&cas_dir_path);
+
     // Initialize .cas directory
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
     let wizard_config = WizardConfig::with_detected_agents(cwd);
 
     // Confirmation with file summary
-    if !confirm_and_apply(&cas_dir, cwd, &wizard_config, &integration_flags_from(args))? {
+    if !confirm_and_apply(
+        &cas_dir,
+        cwd,
+        &wizard_config,
+        keep_config,
+        &integration_flags_from(args),
+    )? {
         println!("\n  Initialization cancelled.");
         return Ok(());
     }
@@ -842,6 +852,7 @@ fn confirm_and_apply(
     cas_dir: &Path,
     cwd: &Path,
     config: &WizardConfig,
+    keep_config: bool,
     integration_flags: &super::integrate::integrations::IntegrationFlags,
 ) -> anyhow::Result<bool> {
     print_section_header("Confirmation")?;
@@ -863,7 +874,9 @@ fn confirm_and_apply(
     if !cas_exists {
         print_file_item(".cas/", "Cassy data directory", InitStyle::Text)?;
     }
-    print_file_item(".cas/config.toml", "Configuration", InitStyle::Text)?;
+    if !keep_config {
+        print_file_item(".cas/config.toml", "Configuration", InitStyle::Text)?;
+    }
     if !gitignore_exists {
         print_file_item(".gitignore", "Add .cas/ exclusion", InitStyle::Text)?;
     }
@@ -980,7 +993,7 @@ fn confirm_and_apply(
     // Telemetry is opt-in; don't enable by default
 
     // Apply with animation
-    apply_configuration(cas_dir, cwd, config, true, false, integration_flags)?;
+    apply_configuration(cas_dir, cwd, config, true, keep_config, integration_flags)?;
 
     Ok(true)
 }

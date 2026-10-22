@@ -650,8 +650,10 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
 
     // Read existing content for comparison
     let existing_content = if mcp_json_path.exists() {
-        Some(std::fs::read_to_string(&mcp_json_path)
-            .context("Cannot read existing .mcp.json; file left unchanged")?)
+        Some(
+            std::fs::read_to_string(&mcp_json_path)
+                .context("Cannot read existing .mcp.json; file left unchanged")?,
+        )
     } else {
         None
     };
@@ -663,16 +665,24 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
         None => serde_json::json!({}),
     };
 
-    // Ensure mcpServers object exists
-    if config.get("mcpServers").is_none() {
-        config["mcpServers"] = serde_json::json!({});
-    }
+    // Validate before mutation: indexing a non-object can panic or replace null.
+    let root = config
+        .as_object_mut()
+        .context("Invalid JSON in .mcp.json: root must be an object; file left unchanged")?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("Invalid JSON in .mcp.json: mcpServers must be an object; file left unchanged")?;
 
     // Add or update Cassy server config
-    config["mcpServers"]["cas"] = serde_json::json!({
-        "command": "cas",
-        "args": ["serve"]
-    });
+    servers.insert(
+        "cas".to_string(),
+        serde_json::json!({
+            "command": "cas",
+            "args": ["serve"]
+        }),
+    );
 
     // Write back with pretty formatting
     let formatted = canonical_json_pretty(&config)?;

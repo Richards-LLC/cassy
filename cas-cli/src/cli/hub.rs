@@ -1635,6 +1635,7 @@ fn start_with_output_resolved(
             });
         }
     };
+    cleanup_stale_launcher_files(paths.root());
     let prior_record = paths.read_process_record().ok();
     let stale_cgroup = prior_record.as_ref().and_then(|record| record.cgroup.clone());
     let prior_serve_target = prior_record.as_ref().and_then(|record| {
@@ -1882,6 +1883,17 @@ fn start_with_output_resolved(
 }
 
 struct ScopedFile(std::path::PathBuf);
+
+fn cleanup_stale_launcher_files(root: &std::path::Path) {
+    cleanup_stale_launcher_files_with(root, process_is_running);
+}
+
+fn cleanup_stale_launcher_files_with(
+    root: &std::path::Path,
+    is_alive: impl Fn(u32) -> bool,
+) {
+    let _ = (root, is_alive);
+}
 
 impl ScopedFile {
     fn new(path: std::path::PathBuf) -> Self {
@@ -4464,6 +4476,27 @@ mod tests {
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn stale_launcher_files_are_removed_without_touching_live_files() {
+        let root = tempfile::tempdir().unwrap();
+        let stale_pid = 111;
+        let live_pid = 222;
+        for extension in ["pid", "go", "error"] {
+            std::fs::write(root.path().join(format!(".launcher-7-{stale_pid}.{extension}")), b"stale").unwrap();
+            std::fs::write(root.path().join(format!(".launcher-8-{live_pid}.{extension}")), b"live").unwrap();
+        }
+        let unrelated = root.path().join(".launcher-unrelated.error");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        cleanup_stale_launcher_files_with(root.path(), |pid| pid == live_pid);
+
+        for extension in ["pid", "go", "error"] {
+            assert!(!root.path().join(format!(".launcher-7-{stale_pid}.{extension}")).exists());
+            assert!(root.path().join(format!(".launcher-8-{live_pid}.{extension}")).exists());
+        }
+        assert!(unrelated.exists());
     }
 
     /// cas-0140: the status screen tells a quiet audit log (OK, with the last

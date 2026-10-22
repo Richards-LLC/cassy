@@ -462,27 +462,35 @@ impl PeerClaims {
         // this point: the caller publishes a local lease, and renewal repairs
         // its Cloud mirror. Keep release fenced until that local publication.
         let claims = self.clone().with_budget(PeerBudget::default());
-        let mut answer = claims.acquire_bounded(
-            task_id, kind, agent_id, agent_name, duration_secs, is_local,
-        );
+        let mut answer =
+            claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local);
         let mut snapshot = None;
         for attempt in 0..2 {
             if !matches!(answer, Acquire::Claimed) {
                 break;
             }
-            match claims.coordinator(agent_id)
+            match claims
+                .coordinator(agent_id)
                 .and_then(|coordinator| coordinator.renew(&claims.key(task_id), duration_secs))
             {
                 Ok(lease) => {
-                    snapshot = Some(ClaimSnapshot { epoch: lease.epoch, renewal_count: lease.renewal_count });
+                    snapshot = Some(ClaimSnapshot {
+                        epoch: lease.epoch,
+                        renewal_count: lease.renewal_count,
+                    });
                     break;
                 }
                 Err(error) => {
                     tracing::warn!(task = %task_id, %agent_id, %error,
-                        "claim snapshot renewal failed; checking the claim again within the request budget");
+                            "claim snapshot renewal failed");
                     answer = if attempt == 0 {
                         claims.acquire_bounded(
-                            task_id, kind, agent_id, agent_name, duration_secs, is_local,
+                            task_id,
+                            kind,
+                            agent_id,
+                            agent_name,
+                            duration_secs,
+                            is_local,
                         )
                     } else {
                         Acquire::Unavailable(format!("claim snapshot renewal failed: {error}"))

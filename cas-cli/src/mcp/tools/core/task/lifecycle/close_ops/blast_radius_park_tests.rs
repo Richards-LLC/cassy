@@ -143,7 +143,7 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     }
 }
 
-/// cas-ba56: the real park path accepts a parent's capped selection when
+/// cas-ba56: the real close path accepts a parent's capped selection when
 /// its delivery changes a sibling test mounted by #[path] and a child module.
 #[tokio::test]
 async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
@@ -165,6 +165,16 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     })).await;
     assert_eq!(f.task().proof_targets, ["widget gear"], "{updated}");
     let head = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    // A receipt in another crate must not make the mounted file disappear
+    // from the focused-proof obligation.
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &head, "other-crate", "test(gear)",
+    );
+    let refused = call(&f.worker, serde_json::json!({
+        "action": "close", "id": ID, "reason": "parent tests cover delivery",
+    })).await;
+    assert!(refused.contains("FOCUSED PROOF REQUIRED"), "{refused}");
+    assert_eq!(f.task().status, TaskStatus::InProgress);
     crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(), &f.worker_path, &head, "widget", "test(gear)",
     );
@@ -173,6 +183,14 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     })).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
+    git(f.dir.path(), &["merge", "--no-ff", "-m", "merge delivery", LANE]);
+    git(f.dir.path(), &["push", "-q", "origin", "main"]);
+    let closed = call(&f.supervisor, serde_json::json!({
+        "action": "close", "id": ID, "reason": "reviewed parent test proof",
+    })).await;
+    assert!(closed.contains("Closed task"), "{closed}");
+    assert_eq!(f.task().status, TaskStatus::Closed);
+    assert_eq!(f.task().proof_targets, ["widget gear"], "no administrative scope widening");
 }
 
 /// cas-eac2 / cas-95e0: a focused receipt is required after each proof-input

@@ -1886,6 +1886,10 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     } else {
         let mut command = Command::new(cargo);
         command.arg("check");
+        // cas-edeb: a nested check must not reuse an outer test's lease runner.
+        if let Some(variable) = crate::factory_target_cache::owner::host_runner_env() {
+            command.env_remove(variable);
+        }
         command
     };
     #[cfg(unix)]

@@ -375,13 +375,33 @@ fn idle_worker_pane(name: &str, harness: cas_mux::SupervisorCli) -> cas_mux::Pan
 
 /// Alive means the process exists and is not a zombie awaiting reaping.
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
-        })
-        .is_some_and(|state| state != "Z" && state != "X")
+    if pid == 0 || pid > i32::MAX as u32 || !crate::mcp::daemon::pid_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
+            })
+            .is_some_and(|state| state != "Z" && state != "X")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS has no /proc. Signal 0 above probes existence; ps keeps the
+        // same zombie exclusion as the Linux check and the daemon fixture.
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                let state = String::from_utf8_lossy(&output.stdout);
+                let state = state.trim();
+                output.status.success() && !state.is_empty() && !state.starts_with(['Z', 'X'])
+            })
+    }
 }
 
 fn register_idle_worker(cas_dir: &std::path::Path, name: &str) {

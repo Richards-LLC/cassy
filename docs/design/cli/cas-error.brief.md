@@ -8,6 +8,11 @@
 | Machine output | Human errors go to stderr; JSON remains one stdout document and existing exit codes carry the result. |
 | Omitted | No stack trace, extra metadata, or new error advice is added; suggestions remain limited to `CasError` values. |
 
+The top-level human diagnostic detects color from stderr, its destination.
+Redirecting stderr produces plain text even when stdout remains a terminal;
+terminal stderr remains styled even when stdout is piped. `NO_COLOR` suppresses
+styling in either case. Error text, JSON stdout, and exit codes remain unchanged.
+
 ## Critique
 
 terminal-qa: PASS cas-error-renderer · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-d0b1/terminal-qa/error-renderer/report.json

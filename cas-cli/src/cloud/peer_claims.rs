@@ -1661,7 +1661,7 @@ mod tests {
                     // local try_claim. Delay local publication to force the gap.
                     assert!(crate::store::open_agent_store(dir.path()).unwrap()
                         .get_lease(task).unwrap().is_none());
-                    let (answer, fence) = claims.acquire_for_local_lease(
+                    let (answer, fence, _) = claims.acquire_for_local_lease(
                         dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                     );
                     assert!(matches!(answer, Acquire::Claimed));
@@ -1703,7 +1703,7 @@ mod tests {
                 let restart = {
                     let (claims, root) = (claims.clone(), dir.path().to_path_buf());
                     std::thread::spawn(move || {
-                        let (answer, fence) = claims.acquire_for_local_lease(
+                        let (answer, fence, _) = claims.acquire_for_local_lease(
                             &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                         );
                         assert!(matches!(answer, Acquire::Claimed));
@@ -1733,7 +1733,7 @@ mod tests {
             // new local lease, published before the start fence is dropped.
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
-                let (answer, fence) = claims.acquire_for_local_lease(
+                let (answer, fence, _) = claims.acquire_for_local_lease(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                 );
                 assert!(matches!(answer, Acquire::Claimed));

@@ -226,6 +226,43 @@ pub fn release_for_task(cas_root: &Path, task_id: &str) {
 }
 
 pub(crate) fn release_for_task_with(claims: Option<&PeerClaims>, cas_root: &Path, task_id: &str) {
-    // Red: the pre-review behaviour, where a park or supervisor close released nothing.
-    let _ = (claims, cas_root, task_id);
+    let Ok(entries) = std::fs::read_dir(cas_root.join("file-leases")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ledger_file = entry.path();
+        if ledger_file.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(mut ledger) = std::fs::read_to_string(&ledger_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Ledger>(&text).ok())
+        else {
+            continue;
+        };
+        let held: Vec<String> = ledger
+            .leases
+            .iter()
+            .filter(|(_, lease)| lease.task_id.as_deref() == Some(task_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if held.is_empty() {
+            continue;
+        }
+        for id in &held {
+            if let (Some(claims), Some(lease)) = (claims, ledger.leases.get(id))
+                && lease.mine
+                && !ledger.agent_id.is_empty()
+            {
+                let _ = claims.release_own(id, &ledger.agent_id);
+            }
+            ledger.leases.remove(id);
+        }
+        if ledger.leases.is_empty() {
+            let _ = std::fs::remove_file(&ledger_file);
+        } else {
+            let agent = ledger.agent_id.clone();
+            save(cas_root, &agent, &ledger);
+        }
+    }
 }

@@ -1537,6 +1537,15 @@ mod tests {
         async fn restarting_between_lease_check_and_cloud_read_keeps_fresh_claim_cas_af26() {
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
+                // A start that exhausted its peer budget while waiting for
+                // the fence must not cancel a later release on waking up.
+                let pending = read_pending_claim_releases(dir.path());
+                let expired = claims.clone().with_budget(PeerBudget::new(Duration::ZERO));
+                assert!(matches!(expired.acquire_for_start(
+                    dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                ), Acquire::Unavailable(_)));
+                assert_eq!(read_pending_claim_releases(dir.path()), pending,
+                    "a timed-out start must not cancel a pending release");
                 release_pending_task_claims_with(&claims, dir.path(), |task| {
                     // The real task-start order: Cloud first, local lease later.
                     assert!(crate::store::open_agent_store(dir.path()).unwrap().get_lease(task).unwrap().is_none());

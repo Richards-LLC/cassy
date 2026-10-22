@@ -295,15 +295,28 @@ fn cassy_wordmark_lines() -> &'static [&'static str] {
 }
 
 fn cassy_wordmark_lines_for_mode(mode: OutputMode) -> &'static [&'static str] {
-    if mode == OutputMode::Plain {
-        &CASSY_PLAIN_WORDMARK
-    } else {
+    if super::supports_styled_glyphs(mode) {
         &CASSY_WORDMARK
+    } else {
+        &CASSY_PLAIN_WORDMARK
     }
 }
 
-fn init_text_for_mode(text: &str, _mode: OutputMode) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(text)
+fn init_text_for_mode(text: &str, mode: OutputMode) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() || super::supports_styled_glyphs(mode) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    // Init's frame corners and section dot extend the shared punctuation
+    // fallback. Leave user content (paths and names) intact.
+    let decor: String = text
+        .chars()
+        .map(|ch| match ch {
+            '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' => '+',
+            '●' => '*',
+            other => other,
+        })
+        .collect();
+    std::borrow::Cow::Owned(crate::ui::components::ascii_fallback(&decor).into_owned())
 }
 
 fn print_cassy_wordmark(indent: &str) -> anyhow::Result<()> {

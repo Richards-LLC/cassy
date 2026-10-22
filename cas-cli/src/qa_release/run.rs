@@ -14,7 +14,7 @@ use super::resources::{self, Meter, MeteredError, PlannedRow as PlannedUse, Reso
 use super::verdict::{Gate, GateVerdict, NotExercisedCause, RowVerdict};
 use super::{
     CallError, ReleaseConfig, Request, ServedComponent, ServedRefusal, Verb, configured,
-    preflight_served, printable,
+    preflight_served, printable, short,
 };
 use crate::qa_registry::{FixtureSource, Journey, Registry};
 use anyhow::{Context, Result, bail, ensure};
@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 pub const DIR: &str = "release-gate";
 /// The refusal class an override reason must name to merge through a freeze.
 pub const FREEZE_LABEL: &str = "RELEASE FREEZE";
+/// The detail of a row the freeze TTL timed out.
+const TTL_DETAIL: &str = "not walked before the freeze ended";
 /// Added to the suites' wall clocks for the freeze TTL.
 const FREEZE_SLACK_MINS: i64 = 30;
 
@@ -108,6 +110,9 @@ pub struct Run {
     pub generation: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abort_reason: Option<String>,
+    /// Sealed at `freeze_until` with rows still unwalked, not by its last row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ttl_sealed: bool,
     /// Best-effort publication and cleanup outcomes; never a verdict.
     #[serde(default)]
     pub notes: Vec<String>,
@@ -198,11 +203,6 @@ fn lock_file(path: PathBuf) -> Result<File> {
 /// Serializes writers of one run across processes (driver, `record`, `abort`).
 fn lock(cas_root: &Path, sha: &str) -> Result<File> {
     lock_file(run_path(cas_root, sha)?.with_extension("lock"))
-}
-
-/// The first 12 characters, or all of a shorter string; never panics.
-pub fn short(sha: &str) -> &str {
-    sha.get(..12).unwrap_or(sha)
 }
 
 /// Reads the run for `sha`. A run whose recorded SHA is not the 40-hex SHA
@@ -311,6 +311,14 @@ fn config(cas_root: &Path) -> Result<ReleaseConfig> {
         .context("No qa.release.adapter configured; set qa.release.adapter first")
 }
 
+/// What `--json` prints: the run's fields at top level plus `hand_walk`,
+/// the debt summary the text status shows.
+pub fn status_json(cas_root: &Path, run: &Run) -> Result<Value> {
+    let mut value = serde_json::to_value(run)?;
+    value["hand_walk"] = serde_json::to_value(hand_walk(cas_root, run))?;
+    Ok(value)
+}
+
 /// The run's hand-walk debt: manual minutes per journey with each journey's
 /// automation owner (an unreadable registry leaves every owner unknown).
 pub fn hand_walk(cas_root: &Path, run: &Run) -> pack::HandWalk {
@@ -324,10 +332,6 @@ fn registry(cas_root: &Path) -> Result<(Registry, crate::config::QaConfig)> {
     let registry = crate::qa_registry::load(&path)
         .with_context(|| format!("release gate needs the journey registry at {}", path.display()))?;
     Ok((registry, qa))
-}
-
-fn live_in(journey: &Journey, env: &str) -> bool {
-    journey.env_status.get(env).map_or(journey.status == "live", |s| s.status == "live")
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> Option<String> {
@@ -390,7 +394,7 @@ fn plan(
         None => None,
     };
     let mut rows = Vec::new();
-    for journey in registry.journeys.iter().filter(|j| live_in(j, &config.gate_env)) {
+    for journey in registry.journeys.iter().filter(|j| j.live_in(&config.gate_env)) {
         let why = match &impacted {
             _ if journey.release_always => "release_always",
             Some(ids) if ids.contains(&journey.id) => "impacted",
@@ -427,6 +431,18 @@ fn plan(
             cell: None,
             run: None,
         });
+    }
+    // One walk fills one row id: two journeys planning the same id would let
+    // a walk of one stand in for the other, so refuse before the freeze.
+    let mut owners: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in &rows {
+        if let Some(other) = owners.insert(&row.id, &row.journey).filter(|other| *other != row.journey) {
+            bail!(
+                "row id {} is planned by journeys {other} and {}; rename one before starting the gate",
+                printable(&row.id),
+                printable(&row.journey)
+            );
+        }
     }
     Ok(rows)
 }
@@ -534,6 +550,7 @@ pub fn start(cas_root: &Path, sha: &str) -> Result<Run> {
         gate: None,
         generation: 0,
         abort_reason: None,
+        ttl_sealed: false,
         notes: Vec::new(),
     };
     run.note(format!("START {} rows; freeze until {}", run.plan.len(), run.freeze_until.to_rfc3339()));
@@ -588,6 +605,23 @@ pub struct Record {
     pub covers_commits: Vec<String>,
 }
 
+/// The run `record` targets. Without `--sha` it is the live run; when the
+/// TTL has just sealed that run, say so, because a retry with its SHA reseals.
+fn record_target(cas_root: &Path, sha: Option<&str>) -> Result<String> {
+    if sha.is_some() || active(cas_root)?.is_some() {
+        return Ok(resolve(cas_root, sha)?.sha);
+    }
+    let latest = scan(cas_root).0.into_iter().max_by_key(|run| run.updated_at);
+    match latest {
+        Some(run) if run.state == State::Sealed && run.ttl_sealed => bail!(
+            "the run for {} was sealed by the TTL; retry the record with --sha {} to reseal",
+            short(&run.sha),
+            run.sha
+        ),
+        _ => Ok(resolve(cas_root, None)?.sha),
+    }
+}
+
 /// Records a manual row. On a live run it fills a planned manual row (or adds
 /// a row that covers a PR). On a sealed OWED run it replaces an owed row
 /// (BLOCKED_EXTERNAL, NOT_EXERCISED, SERVED_DRIFT…) and reseals as a new pack
@@ -596,7 +630,7 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
     let config = config(cas_root)?;
     let root = project_root(cas_root)?;
     let (registry, _) = registry(cas_root)?;
-    let sha = resolve(cas_root, sha)?.sha;
+    let sha = record_target(cas_root, sha)?;
     let journey = {
         let run = load(cas_root, &sha)?.context("no release-gate run")?;
         let id = run.plan.iter().find(|p| p.id == input.row).map_or(input.row.as_str(), |p| p.journey.as_str());
@@ -629,11 +663,18 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
                 }
             }
             State::Aborted => bail!("the release gate for {sha} was aborted; start a new SHA"),
-            _ => ensure!(
-                planned.is_none_or(|p| p.manual) && run.row(&input.row).is_none_or(|_| planned.is_none()),
-                "row {} is walked by the driver or already recorded",
-                input.row
-            ),
+            _ => {
+                // The TTL tick timed the row out but has not sealed yet.
+                let ttl = run.row(&input.row).is_some_and(|r| {
+                    matches!(&r.verdict, RowVerdict::NotExercised { cause: NotExercisedCause::TimedOut, detail } if detail == TTL_DETAIL)
+                });
+                ensure!(!ttl, "the TTL timed row {} out; retry after the run seals to reseal it", input.row);
+                ensure!(
+                    planned.is_none_or(|p| p.manual) && run.row(&input.row).is_none_or(|_| planned.is_none()),
+                    "row {} is walked by the driver or already recorded",
+                    input.row
+                );
+            }
         }
         ensure!(
             planned.is_some() || !input.covers_prs.is_empty() || !input.covers_commits.is_empty(),
@@ -645,14 +686,28 @@ pub fn record(cas_root: &Path, sha: Option<&str>, input: &Record) -> Result<Run>
     admit(&load(cas_root, &sha)?.context("no release-gate run")?)?;
     let walked = walk_manual(cas_root, root, &config, &sha, &journey, input)?;
     let mut reseal = false;
-    let mut run = update(cas_root, &sha, |run| {
-        reseal = admit(run)?;
+    let frames = walked.frames.clone();
+    let written = update(cas_root, &sha, |run| {
+        reseal = match admit(run) {
+            Ok(reseal) => reseal,
+            Err(error) => {
+                // Remove the evidence this refused record copied, unless a
+                // recorded row names the same file.
+                if let Ok(dir) = pack::pack_dir(cas_root, &sha) {
+                    for frame in frames.iter().filter(|f| !run.rows.iter().any(|r| r.frames.contains(f))) {
+                        let _ = fs::remove_file(dir.join(frame));
+                    }
+                }
+                return Err(error);
+            }
+        };
         run.put(walked);
         if reseal {
             run.note(format!("RECORD {} after seal; resealing", input.row));
         }
         Ok(run.clone())
-    })?;
+    });
+    let mut run = written?;
     if reseal || (run.state == State::Manual && run.pending().next().is_none()) {
         run = seal(cas_root, &config, &sha)?;
     }
@@ -886,7 +941,7 @@ impl Walk<'_> {
         let verdict = RowVerdict::grade(runner, walked.frames.len(), readback);
         match (&verdict, &planned.cell) {
             (RowVerdict::Pass, Some(cell)) => {
-                super::matrix::grade_measured(self.registry, cell, &answer.measured).unwrap_or(verdict)
+                super::matrix::grade_measured(self.registry, journey, cell, &answer.measured).unwrap_or(verdict)
             }
             _ => verdict,
         }
@@ -936,8 +991,9 @@ pub fn tick(cas_root: &Path, cancel: &AtomicBool) -> Result<()> {
     if run.state.live() && (expired || (automated_done && run.pending().next().is_none())) {
         update(cas_root, &sha, |run| {
             let timed_out: Vec<PlannedRow> = run.pending().cloned().collect();
+            run.ttl_sealed = !timed_out.is_empty();
             for p in timed_out {
-                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, "not walked before the freeze ended")));
+                run.put(row(&p.id, &p.journey, not_exercised(NotExercisedCause::TimedOut, TTL_DETAIL)));
             }
             Ok(())
         })?;
@@ -1118,13 +1174,14 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
             .journeys
             .iter()
             .filter_map(|journey| {
-                let rows: Vec<(String, String)> = run
+                let rows: Vec<(String, super::matrix::Cell)> = run
                     .plan
                     .iter()
                     .filter(|p| p.journey == journey.id)
-                    .filter_map(|p| Some((p.id.clone(), p.cell.as_ref()?.label())))
+                    .filter_map(|p| Some((p.id.clone(), p.cell.clone()?)))
                     .collect();
-                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows })
+                let labeled = registry.labeled_criteria(journey);
+                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows, labeled })
             })
             .collect();
         pack.matrix = super::matrix::settle(&mut pack.rows, &golden);
@@ -1145,6 +1202,10 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
         }
         pack.seal(&dir).map_err(anyhow::Error::msg)?;
         run.generation += 1;
+        // A reseal is a record's, not the TTL's: no retry hint applies now.
+        if run.generation > 1 {
+            run.ttl_sealed = false;
+        }
         run.state = State::Sealed;
         run.gate = Some(pack.gate.clone());
         run.note(format!("SEAL generation {}: {:?}", run.generation, pack.gate.verdict));

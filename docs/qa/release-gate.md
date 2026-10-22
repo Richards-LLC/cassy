@@ -382,7 +382,10 @@ the expected value of each labeled criterion. It comes in two forms:
 - an id repeats or is not a plain token;
 - a frozen digest is not 64 hex characters, or a storage key is missing;
 - a matrix axis or value is empty;
-- `runs: 0`.
+- `runs: 0`, or `runs` above 1 with no `independence_key` (duplicates could
+  not be told apart);
+- two journeys would plan the same row id, for example journey `a` cell `b`
+  and journey `a.b`.
 
 It reports `unlabeled_cell` debt for a record with no label for one of the
 journey's labeled criteria.
@@ -395,23 +398,35 @@ Each cell is walked `runs` times, one row per run:
 - `run` is n.
 
 Resource preflight needs consumes × runs × cells. Start refuses before the
-freeze, and persists nothing, when a journey expands past
-`qa.release.max_cells` rows (default 500). The refusal names the journey,
-cells, runs and limit.
+freeze, and persists nothing, in two cases:
+
+- A journey expands past `qa.release.max_cells` rows (default 500). Cells
+  are counted before they are built, and the refusal names the journey,
+  cells, runs and limit.
+- Two journeys plan the same row id, because one walk would fill both rows.
 
 **Grading.** The `run` request's `args` carry the cell:
 `{id, record: {id, frozen, labels}, axes}` and `run`. The answer may add
-`measured: {criterion: number}`. Each measured value is graded against the
-cell's label with the criterion's `compare` (default `exact`). A band miss
-is a FAIL that names the value, the % of the baseline and the baseline. The
+`measured: {criterion: number}`. Each labeled criterion the cell has a label
+for is graded against that label with the criterion's `compare` (default
+`exact`):
+
+- A band miss is a FAIL that names the value, the % of the baseline and the
+  baseline.
+- A labeled criterion with no measured value is
+  `NOT_EXERCISED{automation}`, which is owed.
+- An unlabeled cell keeps the runner's verdict. It is debt: the pack and the
+  PR comment list it. The
 answer's `subjects` value for `independence_key` is the run's identity.
 
 **Coverage.** At seal, each cell counts only distinct identities. A
 duplicate or unidentified run is rejected as `NOT_EXERCISED` and names the
 duplicate, so the cell stays OWED; a run with no verdict is OWED too. The
 pack's `matrix` lists each golden journey's cells, runs, required
-(cells × runs), counted runs and the rows still missing. The PR comment
-shows `<journey>: counted/required runs (cells × runs)`.
+(cells × runs), counted runs, the rows still missing and the unlabeled
+cells. The PR comment shows
+`<journey>: counted/required runs (cells × runs)`, then the owed count and
+the unlabeled cells.
 
 ## Deploy failure alerts
 
@@ -742,7 +757,8 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 ### Status, record and abort
 
 - `cas qa release-gate status [--sha <sha>]` shows the state, the freeze,
-  rows by verdict, owed rows and manual minutes. `--json` prints the run.
+  rows by verdict, owed rows and the hand-walk debt. `--json` prints the run's
+  fields at top level plus a `hand_walk` key with the same debt summary.
   An unreadable run file is warned about on stderr. It freezes nothing,
   because row-end `SERVED_DRIFT` still guards the verdicts.
 - `cas qa release-gate record [--sha <sha>] --row <id> --verdict PASS|FAIL|NOT_A_ROUTE|NOT_EXERCISED --evidence <dir>`
@@ -761,7 +777,11 @@ files the adapter wrote under `media/<row>/`. A 429 or 402 is
 **Sealing.** The pack is sealed when the last row gets its verdict. At
 the freeze TTL, merges are allowed again, so no suite starts or runs past it:
 every row still without a verdict, automated or manual, becomes
-`NOT_EXERCISED{timed_out}` and the pack is sealed. After the seal, Cassy does three things:
+`NOT_EXERCISED{timed_out}` and the pack is sealed. A `record` without
+`--sha` then refuses with "the run … was sealed by the TTL; retry the record
+with --sha <sha> to reseal". A `record` arriving after the TTL timed its
+row out, but before the seal, refuses with "the TTL timed row <id> out; retry
+after the run seals to reseal it" and removes the evidence it copied. After the seal, Cassy does three things:
 
 - prunes media past `retention_days`;
 - edits the gate comment on each open PR from `integration_branch` into a

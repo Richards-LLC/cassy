@@ -562,8 +562,15 @@ pub fn readback(
     ))
 }
 
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(12)]
+/// The first 12 characters (a short SHA), or all of a shorter string. Cuts
+/// on a character boundary, so it never panics on adapter or file data.
+pub fn short(sha: &str) -> &str {
+    prefix(sha, 12)
+}
+
+/// The first `chars` characters of `text`, cut on a character boundary.
+pub fn prefix(text: &str, chars: usize) -> &str {
+    text.char_indices().nth(chars).map_or(text, |(end, _)| &text[..end])
 }
 
 const GIT_CAP: Duration = Duration::from_secs(10);

@@ -994,7 +994,7 @@ fn is_test_or_build_input_path(
     named_sources: &mut BTreeMap<String, bool>,
 ) -> bool {
     let lower = path.to_ascii_lowercase();
-    if is_workspace_crate_path(repo, path)
+    if is_workspace_crate_path(repo, delivered_head, path)
         || lower == ".env"
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
@@ -1057,9 +1057,9 @@ fn is_test_or_build_input_path(
 }
 
 /// A Rust source file can embed assets outside its crate directory with
-/// `include_str!` or `include_bytes!`. Detect those by filename so new assets do
-/// not need a hand-maintained path entry here. Treat git errors conservatively
-/// as proof inputs rather than reusing a receipt we could not validate.
+/// `include_str!` or `include_bytes!`. Use the basename to find candidate
+/// sources, then confirm the repo-relative or source-relative path. Treat git
+/// errors conservatively as proof inputs rather than reusing an unvalidated receipt.
 fn is_named_by_tracked_rust_source(
     repo: &Path,
     delivered_head: &str,
@@ -1069,22 +1069,80 @@ fn is_named_by_tracked_rust_source(
     let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    // Cheap path checks already ran. Every range in this scan has the same
-    // repository and delivered head, and grep searches only the basename.
-    *named_sources.entry(name.to_owned()).or_insert_with(|| {
-        Command::new("git")
+    // The basename only discovers possible source files. Confirm the full
+    // repo-relative path or its spelling relative to each source file; matching
+    // only a basename makes unrelated assets invalidate each other's receipts.
+    *named_sources.entry(path.to_owned()).or_insert_with(|| {
+        let sources = Command::new("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["grep", "-lF", "-e", name, delivered_head, "--", "*.rs"])
+            .args(["grep", "-lF", "-z", "-e", name, delivered_head, "--", "*.rs"])
             .current_dir(repo)
-            .output()
-            .map_or(true, |matches| matches.status.code() != Some(1))
+            .output();
+        let Ok(sources) = sources else {
+            return true;
+        };
+        if !sources.status.success() {
+            return sources.status.code() != Some(1);
+        }
+        let sources = sources.stdout.split(|byte| *byte == 0);
+        for source in sources {
+            if source.is_empty() {
+                continue;
+            }
+            let Ok(source) = std::str::from_utf8(source) else {
+                return true;
+            };
+            let Some(relative_path) = relative_path_from_source(source, path) else {
+                return true;
+            };
+            let matches = Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .arg("grep")
+                .arg("-lF")
+                .arg("-e")
+                .arg(path)
+                .arg("-e")
+                .arg(&relative_path)
+                .arg(delivered_head)
+                .arg("--")
+                .arg(source)
+                .current_dir(repo)
+                .output();
+            match matches {
+                Ok(matches) if matches.status.success() => return true,
+                Ok(matches) if matches.status.code() == Some(1) => {}
+                Ok(_) | Err(_) => return true,
+            }
+        }
+        false
     })
+}
+
+fn relative_path_from_source(source: &str, target: &str) -> Option<String> {
+    let mut source_dir = source.split('/').collect::<Vec<_>>();
+    source_dir.pop()?;
+    let target = target.split('/').collect::<Vec<_>>();
+    if source_dir
+        .iter()
+        .chain(&target)
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return None;
+    }
+    let shared = source_dir
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = vec![".."; source_dir.len() - shared];
+    relative.extend_from_slice(&target[shared..]);
+    Some(relative.join("/"))
 }
 
 /// Cargo inputs are not limited to source-code extensions: `include_str!`,
 /// `include_bytes!`, and package build scripts can consume any file beneath a
 /// crate directory. Treat those files as proof inputs regardless of suffix.
-fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
+fn is_workspace_crate_path(repo: &Path, delivered_head: &str, path: &str) -> bool {
     let path = Path::new(path);
     let Some(parent) = path.parent() else {
         return false;
@@ -1092,8 +1150,20 @@ fn is_workspace_crate_path(repo: &Path, path: &str) -> bool {
     let mut prefix = PathBuf::new();
     for component in parent.components() {
         prefix.push(component.as_os_str());
-        if prefix != Path::new(".") && repo.join(&prefix).join("Cargo.toml").is_file() {
-            return true;
+        if prefix != Path::new(".") {
+            let prefix_for_git = prefix.to_string_lossy().replace('\\', "/");
+            let manifest = format!("{delivered_head}:{prefix_for_git}/Cargo.toml");
+            match Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["cat-file", "-e", &manifest])
+                .stderr(std::process::Stdio::null())
+                .current_dir(repo)
+                .status()
+            {
+                Ok(status) if status.success() => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
         }
     }
     false

@@ -637,12 +637,50 @@ mod tests {
         let (message, is_error) = app.status_message.clone().unwrap();
         assert!(is_error && message.contains("operator"), "{message}");
         let saved = Config::load(&root).unwrap();
-        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
+        assert_eq!(
+            saved.get("qa.evidence_gate"),
+            app.original_config.get("qa.evidence_gate")
+        );
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("sync.min_helpful", "5").unwrap();
         app.save_config_with(agent).unwrap();
         assert!(!app.has_unsaved);
-        assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
+        assert_eq!(
+            Config::load(&root)
+                .unwrap()
+                .get("sync.min_helpful")
+                .as_deref(),
+            Some("5")
+        );
+    }
+
+    #[test]
+    fn config_tui_reset_removes_override_and_restores_hub_fallback() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("hub".into());
+        app.option_keys = vec!["hub.transport_mode".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
+        app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
+        app.save_config_with(|| InvocationContext::default())
+            .unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(document["hub"].get("transport_mode").is_none(), "{saved}");
+        assert_eq!(
+            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
+            crate::config::HubTransportMode::Loopback
+        );
     }
 }

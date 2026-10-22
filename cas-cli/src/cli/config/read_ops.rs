@@ -37,9 +37,19 @@ fn origin_note(config: &Config, key: &str, value: &str) -> &'static str {
 }
 
 fn blank_component_note(config: &Config, key: &str) -> Option<&'static str> {
-    if key != "issues.components.cassy" { return None; }
-    let raw = config.issues.as_ref()?.components.as_ref()?.cassy.as_deref()?;
-    if !raw.trim().is_empty() { return None; }
+    if key != "issues.components.cassy" {
+        return None;
+    }
+    let raw = config
+        .issues
+        .as_ref()?
+        .components
+        .as_ref()?
+        .cassy
+        .as_deref()?;
+    if !raw.trim().is_empty() {
+        return None;
+    }
     Some(if config.cassy_issue_legacy_repo().is_some() {
         "(blank: legacy issues.repo fallback)"
     } else {
@@ -66,8 +76,11 @@ fn with_issue_repo_source(
     if blank_component_note(config, key).is_some() {
         let legacy = config.cassy_issue_legacy_repo();
         json["raw_blank"] = serde_json::json!(true);
-        json["report_repo"] = serde_json::json!(legacy.map(str::to_owned)
-            .unwrap_or_else(|| config.issue_repo_registry().cassy));
+        json["report_repo"] = serde_json::json!(
+            legacy
+                .map(str::to_owned)
+                .unwrap_or_else(|| config.issue_repo_registry().cassy)
+        );
         json["report_source"] = serde_json::json!(if legacy.is_some() {
             "issues.repo"
         } else {
@@ -78,7 +91,10 @@ fn with_issue_repo_source(
 }
 
 fn get_output(
-    config: &Config, key: &str, value: &str, json: bool,
+    config: &Config,
+    key: &str,
+    value: &str,
+    json: bool,
 ) -> anyhow::Result<(String, Option<&'static str>)> {
     if json {
         let meta = registry().get(key);
@@ -88,7 +104,10 @@ fn get_output(
             "default": meta.map(|m| m.default),
             "modified": meta.map(|m| m.is_modified(value)).unwrap_or(false)
         });
-        Ok((serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, value))?, None))
+        Ok((
+            serde_json::to_string_pretty(&with_issue_repo_source(json, config, key, value))?,
+            None,
+        ))
     } else {
         Ok((value.to_owned(), blank_component_note(config, key)))
     }
@@ -188,8 +207,7 @@ pub(crate) fn update_config_in_place<T>(
     let serialized_after = toml::to_string(&after)?;
     let after_document = toml_edit::Document::parse(serialized_after)?;
     let mut document = toml_edit::Document::parse(raw.as_str())?.into_mut();
-    let (serialized_path, stored_path, alternate_path) =
-        config_document_paths(&document, key);
+    let (serialized_path, stored_path, alternate_path) = config_document_paths(&document, key);
     let replacement = config_document_item(after_document.as_item(), serialized_path).cloned();
     set_config_document_item(&mut document, stored_path, replacement)?;
     if let Some(alternate_path) = alternate_path {
@@ -221,9 +239,10 @@ fn config_document_paths<'a>(
     key: &'a str,
 ) -> (&'a str, &'a str, Option<&'a str>) {
     let (serialized_path, alternate_path) = match key {
-        "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
-            ("factory.cargo_build_jobs", Some("factory.worker_build_jobs"))
-        }
+        "factory.worker_build_jobs" | "factory.cargo_build_jobs" => (
+            "factory.cargo_build_jobs",
+            Some("factory.worker_build_jobs"),
+        ),
         "staging.staging_dir" | "staging.large_artifact_dir" => {
             ("staging.staging_dir", Some("staging.large_artifact_dir"))
         }
@@ -231,9 +250,9 @@ fn config_document_paths<'a>(
     };
     let stored_path = if config_document_item(document.as_item(), serialized_path).is_some() {
         serialized_path
-    } else if let Some(alternate_path) = alternate_path.filter(|path| {
-        config_document_item(document.as_item(), path).is_some()
-    }) {
+    } else if let Some(alternate_path) =
+        alternate_path.filter(|path| config_document_item(document.as_item(), path).is_some())
+    {
         alternate_path
     } else {
         serialized_path
@@ -275,7 +294,9 @@ fn set_config_document_path(
     let Some((part, rest)) = parts.split_first() else {
         return Ok(());
     };
-    let parent_is_inline = item.as_value().is_some_and(toml_edit::Value::is_inline_table);
+    let parent_is_inline = item
+        .as_value()
+        .is_some_and(toml_edit::Value::is_inline_table);
     let table = item
         .as_table_like_mut()
         .ok_or_else(|| anyhow::anyhow!("config key path parent for {part} is not a table"))?;
@@ -303,9 +324,7 @@ fn set_config_document_path(
             return Ok(());
         }
         let child = if parent_is_inline {
-            toml_edit::Item::Value(toml_edit::Value::InlineTable(
-                toml_edit::InlineTable::new(),
-            ))
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml_edit::InlineTable::new()))
         } else {
             let mut child = toml_edit::Table::new();
             child.set_implicit(true);
@@ -321,12 +340,11 @@ fn set_config_document_path(
 
 /// Remove the stored override without serializing defaults back into the file.
 /// Keep the same operator guard and atomic writer as other config mutations.
-fn reset_config_value(
-    key: &str,
-    cas_root: &Path,
-) -> anyhow::Result<(String, String)> {
-    anyhow::ensure!(key != "factory.write_roots",
-        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it");
+fn reset_config_value(key: &str, cas_root: &Path) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(
+        key != "factory.write_roots",
+        "factory.write_roots is operator-only; use `cas config set factory.write_roots \"\"` to clear it"
+    );
     let _lock = crate::config::lock_project_config(cas_root)?;
     let path = cas_root.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
@@ -338,10 +356,14 @@ fn reset_config_value(
     let mut document = toml_edit::Document::parse(&raw)?.into_mut();
     let mut parts: Vec<_> = key.split('.').collect();
     let leaf = parts.pop().expect("a config key has at least one part");
-    let parent = parts.into_iter().try_fold(document.as_item_mut(), |item, part| {
-        item.as_table_like_mut()?.get_mut(part)
-    });
-    let removed = parent.and_then(|item| item.as_table_like_mut()?.remove(leaf)).is_some();
+    let parent = parts
+        .into_iter()
+        .try_fold(document.as_item_mut(), |item, part| {
+            item.as_table_like_mut()?.get_mut(part)
+        });
+    let removed = parent
+        .and_then(|item| item.as_table_like_mut()?.remove(leaf))
+        .is_some();
     let contents = document.to_string();
     let after: Config = toml::from_str(&contents)?;
     guard_operator_config(&before, &after, InvocationContext::from_process)?;
@@ -351,7 +373,10 @@ fn reset_config_value(
     if key == "viktor.enabled" {
         crate::cli::viktor::reconcile_managed_proxy(after.viktor_enabled())?;
     }
-    Ok((before.get(key).unwrap_or_default(), after.get(key).unwrap_or_default()))
+    Ok((
+        before.get(key).unwrap_or_default(),
+        after.get(key).unwrap_or_default(),
+    ))
 }
 
 #[derive(serde::Serialize)]
@@ -470,7 +495,10 @@ pub(crate) fn execute_list(
     // Get all current values
     let mut items: HashMap<String, String> = config.list().into_iter().collect();
     let host_config = Config::load(&crate::config::host_config_dir())?;
-    items.insert("viktor.enabled".into(), host_config.viktor_enabled().to_string());
+    items.insert(
+        "viktor.enabled".into(),
+        host_config.viktor_enabled().to_string(),
+    );
     for (key, value) in host_config.list() {
         if host_scoped_key(&key) {
             items.insert(key, value);
@@ -931,24 +959,122 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_reset_maps_registry_keys_to_serialized_toml_paths() {
+        const SET_REJECTED_REGISTRY_KEYS: &[&str] = &[
+            "hooks.stop.duplicate_detection_enabled",
+            "hooks.stop.duplicate_detection_threshold",
+            "hooks.stop.learning_review_enabled",
+            "hooks.stop.learning_review_threshold",
+            "hooks.stop.rule_review_enabled",
+            "hooks.stop.rule_review_threshold",
+            "notifications.on_auth_success",
+            "notifications.on_idle_prompt",
+            "notifications.on_permission_prompt",
+            "notifications.webhook_url",
+        ];
+
+        let registry = crate::config::registry();
+        let mut keys = registry.all_keys();
+        keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
+        keys.sort_unstable();
+        keys.dedup();
+
+        for key in keys {
+            let raw = if key == "factory.write_roots" {
+                let mut config = Config::default();
+                config.set_factory_write_roots(vec!["/tmp/cas-config-path".into()]);
+                toml::to_string(&config).unwrap()
+            } else if SET_REJECTED_REGISTRY_KEYS.contains(&key) {
+                let (parent, leaf) = key.rsplit_once('.').expect("nested config key");
+                format!("[{parent}]\n{leaf} = \"sentinel\"\n")
+            } else {
+                let value = match key {
+                    "factory.worker_build_jobs" => "8",
+                    "factory.cargo_build_jobs" => "9",
+                    "staging.staging_dir" => "roundtrip-staging-dir",
+                    "staging.large_artifact_dir" => "roundtrip-large-artifact-dir",
+                    "llm.supervisor.harness" => "codex",
+                    "llm.supervisor.model" => "roundtrip-supervisor-model",
+                    "llm.supervisor.reasoning_effort" => "medium",
+                    "llm.worker.harness" => "claude",
+                    "llm.worker.model" => "roundtrip-worker-model",
+                    "llm.worker.reasoning_effort" => "high",
+                    _ => registry.get(key).expect("registered key").default,
+                };
+                let mut config = Config::default();
+                config
+                    .set(key, value)
+                    .unwrap_or_else(|error| panic!("failed to materialize {key}: {error}"));
+                toml::to_string(&config).unwrap()
+            };
+
+            let document = toml_edit::Document::parse(&raw).unwrap().into_mut();
+            let (_, stored_path, _) = config_document_paths(&document, key);
+            assert!(
+                config_document_item(document.as_item(), stored_path).is_some(),
+                "registry key {key} did not resolve to a serialized TOML path {stored_path} in:\n{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_reset_removes_canonical_toml_path_for_registry_alias() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[factory]\ncargo_build_jobs = \"4\"\n",
+        )
+        .unwrap();
+
+        reset_config_value("factory.worker_build_jobs", &root).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(
+            document["factory"].get("cargo_build_jobs").is_none(),
+            "{saved}"
+        );
+    }
+
+    #[test]
     fn cas_337b_config_reset_removes_key_and_restores_fallback() {
         use clap::Parser;
         let env = crate::test_support::TestEnvGuard::temp_home();
         let root = env.home().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
         let original = "# keep host policy\n[hub]\ntailscale_serve = false\n";
-        std::fs::write(root.join("config.toml"), format!("{original}transport_mode = \"required\"\n")).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("{original}transport_mode = \"required\"\n"),
+        )
+        .unwrap();
         let cli = Cli::parse_from(["cas", "config", "reset", "hub.transport_mode"]);
-        execute_reset(&ConfigResetArgs {
-            key: "hub.transport_mode".into(),
-            force: false,
-            store: Default::default(),
-        }, &cli, &root).unwrap();
+        execute_reset(
+            &ConfigResetArgs {
+                key: "hub.transport_mode".into(),
+                force: false,
+                store: Default::default(),
+            },
+            &cli,
+            &root,
+        )
+        .unwrap();
         let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
         let document: toml::Value = toml::from_str(&saved).unwrap();
-        assert!(document["hub"].get("transport_mode").is_none(), "reset persisted an override: {saved}");
-        assert_eq!(Config::load(&root).unwrap().hub.unwrap().transport_mode(), crate::config::HubTransportMode::Loopback);
-        assert_eq!(saved, original, "reset must preserve unrelated settings and comments");
+        assert!(
+            document["hub"].get("transport_mode").is_none(),
+            "reset persisted an override: {saved}"
+        );
+        assert_eq!(
+            Config::load(&root).unwrap().hub.unwrap().transport_mode(),
+            crate::config::HubTransportMode::Loopback
+        );
+        assert_eq!(
+            saved, original,
+            "reset must preserve unrelated settings and comments"
+        );
     }
 
     #[test]
@@ -958,26 +1084,47 @@ mod tests {
         let key = "issues.components.cassy";
         let default = crate::config::DEFAULT_CASSY_ISSUES_REPO;
         for (component, project, note, report_repo, report_source) in [
-            (Some(""), Some("example/project"), Some("legacy issues.repo fallback"), "example/project", "issues.repo"),
+            (
+                Some(""),
+                Some("example/project"),
+                Some("legacy issues.repo fallback"),
+                "example/project",
+                "issues.repo",
+            ),
             (Some("  "), None, Some("issues.repo unset"), default, key),
             (None, Some("example/project"), None, default, key),
-            (Some("example/component"), Some("example/project"), None, "example/component", key),
+            (
+                Some("example/component"),
+                Some("example/project"),
+                None,
+                "example/component",
+                key,
+            ),
         ] {
             // Raw configuration is the documented legacy opt-out; config set
             // with blank intentionally clears the override instead.
             let mut config = Config::default();
             let issues = config.issues.get_or_insert_with(Default::default);
             issues.repo = project.map(str::to_string);
-            issues.components.get_or_insert_with(Default::default).cassy = component.map(str::to_string);
+            issues.components.get_or_insert_with(Default::default).cassy =
+                component.map(str::to_string);
             config.save(dir.path()).unwrap();
             let before = std::fs::read(dir.path().join("config.toml")).unwrap();
             let config = Config::load(dir.path()).unwrap();
             let value = config.get_resolved(key, dir.path()).unwrap();
             let (scalar, explanation) = get_output(&config, key, &value, false).unwrap();
             // pin: config get scalars are consumed by shell substitutions.
-            assert_eq!(scalar, component.filter(|value| !value.trim().is_empty()).unwrap_or(default));
+            assert_eq!(
+                scalar,
+                component
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(default)
+            );
             match note {
-                Some(expected) => assert!(explanation.is_some_and(|text| text.contains(expected)), "blank opt-out lost: {explanation:?}"),
+                Some(expected) => assert!(
+                    explanation.is_some_and(|text| text.contains(expected)),
+                    "blank opt-out lost: {explanation:?}"
+                ),
                 None => assert_eq!(explanation, None),
             }
             let (document, stderr) = get_output(&config, key, &value, true).unwrap();
@@ -991,7 +1138,10 @@ mod tests {
             } else {
                 assert!(document.get("raw_blank").is_none());
             }
-            assert_eq!(std::fs::read(dir.path().join("config.toml")).unwrap(), before);
+            assert_eq!(
+                std::fs::read(dir.path().join("config.toml")).unwrap(),
+                before
+            );
         }
     }
 }

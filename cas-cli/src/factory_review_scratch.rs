@@ -106,10 +106,22 @@ fn lease(path: &Path, create: bool) -> Result<File> {
 }
 
 fn write_owner(directory: &Path, record: &Owner) -> Result<()> {
+    write_owner_with_directory_sync(directory, record, |directory| {
+        File::open(directory)?.sync_all()
+    })
+}
+
+fn write_owner_with_directory_sync(
+    directory: &Path,
+    record: &Owner,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     serde_json::to_writer(file.as_file_mut(), record)?;
     file.as_file().sync_all()?;
     file.persist(directory.join("owner.json"))?;
+    // The synced payload alone does not make the renamed directory entry durable.
+    sync_directory(directory)?;
     Ok(())
 }
 
@@ -903,4 +915,53 @@ pub(crate) fn unmanaged_large(cas: &Path) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn write_owner_syncs_directory_after_rename_cas_a271() {
+        let directory = tempfile::tempdir().unwrap();
+        let record = Owner {
+            schema_version: 1,
+            cas_root: directory.path().to_path_buf(),
+            task_id: "cas-owner-sync".into(),
+            dispatch_id: None,
+            head: "a".repeat(40),
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        let synced = Cell::new(false);
+        let result = write_owner_with_directory_sync(directory.path(), &record, |parent| {
+            assert_eq!(parent, directory.path());
+            let published: Owner = serde_json::from_slice(
+                &fs::read(parent.join("owner.json")).expect("rename must precede directory sync"),
+            )
+            .unwrap();
+            assert_eq!(published.task_id, record.task_id);
+            assert_eq!(
+                fs::read_dir(parent).unwrap().count(),
+                1,
+                "temp marker must be renamed"
+            );
+            File::open(parent)?.sync_all()?;
+            synced.set(true);
+            Err(std::io::Error::other(
+                "injected owner directory sync failure",
+            ))
+        });
+        assert!(
+            synced.get(),
+            "owner publication must sync its parent directory"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected owner directory sync failure")
+        );
+    }
 }

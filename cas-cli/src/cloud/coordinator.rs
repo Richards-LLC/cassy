@@ -522,6 +522,51 @@ impl CloudCoordinator {
         })
     }
 
+    /// cas-da31: release `task_id` only while its lock still has this epoch
+    /// and renewal count (petra-stella-cloud #158 / PR #164: both fields or
+    /// neither). A reacquisition or renewal since then is answered 409
+    /// `lock_snapshot_changed`: `Ok(false)`, and nothing is released.
+    pub fn release_expecting(
+        &self,
+        task_id: &str,
+        epoch: u64,
+        renewal_count: u32,
+    ) -> Result<bool, CasError> {
+        let agent_id = self
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| CasError::Other("No agent registered".to_string()))?;
+        let url = format!(
+            "{}/api/agents/tasks/{}/release",
+            self.config.endpoint, task_id
+        );
+        let response = super::rate_limit::call(self.timeout, |left| {
+            ureq::post(&url)
+                .timeout(left)
+                .set("Authorization", &format!("Bearer {}", self.token()))
+                .set("Content-Type", "application/json")
+                .send_json(self.project_scoped(serde_json::json!({
+                    "agent_id": agent_id,
+                    "expected_epoch": epoch,
+                    "expected_renewal_count": renewal_count,
+                })))
+        });
+        match response {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(409, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                if body.contains("lock_snapshot_changed") {
+                    Ok(false)
+                } else {
+                    Err(CasError::Other(format!("Release failed (409): {body}")))
+                }
+            }
+            Err(error) => Err(CasError::Other(
+                super::rate_limit::Failure::from_http("Release", error).cause,
+            )),
+        }
+    }
+
     /// Renew a task lease
     pub fn renew(&self, task_id: &str, duration_secs: u32) -> Result<TaskLease, CasError> {
         let agent_id = self

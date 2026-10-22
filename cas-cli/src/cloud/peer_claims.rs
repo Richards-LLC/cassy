@@ -310,6 +310,14 @@ impl std::ops::Deref for ObservedLock {
     }
 }
 
+/// cas-da31: a claim's lock as one start or claim saw it, so its rollback
+/// releases that lock only (petra-stella-cloud #164 conditional release).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimSnapshot {
+    pub epoch: u64,
+    pub renewal_count: u32,
+}
+
 /// Cloud claims for one repository.
 #[derive(Clone)]
 pub struct PeerClaims {
@@ -423,28 +431,62 @@ impl PeerClaims {
     /// in flight; cancellation alone cannot invalidate its earlier snapshot.
     /// Called on the blocking pool under the request's peer budget.
     /// The caller retains the returned guard until its local lease is published.
+    ///
+    /// cas-da31: a claim won here is renewed once, and the returned
+    /// [`ClaimSnapshot`] is what a rollback of this start releases against.
+    /// A same-agent re-claim of a live lock comes back unchanged, so the
+    /// renewal is what makes any earlier, still in-flight conditional release
+    /// of that lock miss (409) instead of dropping this start's claim.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn acquire_for_local_lease(
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
-    ) -> (Acquire, Option<TaskClaimFence>) {
+    ) -> (Acquire, Option<TaskClaimFence>, Option<ClaimSnapshot>) {
         let _fence = match lock_task_claim_release(cas_root, task_id) {
             Ok(fence) => fence,
-            Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None),
+            Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None, None),
         };
         // The async caller may already have timed out while this blocking
         // work waited for an in-flight release. Do not cancel newer work.
         if let Err(error) = self.remaining() {
-            return (Acquire::Unavailable(error.to_string()), None);
+            return (Acquire::Unavailable(error.to_string()), None, None);
         }
         if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
-            return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None);
+            return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None, None);
         }
         // Cancellation remains intentional if Cloud becomes unavailable at
         // this point: the caller publishes a local lease, and renewal repairs
         // its Cloud mirror. Keep release fenced until that local publication.
-        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), Some(_fence))
+        let answer = self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local);
+        let snapshot = matches!(answer, Acquire::Claimed)
+            .then(|| self.coordinator(agent_id).and_then(|coordinator| coordinator.renew(&self.key(task_id), duration_secs)))
+            .and_then(Result::ok)
+            .map(|lease| ClaimSnapshot { epoch: lease.epoch, renewal_count: lease.renewal_count });
+        (answer, Some(_fence), snapshot)
+    }
+
+    /// cas-da31: roll back this agent's own claim on `task_id`, as it stood
+    /// in `snapshot`. A claim reacquired or renewed since (a restart by the
+    /// same agent) is left alone; Cloud answers that release 409. Without a
+    /// snapshot this is [`Self::release_own`]. Returns whether it released.
+    pub fn release_own_at(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        snapshot: Option<ClaimSnapshot>,
+    ) -> Result<bool, CasError> {
+        let Some(snapshot) = snapshot else {
+            return self.release_own(task_id, agent_id);
+        };
+        let key = self.key(task_id);
+        let Some(lock) = self.read_lock(&key, agent_id)? else {
+            return Ok(false);
+        };
+        if lock.foreign_account || lock.agent_id != agent_id {
+            return Ok(false);
+        }
+        self.coordinator(agent_id)?.release_expecting(&key, snapshot.epoch, snapshot.renewal_count)
     }
 
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
@@ -1380,6 +1422,14 @@ fn release_pending_task_claims_with(
     }
 }
 
+/// cas-da31: [`release_task_claim`] on the blocking pool, awaited, so a
+/// handler freeing a task's claim never blocks the async runtime on the
+/// Cloud.
+pub async fn release_task_claim_off_runtime(cas_root: &Path, task_id: &str) {
+    let (root, id) = (cas_root.to_path_buf(), task_id.to_string());
+    let _ = tokio::task::spawn_blocking(move || release_task_claim(&root, &id)).await;
+}
+
 /// What a spawn learns about peers before it queues anything (cas-0078).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpawnPeerCheck {
@@ -1611,7 +1661,7 @@ mod tests {
                     // local try_claim. Delay local publication to force the gap.
                     assert!(crate::store::open_agent_store(dir.path()).unwrap()
                         .get_lease(task).unwrap().is_none());
-                    let (answer, fence) = claims.acquire_for_local_lease(
+                    let (answer, fence, _) = claims.acquire_for_local_lease(
                         dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                     );
                     assert!(matches!(answer, Acquire::Claimed));
@@ -1653,7 +1703,7 @@ mod tests {
                 let restart = {
                     let (claims, root) = (claims.clone(), dir.path().to_path_buf());
                     std::thread::spawn(move || {
-                        let (answer, fence) = claims.acquire_for_local_lease(
+                        let (answer, fence, _) = claims.acquire_for_local_lease(
                             &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                         );
                         assert!(matches!(answer, Acquire::Claimed));
@@ -1683,7 +1733,7 @@ mod tests {
             // new local lease, published before the start fence is dropped.
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
-                let (answer, fence) = claims.acquire_for_local_lease(
+                let (answer, fence, _) = claims.acquire_for_local_lease(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
                 );
                 assert!(matches!(answer, Acquire::Claimed));

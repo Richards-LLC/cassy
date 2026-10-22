@@ -2530,6 +2530,7 @@ impl CasCore {
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
+        let mut claim_snapshot = None;
         // cas-0078: another agent of this database holds the cloud claim. It
         // moves here only if this start wins the local lease below.
         let mut cloud_local_holder: Option<String> = None;
@@ -2541,7 +2542,7 @@ impl CasCore {
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};
             let kind = task_claim_kind;
-            let (answer, fence) = {
+            let (answer, fence, snapshot) = {
                 let (claims, id, agent, name, local) = (
                     claims.clone(),
                     req.id.clone(),
@@ -2557,9 +2558,10 @@ impl CasCore {
                         })
                     })
                     .await
-                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
+                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
             };
             peer_claim_fence = fence;
+            claim_snapshot = snapshot;
             match answer {
                 Acquire::Claimed => cloud_claimed = true,
                 Acquire::LocalHolder(holder) => cloud_local_holder = Some(holder),
@@ -2615,8 +2617,18 @@ impl CasCore {
         if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
             // A refusal or failed local write leaves no newly acquired claim
             // behind. Never release a claim retained by another local agent.
-            let (id, agent) = (req.id.clone(), agent_id.clone());
-            let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+            // cas-da31: the release holds the claim fence until it really
+            // ends, even past this call's budget, so a same-agent restart
+            // cannot claim first and then lose that claim to this release.
+            // cas-da31: release only the lock this start claimed, so a late
+            // copy of this release cannot drop a restart's newer claim.
+            let (id, agent, fence) = (req.id.clone(), agent_id.clone(), peer_claim_fence.take());
+            let _ = peer_budget
+                .run(move || {
+                    let _fence = fence;
+                    claims.release_own_at(&id, &agent, claim_snapshot)
+                })
+                .await;
         }
 
         let mut start_lease_epoch = None;

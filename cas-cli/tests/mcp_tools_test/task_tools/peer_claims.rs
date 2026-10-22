@@ -51,6 +51,9 @@ struct FakeState {
     file_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     // cas-978d: hold the next task-claim release until the test resumes it.
     task_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    // cas-da31: hold the next release on its own thread until the test
+    // resumes it, while every other request is still served (a slow Cloud).
+    async_release_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 /// A stateful stand-in for petra-stella-cloud's task-lock routes.
@@ -90,6 +93,28 @@ impl FakeCloud {
             for mut request in thread_server.incoming_requests() {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
+                let async_gate = if request.url().ends_with("/release") {
+                    thread_state.lock().unwrap().async_release_gate.take()
+                } else {
+                    None
+                };
+                if let Some((entered, resume)) = async_gate {
+                    let state = Arc::clone(&thread_state);
+                    std::thread::spawn(move || {
+                        let _ = entered.send(());
+                        let _ = resume.recv();
+                        let (status, json) =
+                            Self::handle(&state, request.method().as_str(), request.url(), &body);
+                        let response = tiny_http::Response::from_string(json.to_string())
+                            .with_status_code(status)
+                            .with_header(
+                                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                    .unwrap(),
+                            );
+                        let _ = request.respond(response);
+                    });
+                    continue;
+                }
                 let gate = if request.url().ends_with("/release") {
                     thread_state.lock().unwrap().release_gate.take()
                 } else {
@@ -202,6 +227,21 @@ impl FakeCloud {
                 }
             },
             ("POST", "release") => {
+                // petra-stella-cloud #164: a conditional release names the
+                // lock snapshot it expects, both fields or neither; a lock
+                // reacquired or renewed since answers 409.
+                let expected = (body["expected_epoch"].as_u64(), body["expected_renewal_count"].as_u64());
+                match expected {
+                    (Some(epoch), Some(renewals)) => {
+                        if let Some(lock) = state.locks.get(&key).filter(|lock| lock.status == "active")
+                            && (lock.epoch != epoch || u64::from(lock.renewal_count) != renewals)
+                        {
+                            return (409, serde_json::json!({"error": "lock_snapshot_changed"}));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => return (400, serde_json::json!({"error": "expected_epoch and expected_renewal_count go together"})),
+                }
                 if let Some(winner) = state.replace_on_release.take()
                     && let Some(lock) = state.locks.get_mut(&key)
                 { lock.agent_id = winner; lock.renewed_at = now; lock.epoch += 1; }
@@ -870,6 +910,66 @@ async fn a_claim_held_by_a_local_agent_moves_with_the_local_lease() {
         let (_, lock) = cloud.active_lock("cas-p008").unwrap();
         assert_ne!(lock.agent_id, alpha.agent_id, "{taken}");
     }
+}
+
+/// cas-da31: a start whose local lease fails rolls its fresh Cloud claim
+/// back. When that release outlasts the start's Cloud budget it keeps
+/// running in the background. A restart by the same agent in that window
+/// must keep its own fresh claim: the stale release may not take it.
+#[tokio::test]
+async fn a_restart_during_a_timed_out_rollback_keeps_its_fresh_claim_cas_da31() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let cloud = FakeCloud::start();
+    let alpha = machine(&cloud.url, PROJECT, "restart-worker");
+    alpha.put_task("cas-restart", TaskType::Task);
+    let db = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_start BEFORE INSERT ON task_leases
+         WHEN NEW.task_id = 'cas-restart'
+         BEGIN SELECT RAISE(ABORT, 'injected start write failure'); END;",
+    )
+    .unwrap();
+    // The rollback's Cloud release is held, on its own thread, until the test
+    // lets it go; every other request is still served.
+    let (entered, rollback_reached) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    cloud.state.lock().unwrap().async_release_gate = Some((entered, held));
+
+    // The failed start returns once its Cloud budget runs out; its rollback
+    // release is still held at the Cloud.
+    start(&alpha.core, "cas-restart", false).await.unwrap_err();
+    rollback_reached
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the rollback asked the Cloud to release");
+
+    db.execute_batch("DROP TRIGGER refuse_start;").unwrap();
+    let mut restart = Box::pin(start(&alpha.core, "cas-restart", false));
+    // Give the restart time to claim if nothing holds it back.
+    let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut restart).await;
+    resume.send(()).unwrap();
+    let restarted = match early {
+        Ok(result) => result,
+        Err(_) => restart.await,
+    };
+    restarted.expect("the same agent restarts the task");
+
+    // Once the stale release has reached the Cloud, the restart's claim stands.
+    let release_served = || {
+        cloud.state.lock().unwrap().requests.iter()
+            .any(|request| request.starts_with("POST ") && request.ends_with("/release"))
+    };
+    for _ in 0..200 {
+        if release_served() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(release_served(), "the rollback release reached the Cloud");
+    let (_, lock) = cloud
+        .active_lock("cas-restart")
+        .expect("the restart's fresh Cloud claim survives the stale rollback release");
+    assert_eq!(lock.agent_id, alpha.agent_id);
 }
 
 #[tokio::test]

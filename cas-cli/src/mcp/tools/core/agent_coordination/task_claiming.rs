@@ -220,6 +220,7 @@ impl CasCore {
         };
         let mut cloud_claimed = false;
         let mut peer_claim_fence = None;
+        let mut claim_snapshot = None;
         let mut cloud_local_holder: Option<String> = None;
         let peer_note = match peer_claims.clone() {
             Some(claims) => {
@@ -227,7 +228,7 @@ impl CasCore {
                 let kind = claim_kind;
                 let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                let (answer, fence) = {
+                let (answer, fence, snapshot) = {
                     let cas_root = self.cas_root.clone();
                     let (id, agent, name) =
                         (req.task_id.clone(), agent_id.clone(), agent_name.clone());
@@ -238,9 +239,10 @@ impl CasCore {
                             })
                         })
                         .await
-                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
+                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
                 };
                 peer_claim_fence = fence;
+                claim_snapshot = snapshot;
                 match answer {
                     Acquire::Claimed => {
                         cloud_claimed = true;
@@ -315,7 +317,14 @@ impl CasCore {
                         .await;
                 }
                 (false, _) if cloud_claimed => {
-                    let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+                    // cas-da31: fenced until the release really ends.
+                    let fence = peer_claim_fence.take();
+                    let _ = peer_budget
+                        .run(move || {
+                            let _fence = fence;
+                            claims.release_own_at(&id, &agent, claim_snapshot)
+                        })
+                        .await;
                 }
                 _ => {}
             }
@@ -512,11 +521,8 @@ impl CasCore {
         match release_result {
             Ok(()) => {
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
-                let (root, id) = (self.cas_root.clone(), req.task_id.clone());
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::cloud::peer_claims::release_task_claim(&root, &id);
-                })
-                .await;
+                crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id)
+                    .await;
                 // cas-c55f: and the file leases taken for the task.
                 crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
@@ -755,11 +761,7 @@ impl CasCore {
             .release_lease_for_task(&req.task_id, "Task reset")
             .unwrap_or(false);
         // cas-5f28: and its Cassy Cloud claim, so peers may start it.
-        let (root, id) = (self.cas_root.clone(), req.task_id.clone());
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::cloud::peer_claims::release_task_claim(&root, &id);
-        })
-        .await;
+        crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
         // cas-c55f: and the file leases taken for it.
         crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
@@ -1208,11 +1210,7 @@ impl CasCore {
                 })?;
         }
         // cas-5f28: the receiver's start takes the cloud claim afresh.
-        let (root, id) = (self.cas_root.clone(), req.task_id.clone());
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::cloud::peer_claims::release_task_claim(&root, &id);
-        })
-        .await;
+        crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
         // cas-978d: and the previous holder's file leases end with its work.
         crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 

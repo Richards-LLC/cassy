@@ -13477,6 +13477,71 @@ fn target_identical_delivered_paths(
     Some((note, dropped))
 }
 
+/// A foreign task's ordinary commit can deliberately retire delivered lines.
+/// Qualify immutable history first, then ask the same ownership walk which
+/// qualified commit actually removed a live owner. Path touches alone grant
+/// nothing, and a merge loss cannot be revived by a later ordinary edit.
+fn epic_anchor_supersession(
+    task: &Task,
+    children: &[Task],
+    repo: &std::path::Path,
+    anchor: &str,
+    target: &str,
+    paths: &[String],
+) -> Option<(DeliveryContentPresence, String)> {
+    let target = preferred_diff_target_ref(repo, target);
+    let target = resolve_branch_sha(repo, &target)?;
+    let parent = resolve_branch_sha(repo, &format!("{anchor}^1"))?;
+    let history = std::process::Command::new("git")
+        .args(["log", "--ancestry-path", "--reverse",
+            "--format=%H%x1f%P%x1f%s%x1e", &format!("{anchor}..{target}"), "--"])
+        .current_dir(repo).measurement_output().ok()?;
+    if !history.status.success() { return None; }
+    let history = String::from_utf8(history.stdout).ok()?;
+    let records: Vec<_> = history.split('\u{1e}').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let mut qualified = std::collections::BTreeMap::new();
+    for record in records {
+        let mut fields = record.splitn(3, '\u{1f}');
+        let sha = fields.next()?;
+        let parents = fields.next()?;
+        let subject = fields.next()?;
+        if parents.split_whitespace().count() != 1 { continue; }
+        let named = message_claims_other_task(subject, Some(&task.id)).then(|| {
+            subject.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .find(|word| message_claims_other_task(word, None))
+                .map(str::to_ascii_lowercase)
+        }).flatten();
+        let owner = named.or_else(|| children.iter().find(|child| {
+            child.id != task.id && child.status == TaskStatus::Closed
+                && child.has_delivery_to_integrate()
+                && child.deliverables.factory_branch_anchor.as_deref() == Some(sha)
+        }).map(|child| child.id.clone()));
+        if let Some(owner) = owner { qualified.insert(sha.to_string(), owner); }
+    }
+    if qualified.is_empty() { return None; }
+    let retirements: Vec<_> = qualified.keys().cloned().collect();
+    let mut evidence = std::collections::BTreeSet::new();
+    let mut commits = Vec::new();
+    for path in paths {
+        let Some(DeliveryContentPresence::Superseded { commits: owners, .. }) =
+            delivery_evolution::line_content_presence_with_retirements(
+                repo, &parent, anchor, &target, path, &retirements).ok()?
+        else { return None; };
+        let mut attributed = false;
+        for sha in owners {
+            if let Some(owner) = qualified.get(&sha) {
+                evidence.insert(format!("anchor superseded by {sha} ({owner})"));
+                attributed = true;
+            }
+            if !commits.contains(&sha) { commits.push(sha); }
+        }
+        if !attributed { return None; }
+    }
+    Some((DeliveryContentPresence::Superseded { paths: paths.to_vec(), commits },
+        format!("{}; later task's single-parent rewrite, not merge-resolution loss",
+            evidence.into_iter().collect::<Vec<_>>().join("; "))))
+}
+
 /// An epic must prove the child's delivery, not just the first-parent
 /// imports of its target-sync merge. Use the same attributed history and
 /// exact final-blob recovery as child close when that history is available.
@@ -13485,6 +13550,7 @@ fn target_identical_delivered_paths(
 /// cannot supply another task's final blob to this child's epic accounting.
 fn epic_anchor_content_presence(
     task: &Task,
+    children: &[Task],
     repo: &std::path::Path,
     anchor: &str,
     target: &str,
@@ -13520,6 +13586,9 @@ fn epic_anchor_content_presence(
         (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
         (note, ledger) => note.or(ledger),
     };
+    if let Some((presence, note)) = epic_anchor_supersession(task, children, repo, anchor, target, paths) {
+        return (presence, joined(Some(note)));
+    }
     match target_identical_delivered_paths(task, repo, anchor, target, None, &identity, paths, false) {
         Some((note, remaining)) if remaining.is_empty() => {
             (DeliveryContentPresence::Present { paths: paths.clone() }, joined(note))
@@ -19452,6 +19521,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 resolved_anchor.is_some(),
                 &fallback_branches,
                 &git_snapshot,
+                subtasks,
             )
         });
         if let Some(cached) = cache_key.as_deref().and_then(|key| verdict_cache.get(key)) {
@@ -19483,6 +19553,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     true,
                     &fallback_branches,
                     &git_snapshot,
+                    subtasks,
                 ));
             }
             if epic_measurement::expired() {
@@ -19654,7 +19725,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
         {
-            let (presence, snapshot_note) = epic_anchor_content_presence(t, repo_path, anchor, parent_branch);
+            let (presence, snapshot_note) = epic_anchor_content_presence(t, subtasks, repo_path, anchor, parent_branch);
             if let Some(note) = snapshot_note {
                 content_evolution_note = Some(format!(
                     "decision: recorded factory_branch_anchor `{anchor}` for child task `{}`: {note}.",
@@ -19679,7 +19750,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     // integrated exactly like a present one; later commits on
                     // the reusable live lane are another task's work.
                     unmerged_count = 0;
-                    content_evolution_note = Some(format!(
+                    content_evolution_note.get_or_insert_with(|| format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is merged and its delivered path(s) {} were intentionally evolved by \
                              later first-parent commit(s) {}. The original byte-identical patch no \
@@ -36521,7 +36592,7 @@ mod epic_status_gate_tests {
         git(p, &["add", "shared.rs"]);
         git(
             p,
-            &["commit", "-q", "-m", "evolve integrated worker delivery"],
+            &["commit", "-q", "-m", "refactor(cas-bbbb): evolve integrated worker delivery"],
         );
 
         assert!(
@@ -36541,60 +36612,78 @@ mod epic_status_gate_tests {
         assert!(row.blocks_epic_close(), "later edits of the retained base cannot revive lost delivery: {row:?}");
     }
 
-    /// cas-9eae1 fence: a reachable delivery with no later first-parent path
-    /// touch and absent target content remains a real dropped-content verdict.
+    /// A later task may retire an anchor's line, but a merge resolution or
+    /// an unattributed deletion must retain the dropped-content fence.
     #[test]
-    fn ancestor_anchor_without_later_path_evolution_stays_dropped_cas_9eae1() {
-        let dir = init_epic_repo(&[]);
-        let p = dir.path();
-
-        std::fs::write(p.join("shared.rs"), "fn value() { base(); }\n").unwrap();
-        git(p, &["add", "shared.rs"]);
-        git(p, &["commit", "-q", "-m", "seed shared file"]);
-        git(p, &["checkout", "-q", "-b", "factory/worker"]);
-        std::fs::write(p.join("shared.rs"), "fn value() { worker_v1(); }\n").unwrap();
-        git(p, &["add", "shared.rs"]);
-        git(p, &["commit", "-q", "-m", "worker delivery"]);
-        let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
-
-        // `ours` intentionally carries the anchor in history while removing
-        // its file effect. Nothing after the integration touches shared.rs.
-        git(p, &["checkout", "-q", "main"]);
-        git(
-            p,
-            &[
-                "merge",
-                "-q",
-                "--no-ff",
-                "-s",
-                "ours",
-                "factory/worker",
-                "-m",
-                "drop worker delivery",
-            ],
-        );
-
-        assert!(git_commit_is_ancestor(p, &anchor, "main"));
-        assert_eq!(
-            delivery_content_presence_on_target(p, &anchor, "main"),
-            DeliveryContentPresence::Dropped {
-                paths: vec!["shared.rs".to_string()]
-            },
-            "a genuine dropped hunk with no later path touch must remain dropped"
-        );
-
-        let mut task = child("cas-dropped", TaskStatus::Closed, Some("worker"));
-        task.deliverables.factory_branch_anchor = Some(anchor);
-        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
-        let row = &statuses[0];
-        assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()]);
-        assert!(
-            row.blocks_epic_close(),
-            "real dropped content must remain an epic close blocker: {row:?}"
-        );
-        let report = render_epic_status_report("cas-epic", "main", &statuses);
-        assert!(report.contains("content dropped"), "{report}");
-        assert!(report.contains("hard-blocked"), "{report}");
+    fn ancestor_anchor_retirement_distinguishes_task_rewrite_from_merge_loss_cas_5993() {
+        for mode in ["named", "closed-child", "merge", "unnamed", "body-only"] {
+            let dir = init_epic_repo(&[]);
+            let p = dir.path();
+            let baseline = "pub fn baseline() {}\n";
+            std::fs::write(p.join("shared.rs"), baseline).unwrap();
+            git(p, &["add", "shared.rs"]);
+            git(p, &["commit", "-q", "-m", "seed shared file"]);
+            git(p, &["checkout", "-q", "-b", "factory/worker"]);
+            std::fs::write(p.join("shared.rs"), format!("{baseline}pub fn delivered() {{}}\n")).unwrap();
+            git(p, &["add", "shared.rs"]);
+            git(p, &["commit", "-q", "-m", "feat(cas-aaaa): deliver helper"]);
+            let anchor = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+            let removal = if mode == "merge" {
+                git(p, &["checkout", "-q", "-b", "factory/parallel"]);
+                std::fs::write(p.join("parallel.txt"), "parallel work\n").unwrap();
+                git(p, &["add", "parallel.txt"]);
+                git(p, &["commit", "-q", "-m", "parallel work"]);
+                git(p, &["checkout", "-q", "main"]);
+                git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+                git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/parallel"]);
+                // Both parents keep the helper; only the merge resolution
+                // removes it, even though its subject names another task.
+                std::fs::write(p.join("shared.rs"), baseline).unwrap();
+                git(p, &["add", "shared.rs"]);
+                git(p, &["commit", "-q", "-m", "merge(cas-bbbb): discard helper"]);
+                epic_git_stdout(p, &["rev-parse", "HEAD"])
+            } else {
+                // Same reused lane, ordinary task rewrite before integration.
+                std::fs::write(p.join("shared.rs"), baseline).unwrap();
+                git(p, &["add", "shared.rs"]);
+                let subject = match mode {
+                    "named" => "refactor(cas-bbbb): retire obsolete helper",
+                    "body-only" => "refactor: retire helper\n\nRelated incident cas-bbbb",
+                    _ => "refactor: retire helper",
+                };
+                git(p, &["commit", "-q", "-m", subject]);
+                let removal = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+                git(p, &["checkout", "-q", "main"]);
+                git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+                removal
+            };
+            assert!(git_commit_is_ancestor(p, &anchor, "main"));
+            let mut task = child("cas-aaaa", TaskStatus::Closed, Some("worker"));
+            task.deliverables.factory_branch_anchor = Some(anchor);
+            let mut children = vec![task];
+            if mode == "closed-child" {
+                let before = collect_epic_branch_statuses(&children, "main", p);
+                assert!(!before[0].dropped_paths.is_empty(), "no later task authority yet");
+                let mut later = child("cas-bbbb", TaskStatus::Closed, Some("worker"));
+                later.deliverables.factory_branch_anchor = Some(removal.clone());
+                children.push(later);
+            }
+            let statuses = collect_epic_branch_statuses(&children, "main", p);
+            let row = &statuses[0];
+            let report = render_epic_status_report("cas-epic", "main", &statuses);
+            if matches!(mode, "named" | "closed-child") {
+                assert!(row.dropped_paths.is_empty(), "{mode}: {report}");
+                assert!(!row.blocks_epic_close(), "{mode}: {report}");
+                let note = row.content_evolution_note.as_deref().expect("supersession evidence");
+                // pin: informational audit must identify the actual retiring SHA and task.
+                assert!(note.contains(&format!("anchor superseded by {removal} (cas-bbbb)")), "{mode}: {note}");
+                assert!(!report.contains("content dropped"), "{mode}: {report}");
+            } else {
+                assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()], "{mode}: {report}");
+                assert!(row.blocks_epic_close(), "{mode}: {report}");
+                assert!(report.contains("content dropped"), "{mode}: {report}");
+            }
+        }
     }
 
     #[test]

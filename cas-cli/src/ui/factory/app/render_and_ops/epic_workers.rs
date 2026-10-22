@@ -1830,7 +1830,7 @@ pub(crate) fn recycle_resume_brief(
     }
     held.sort_by(|a, b| a.id.cmp(&b.id));
     let mut brief =
-        "Your context was reset by a recycle; your worktree and every task binding were kept.\n"
+        "Your context was reset; your worktree and every task binding were kept.\n"
             .to_string();
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
     for task in held
@@ -1907,13 +1907,46 @@ fn append_recycle_received_messages(
     all_tasks: &[cas_types::Task],
     brief: &mut String,
 ) {
-    let since = held
+    let checkpoints: Vec<_> = held
         .iter()
-        .map(recycle_task_checkpoint)
-        .min()
-        .expect("nonempty held tasks");
+        .map(|task| (task.id.as_str(), recycle_task_checkpoint(task)))
+        .collect();
+    let Some(since) = checkpoints.iter().map(|(_, at)| *at).min() else {
+        return;
+    };
+    let known_tasks: std::collections::HashSet<_> =
+        all_tasks.iter().map(|task| task.id.as_str()).collect();
     let history = cas_store::SqlitePromptQueueStore::open_read_only(cas_dir).and_then(|queue| {
-        queue.received_supervisor_messages_since(worker_name, factory_session, since, 64)
+        queue.received_supervisor_messages_since_matching(
+            worker_name,
+            factory_session,
+            since,
+            8,
+            |row, received_at| {
+                // Assignment envelopes bind even unknown tasks. Generic replies
+                // use this worker's checkpoint window; known task mentions use
+                // only the corresponding bound-task windows.
+                let assignment =
+                    crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt);
+                let tokens: std::collections::HashSet<_> = row
+                    .prompt
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                    .collect();
+                let mentions_task = tokens.iter().any(|token| known_tasks.contains(token));
+                checkpoints
+                    .iter()
+                    .filter(|(id, _)| {
+                        if let Some(assignment) = assignment.as_deref() {
+                            *id == assignment
+                        } else {
+                            !mentions_task || tokens.contains(id)
+                        }
+                    })
+                    .map(|(_, at)| *at)
+                    .min()
+                    .is_some_and(|cutoff| received_at >= cutoff)
+            },
+        )
     });
     let history = match history {
         Ok(history) => history,
@@ -1923,38 +1956,10 @@ fn append_recycle_received_messages(
             return;
         }
     };
+    let intro = "Recent received supervisor messages (newest first; up to 8). These answers survived the reset; read them before repeating a question.\n";
     let mut included = 0;
-    let mut remaining = 12_000usize;
+    let mut remaining = 12_000usize - intro.len();
     for (row, received_at) in history {
-        // Assignment envelopes bind even unknown tasks. Ordinary replies often
-        // omit an id ("yes, use that candidate"); keep them for this worker's
-        // checkpoint window. When known task ids are present, apply only the
-        // corresponding bound-task windows, never another task's checkpoint.
-        let assignment = crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt);
-        let tokens: std::collections::HashSet<_> = row
-            .prompt
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-            .collect();
-        let mentions_task = all_tasks
-            .iter()
-            .any(|task| tokens.contains(task.id.as_str()));
-        let cutoff = held
-            .iter()
-            .filter(|task| {
-                if let Some(id) = assignment.as_deref() {
-                    task.id == id
-                } else {
-                    !mentions_task || tokens.contains(task.id.as_str())
-                }
-            })
-            .map(recycle_task_checkpoint)
-            .min();
-        if cutoff.is_none_or(|cutoff| received_at < cutoff) {
-            continue;
-        }
-        if included == 0 {
-            brief.push_str("Recent received supervisor messages (newest first; up to 8). These answers survived the reset; read them before repeating a question.\n");
-        }
         let header = format!(
             "#{} from {} (received {}):\n",
             row.id,
@@ -1972,12 +1977,12 @@ fn append_recycle_received_messages(
         if body.len() > remaining {
             break;
         }
+        if included == 0 {
+            brief.push_str(intro);
+        }
         remaining -= body.len();
         brief.push_str(&body);
         included += 1;
-        if included == 8 {
-            break;
-        }
     }
 }
 
@@ -1989,7 +1994,21 @@ pub(crate) fn enqueue_recycle_resume_brief(
     factory_session: &str,
     worker_name: &str,
 ) -> anyhow::Result<Option<i64>> {
-    let Some(brief) = recycle_resume_brief(cas_dir, worker_name, factory_session) else {
+    enqueue_context_resume_brief(cas_dir, supervisor_name, Some(factory_session), worker_name)
+}
+
+/// Shared by daemon recycle completion and a confirmed in-place context reset.
+/// Legacy callers without a factory session still receive their task brief;
+/// received-message history requires an authenticated session.
+pub(crate) fn enqueue_context_resume_brief(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: Option<&str>,
+    worker_name: &str,
+) -> anyhow::Result<Option<i64>> {
+    let Some(brief) =
+        recycle_resume_brief(cas_dir, worker_name, factory_session.unwrap_or_default())
+    else {
         return Ok(None);
     };
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
@@ -1997,8 +2016,8 @@ pub(crate) fn enqueue_recycle_resume_brief(
         supervisor_name,
         worker_name,
         &brief,
-        Some(factory_session),
-        Some("Recycled: resume your assigned work"),
+        factory_session,
+        Some("Context reset: resume your assigned work"),
     )?;
     Ok(Some(id))
 }
@@ -6904,7 +6923,11 @@ mod tests {
                         .unwrap();
                 } else {
                     queue
-                        .record_recipient_surfaced(id, target, cas_store::SurfacingSource::InboxPoll)
+                        .record_recipient_surfaced(
+                            id,
+                            target,
+                            cas_store::SurfacingSource::InboxPoll,
+                        )
                         .unwrap();
                     queue.ack(id).unwrap();
                 }
@@ -7038,11 +7061,81 @@ mod tests {
                 .any(|row| row.prompt == "UNRECEIVED"),
             "building a brief never consumes pending mail"
         );
+        // Charge the section intro as well as entries. This payload fits the
+        // old entry-only cap, but not the whole history section.
+        let receive = |body: &str, at: &str| {
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    "zen-condor",
+                    "wise-raven",
+                    body,
+                    Some("session-a622"),
+                    None,
+                    None,
+                    false,
+                    Some(&cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: supervisor.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_recipient_surfaced(id, "wise-raven", cas_store::SurfacingSource::InboxPoll)
+                .unwrap();
+            queue.mark_processed(id).unwrap();
+            queue.ack(id).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue_recipient_seen SET seen_at = ? WHERE prompt_id = ?",
+                rusqlite::params![at, id],
+            )
+            .unwrap();
+            id
+        };
+        receive(&"λ".repeat(5950), "2026-10-20T12:40:00Z");
+        let capped = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        let history_bytes =
+            capped.len() - capped.find("Recent received supervisor messages").unwrap();
+        // More than a raw query page of newer, ineligible replies must not
+        // hide an older answer. Cover both task and per-task checkpoint filters.
+        for index in 0..65 {
+            let (body, at) = if index % 2 == 0 {
+                (
+                    format!("<cas-assignment task_id=\"cas-peer\"/> FILTERED_{index}"),
+                    "2026-10-20T12:50:00Z",
+                )
+            } else {
+                (
+                    format!("cas-96c0 FILTERED_STALE_{index}"),
+                    "2026-10-20T12:19:00Z",
+                )
+            };
+            receive(&body, at);
+        }
+        let filtered = recycle_resume_brief(&cas_dir, "wise-raven", "session-a622").unwrap();
+        assert_eq!(
+            (history_bytes <= 12_000, filtered.contains(&received[9].1)),
+            (true, true),
+            "history bytes including intro={history_bytes}; eligible answer must survive >64 filtered rows"
+        );
+        assert!(!filtered.contains("FILTERED_"));
     }
 
     #[test]
     fn a_worker_with_no_open_work_gets_no_resume_brief_cas_a622() {
         let (_temp, cas_dir) = seeded_cas_dir();
+        let mut untouched = "existing brief".to_string();
+        append_recycle_received_messages(
+            &cas_dir,
+            "idle-worker",
+            "session-a622",
+            &[],
+            &[],
+            &mut untouched,
+        );
+        assert_eq!(
+            untouched, "existing brief",
+            "empty held-task history is a no-op"
+        );
         assert_eq!(
             enqueue_recycle_resume_brief(&cas_dir, "zen-condor", "session-a622", "idle-worker")
                 .unwrap(),

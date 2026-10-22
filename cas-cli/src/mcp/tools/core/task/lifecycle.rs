@@ -1565,7 +1565,24 @@ impl CasCore {
         // "prior context" and turn an otherwise clean create receipt noisy.
         // cas-3e41 (GH #993): every task create, not only an epic, pushes the
         // domain-matched rules and memories back to the creating supervisor.
+        // cas-1630: a follow-up citing commits its epic's branch lacks.
+        let cited_commit_warning = epic_id
+            .as_deref()
+            .and_then(|epic| {
+                let store = self.open_task_store().ok()?;
+                let epic = store.get(epic).ok()?;
+                let repo = self.cas_root.parent()?.to_path_buf();
+                let text = format!(
+                    "{}\n{}\n{}",
+                    task.title,
+                    task.description,
+                    task.acceptance_criteria
+                );
+                Some(epic_lane::cited_commit_warning(&repo, store.as_ref(), &epic, &text))
+            })
+            .unwrap_or_default();
         let related_context = sibling_warning
+            + &cited_commit_warning
             + &self
                 .related_recall(&task_recall_query(
                     &task.title,
@@ -1672,6 +1689,39 @@ impl CasCore {
                     } else {
                         resolved.sha.clone()
                     };
+                    // cas-1630: an epic created blocked_by an open epic is its
+                    // successor. Cut it from the predecessor's fresh tip, so
+                    // follow-ups on that unreleased code can start; its
+                    // delivery target is unchanged.
+                    let predecessor = self
+                        .open_task_store()
+                        .ok()
+                        .and_then(|store| epic_lane::open_predecessor_epic(store.as_ref(), &blocked_by_ids))
+                        .and_then(|(id, branch)| {
+                            // resolve_fresh_base reports success with an empty
+                            // SHA for a branch that exists neither locally nor
+                            // on origin (another repo, or deleted). Stack only
+                            // on a tip that resolves to a commit here, falling
+                            // back to a local-only lane, else to trunk.
+                            let resolves = |sha: &str| {
+                                !sha.is_empty()
+                                    && git_ops.ref_sha(&format!("{sha}^{{commit}}")).is_ok()
+                            };
+                            match git_ops.resolve_fresh_base(&branch) {
+                                Ok(fresh) if resolves(&fresh.sha) => {
+                                    Some((id, branch, fresh.branch_ref, fresh.sha))
+                                }
+                                _ => git_ops
+                                    .ref_sha(&branch)
+                                    .ok()
+                                    .filter(|sha| resolves(sha))
+                                    .map(|sha| (id, branch.clone(), branch, sha)),
+                            }
+                        });
+                    let (base_ref, base_sha) = match &predecessor {
+                        Some((_, _, predecessor_ref, sha)) => (predecessor_ref.clone(), sha.clone()),
+                        None => (base_ref, base_sha),
+                    };
                     let sha_preview = &base_sha[..base_sha.len().min(8)];
                     match git_ops.create_branch_from(&branch_name, &base_sha) {
                         Ok(created) => {
@@ -1732,12 +1782,18 @@ impl CasCore {
                                 )
                             };
 
-                            let divergence = base_choice
-                                .notice
-                                .as_deref()
-                                .map(|notice| format!("\n   {notice}"))
-                                .unwrap_or_default();
-                            let freshness = (!base_choice.used_head
+                            let divergence = match &predecessor {
+                                Some((id, branch, _, _)) => format!(
+                                    "\n   STACKED ON PREDECESSOR: {id} ({branch}) is open, so this epic starts from its tip. Merge {branch} into {branch_name} again until {id} lands on '{trunk}'."
+                                ),
+                                None => base_choice
+                                    .notice
+                                    .as_deref()
+                                    .map(|notice| format!("\n   {notice}"))
+                                    .unwrap_or_default(),
+                            };
+                            let freshness = (predecessor.is_none()
+                                && !base_choice.used_head
                                 && resolved.behind_count > 0)
                                 .then(|| {
                                     if resolved.used_remote {

@@ -333,12 +333,15 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
         let id = "cas-255b";
         let mut helper = assigned(id, TaskType::Task, "main");
         helper.title = "Own the iOS simulator".into();
+        helper.execution_note = Some("no-code".into());
+        helper.external_ref = Some("artifact:cas-255b/ios-simulator-release".into());
         f.put(&helper);
         claim(&f, id);
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         config.set("verification.enabled", "true").unwrap();
         config.save(&f.cas_dir()).unwrap();
-        // A real exact-task verdict authorizes close, without any code anchor.
+        // A real exact-task verdict and portable no-code proof authorize close
+        // without treating an unmeasured empty range as proof by itself.
         let dispatch = cas_store::create_verification_dispatch_bound(
             &f.cas_dir(), id, "nocode-worker-session", "nocode-supervisor-session",
             &cas_types::VerificationProofBoundary::task(),
@@ -450,6 +453,40 @@ async fn close_refuses_terminal_write_over_a_concurrent_proof_scope_fix_cas_c202
         response.contains("CLOSE REFUSED") && response.contains("Reload"),
         "the refusal tells the worker to reload and retry: {response}"
     );
+
+    // cas-3f81: a note-only append does not invalidate the close's proof.
+    // Keep the stored timeline intact, including repeated notes and blank
+    // paragraphs, then append close's own audit notes without duplicating it.
+    let id = "cas-3f81-race";
+    let mut original = assigned(id, TaskType::Task, "main");
+    original.notes = "[2026-10-21 14:17] Initial progress".into();
+    f.put(&original);
+    claim(&f, id);
+    let cas_dir = f.cas_dir();
+    let (notes_tx, notes_rx) = std::sync::mpsc::channel();
+    close_race_hook::before_terminal_write(id, move || {
+        let store = open_task_store(&cas_dir).unwrap();
+        store.append_note(id, "[2026-10-21 14:18] Supervisor update\n\nSecond paragraph").unwrap();
+        for _ in 0..2 {
+            store.append_note(id, "[2026-10-21 14:19] Repeated observation").unwrap();
+        }
+        notes_tx.send(store.get(id).unwrap().notes).unwrap();
+    });
+    let response = call(
+        &f.worker,
+        serde_json::json!({
+            "action": "close", "id": id, "reason": "Deployment independently verified",
+            "execution_note": "no-code", "external_ref": PROOF,
+        }),
+    ).await;
+    let closed = f.task(id);
+    let persisted_notes = notes_rx.try_recv().expect("terminal race hook ran");
+    assert_eq!(closed.status, TaskStatus::Closed, "note-only changes allow close: {response}");
+    assert!(closed.notes.starts_with(&persisted_notes), "concurrent timeline lost or reordered: {}", closed.notes);
+    assert_eq!(closed.notes.matches("Initial progress").count(), 1);
+    assert_eq!(closed.notes.matches("Supervisor update").count(), 1);
+    assert_eq!(closed.notes.matches("Repeated observation").count(), 2);
+    assert!(closed.notes[persisted_notes.len()..].contains("Deployment independently verified"), "close audit follows concurrent notes: {}", closed.notes);
 }
 
 /// GH #1147: a no-code spike created under a code epic inherits the epic's

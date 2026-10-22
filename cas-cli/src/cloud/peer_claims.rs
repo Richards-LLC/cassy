@@ -120,6 +120,8 @@ pub fn local_agent_ids(agents: &dyn crate::store::AgentStore) -> HashSet<String>
 pub enum ClaimKind {
     Task,
     Epic,
+    /// cas-8dbe: a repository file a worker is editing.
+    File,
 }
 
 impl ClaimKind {
@@ -127,6 +129,7 @@ impl ClaimKind {
         match self {
             ClaimKind::Task => "task",
             ClaimKind::Epic => "epic",
+            ClaimKind::File => "file",
         }
     }
 }
@@ -413,6 +416,31 @@ impl PeerClaims {
     ) -> Acquire {
         let claims = self.clone().with_budget(PeerBudget::default());
         claims.acquire_bounded(task_id, kind, agent_id, agent_name, duration_secs, is_local)
+    }
+
+    /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
+    /// within `budget`. `None` when the lock or its reason cannot be read.
+    pub fn recorded_holder(&self, id: &str, reader: &str, budget: Duration) -> Option<ClaimHolder> {
+        let claims = self.clone().with_budget(PeerBudget::new(budget));
+        let (info, _) = claims.coordinator(reader).ok()?.get_visible_lock(&claims.key(id)).ok()??;
+        ClaimHolder::from_reason(info.claim_reason.as_deref())
+    }
+
+    /// [`Self::acquire`] within an explicit total budget, for callers on a
+    /// latency-sensitive path (cas-8dbe file leases before every edit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_within(
+        &self,
+        id: &str,
+        kind: ClaimKind,
+        agent_id: &str,
+        agent_name: &str,
+        duration_secs: u32,
+        is_local: &dyn Fn(&str) -> bool,
+        budget: Duration,
+    ) -> Acquire {
+        let claims = self.clone().with_budget(PeerBudget::new(budget));
+        claims.acquire_bounded(id, kind, agent_id, agent_name, duration_secs, is_local)
     }
 
     fn acquire_bounded(
@@ -1331,6 +1359,150 @@ mod tests {
                 "never release another account's lock"
             );
         }
+    }
+
+    /// cas-8dbe: two factory sessions of one repository, on two machines,
+    /// share one Cassy Cloud. Session A's worker claims a file it is editing;
+    /// session B's worker, about to edit the same file, is told who holds it
+    /// and for which task, before either edit collides.
+    #[tokio::test]
+    async fn cas_8dbe_second_session_learns_who_holds_a_file_before_editing() {
+        use std::sync::{Arc, Mutex};
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        type Held = Arc<Mutex<Option<(String, String)>>>;
+        let lock_json = |key: &str, agent: &str, reason: &str| {
+            serde_json::json!({
+                "id": "lock-1", "task_id": key, "agent_id": agent, "status": "active",
+                "expires_at": (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                "renewed_at": Utc::now().to_rfc3339(), "renewal_count": 0, "claim_reason": reason,
+            })
+        };
+        /// A claim endpoint with one lock: the first agent wins, others get 409.
+        struct Claim(Held, fn(&str, &str, &str) -> serde_json::Value);
+        impl Respond for Claim {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or_default();
+                let agent = body["agent_id"].as_str().unwrap_or_default().to_string();
+                let reason = body["reason"].as_str().unwrap_or_default().to_string();
+                let key = request.url.path().split('/').nth(4).unwrap_or_default().to_string();
+                let mut held = self.0.lock().unwrap();
+                let owner = held.get_or_insert_with(|| (agent.clone(), reason.clone())).clone();
+                if owner.0 == agent {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "status": "success", "result": "claimed", "lock": (self.1)(&key, &owner.0, &owner.1),
+                    }))
+                } else {
+                    ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                        "error": "already_claimed", "owner_agent_id": owner.0,
+                        "expires_at": (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                    }))
+                }
+            }
+        }
+        /// The holder's own release clears the lock.
+        struct Release(Held);
+        impl Respond for Release {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).unwrap_or_default();
+                let mut held = self.0.lock().unwrap();
+                if held.as_ref().is_some_and(|(owner, _)| Some(owner.as_str()) == body["agent_id"].as_str()) {
+                    *held = None;
+                }
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "success"}))
+            }
+        }
+        struct Lock(Held, fn(&str, &str, &str) -> serde_json::Value);
+        impl Respond for Lock {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let key = request.url.path().split('/').nth(4).unwrap_or_default().to_string();
+                let lock = self.0.lock().unwrap().clone().map(|(agent, reason)| (self.1)(&key, &agent, &reason));
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "lock": lock }))
+            }
+        }
+
+        let server = MockServer::start().await;
+        let held: Held = Arc::default();
+        let project = "github.com/acme/widgets";
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+            .respond_with(Claim(held.clone(), lock_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/release$"))
+            .respond_with(Release(held.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/lock$"))
+            .respond_with(Lock(held.clone(), lock_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents": [{
+                "id": "worker-a", "name": "fierce-koala-22", "agent_type": "worker", "status": "active",
+                "last_heartbeat": Utc::now(), "active_tasks": 1, "machine_id": "soundwave",
+                "metadata": {"canonical_id": project, "hostname": "soundwave"},
+            }]})))
+            .mount(&server)
+            .await;
+        let session = |label: &str| PeerClaims {
+            config: CloudConfig {
+                endpoint: server.uri(),
+                token: Some("sandbox-token".into()),
+                ..Default::default()
+            },
+            project: project.into(),
+            label: label.into(),
+            retired_local: HashMap::new(),
+            budget: None,
+        };
+        let (a, b) = (session("soundwave"), session("prowl"));
+        let roots = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root_a, root_b) = (roots.0.path().to_path_buf(), roots.1.path().to_path_buf());
+        let path_edited = "hub-web/src/source-admission.ts";
+
+        let (first, second, again, after_park) = tokio::task::spawn_blocking(move || {
+            use crate::cloud::file_leases::{FileLease, claim_with, release_for_task_with};
+            let first = claim_with(&a, &root_a, "worker-a", "fierce-koala-22", "cas-ac47", path_edited);
+            let second = claim_with(&b, &root_b, "worker-b", "bright-cobra-44", "cas-9f01", path_edited);
+            let again = claim_with(&a, &root_a, "worker-a", "fierce-koala-22", "cas-ac47", path_edited);
+            assert!(matches!(again, FileLease::Mine));
+            // cas-8dbe review: on the factory path the worker's close parks
+            // the task and the supervisor closes it. The park releases by
+            // task, as worker-a, so session B can take the file.
+            release_for_task_with(Some(&a), &root_a, "cas-ac47");
+            let after_park = claim_with(&b, &root_b, "worker-b", "bright-cobra-44", "cas-9f01", path_edited);
+            (first, second, again, after_park)
+        })
+        .await
+        .unwrap();
+        assert_eq!(first, crate::cloud::file_leases::FileLease::Mine);
+        assert_eq!(again, crate::cloud::file_leases::FileLease::Mine);
+        assert_eq!(
+            second,
+            crate::cloud::file_leases::FileLease::HeldBy(
+                "fierce-koala-22 (task cas-ac47) on soundwave".into()
+            ),
+        );
+        let claims = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/claim"))
+            .count();
+        assert_eq!(
+            after_park,
+            crate::cloud::file_leases::FileLease::Mine,
+            "a parked task frees its files for the other session"
+        );
+        assert_eq!(claims, 3, "session A's repeat edit reuses its own lease without asking");
     }
 
     /// cas-0078 (f): cloud work runs on the blocking pool, and one budget

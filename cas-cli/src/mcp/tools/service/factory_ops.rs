@@ -3898,12 +3898,15 @@ impl CasService {
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            let summary = render_worker_liveness_summary_scoped(
+            let mut summary = render_worker_liveness_summary_scoped(
                 &liveness_rows,
                 factory_session.as_deref(),
                 scoped_worker_count,
                 outside_scope_worker_count,
             );
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
             // cas-73b5: the fast poll surfaces a wedged daemon loop too.
             let health = factory_session
                 .as_deref()
@@ -4312,6 +4315,9 @@ impl CasService {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
             }
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { msg.push_str(&format!("\n{capacity}\n")); }
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
@@ -4438,6 +4444,9 @@ impl CasService {
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
         // starting it past the configured stall threshold.
+        let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+            factory_session.as_deref(), chrono::Utc::now());
+        if !capacity.is_empty() { output.push_str(&format!("{capacity}\n\n")); }
         let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             match open_task_store(&self.inner.cas_root)
@@ -5751,12 +5760,13 @@ impl CasService {
         // caller CAS actually resolved. `source` above falls back to the string
         // "unknown", which is not an identity, so the stamp is taken from a
         // real agent row or omitted entirely.
-        let queue_origin = crate::store::open_agent_store(&self.inner.cas_root)
-            .ok()
-            .and_then(|store| store.get(&source).ok())
-            .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
-                agent_id: agent.id,
-            });
+        let source_agent = agent_store.get(&source).ok();
+        let resume_source = source_agent
+            .as_ref()
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| source.clone());
+        let queue_origin = source_agent
+            .map(|agent| cas_store::QueueOrigin::RegisteredAgent { agent_id: agent.id });
 
         // Pre-flight every recipient BEFORE queueing anything: an unsupported
         // harness or an unlocatable transcript directory means Cassy could never
@@ -5950,7 +5960,35 @@ impl CasService {
             output.push_str(&format!("❌ {refusal}\n"));
         }
 
-        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() {
+        // Only a new transcript proves the old context is gone. Queue its
+        // replacement brief afterwards, including already-received answers.
+        // Codex resets return through the recycle path above, whose daemon
+        // completion already queues this same brief.
+        let mut brief_failed = false;
+        for name in confirmed.iter().map(|(name, _, _)| name).chain(
+            lost.iter()
+                .filter_map(|(name, _, restored)| restored.is_ok().then_some(name)),
+        ) {
+            match crate::ui::factory::enqueue_context_resume_brief(
+                &self.inner.cas_root,
+                &resume_source,
+                factory_session.as_deref(),
+                name,
+            ) {
+                Ok(Some(id)) => output.push_str(&format!(
+                    "✅ {name}: resume brief queued (notification #{id}).\n"
+                )),
+                Ok(None) => {}
+                Err(error) => {
+                    brief_failed = true;
+                    output.push_str(&format!(
+                        "❌ {name}: context reset landed, but its resume brief could not be queued: {error}. Recover from task notes and received supervisor messages before continuing.\n"
+                    ));
+                }
+            }
+        }
+
+        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() || brief_failed {
             // Never report success for a reset that was not observed.
             return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
         }

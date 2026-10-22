@@ -793,6 +793,7 @@ pub(super) fn line_content_presence_with_resolutions(
         false,
         &[],
         false,
+        &[],
     )
 }
 
@@ -803,7 +804,7 @@ pub(super) fn resolution_content_presence(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[], false)
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[], false, &[])
 }
 
 /// Caller proves the final handoff's own content on this path before allowing
@@ -828,7 +829,22 @@ pub(super) fn line_content_presence_with_task_cycle(
         false,
         cycle,
         false,
+        &[],
     )
+}
+
+/// Epic accounting may retire a still-live owner at an independently
+/// attributed later task's ordinary commit. This never revives ownership
+/// already lost at a merge; child-close callers retain the strict replay.
+pub(super) fn line_content_presence_with_retirements(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    retirements: &[String],
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], false, retirements)
 }
 
 /// Only the exact-final-snapshot companion may ask whether some attributed
@@ -841,7 +857,7 @@ pub(super) fn surviving_line_content(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true)
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true, &[])
 }
 
 /// cas-24d8: one close asked for the same ownership walk about 78 times
@@ -859,6 +875,7 @@ type WalkKey = (
     bool,
     Vec<String>,
     bool,
+    Vec<String>,
 );
 
 static WALKS: std::sync::OnceLock<
@@ -878,6 +895,7 @@ fn line_content_presence_impl(
     novel_only: bool,
     cycle: &[String],
     allow_partial: bool,
+    retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let commit =
         |reference: &str| super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"));
@@ -892,6 +910,7 @@ fn line_content_presence_impl(
             novel_only,
             cycle.to_vec(),
             allow_partial,
+            retirements.to_vec(),
         )),
         _ => None,
     };
@@ -912,6 +931,7 @@ fn line_content_presence_impl(
         novel_only,
         cycle,
         allow_partial,
+        retirements,
     )?;
     if let Some(key) = key
         && let Ok(mut cache) = walks.lock()
@@ -1123,6 +1143,7 @@ fn line_content_presence_uncached(
     novel_only: bool,
     cycle: &[String],
     allow_partial: bool,
+    retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
@@ -1245,7 +1266,7 @@ fn line_content_presence_uncached(
             owners.iter().any(Option::is_none)
         }
     };
-    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle)?;
+    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle, retirements)?;
     // cas-90d8: a later ordinary commit may rename the delivered file (for
     // example `release: vX` moving a dated release-notes draft). The
     // per-path walk reads that edge as a whole-file deletion, so carry the
@@ -1264,7 +1285,7 @@ fn line_content_presence_uncached(
         else {
             break;
         };
-        states = walk_owners(repo, &rename, target, &renamed_to, carried, resolutions, cycle)?;
+        states = walk_owners(repo, &rename, target, &renamed_to, carried, resolutions, cycle, retirements)?;
         start = rename;
         current = renamed_to;
     }
@@ -1311,6 +1332,7 @@ fn walk_owners(
     owners: Vec<Option<OwnedLines>>,
     resolutions: &[String],
     cycle: &[String],
+    retirements: &[String],
 ) -> Result<OwnerStates, String> {
     let width = owners.len();
     let history = text(
@@ -1472,7 +1494,20 @@ fn walk_owners(
                                 && cycle.iter().any(|owned| owned == commit),
                             reverted,
                             commit,
-                        )
+                        ).or_else(|| {
+                            // Only the actual ordinary loss edge can retire a
+                            // live owner. A missing parent owner never reaches
+                            // this closure, so later task work cannot excuse
+                            // an earlier merge-resolution drop.
+                            (ordinary && retirements.iter().any(|sha| sha == commit)).then(|| {
+                                let mut retired = owner.clone();
+                                retired.positions.clear();
+                                if !retired.commits.iter().any(|sha| sha == commit) {
+                                    retired.commits.push(commit.to_string());
+                                }
+                                retired
+                            })
+                        })
                     })
                 })
                 .collect();

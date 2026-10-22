@@ -1434,6 +1434,14 @@ fallback threshold. PSI limits and `factory.max_concurrent_builders` still apply
 Invalid hand-edited thresholds use defaults. A denied worker command prints
 `Waiting for build admission` with its measured reason and asks for the same
 capped command to be retried; it does not hold a builder slot while waiting.
+Registered workers retain their InProgress task and lease during capacity
+waiting. Each refusal updates one durable worker/task/lease-generation episode,
+with its original start, current cause and next retry (120 seconds). worker_status
+shows that episode once; the background reminder scan sends one capacity notice
+after 20 minutes, without a blocked-task page. A delivered explicit assistance
+message consumes that episode's automatic notice. Successful admission clears
+it, and a changed task/lease invalidates it. Capacity waiting never changes task
+status; genuine blocked/yielded tasks retain their existing semantics.
 `force=true` only overrides the existing spawn-time soft check, never capped
 worker slot locks.
 
@@ -1478,6 +1486,21 @@ An omitted target selects `--lib`; `--test` must name one explicit harness from
 positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
 Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
 environment prefixes, compound commands, repeated packages and broader flags.
+For a credential-free CI reproduction, first create a private config directory.
+The hook also accepts this complete fixed profile before a named nextest command
+(use an existing, literal absolute path without shell expansion):
+
+```bash
+env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+```
+
+The hook carries this as runner metadata, including detached execution. The
+runner removes those six credentials and sets XDG only on the final Cargo/test
+child, after Cassy credential bootstrap and normal builder admission. Parent
+identity, private targets, memory limits and clean-tip receipts remain in force.
+Other environment wrappers, partial profiles, identity/build overrides and shell
+substitutions remain refused; this profile is for targeted tests, not checks.
+
 The same capped runner invokes the shared `run-verified-tests.sh` zero-test
 guard, forces the private target, and records only successful nonzero counts
 against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
@@ -1527,7 +1550,11 @@ exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
 
 Each check runs once (operator decisions D1–D3, cas-eac2). A factory worker's
 pre-push hook runs the no-build fast rows (`scripts/fast-rows-pre-push.sh`) and
-writes a PASS receipt for the pushed tip; a missing tool fails the push. With
+writes a PASS receipt for the pushed tip; a missing tool fails the push. Failed
+attempts print a retained log directory under the Git common directory's
+`cas/fast-rows/<sha>.logs.*`, containing `gate.log`, detailed row logs and timings.
+Each attempt has its own directory so a later push preserves the original failure.
+With
 the repository variable `CAS_LANE_SLIM` set to `true`, lane CI runs no fast rows
 and no broad Rust tests for factory pushes; unset (the default) the lanes run as
 before, so the switch waits for a runtime with these guards. Park reads, and
@@ -2560,6 +2587,13 @@ blob comparison in the review. Do not manufacture a corrective commit or edit
 task metadata directly. The cas-c2cb incident (cas-5f0b) used the tracked merge
 64d1740bd7bb065049dea3b9c7eee2e712738e68 as its reviewed-drop receipt; anchor
 6ff3c4d6e and target held app.js blob 5bde1a1d1bf2b077538c054ee758bc8ffcdd4006.
+
+Epic status reports `anchor superseded by <sha> (<task>)` as information when
+an ordinary later commit retires still-owned anchor lines and its subject names
+another task, or it is that closed child's recorded delivery. Body references
+and path touches alone grant no authority. A merge-resolution loss remains
+`content dropped`; later task edits cannot revive ownership already lost there.
+This epic accounting rule does not relax the individual task close proof.
 
 A deliberately superseded delivery that still fails automatic content attribution
 can close with `supervisor_override=true` and

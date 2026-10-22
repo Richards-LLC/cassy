@@ -8,6 +8,7 @@
 mod cloud_attach;
 mod daemon;
 mod doctor;
+mod gc;
 mod lifecycle;
 pub(crate) mod parity;
 pub(crate) mod probe_comm;
@@ -753,6 +754,9 @@ pub enum FactoryCommands {
         /// Start the runner in its own session and return (backgrounded calls).
         #[arg(long)]
         detach: bool,
+        /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
+        #[arg(long)]
+        isolated_test_env: Option<std::path::PathBuf>,
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -776,6 +780,12 @@ pub enum FactoryCommands {
         /// Explicit Cassy root (.cas directory)
         #[arg(long)]
         cas_root: Option<std::path::PathBuf>,
+    },
+
+    /// Inspect or clean factory-owned state using the MCP GC handlers.
+    Gc {
+        #[command(subcommand)]
+        command: FactoryGcCommands,
     },
 
     /// Run as a factory daemon (internal use)
@@ -1163,6 +1173,29 @@ pub enum FactoryCommands {
     },
 }
 
+/// Factory garbage-collection commands.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+#[command(next_line_help = true)]
+pub enum FactoryGcCommands {
+    /// Show the same factory GC report as the coordination gc_report action.
+    Report,
+    /// Run the same cleanup as coordination gc_cleanup.
+    ///
+    /// Cleanup defaults to a dry run. Actual mutation requires both --force
+    /// and --no-dry-run.
+    Cleanup {
+        /// Authorize cleanup actions that require explicit force consent.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Explicitly keep cleanup in preview mode (the default).
+        #[arg(long, conflicts_with = "no_dry_run")]
+        dry_run: bool,
+        /// Apply eligible cleanup instead of only previewing it.
+        #[arg(long = "no-dry-run", conflicts_with = "dry_run")]
+        no_dry_run: bool,
+    },
+}
+
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
@@ -1202,13 +1235,15 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: true,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
+                isolated_test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute(cas_root, cargo_args),
+            } => crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref()),
             FactoryCommands::VerifierTest {
                 cas_root,
                 head,
@@ -1218,6 +1253,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
+            FactoryCommands::Gc { command } => gc::execute(command, cas_root),
             FactoryCommands::Daemon {
                 session,
                 cwd,

@@ -352,7 +352,8 @@ impl CasService {
         Parameters(req): Parameters<TaskRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_guidance("task", this.inner.clone(), async move {
+        // cas-1567: box the action match once, as in coordination_dispatch.
+        panic_catch::dispatch_with_guidance("task", this.inner.clone(), Box::pin(async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let mut req = req;
             let action = canonical_task_action(&req.action).to_string();
@@ -451,7 +452,7 @@ impl CasService {
             crate::telemetry::track_mcp_tool("task", &action, result.is_ok());
 
             result
-        })
+        }))
         .await
     }
 
@@ -1217,7 +1218,12 @@ impl CasService {
         req: CoordinationRequest,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
+        // cas-1567: this match's debug-build future is the sum of its ~50 arm
+        // futures (~100 KB). Moved by value through dispatch_with_guidance,
+        // dispatch_with_catch and tokio::spawn, each frame kept its own copy
+        // on the caller's 2 MiB test/request thread. Box it once here so the
+        // wrappers move a pointer.
+        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), Box::pin(async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let mut req = req;
             let action = canonical_coordination_action(&req.action).to_string();
@@ -1233,6 +1239,8 @@ impl CasService {
             }
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
+            let capacity_assistance = matches!(action.as_str(), "message" | "interrupt")
+                && req.blocker == Some(true) && req.target.as_deref() == Some("supervisor");
 
             // Destructive operations fail closed on fields that belong to
             // another action in this unified request. Serde catches unknown
@@ -1551,6 +1559,15 @@ impl CasService {
                 )),
             };
 
+            if capacity_assistance && result.as_ref().is_ok_and(|result| result.is_error != Some(true))
+                && let Ok(worker_id) = this.inner.get_registered_agent_id_read_only()
+            {
+                if let Err(error) = crate::factory_capacity_wait::assistance_queued(
+                    &this.inner.cas_root, &worker_id,
+                    (!event_task_id.is_empty()).then_some(event_task_id.as_str()), chrono::Utc::now())
+                { tracing::warn!(%error, "capacity assistance queued but wait stamp failed"); }
+            }
+
             // cas-0033: the supervisor's calls retry queued branch deletions
             // and delete branches whose task ended or whose worktree is gone
             // (for example right after worktree_cleanup). A no-op otherwise.
@@ -1630,7 +1647,7 @@ impl CasService {
             crate::telemetry::track_mcp_tool(domain, &action, result.is_ok());
 
             result
-        })
+        }))
         .await
     }
 
@@ -1965,7 +1982,18 @@ mod tests {
         }
     }
 
-
+    #[test]
+    fn coordination_dispatch_future_stays_small_cas_1567() {
+        // Unboxed, this debug-build future was 101464 bytes (12368 boxed) and
+        // every caller frame copied it. The epic_split cas_0795 journey
+        // overflowed the 2 MiB test thread on Linux.
+        let dir = TempDir::new().unwrap();
+        let service = CasService::new(CasCore::with_daemon(dir.path().to_path_buf(), None, None), None);
+        let req: CoordinationRequest =
+            serde_json::from_value(serde_json::json!({"action": "peers"})).unwrap();
+        let size = std::mem::size_of_val(&service.coordination_dispatch(req));
+        assert!(size < 32 * 1024, "coordination_dispatch future is {size} bytes");
+    }
 }
 
 #[cfg(test)]

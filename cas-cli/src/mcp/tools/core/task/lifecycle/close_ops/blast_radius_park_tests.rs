@@ -79,10 +79,12 @@ fn fixture(env: &mut TestEnvGuard) -> Fixture {
     std::fs::write(repo.join("crates/widget/Cargo.toml"), "[package]\nname = \"widget\"\n").unwrap();
     std::fs::write(
         repo.join("crates/widget/src/lib.rs"),
-        "pub mod gear;\npub const EMBEDDED: &str = include_str!(\"embedded.md\");\n",
+        "pub mod gear;\npub const EMBEDDED: &str = include_str!(\"embedded.md\");\npub const RELEASE_RUBRIC: &str = include_str!(\"../../../docs/RELEASE_SLACK_RUBRIC.md\");\n",
     )
     .unwrap();
     std::fs::write(repo.join("crates/widget/src/embedded.md"), "embedded prompt v1\n").unwrap();
+    std::fs::create_dir_all(repo.join("docs")).unwrap();
+    std::fs::write(repo.join("docs/RELEASE_SLACK_RUBRIC.md"), "release rubric v1\n").unwrap();
     std::fs::write(repo.join("crates/widget/src/gear.rs"), "pub fn turn() {}\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "seed"]);
@@ -355,7 +357,69 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
         "test(gear)",
     );
 
+    let external_embedded_path = "docs/RELEASE_SLACK_RUBRIC.md";
+    std::fs::write(
+        f.worker_path.join(external_embedded_path),
+        "release rubric v2\n",
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", external_embedded_path]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "docs(cas-br01): change an external compiled-in rubric",
+        ],
+    );
+    git(&f.worker_path, &["push", "-q", "origin", LANE]);
+    let stale_external_embedded = call(&f.worker, close.clone()).await;
+    assert!(
+        stale_external_embedded.contains("FOCUSED PROOF REQUIRED"),
+        "receipt at {tested_tip} must not cover an outside-crate compiled-in Markdown file: {stale_external_embedded}"
+    );
+    assert_eq!(
+        f.task().status,
+        TaskStatus::InProgress,
+        "{stale_external_embedded}"
+    );
+    // cas-70cb: another task can remove the include after this delivery was
+    // measured. That newer HEAD must not let the old receipt cover its asset.
+    let untested_delivery = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(&f.worker_path, &["checkout", "-q", "-b", "factory/without-include"]);
+    std::fs::write(f.worker_path.join("crates/widget/src/lib.rs"), "pub mod gear;\n").unwrap();
+    git(&f.worker_path, &["add", "crates/widget/src/lib.rs"]);
+    git(&f.worker_path, &["commit", "-q", "-m", "next task removes include"]);
+    assert!(
+        crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &untested_delivery).is_empty(),
+        "removing an include on another HEAD must not authorize the delivered asset change"
+    );
+    git(&f.worker_path, &["checkout", "-q", LANE]);
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(),
+        &f.worker_path,
+        &tested_tip,
+        "widget",
+        "test(gear)",
+    );
+
     let doc_path = "docs/design/cli/update-managed-files.brief.md";
+    // An older receipt whose range includes this obvious source input must
+    // be rejected without searching Rust source for its filename.
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tested_tip, "widget", "test(before_script)",
+    );
+    std::fs::write(f.worker_path.join("operator.py"), "print('next')\n").unwrap();
+    git(&f.worker_path, &["add", "operator.py"]);
+    git(&f.worker_path, &["commit", "-q", "-m", "update operator script"]);
+    let tested_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    for filter in ["test(gear)", "test(adjacent)"] {
+        crate::factory_worker_check::record_passing_test_for_tests(
+            &f.cas_dir(), &f.worker_path, &tested_tip, "widget", filter,
+        );
+    }
     std::fs::create_dir_all(f.worker_path.join("docs/design/cli")).unwrap();
     std::fs::write(f.worker_path.join(doc_path), "Updated operator guidance.\n").unwrap();
     git(&f.worker_path, &["add", doc_path]);
@@ -367,18 +431,50 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 
+    // The worker now starts another task whose Rust source names this brief.
+    // The supervisor still closes the parked delivery's immutable tree.
+    git(&f.worker_path, &["checkout", "-q", "-b", "factory/next-task"]);
+    std::fs::write(
+        f.worker_path.join(source_path),
+        format!("pub fn turn() {{}}\nconst NEXT_TASK: &str = include_str!(\"../../../{doc_path}\");\n"),
+    ).unwrap();
+    git(&f.worker_path, &["add", source_path]);
+    git(&f.worker_path, &["commit", "-q", "-m", "next task embeds brief"]);
+    let receipts = crate::factory_worker_check::passing_test_receipts(&f.cas_dir(), &f.worker_path, &delivered_tip);
+    assert!(receipts.iter().any(|receipt| receipt.contains(&format!("rebound from {tested_tip} to {delivered_tip}"))), "the parked tree still permits doc rebind after HEAD changes: {receipts:?}");
+    // The executable pre-close hook requires the task's own lane, so restore
+    // it after exercising the parked delivery's receipt reader on another HEAD.
+    git(&f.worker_path, &["checkout", "-q", LANE]);
+
     git(&f.dir.path(), &["merge", "--ff-only", LANE]);
     git(&f.dir.path(), &["push", "-q", "origin", "main"]);
+    let trace = f.dir.path().join("close-git-trace.jsonl");
+    env.set("GIT_TRACE2_EVENT", &trace);
     let closed = call(&f.supervisor, close).await;
+    env.remove("GIT_TRACE2_EVENT");
     assert!(closed.contains("Closed task"), "{closed}");
     let task = f.task();
     assert_eq!(task.status, TaskStatus::Closed);
+    assert!(!task.notes.contains("test(before_script)"), "the script invalidates its older receipt: {}", task.notes);
     assert!(
         task.notes
             .contains(&format!("rebound from {tested_tip} to {delivered_tip}")),
         "the close must record the receipt rebind: {}",
         task.notes
     );
+    // Count real Git commands rather than inspecting cache internals. Both
+    // receipt filters and the close's package/audit readers share this lookup.
+    let trace = std::fs::read_to_string(trace).unwrap();
+    let greps: Vec<Vec<String>> = trace.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["event"] == "start")
+        .filter_map(|event| Some(event["argv"].as_array()?.iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect::<Vec<_>>()))
+        .filter(|args| args.get(1).is_some_and(|arg| arg == "grep") && args.iter().any(|arg| arg == "-lF"))
+        .collect();
+    let brief = Path::new(doc_path).file_name().unwrap().to_str().unwrap();
+    assert_eq!(greps.iter().filter(|args| args.iter().any(|arg| arg == brief)).count(), 1, "one doc lookup per close: {greps:?}");
+    assert!(greps.iter().all(|args| !args.iter().any(|arg| arg == "operator.py")), "cheap extension checks run before grep: {greps:?}");
+    assert!(greps.iter().all(|args| args.iter().any(|arg| arg == &delivered_tip)), "source searches use the delivered tree: {greps:?}");
 }
 
 /// AC2: a worker receipt in `widget` at the parked tip already covers

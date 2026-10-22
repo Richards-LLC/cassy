@@ -193,8 +193,12 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
   const hub = await journey.hub({ machines: [ATLAS] });
   await journey.open();
   await pair(page, "8".repeat(43));
-  hub.expireInstallation([...hub.installations.keys()][0]!);
   const url = page.url();
+  // cas-d06f: expire on the hub only once no tab holds a live connection.
+  // Expiring first let the still-connected page see 401 expired and start a
+  // refresh that the hub applied but the page never persisted (aborted by the
+  // navigation below, or overwritten by this IndexedDB edit), so both tabs
+  // later presented a replaced credential and read as revoked.
   await page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open("cas-commander-v1", 2); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
     await new Promise<void>((resolve, reject) => {
@@ -207,6 +211,8 @@ test("HUB-J2 two expired tabs share one refresh before the next repair (cas-5e53
     }); db.close();
   });
   await page.goto("about:blank");
+  hub.expireInstallation([...hub.installations.keys()][0]!);
+  expect(hub.installationRefreshes, "no refresh may start before both tabs open").toBe(0);
   const peer = await context.newPage(); await hub.install(peer);
   await journey.stage("M01 expired tabs serialize their refresh through real Web Locks and IndexedDB", async () => {
     await Promise.all([page.goto(url), peer.goto(url)]);

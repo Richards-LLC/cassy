@@ -235,6 +235,26 @@ pub(crate) struct TaskSyncIntent {
     pub global_scope: bool,
 }
 
+/// Durable recovery record for an intent that could not be classified.
+/// Resolution keeps the original intent row and captured revision/receipt
+/// evidence in place; it only removes that row from automatic replay.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct TaskSyncRecoveryRecord {
+    pub intent_id: i64,
+    pub mutation_id: String,
+    pub entity_id: String,
+    pub operation: String,
+    pub previous_revision: i64,
+    pub blocked_at: String,
+    pub blocked_reason: String,
+    pub blocked_evidence: String,
+    pub resolved_at: Option<String>,
+    pub resolved_by: Option<String>,
+    pub resolution: Option<String>,
+    pub resolution_reason: Option<String>,
+    pub resolution_evidence: Option<String>,
+}
+
 pub(crate) struct TaskSyncPayload {
     pub payload: String,
     pub current_project_id: Option<String>,
@@ -242,7 +262,7 @@ pub(crate) struct TaskSyncPayload {
     pub personal: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TaskSyncFulfillResult {
     Fulfilled,
     ProvenPreCommit,
@@ -250,6 +270,12 @@ pub(crate) enum TaskSyncFulfillResult {
     /// Reconcile only: a live mutation owns the entity, or the database was
     /// write-busy past the reconcile bound. Nothing changed; retry later.
     Deferred,
+    /// The intent remains active and durable, but its revision/receipt
+    /// evidence is ambiguous. `first_report` gates its one-time warning.
+    Blocked {
+        diagnostic: String,
+        first_report: bool,
+    },
 }
 
 impl SyncQueue {
@@ -464,6 +490,11 @@ impl SyncQueue {
                    i.previous_project_id, i.global_scope
             FROM task_sync_intents i
             LEFT JOIN task_mutation_receipts r ON r.receipt_id = i.mutation_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM task_sync_intent_recovery recovery
+                WHERE recovery.mutation_id = i.mutation_id
+                  AND recovery.resolved_at IS NOT NULL
+            )
             ORDER BY i.id ASC
             "#,
         )?;
@@ -490,6 +521,141 @@ impl SyncQueue {
         Ok(intents)
     }
 
+    /// Ambiguous task-sync intents and the evidence captured on first report.
+    /// Resolved records remain visible here as an audit history.
+    pub(crate) fn task_sync_recovery_records(
+        &self,
+    ) -> Result<Vec<TaskSyncRecoveryRecord>, CasError> {
+        let conn = self.lock_queue_conn()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT recovery.intent_id, recovery.mutation_id, recovery.entity_id,
+                   recovery.operation, recovery.previous_revision, recovery.blocked_at,
+                   recovery.blocked_reason, recovery.blocked_evidence,
+                   recovery.resolved_at, recovery.resolved_by, recovery.resolution,
+                   recovery.resolution_reason, recovery.resolution_evidence
+            FROM task_sync_intent_recovery recovery
+            ORDER BY recovery.blocked_at, recovery.intent_id
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TaskSyncRecoveryRecord {
+                intent_id: row.get(0)?,
+                mutation_id: row.get(1)?,
+                entity_id: row.get(2)?,
+                operation: row.get(3)?,
+                previous_revision: row.get(4)?,
+                blocked_at: row.get(5)?,
+                blocked_reason: row.get(6)?,
+                blocked_evidence: row.get(7)?,
+                resolved_at: row.get(8)?,
+                resolved_by: row.get(9)?,
+                resolution: row.get(10)?,
+                resolution_reason: row.get(11)?,
+                resolution_evidence: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CasError::from)
+    }
+
+    /// Stop automatic replay of one still-ambiguous intent, preserving both
+    /// the original staged row and the observed state in the recovery ledger.
+    /// This is deliberately a quarantine action, never a guess at commit state.
+    pub(crate) fn quarantine_task_sync_intent(
+        &self,
+        intent_id: i64,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), CasError> {
+        if actor.trim().is_empty() || reason.trim().is_empty() {
+            return Err(CasError::Other(
+                "task sync intent quarantine requires an actor and reason".to_string(),
+            ));
+        }
+        let conn = self.lock_queue_conn()?;
+        let tx = begin_write(&conn)?;
+        let intent = tx
+            .query_row(
+                r#"
+                SELECT i.id, i.mutation_id, i.entity_id, i.operation, i.previous_updated_at,
+                       i.previous_revision, receipt.revision, i.team_id, i.previous_team_id,
+                       i.previous_project_id, i.global_scope
+                FROM task_sync_intents i
+                LEFT JOIN task_mutation_receipts receipt ON receipt.receipt_id = i.mutation_id
+                WHERE i.id = ?1
+                "#,
+                params![intent_id],
+                |row| {
+                    Ok(TaskSyncIntent {
+                        id: row.get(0)?,
+                        mutation_id: row.get(1)?,
+                        entity_id: row.get(2)?,
+                        operation: row.get(3)?,
+                        previous_updated_at: row.get(4)?,
+                        previous_revision: row.get(5)?,
+                        committed_revision: row.get(6)?,
+                        team_id: row.get(7)?,
+                        previous_team_id: row.get(8)?,
+                        previous_project_id: row.get(9)?,
+                        global_scope: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CasError::Other(format!("task sync intent {intent_id} was not found"))
+            })?;
+        let (diagnostic, committed_revision, current_revision) =
+            match classify_task_sync_intent(&tx, &intent)? {
+                TaskSyncIntentClass::Blocked {
+                    diagnostic,
+                    committed_revision,
+                    current_revision,
+                } => (diagnostic, committed_revision, current_revision),
+                _ => {
+                    return Err(CasError::Other(format!(
+                        "task sync intent {intent_id} is no longer ambiguous; quarantine refused"
+                    )));
+                }
+            };
+        let evidence = task_sync_blocked_evidence(&intent, committed_revision, current_revision);
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO task_sync_intent_recovery
+                (mutation_id, intent_id, entity_id, operation, previous_revision,
+                 blocked_at, blocked_reason, blocked_evidence)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                intent.mutation_id,
+                intent.id,
+                intent.entity_id,
+                intent.operation,
+                intent.previous_revision,
+                now,
+                diagnostic,
+                evidence
+            ],
+        )?;
+        let changed = tx.execute(
+            r#"
+            UPDATE task_sync_intent_recovery
+            SET resolved_at = ?1, resolved_by = ?2, resolution = 'quarantined',
+                resolution_reason = ?3, resolution_evidence = ?4
+            WHERE mutation_id = ?5 AND intent_id = ?6 AND resolved_at IS NULL
+            "#,
+            params![now, actor, reason, evidence, intent.mutation_id, intent.id],
+        )?;
+        if changed != 1 {
+            return Err(CasError::Other(format!(
+                "task sync intent {intent_id} is already resolved"
+            )));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Queue only the canonical payload under the current routing policy.
     /// An obsolete proven route receives a payload-free delete.
     ///
@@ -513,7 +679,7 @@ impl SyncQueue {
         let conn = self.lock_queue_conn()?;
         let mut after_validation = Some(after_validation);
         let mut attempt = 0;
-        let (tx, canonical, _reconcile_lease) = loop {
+        let (tx, canonical, _reconcile_lease, revision) = loop {
             attempt += 1;
             // cas-0e57: load the canonical task BEFORE taking the write lock.
             // The load runs on the task store's pooled connection, whose
@@ -555,7 +721,15 @@ impl SyncQueue {
             // intent for the same entity on behalf of this stale snapshot.
             if mode == TaskSyncFulfillMode::Reconcile
                 && !tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM task_sync_intents WHERE id = ?1 AND mutation_id = ?2 AND entity_id = ?3)",
+                    "SELECT EXISTS(
+                        SELECT 1 FROM task_sync_intents i
+                        WHERE i.id = ?1 AND i.mutation_id = ?2 AND i.entity_id = ?3
+                          AND NOT EXISTS (
+                              SELECT 1 FROM task_sync_intent_recovery recovery
+                              WHERE recovery.mutation_id = i.mutation_id
+                                AND recovery.resolved_at IS NOT NULL
+                          )
+                    )",
                     params![intent.id, intent.mutation_id, intent.entity_id],
                     |row| row.get::<_, bool>(0),
                 )?
@@ -573,7 +747,40 @@ impl SyncQueue {
                     tx.commit()?;
                     return Ok(TaskSyncFulfillResult::ProvenPreCommit);
                 }
-                TaskSyncIntentClass::Blocked(message) => return Err(CasError::Other(message)),
+                TaskSyncIntentClass::Blocked {
+                    diagnostic,
+                    committed_revision,
+                    current_revision,
+                } => {
+                    if mode != TaskSyncFulfillMode::Reconcile {
+                        return Err(CasError::Other(diagnostic));
+                    }
+                    let evidence =
+                        task_sync_blocked_evidence(intent, committed_revision, current_revision);
+                    let first_report = tx.execute(
+                        r#"
+                        INSERT OR IGNORE INTO task_sync_intent_recovery
+                            (mutation_id, intent_id, entity_id, operation, previous_revision,
+                             blocked_at, blocked_reason, blocked_evidence)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                        "#,
+                        params![
+                            intent.mutation_id,
+                            intent.id,
+                            intent.entity_id,
+                            intent.operation,
+                            intent.previous_revision,
+                            Utc::now().to_rfc3339(),
+                            diagnostic,
+                            evidence
+                        ],
+                    )? > 0;
+                    tx.commit()?;
+                    return Ok(TaskSyncFulfillResult::Blocked {
+                        diagnostic,
+                        first_report,
+                    });
+                }
                 TaskSyncIntentClass::Proceed { revision } => revision,
             };
             let canonical = match preloaded {
@@ -595,7 +802,7 @@ impl SyncQueue {
                 Some(canonical) => canonical,
                 None => load_canonical()?,
             };
-            break (tx, canonical, reconcile_lease);
+            break (tx, canonical, reconcile_lease, revision);
         };
         let payload = canonical.payload;
         let local_project = crate::cloud::resolve_canonical_id(&self.cas_dir);
@@ -700,6 +907,7 @@ impl SyncQueue {
                 Utc::now().to_rfc3339(),
             ],
         )?;
+        resolve_blocked_task_sync_intents(&tx, intent, revision)?;
         retire_task_sync_evidence(&tx, &intent.entity_id)?;
         tx.commit()?;
         Ok(TaskSyncFulfillResult::Fulfilled)
@@ -716,7 +924,11 @@ enum TaskSyncIntentClass {
     /// The mutation never committed.
     ProvenPreCommit,
     /// The evidence does not classify the intent.
-    Blocked(String),
+    Blocked {
+        diagnostic: String,
+        committed_revision: Option<i64>,
+        current_revision: Option<(i64, bool)>,
+    },
 }
 
 fn classify_task_sync_intent(
@@ -748,11 +960,41 @@ fn classify_task_sync_intent(
             TaskSyncIntentClass::ProvenPreCommit
         }
         (None, None) if intent.previous_revision == 0 => TaskSyncIntentClass::ProvenPreCommit,
-        (committed, current) => TaskSyncIntentClass::Blocked(format!(
-            "task sync recovery blocked for {}: intent revision is unclassified (previous={}, committed={committed:?}, current={current:?}); durable evidence retained",
-            intent.entity_id, intent.previous_revision
-        )),
+        (committed, current) => TaskSyncIntentClass::Blocked {
+            diagnostic: format!(
+                "task sync recovery blocked for {}: intent revision is unclassified (previous={}, committed={committed:?}, current={current:?}); durable evidence retained",
+                intent.entity_id, intent.previous_revision
+            ),
+            committed_revision: committed,
+            current_revision: current,
+        },
     })
+}
+
+fn task_sync_blocked_evidence(
+    intent: &TaskSyncIntent,
+    committed_revision: Option<i64>,
+    current_revision: Option<(i64, bool)>,
+) -> String {
+    serde_json::json!({
+        "intent": {
+            "id": intent.id,
+            "mutation_id": &intent.mutation_id,
+            "entity_id": &intent.entity_id,
+            "operation": &intent.operation,
+            "previous_updated_at": &intent.previous_updated_at,
+            "previous_revision": intent.previous_revision,
+            "team_id": &intent.team_id,
+            "previous_team_id": &intent.previous_team_id,
+            "previous_project_id": &intent.previous_project_id,
+            "global_scope": intent.global_scope,
+        },
+        "committed_revision": committed_revision,
+        "current_revision": current_revision.map(|(revision, present)| {
+            serde_json::json!({"revision": revision, "present": present})
+        }),
+    })
+    .to_string()
 }
 
 /// Open the write transaction every task sync-intent write runs in (cas-d5c8,
@@ -838,6 +1080,43 @@ fn retire_task_sync_evidence(conn: &rusqlite::Connection, entity_id: &str) -> Re
     Ok(())
 }
 
+/// A current receipt-bound mutation proves the canonical task payload has
+/// reached the outbox. Preserve earlier ambiguous evidence while recording
+/// why its automatic replay is no longer needed.
+fn resolve_blocked_task_sync_intents(
+    conn: &rusqlite::Connection,
+    intent: &TaskSyncIntent,
+    revision: i64,
+) -> Result<(), CasError> {
+    let now = Utc::now().to_rfc3339();
+    let evidence = serde_json::json!({
+        "receipt_mutation_id": &intent.mutation_id,
+        "entity_id": &intent.entity_id,
+        "revision": revision,
+        "proof": "current receipt-bound canonical payload was queued",
+    })
+    .to_string();
+    conn.execute(
+        r#"
+        UPDATE task_sync_intent_recovery
+        SET resolved_at = ?1,
+            resolved_by = 'system',
+            resolution = CASE
+                WHEN mutation_id = ?2 THEN 'receipt_confirmed'
+                ELSE 'superseded_by_receipt'
+            END,
+            resolution_reason = CASE
+                WHEN mutation_id = ?2 THEN 'The original mutation receipt now matches the current task revision.'
+                ELSE 'A newer receipt-bound task mutation queued the current canonical payload.'
+            END,
+            resolution_evidence = ?3
+        WHERE entity_id = ?4 AND resolved_at IS NULL
+        "#,
+        params![now, intent.mutation_id, evidence, intent.entity_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,16 +1156,71 @@ mod tests {
         assert_eq!(intent.previous_revision, -1);
         assert!(intent.mutation_id.starts_with("legacy-unbound-"));
 
-        let error = queue
+        let first = queue
             .fulfill_task_sync_intent(
                 &intent,
                 TaskSyncFulfillMode::Reconcile,
                 || panic!("unclassified intent must not reach payload loading"),
                 || panic!("unclassified intent must not load canonical payload"),
             )
-            .unwrap_err();
-        assert!(error.to_string().contains("recovery blocked"), "{error}");
-        assert_eq!(queue.pending_task_sync_intents().unwrap(), vec![intent]);
+            .unwrap();
+        assert!(matches!(
+            first,
+            TaskSyncFulfillResult::Blocked {
+                diagnostic,
+                first_report: true
+            } if diagnostic.contains("recovery blocked")
+        ));
+        let second = queue
+            .fulfill_task_sync_intent(
+                &intent,
+                TaskSyncFulfillMode::Reconcile,
+                || panic!("unclassified intent must not reach payload loading"),
+                || panic!("unclassified intent must not load canonical payload"),
+            )
+            .unwrap();
+        assert!(matches!(
+            second,
+            TaskSyncFulfillResult::Blocked {
+                first_report: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            queue.pending_task_sync_intents().unwrap(),
+            vec![intent.clone()]
+        );
+        let records = queue.task_sync_recovery_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].blocked_evidence.contains("legacy-unbound-"));
+
+        queue
+            .quarantine_task_sync_intent(
+                intent.id,
+                "supervisor-session",
+                "reviewed legacy task-sync evidence; hold for manual reconciliation",
+            )
+            .unwrap();
+        assert!(queue.pending_task_sync_intents().unwrap().is_empty());
+        let records = queue.task_sync_recovery_records().unwrap();
+        assert_eq!(records.len(), 1, "quarantine preserves its evidence record");
+        assert!(records[0].resolved_at.is_some());
+        assert_eq!(
+            records[0].resolved_by.as_deref(),
+            Some("supervisor-session")
+        );
+        assert_eq!(records[0].resolution.as_deref(), Some("quarantined"));
+        assert_eq!(
+            records[0].resolution_reason.as_deref(),
+            Some("reviewed legacy task-sync evidence; hold for manual reconciliation")
+        );
+        assert!(
+            records[0]
+                .resolution_evidence
+                .as_deref()
+                .unwrap()
+                .contains("legacy-unbound-")
+        );
     }
 
     #[test]

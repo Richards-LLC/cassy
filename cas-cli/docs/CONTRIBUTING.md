@@ -1136,6 +1136,18 @@ still warn. Intentional duplicates retain the `confirm_warning=true` escape.
 
 ### Assignment on task creation
 
+When `epic`, `target_repo` and `target_branch` are all omitted, task creation
+inherits the caller's active task's epic and exact WorkTarget together. Only
+valid leases on InProgress tasks count; held or expired work does not. Multiple
+eligible tasks must agree on both bindings, or creation refuses and requests an
+explicit binding. The receipt names the source task, epic, repository and branch.
+Any explicit binding keeps the explicit resolver: an alternate epic follows
+that epic's lane, and `epic=""` deliberately creates standalone work. Omitted
+fields are never inherited independently. Parent edges record the caller's
+identity, so the caller's own epic updates and dependency additions do not
+trigger a planning-race warning; legacy anonymous `mcp` edges prove no other
+planner's identity.
+
 In factory mode, `task action=create assignee=<worker>` uses the same worker
 identity normalization and freshness policy as `task action=update assignee=`.
 A refused assignment rejects the entire create before saving a task or queuing

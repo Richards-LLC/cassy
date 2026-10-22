@@ -570,7 +570,7 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    for state in ["missing", "existing", "directory", "malformed", "malformed-grok"] {
+    for state in ["missing", "existing", "directory", "malformed", "malformed-grok", "array-root", "array-servers", "null-root", "null-servers"] {
         let temp = TempDir::new().unwrap();
         if state == "malformed-grok" {
             std::fs::create_dir(temp.path().join(".codex")).unwrap();
@@ -580,6 +580,14 @@ fn test_init_json() {
         }
         let mcp_path = temp.path().join(".mcp.json");
         let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
+        let invalid_content: Option<&[u8]> = match state {
+            "malformed" | "malformed-grok" => Some(b"{\"mcpServers\": {\"other\":"),
+            "array-root" => Some(b"[]"),
+            "array-servers" => Some(b"{\"mcpServers\":[\"x\"]}"),
+            "null-root" => Some(b"null"),
+            "null-servers" => Some(b"{\"mcpServers\":null}"),
+            _ => None,
+        };
         match state {
             "existing" => std::fs::write(
                 &mcp_path,
@@ -587,7 +595,7 @@ fn test_init_json() {
             )
             .unwrap(),
             "directory" => std::fs::create_dir(&mcp_path).unwrap(),
-            "malformed" | "malformed-grok" => std::fs::write(&mcp_path, b"{\"mcpServers\": {\"other\":").unwrap(),
+            _ if invalid_content.is_some() => std::fs::write(&mcp_path, invalid_content.unwrap()).unwrap(),
             _ => {}
         }
 
@@ -597,10 +605,11 @@ fn test_init_json() {
             .args(["init", "--no-integrations", "--json"])
             .output()
             .unwrap();
-        if matches!(state, "directory" | "malformed" | "malformed-grok") {
+        if state == "directory" || invalid_content.is_some() {
             assert!(
-                !output.status.success(),
-                "MCP provisioning failure must fail init"
+                output.status.code() == Some(1),
+                "MCP provisioning failure must exit 1 without panicking ({state}): {}",
+                String::from_utf8_lossy(&output.stderr)
             );
             assert!(
                 output.stdout.is_empty(),
@@ -610,7 +619,7 @@ fn test_init_json() {
             if state == "directory" {
                 assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
             } else {
-                assert_eq!(std::fs::read(&mcp_path).unwrap(), b"{\"mcpServers\": {\"other\":");
+                assert_eq!(std::fs::read(&mcp_path).unwrap(), invalid_content.unwrap());
                 let error = String::from_utf8_lossy(&output.stderr);
                 assert!(error.contains("JSON"), "malformed config needs an explicit parse error: {error}");
             }
@@ -717,6 +726,18 @@ fn test_init_already_initialized() {
         .assert()
         .success()
         .stdout(predicate::str::contains("already initialized"));
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n";
+    std::fs::write(&config_path, custom_config).unwrap();
+    let output = cas_cmd(temp.path()).current_dir(&temp)
+        .args(["init", "--no-integrations"]).write_stdin("").output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(error.contains("stdin closed before a selection"), "{error}");
+    assert!(!error.contains("Initialization is incomplete") && !error.contains("cas init --force"),
+        "a valid pre-existing store must not receive partial-init recovery advice: {error}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config);
 }
 
 /// Regression test for cas-bf06: a reinit of `cas init` (interactive, no
@@ -798,22 +819,31 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
 
 #[test]
 fn test_init_force_reinit() {
-    let temp = TempDir::new().unwrap();
+    for mode in ["json", "yes", "interactive"] {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        cas_cmd(temp.path()).current_dir(&temp)
+            .args(["init", "--yes", "--no-integrations"]).assert().success();
+        let config_path = temp.path().join(".cas/config.toml");
+        let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n[hooks]\ntoken_budget = 1234\n";
+        std::fs::write(&config_path, custom_config).unwrap();
+        let mcp_path = temp.path().join(".mcp.json");
+        std::fs::remove_file(&mcp_path).unwrap();
 
-    // First init
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Force reinit should succeed
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes", "--force"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"));
+        let mut command = cas_cmd(temp.path());
+        command.current_dir(&temp).args(["init", "--force", "--no-integrations"]);
+        match mode {
+            "json" => { command.arg("--json"); }
+            "yes" => { command.arg("--yes"); }
+            _ => { command.write_stdin("y\n"); }
+        }
+        command.assert().success().stdout(predicate::str::contains(
+            if mode == "json" { "initialized" } else { "Cassy initialized" }));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config,
+            "{mode} force retry must preserve the operator's config bytes");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["cas"]["command"], "cas", "{mode} must repair provisioning");
+    }
 }
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the

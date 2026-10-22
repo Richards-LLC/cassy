@@ -468,6 +468,20 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<BuilderSlot> {
     Err(CapacityRefusal(format!("max_concurrent_builders={cap} slots are occupied")).into())
 }
 
+fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
+    std::fs::create_dir_all(root)?;
+    let mut available = 0;
+    for index in 0..cap {
+        let slot = lock_file(&root.join(format!("slot-{index}.lock")))?;
+        match slot.try_lock_exclusive() {
+            Ok(()) => available += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(available)
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
     // cas-39f3: the runner only reads git state. `git status` otherwise
     // rewrites a stat-dirty index under the worker's `index.lock`, and a git
@@ -1479,14 +1493,26 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     }
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
-    if let Some(cause) = crate::factory_capacity_wait::priority_refusal(
+    let available_slots = available_slot_count(&slots, config.max_concurrent_builders)?;
+    match crate::factory_capacity_wait::priority_refusal(
         &cas_root,
         &repo,
         chrono::Utc::now(),
-    )? {
-        let refusal = recorded_refusal(&cas_root, &repo, &cause);
-        drop(admission);
-        return Err(refusal);
+        available_slots,
+    ) {
+        Ok(Some(cause)) => {
+            let refusal = recorded_refusal(&cas_root, &repo, &cause);
+            drop(admission);
+            return Err(refusal);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                checkout = %repo.display(),
+                "capacity priority lookup failed; continuing build admission"
+            );
+        }
     }
     let slot = match acquire_slot(&slots, config.max_concurrent_builders) {
         Ok(slot) => slot,

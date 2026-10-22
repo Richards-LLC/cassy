@@ -115,6 +115,9 @@ fn entries(root: &Path) -> Result<Vec<(PathBuf, CapacityWait)>> {
 }
 
 fn current(root: &Path, wait: &CapacityWait, now: DateTime<Utc>) -> Result<bool> {
+    if now > wait.next_retry + Duration::seconds(RETRY_SECONDS) {
+        return Ok(false);
+    }
     let agents = open_agent_store(root)?;
     let Ok(worker) = agents.get(&wait.worker_id) else {
         return Ok(false);
@@ -217,6 +220,7 @@ pub(crate) fn record_refusal(
     let _lock = lock(root)?;
     if let Some(previous) = read(&path(root, &wait.worker_id))?
         && same_identity(&previous, &wait)
+        && current(root, &previous, now)?
     {
         wait = previous;
     }
@@ -234,6 +238,7 @@ pub(crate) fn priority_refusal(
     root: &Path,
     repo: &Path,
     now: DateTime<Utc>,
+    available_slots: usize,
 ) -> Result<Option<String>> {
     let Some(mut requester) = binding(root, repo, now)? else {
         return Ok(None);
@@ -241,6 +246,7 @@ pub(crate) fn priority_refusal(
     let _lock = lock(root)?;
     if let Some(previous) = read(&path(root, &requester.worker_id))?
         && same_identity(&previous, &requester)
+        && current(root, &previous, now)?
     {
         requester = previous;
     }
@@ -251,6 +257,7 @@ pub(crate) fn priority_refusal(
         now,
     );
     let mut first_ahead: Option<(i32, DateTime<Utc>, String)> = None;
+    let mut ahead_count = 0;
     for (_, wait) in entries(root)? {
         if wait.worker_id == requester.worker_id || !current(root, &wait, now)? {
             continue;
@@ -271,6 +278,7 @@ pub(crate) fn priority_refusal(
         {
             continue;
         }
+        ahead_count += 1;
         let position = (priority, wait.since.clone(), wait.worker_name);
         if first_ahead.as_ref().is_none_or(|first| {
             compare_position(
@@ -284,6 +292,9 @@ pub(crate) fn priority_refusal(
         }) {
             first_ahead = Some(position);
         }
+    }
+    if available_slots == 0 || ahead_count < available_slots {
+        return Ok(None);
     }
     Ok(first_ahead
         .map(|(priority, _, worker)| format!("queued behind priority=P{priority} worker={worker}")))

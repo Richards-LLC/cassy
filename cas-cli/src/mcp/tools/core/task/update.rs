@@ -631,6 +631,14 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if req.priority.is_some() && task.status == TaskStatus::InProgress {
+            self.resolve_live_supervisor_authority().map_err(|_| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "TASK PRIORITY UPDATE REJECTED: changing priority on an in-progress task requires a live registered supervisor.",
+                )
+            })?;
+        }
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.

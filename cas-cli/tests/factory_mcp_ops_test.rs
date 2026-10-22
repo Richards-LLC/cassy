@@ -10381,7 +10381,9 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
     env.task_store().add(&task).unwrap();
     let base = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
     for (message, anchor, prior, after, allowed) in [
+        ("", None, "", "fresh-transferred-dirty", false),
         ("", None, "", "fresh-dirty", false),
+        ("", None, "", "fresh-sync-dirty", false),
         ("fix(cas-5eb1a): own work", None, "", "", true),
         ("unnamed delivery", Some("current"), "", "", true),
         ("unnamed delivery", Some("historical"), "", "", true),
@@ -10454,7 +10456,33 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             }))
             .unwrap()
         };
-        if after == "fresh-dirty" {
+        if after.starts_with("fresh-") {
+            let project = env.cas_root.parent().unwrap();
+            if after == "fresh-transferred-dirty" {
+                // cas-32fa: transferred from another worker, whose delivery
+                // anchor is not on this worker's branch.
+                git_stdout(project, &["checkout", "-B", "transferred-side", &base]);
+                git_stdout(
+                    project,
+                    &["commit", "--allow-empty", "-m", "fix(cas-5eb1a): previous worker's delivery"],
+                );
+                let mut transferred = env.task_store().get(&task.id).unwrap();
+                transferred.deliverables.factory_branch_anchor =
+                    Some(git_stdout(project, &["rev-parse", "HEAD"]));
+                env.task_store().update(&transferred).unwrap();
+                git_stdout(project, &["checkout", "main"]);
+            }
+            if after == "fresh-sync-dirty" {
+                // cas-32fa: ahead of the target only by a target-sync merge.
+                std::fs::write(project.join("target.txt"), "new target work\n").unwrap();
+                git_stdout(project, &["add", "target.txt"]);
+                git_stdout(project, &["commit", "-m", "target advances"]);
+                git_stdout(
+                    &worker_path,
+                    &["merge", "--no-ff", "main", "-m", "Merge branch 'main' from target"],
+                );
+            }
+            let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
             std::fs::write(worker_path.join("README"), "prior task left edits\n").unwrap();
             git_stdout(&worker_path, &["add", "README"]);
             let status = git_stdout(
@@ -10466,7 +10494,12 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 .task(Parameters(start()))
                 .await
                 .expect_err("a fresh task cannot inherit prior uncommitted tracked edits");
-            assert!(error.message.contains("uncommitted changes"), "{error}");
+            assert!(error.message.contains("uncommitted changes"), "{after}: {error}");
+            // pin: a fresh start is told to stash, not commit, the earlier edits (cas-32fa).
+            assert!(
+                error.message.contains("git stash push") && !error.message.contains("Commit or stash"),
+                "{after}: {error}"
+            );
             assert_eq!(
                 env.task_store().get(&task.id).unwrap().status,
                 TaskStatus::Open
@@ -10477,7 +10510,7 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                     .unwrap()
                     .is_empty()
             );
-            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), base);
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
             assert_eq!(
                 git_stdout(
                     &worker_path,

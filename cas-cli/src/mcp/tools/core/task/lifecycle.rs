@@ -2514,6 +2514,7 @@ impl CasCore {
         let mut peer_notes = elsewhere_note;
         peer_notes.push_str(&split_note);
         let mut cloud_claimed = false;
+        let mut peer_claim_fence = None;
         // cas-0078: another agent of this database holds the cloud claim. It
         // moves here only if this start wins the local lease below.
         let mut cloud_local_holder: Option<String> = None;
@@ -2525,7 +2526,7 @@ impl CasCore {
         if let Some(claims) = peer_claims.as_ref() {
             use crate::cloud::peer_claims::{Acquire, ClaimKind};
             let kind = task_claim_kind;
-            let answer = {
+            let (answer, fence) = {
                 let (claims, id, agent, name, local) = (
                     claims.clone(),
                     req.id.clone(),
@@ -2541,8 +2542,9 @@ impl CasCore {
                         })
                     })
                     .await
-                    .unwrap_or_else(Acquire::Unavailable)
+                    .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None))
             };
+            peer_claim_fence = fence;
             match answer {
                 Acquire::Claimed => cloud_claimed = true,
                 Acquire::LocalHolder(holder) => cloud_local_holder = Some(holder),
@@ -2640,6 +2642,7 @@ impl CasCore {
                     format!("Failed to claim task before start: {error}"),
                 )),
             };
+        drop(peer_claim_fence);
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes

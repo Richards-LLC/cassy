@@ -427,20 +427,20 @@ impl PeerClaims {
         &self, cas_root: &Path, task_id: &str, kind: ClaimKind,
         agent_id: &str, agent_name: &str, duration_secs: u32,
         is_local: &dyn Fn(&str) -> bool,
-    ) -> Acquire {
+    ) -> (Acquire, Option<std::fs::File>) {
         let _fence = match lock_task_claim_release(cas_root, task_id) {
             Ok(fence) => fence,
-            Err(error) => return Acquire::Unavailable(format!("task claim release fence: {error}")),
+            Err(error) => return (Acquire::Unavailable(format!("task claim release fence: {error}")), None),
         };
         // The async caller may already have timed out while this blocking
         // work waited for an in-flight release. Do not cancel newer work.
         if let Err(error) = self.remaining() {
-            return Acquire::Unavailable(error.to_string());
+            return (Acquire::Unavailable(error.to_string()), None);
         }
         if update_pending_claim_releases(cas_root, |pending| pending.remove(task_id)).is_none() {
-            return Acquire::Unavailable("pending claim releases could not be cancelled safely".into());
+            return (Acquire::Unavailable("pending claim releases could not be cancelled safely".into()), None);
         }
-        self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local)
+        (self.acquire(task_id, kind, agent_id, agent_name, duration_secs, is_local), None)
     }
 
     /// The holder identity recorded in `id`'s claim reason (cas-8dbe), read
@@ -1143,10 +1143,19 @@ pub fn release_task_claim(cas_root: &Path, task_id: &str) {
     let Some(claims) = PeerClaims::for_project(cas_root) else {
         return;
     };
+    release_task_claim_with(&claims, cas_root, task_id, || {});
+}
+
+fn release_task_claim_with(
+    claims: &PeerClaims, cas_root: &Path, task_id: &str, after_holder_read: impl Fn(),
+) {
     let Ok(agents) = crate::store::open_agent_store(cas_root) else {
         return;
     };
-    let is_local = |id: &str| agents.get(id).is_ok();
+    let is_local = |id: &str| {
+        after_holder_read();
+        agents.get(id).is_ok()
+    };
     if let Err(error) = claims.release_local(task_id, &is_local) {
         tracing::debug!(task = %task_id, %error, "cloud claim release failed");
     }
@@ -1172,12 +1181,19 @@ fn read_pending_claim_releases(cas_root: &Path) -> std::collections::BTreeMap<St
 /// these lock inodes: unlinking a held lock would allow a second lock owner.
 /// The shared records lock below never spans a network call.
 fn lock_task_claim_release(cas_root: &Path, task_id: &str) -> std::io::Result<std::fs::File> {
+    lock_task_claim_release_with(cas_root, task_id, |_| {})
+}
+
+fn lock_task_claim_release_with(
+    cas_root: &Path, task_id: &str, mut after_open: impl FnMut(&std::fs::File),
+) -> std::io::Result<std::fs::File> {
     use fs2::FileExt;
     let directory = cas_root.join("claim-release-locks");
     std::fs::create_dir_all(&directory)?;
     let key = format!("{:x}", Sha256::digest(task_id.as_bytes()));
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
         .open(directory.join(format!("{key}.lock")))?;
+    after_open(&file);
     file.lock_exclusive()?;
     Ok(file)
 }
@@ -1539,6 +1555,117 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn synchronous_release_and_restart_preserve_fresh_claim_cas_923e() {
+            let (_server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                use fs2::FileExt;
+                let (entered, read_entered) = std::sync::mpsc::channel();
+                let (resume, proceed) = std::sync::mpsc::channel();
+                let release = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || release_task_claim_with(&claims, &root, TASK, || {
+                        entered.send(()).unwrap();
+                        proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }))
+                };
+                // Stop the actual synchronous path after reading the old
+                // Cloud holder, before its owner-scoped release POST.
+                read_entered.recv_timeout(Duration::from_secs(10)).unwrap();
+                let directory = dir.path().join("claim-release-locks");
+                std::fs::create_dir_all(&directory).unwrap();
+                let path = directory.join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
+                let probe = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+                    .open(path).unwrap();
+                let fenced = probe.try_lock_exclusive().is_err();
+                drop(probe);
+                let restart = {
+                    let (claims, root) = (claims.clone(), dir.path().to_path_buf());
+                    std::thread::spawn(move || {
+                        let (answer, fence) = claims.acquire_for_start(
+                            &root, TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                        );
+                        assert!(matches!(answer, Acquire::Claimed));
+                        assert!(matches!(crate::store::open_agent_store(&root).unwrap()
+                            .try_claim(TASK, AGENT, 600, Some("restart")), Ok(ClaimResult::Success(_))));
+                        drop(fence);
+                    })
+                };
+                // Select the forced ordering from a nonblocking lock probe,
+                // never from elapsed time or a thread scheduling assumption.
+                if fenced {
+                    resume.send(()).unwrap();
+                    release.join().unwrap();
+                    restart.join().unwrap();
+                } else {
+                    restart.join().unwrap();
+                    resume.send(()).unwrap();
+                    release.join().unwrap();
+                }
+                assert_eq!(held.lock().unwrap().as_ref().map(|lock| lock["id"].clone()),
+                    Some(serde_json::json!("fresh-lock")),
+                    "the synchronous release removed the restart's fresh Cloud claim");
+                assert!(fenced, "the synchronous path must retain the per-task fence through GET and POST");
+            }).await.unwrap();
+
+            // The opposite order: a delayed old release must observe the
+            // new local lease, published before the start fence is dropped.
+            let (server, dir, claims, held) = fixture(false).await;
+            tokio::task::spawn_blocking(move || {
+                let (answer, fence) = claims.acquire_for_start(
+                    dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
+                );
+                assert!(matches!(answer, Acquire::Claimed));
+                assert!(fence.is_some(), "retain the start fence until the local lease is published");
+                crate::store::open_agent_store(dir.path()).unwrap()
+                    .try_claim(TASK, AGENT, 600, Some("restart")).unwrap();
+                drop(fence);
+                release_task_claim_with(&claims, dir.path(), TASK, || {});
+                assert_eq!(held.lock().unwrap().as_ref().unwrap()["id"], "fresh-lock");
+            }).await.unwrap();
+            assert!(server.received_requests().await.unwrap().iter()
+                .all(|request| !request.url.path().ends_with("/release")));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn settled_claim_fences_are_removed_without_splitting_waiters_cas_923e() {
+            use std::os::unix::fs::MetadataExt;
+            let dir = tempfile::tempdir().unwrap();
+            let owner = lock_task_claim_release(dir.path(), TASK).unwrap();
+            let path = dir.path().join("claim-release-locks")
+                .join(format!("{:x}.lock", Sha256::digest(TASK.as_bytes())));
+            let (opened, saw_open) = std::sync::mpsc::channel();
+            let (resume, proceed) = std::sync::mpsc::channel();
+            let root = dir.path().to_path_buf();
+            let waiter = std::thread::spawn(move || {
+                let mut first = true;
+                lock_task_claim_release_with(&root, TASK, |_| {
+                    if first {
+                        first = false;
+                        opened.send(()).unwrap();
+                        proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                }).unwrap()
+            });
+            saw_open.recv_timeout(Duration::from_secs(10)).unwrap();
+            drop(owner);
+            let removed = !path.exists();
+            // A new opener creates another inode while the waiter still has
+            // the old inode open. That waiter must reopen before proceeding.
+            let replacement = lock_task_claim_release(dir.path(), TASK).unwrap();
+            drop(replacement);
+            resume.send(()).unwrap();
+            let waiter = waiter.join().unwrap();
+            let current = std::fs::metadata(&path).unwrap();
+            assert!(removed, "settlement must remove the task-specific lock file");
+            let held = waiter.metadata().unwrap();
+            assert_eq!((held.dev(), held.ino()), (current.dev(), current.ino()),
+                "a waiter must lock the current path, not an unlinked inode");
+            drop(waiter);
+            assert!(!path.exists(), "the final owner must remove its lock file too");
+        }
+
+        #[tokio::test]
         async fn restarting_between_lease_check_and_cloud_read_keeps_fresh_claim_cas_af26() {
             let (server, dir, claims, held) = fixture(false).await;
             tokio::task::spawn_blocking(move || {
@@ -1548,7 +1675,7 @@ mod tests {
                 let expired = claims.clone().with_budget(PeerBudget::new(Duration::ZERO));
                 assert!(matches!(expired.acquire_for_start(
                     dir.path(), TASK, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
-                ), Acquire::Unavailable(_)));
+                ).0, Acquire::Unavailable(_)));
                 assert_eq!(read_pending_claim_releases(dir.path()), pending,
                     "a timed-out start must not cancel a pending release");
                 release_pending_task_claims_with(&claims, dir.path(), |task| {
@@ -1556,7 +1683,7 @@ mod tests {
                     assert!(crate::store::open_agent_store(dir.path()).unwrap().get_lease(task).unwrap().is_none());
                     assert!(matches!(claims.acquire_for_start(
                         dir.path(), task, ClaimKind::Task, AGENT, "worker", 600, &|id| id == AGENT,
-                    ), Acquire::Claimed));
+                    ).0, Acquire::Claimed));
                     // Deliberately leave the local lease absent until retry ends.
                 });
                 assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT),
@@ -1614,7 +1741,7 @@ mod tests {
                 };
                 resume.send(()).unwrap();
                 retry.join().unwrap();
-                assert!(matches!(restart.join().unwrap(), Acquire::Claimed));
+                assert!(matches!(restart.join().unwrap().0, Acquire::Claimed));
                 assert!(fenced, "a retry must retain the fence across Cloud reads");
                 assert_eq!(claims.holder(TASK).unwrap().as_deref(), Some(AGENT));
                 assert!(read_pending_claim_releases(dir.path()).is_empty());

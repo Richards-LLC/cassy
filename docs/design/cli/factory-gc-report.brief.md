@@ -3,7 +3,7 @@
 | Field | Contract |
 | --- | --- |
 | First two lines | State the number of inventory categories to review, then direct the reader to `cas factory gc cleanup --help` to review cleanup tiers. Default cleanup still removes stale metadata; cache/process/journey deletion has separate preview controls. A completed inventory is not a promise that every item is reclaimable. |
-| Scannable | Show project metrics, one category/count row (excluding informational notes), a short context and up to three sample items per category; preserve unavailable and review-only findings. |
+| Scannable | Show project metrics, one category/count row (excluding informational notes), a short context and up to three sample items per category; preserve unavailable and review-only findings. Durable artifacts get a separate counts row for closed-task candidates, strays and review-only mode, so a long root cannot hide these values. |
 | Readable | Wrap prose below 80 columns with hanging indentation, use ASCII punctuation and escaped dynamic values, and shorten oversized tokens without splitting them. |
 | Machine output | `--json` returns one object with `schema_version`, bounded `report_text`, complete `full_report`, and `machine_status` containing typed status objects, including `TARGET_CACHE_STATUS_JSON`; no banner or ANSI escapes surround it. MCP `json=true` returns the same text document. |
 | Omitted | Raw status JSON and complete long values are absent from the default summary; `--full` or MCP `full=true` returns the original report. Existing MCP `limit`/`offset` pages retain original-line offsets and byte caps. |

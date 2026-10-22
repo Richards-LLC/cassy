@@ -611,7 +611,7 @@ impl CasCore {
                             let visible_branch =
                                 crate::worktree::GitOperations::visible_git_label(&branch);
                             warnings.push(format!(
-                                "⚠️ SUPERVISOR OVERRIDE: {} accepted assignment to worker '{}' despite {behind_count} commits behind {visible_branch} (threshold: {}). The worktree was not changed; `task start` still checks dirty or unpushed work and can refuse to start. Reason: {reason}",
+                                "⚠️ SUPERVISOR OVERRIDE: {} accepted assignment to worker '{}' despite {behind_count} commits behind {visible_branch} (threshold: {}). The worktree was not changed. Inspect dirty or unpushed work before starting. For an Open task with a declared work target, `task start` runs reuse checks only on another owned factory branch. Other starts do not provide that check. Reason: {reason}",
                                 supervisor.name,
                                 worker.name,
                                 factory_config.stale_threshold_commits,

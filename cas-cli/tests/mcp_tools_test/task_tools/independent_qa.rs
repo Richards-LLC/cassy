@@ -575,8 +575,9 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
 
 /// cas-e371 (GH #1023 finding 1): a narrow, correct delivery on a page with
 /// an unrelated older defect passes independent QA. The defect is recorded
-/// and filed as a follow-up linked to the delivery; it cannot carry a
-/// rejection on its own.
+/// and filed as a linked follow-up when it falls outside the delivery's stated
+/// purpose, acceptance criteria, demo statement, or journey invariants the diff
+/// adds or edits.
 #[tokio::test]
 async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -694,9 +695,11 @@ async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
             "ledger_path": ledger.display().to_string(),
         }))))
         .await
-        .expect_err("a pre-existing defect never rejects a delivery on its own");
+        .expect_err("rejecting only for an unrelated pre-existing defect is refused");
     assert!(
-        refused.message.contains("never rejects a delivery"),
+        refused
+            .message
+            .contains("journey invariant the diff adds or edits"),
         "{}",
         refused.message
     );

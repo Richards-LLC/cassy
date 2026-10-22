@@ -238,7 +238,7 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             let prep = prepare_existing_task(&peer, &peer_root, "cas-peer-child")
                 .expect("published remedy must make peer spawn ready");
             assert_eq!(
-                git(&prep.worktree_info.unwrap().path, &["rev-parse", "HEAD"]),
+                git(&prep.worktree_info.unwrap().worktree_path, &["rev-parse", "HEAD"]),
                 tip
             );
             assert_eq!(git(&f.repo, &["rev-parse", branch]), tip);

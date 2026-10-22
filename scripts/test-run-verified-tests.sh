@@ -44,12 +44,16 @@ expect() {
     fi
 }
 
-stub="$(make_stub green-nextest 0 <<'EOF'
-    Starting 2 tests across 1 binary (0 skipped)
-------------
-     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped
+stub="${tmpdir}/green-nextest"
+cat >"${stub}" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+echo '    Starting 2 tests across 1 binary (0 skipped)'
+sleep 0.4
+echo '------------'
+echo '     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped'
 EOF
-)"
+chmod +x "${stub}"
 expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
     env CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
     "${guard}" nextest run -p cas --lib module

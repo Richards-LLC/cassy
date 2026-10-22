@@ -5191,7 +5191,8 @@ mod tests {
         authorize_explicit_task_for_system_b_worker, ci_override_note,
         classify_delivery_merge_preflight, declared_system_b_merge_target,
         derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
-        describe_target_reconcile, is_cas_pattern_worktree, is_factory_style_worktree,
+        describe_target_reconcile, delivery_observation_failure_message,
+        is_cas_pattern_worktree, is_factory_style_worktree,
         is_git_worktree, lookup_branch_ci_with, path_is_under, protected_default_branch_pr_error,
         resolve_worktree_merge_cleanup, target_diverged_error, worktree_merge_mcp_error,
     };
@@ -5207,6 +5208,25 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    #[test]
+    fn delivery_observation_failure_names_idempotent_merge_recovery() {
+        let message = delivery_observation_failure_message(
+            "factory/worker",
+            "cas-8045",
+            "database is locked",
+        );
+
+        assert!(message.contains("database is locked"), "{message}");
+        assert!(
+            message.contains("worktree_merge id=factory/worker task_id=cas-8045"),
+            "the recovery action must identify the exact delivery: {message}"
+        );
+        assert!(
+            message.contains("idempotent") && message.contains("verification-dispatch"),
+            "the retry contract must say it resumes safely through dispatch: {message}"
+        );
     }
 
     #[cfg(unix)]

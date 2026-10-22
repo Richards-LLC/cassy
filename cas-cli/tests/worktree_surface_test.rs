@@ -2306,7 +2306,12 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         task.assignee = Some("peer-worker".into());
         task.status = TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(anchor.clone());
-        task.deliverables.parked_branch = Some(branch.into());
+        // A missing recorded ref and an unrecorded retry both need discovery.
+        task.deliverables.parked_branch = match branch {
+            "factory/peer-worker-cas-c28b-r2" => None,
+            "factory/peer-worker-cas-c28b-fix" => Some("factory/peer-worker-cas-c28b-missing".into()),
+            _ => Some(branch.into()),
+        };
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:peer-delivery".into(),
             target_branch: "epic/peer".into(),
@@ -2331,6 +2336,22 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+        let sibling = "factory/peer-worker-cas-c28b6df4a2b653af-resume";
+        if branch == "factory/peer-worker-cas-c28b" || branch.ends_with("-r2") {
+            run_git(&["push", "origin", &format!("HEAD:refs/heads/{sibling}")], &peer);
+            if task.deliverables.parked_branch.is_none() {
+                let refused = svc.coordination(Parameters(request.clone())).await
+                    .expect_err("two fallback branches are ambiguous even at the same SHA");
+                let message = refused.message.as_ref();
+                assert!(message.contains("AMBIGUOUS DELIVERY SOURCE"), "{message}");
+                let candidates = format!("{sibling}, {branch}");
+                assert!(message.contains(&candidates), "sorted candidates: {message}");
+                assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
+                assert!(tasks.get(&task.id).unwrap().deliverables.parked_branch.is_none());
+                run_git(&["push", "origin", &format!(":refs/heads/{sibling}")], &peer);
+            }
+            // With a recorded branch, the same sibling stays present through merge.
+        }
         if !exact_sha {
             task.assignee = Some("other-worker".into());
             tasks.update(&task).unwrap();

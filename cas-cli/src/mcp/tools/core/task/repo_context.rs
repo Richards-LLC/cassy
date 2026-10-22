@@ -1616,7 +1616,19 @@ exec "$CAS_TEST_REAL_GIT" "$@"
 
     #[test]
     fn declared_repo_b_resolves_from_repo_a_spawn_context() {
-        let mut guard = TestEnvGuard::temp_home();
+        #[cfg(unix)]
+        if let Some(fixtures) = std::env::var_os("CAS_TEST_CALLER_PROBE_FIXTURE") {
+            let fixtures = PathBuf::from(fixtures);
+            let target = WorkTarget {
+                repo_selector: "remote:github.com/org/work-b".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let context = resolve_repo_context(&fixtures.join("spawn-a/.cas"), &target).unwrap();
+            assert_eq!(context.repo_root, fixtures.join("work-b").canonicalize().unwrap());
+            assert_eq!(context.repo_selector, target.repo_selector);
+            return;
+        }
+        let _guard = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
         let fixtures =
             tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
@@ -1658,13 +1670,28 @@ exec "$CAS_TEST_REAL_GIT" "$@"
             );
             let mut paths = vec![bin];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-            guard.set("PATH", std::env::join_paths(paths).unwrap());
-            guard.set("CAS_TEST_REAL_GIT", actual_git);
-            guard.set("CAS_TEST_CALLER_PROBES", &calls);
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp::tools::core::task::repo_context::tests::declared_repo_b_resolves_from_repo_a_spawn_context",
+                    "--nocapture",
+                ])
+                .env("CAS_TEST_CALLER_PROBE_FIXTURE", fixtures.path())
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CAS_TEST_REAL_GIT", actual_git)
+                .env("CAS_TEST_CALLER_PROBES", &calls)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
-        let context = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
-        assert_eq!(context.repo_root, repo_b.canonicalize().unwrap());
-        assert_eq!(context.repo_selector, "remote:github.com/org/work-b");
+        #[cfg(not(unix))]
+        {
+            let context = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
+            assert_eq!(context.repo_root, repo_b.canonicalize().unwrap());
+            assert_eq!(context.repo_selector, target.repo_selector);
+        }
+        #[cfg(unix)]
+        let _ = target;
         #[cfg(unix)]
         {
             let caller = repo_a.canonicalize().unwrap();

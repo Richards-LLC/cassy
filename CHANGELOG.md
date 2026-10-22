@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Declared QA safety** — Carry the journey registry's fixture-only, staging or production-read-back policy into QA impact and briefs; preflight refuses declared protected credentials or forbidden configured origins.
+
+- **Shared ownership hints** — Report owner groups referenced by only one journey as curation debt, naming the sole journey without failing registry validation.
+
+### Changed
+
+- **Failures inside the promise** — Align generated QA instructions and refusal guidance so failures within the stated purpose, acceptance criteria, demo or edited journey invariant remain in scope even when base shares them; rate invariant-evading tests at least Normal in the review guidance.
+
+- **Verification rejection policy** — Update shipped verification instructions to reject high/critical findings and reproduced silent failures of the delivered behavior instead of approving them as warnings.
+
+- **Cleanup wording** — Clarify that GC dry-run previews destructive cleanup while baseline bookkeeping still runs, and separate WIP notices from the compact GC summary.
+
 ### Fixed
 
 - **Artifact uploads** — Honor Cloud's signed upload headers, including Content-Type, and label uncommitted CLI/MCP publishes local-only rather than delivered.
@@ -35,8 +49,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Readable diagnosis** — Fit the missing-backend footer from factory doctor within an 80-column terminal.
 
-- **Declared QA safety** — Carry the journey registry's fixture-only, staging or production-read-back policy into QA impact and briefs; preflight refuses declared protected credentials or forbidden configured origins.
-
 - **Plan coverage first** — Treat explicitly planned specs and missing traffic shares without a traffic snapshot as curation debt, while keeping missing shipped specs and measured shares as validation problems.
 
 - **Unwritten tests stay clear** — Mark planned specs as unwritten in impact evidence, list them in journey status, and warn when a planned marker remains after the spec is tracked.
@@ -44,12 +56,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Consistent journey status** — Separate working-tree validation from measured integration upkeep in qa journeys --status; the headline reports problems/debt rather than DRIFT or UNKNOWN.
 
 - **CODEMAP freshness** — Use the shared CODEMAP freshness calculation in QA impact, agreeing with codemap status and journey status for files added in the map's own commit.
-
-- **Shared ownership hints** — Report owner groups referenced by only one journey as curation debt, naming the sole journey without failing registry validation.
-
-- **Failures inside the promise** — Align generated QA instructions and refusal guidance so failures within the stated purpose, acceptance criteria, demo or edited journey invariant remain in scope even when base shares them; rate invariant-evading tests at least Normal in the review guidance.
-
-- **Verification rejection policy** — Update shipped verification instructions to reject high/critical findings and reproduced silent failures of the delivered behavior instead of approving them as warnings.
 
 - **Find the right repository** — Resolve the caller's matching repository before a host-wide scan, reuse that probe, retain healthy matches when scans are incomplete, and distinguish unavailable scans from definite mismatches.
 
@@ -73,11 +79,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Observation errors** — Return an internal error for busy rule-observation writes rather than invalid parameters, and log candidate-read failures instead of silently hiding them.
 
-- **Cleanup wording** — Clarify that GC dry-run previews destructive cleanup while baseline bookkeeping still runs, and separate WIP notices from the compact GC summary.
-
 - **Durable review ownership** — Sync the containing directory after publishing a review checkout's owner file, making the rename durable before reporting success.
 
 - **Nested check isolation** — Clear inherited host test runners for capped checks and for test commands in managed review checkouts without their own lease runner.
+
+- **Progress lines from other projects** — Recognize complete downstream progress sentences such as Installing dependencies... in both terminal-QA copies, using the documented capitalized -ing verb and complete-noun pattern while retaining real truncation failures.
+
+- **Mounted sibling tests** — Resolve differently named sibling test parents through explicit Rust AST mounts, caching directory and parent parses within the changed-source batch instead of relying only on foo_tests.rs to foo.rs naming.
 
 - **Prebuild lookup fairness** — Bound per-run artifact retries, continue checking other completed runs, retry failed queries until the overall deadline, and label exit 137 as a timeout.
 

@@ -482,14 +482,20 @@ fn g8_ledger_reads_verdict_column_owes_blocked_rows_and_counts_independent_runs(
         blocked.contains("AUDIT (cell instagram url) is BLOCKED_EXTERNAL{provider=rapidapi, error=502 failed_fetch}"),
         "{blocked}"
     );
-    let observed = refusal(grammar(&[
-        "| AUDIT | url | audited | FAIL: 502 | partial | real-build | - | - |",
-    ]))
-    .expect("a verdict word outside the verdict column is not a verdict");
-    assert!(
-        observed.contains("no row for live journeys AUDIT."),
-        "{observed}"
-    );
+    // A verdict word outside the verdict column is not a verdict: an observed
+    // cell, a data cell starting with "Verdict" (cas-572b: it must not restart
+    // the header), or a column merely starting with a verdict name.
+    for ledger in [
+        grammar(&["| AUDIT | url | audited | FAIL: 502 | partial | real-build | - | - |"]),
+        "| ID | Observed | Verdict |\n| --- | --- | --- |\n| SEND | Verdict banner shown | PASS |\n| AUDIT | FAIL: 502 | partial |\n".to_string(),
+        "| ID | Verdict | Status page | Result before run | Run id |\n| --- | --- | --- | --- | --- |\n| AUDIT | pending | PASS | PASS | FAIL |\n| SEND | PASS | - | - | - |\n".to_string(),
+    ] {
+        let observed = refusal(ledger.clone()).expect("no verdict in a verdict column");
+        assert!(
+            observed.contains("no row for live journeys AUDIT."),
+            "{ledger}\n{observed}"
+        );
+    }
     let run = |id: &str| {
         format!(
             "| AUDIT | run | audited | post_audit_v2_runs.id={id} | PASS | real-build | - | - |"

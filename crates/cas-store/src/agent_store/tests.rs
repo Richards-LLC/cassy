@@ -1,4 +1,4 @@
-use crate::AgentStore;
+use crate::{AgentStore, SqliteTaskStore, TaskStore};
 use crate::agent_store::SqliteAgentStore;
 use crate::{DeliveryStage, PromptQueueStore, SqlitePromptQueueStore};
 use cas_types::{Agent, AgentRole, AgentStatus, AgentType, ClaimResult};
@@ -428,10 +428,16 @@ fn test_lease_claim_and_release() {
 
 #[test]
 fn test_lease_renewal() {
-    let (_temp, store) = create_test_store();
+    let (temp, store) = create_test_store();
 
     let agent = Agent::new("agent-renew".to_string(), "Renew Test".to_string());
     store.register(&agent).unwrap();
+    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+    tasks.init().unwrap();
+    let mut task = cas_types::Task::new("task-renew".into(), "Running task".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some("agent-renew".into());
+    tasks.add(&task).unwrap();
 
     store
         .try_claim("task-renew", "agent-renew", 60, None)
@@ -444,6 +450,62 @@ fn test_lease_renewal() {
 
     assert!(after.expires_at > before.expires_at);
     assert_eq!(after.renewal_count, 1);
+
+    // cas-eb7ff: the registry accepts canonical ids and legacy names, but
+    // renewal belongs only to the currently assigned, running task.
+    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+    let peer = Agent::new("peer-id".into(), "peer-name".into());
+    store.register(&peer).unwrap();
+    for role in [
+        AgentRole::Standard,
+        AgentRole::Worker,
+        AgentRole::Supervisor,
+    ] {
+        let mut owner = agent.clone();
+        owner.role = role;
+        store.update(&owner).unwrap();
+        for assignee in [
+            Some("agent-renew"),
+            Some("  AGENT-RENEW  "),
+            Some("  RENEW TEST  "),
+            Some("peer-id"),
+            Some("peer-name"),
+            None,
+        ] {
+            for status in [
+                cas_types::TaskStatus::Open,
+                cas_types::TaskStatus::InProgress,
+                cas_types::TaskStatus::Blocked,
+                cas_types::TaskStatus::Closed,
+                cas_types::TaskStatus::AwaitingMerge,
+            ] {
+                let mut task = tasks.get("task-renew").unwrap();
+                task.assignee = assignee.map(str::to_string);
+                task.status = status;
+                tasks.update(&task).unwrap();
+                let eligible = status == cas_types::TaskStatus::InProgress
+                    && assignee.is_some_and(|a| {
+                        a.trim().eq_ignore_ascii_case(&agent.id)
+                            || a.trim().eq_ignore_ascii_case(&agent.name)
+                    });
+                let before = store.get_lease(&task.id).unwrap().unwrap();
+                let renewed = store.renew_lease(&task.id, &agent.id, 120);
+                assert_eq!(
+                    renewed.is_ok(),
+                    eligible,
+                    "{role:?}/{assignee:?}/{status:?}"
+                );
+                store.heartbeat(&agent.id).unwrap();
+                let after = store.get_lease(&task.id).unwrap().unwrap();
+                assert_eq!(
+                    after.renewal_count - before.renewal_count,
+                    if eligible { 2 } else { 0 },
+                    "{role:?}/{assignee:?}/{status:?}"
+                );
+                assert_eq!(after.epoch, before.epoch);
+            }
+        }
+    }
 }
 
 /// cas-85d9: `heartbeat` must renew ALL of an agent's active task leases,
@@ -452,10 +514,19 @@ fn test_lease_renewal() {
 /// `renew_lease` had zero production call sites for task leases at all.
 #[test]
 fn test_heartbeat_renews_task_lease_past_original_duration() {
-    let (_temp, store) = create_test_store();
+    let (temp, store) = create_test_store();
 
-    let agent = Agent::new("agent-hb-renew".to_string(), "Heartbeat Renew Test".to_string());
+    let agent = Agent::new(
+        "agent-hb-renew".to_string(),
+        "Heartbeat Renew Test".to_string(),
+    );
     store.register(&agent).unwrap();
+    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+    tasks.init().unwrap();
+    let mut task = cas_types::Task::new("task-hb-renew".into(), "Running task".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some("agent-hb-renew".into());
+    tasks.add(&task).unwrap();
 
     // Claim with a very short duration — simulates a task claimed near (or
     // past) the default ~30min window that's about to run out.
@@ -759,11 +830,17 @@ fn test_agent_get_handles_legacy_text_active_tasks() {
 
 #[test]
 fn test_lease_history_audit_log() {
-    let (_temp, store) = create_test_store();
+    let (temp, store) = create_test_store();
 
     // Register agent
     let agent = Agent::new("agent-history".to_string(), "History Test".to_string());
     store.register(&agent).unwrap();
+    let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+    tasks.init().unwrap();
+    let mut task = cas_types::Task::new("task-history".into(), "Running task".into());
+    task.status = cas_types::TaskStatus::InProgress;
+    task.assignee = Some("agent-history".into());
+    tasks.add(&task).unwrap();
 
     // Claim task with reason
     store

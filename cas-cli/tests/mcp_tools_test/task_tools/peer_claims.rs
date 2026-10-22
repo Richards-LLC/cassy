@@ -1234,7 +1234,9 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
 
     cloud.drop_lock("cas-pb01");
     let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
-    let (_, lock) = cloud.active_lock("cas-pb01").expect("renewal re-acquires the lost claim");
+    let (_, lock) = cloud
+        .active_lock("cas-pb01")
+        .expect("renewal re-acquires the lost claim");
     assert_eq!(lock.agent_id, alpha.agent_id, "{report:?}");
     assert_eq!(report.reacquired, 1, "{report:?}");
 
@@ -1247,7 +1249,45 @@ async fn renewal_reacquires_a_lost_claim_and_reports_a_peer_that_took_it() {
     let (task, hold) = &report.conflicts[0];
     assert_eq!(task, "cas-pb01");
     assert_eq!(hold.name(), "bravo-sup", "{}", hold.describe());
-    assert_eq!(cloud.active_lock("cas-pb01").unwrap().1.agent_id, bravo.agent_id);
+    assert_eq!(
+        cloud.active_lock("cas-pb01").unwrap().1.agent_id,
+        bravo.agent_id
+    );
+
+    // cas-eb7ff: neither renew nor reacquire a stale local execution claim.
+    let tasks = open_task_store(&alpha.cas_dir).unwrap();
+    for (status, assignee) in [
+        (TaskStatus::InProgress, Some(bravo.agent_id.as_str())),
+        (TaskStatus::InProgress, None),
+        (TaskStatus::Open, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Blocked, Some(alpha.agent_id.as_str())),
+        (TaskStatus::Closed, Some(alpha.agent_id.as_str())),
+        (TaskStatus::AwaitingMerge, Some(alpha.agent_id.as_str())),
+    ] {
+        let mut task = tasks.get("cas-pb01").unwrap();
+        task.status = status;
+        task.assignee = assignee.map(str::to_string);
+        tasks.update(&task).unwrap();
+        cloud.give_to("cas-pb01", &alpha.agent_id, None);
+        let before = cloud.active_lock("cas-pb01").unwrap().1;
+        let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+        assert_eq!(
+            report.renewed + report.reacquired,
+            0,
+            "{status:?}/{assignee:?}: {report:?}"
+        );
+        assert_eq!(
+            cloud.active_lock("cas-pb01").unwrap().1.renewal_count,
+            before.renewal_count
+        );
+        cloud.drop_lock("cas-pb01");
+        let report = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+        assert_eq!(report.renewed + report.reacquired, 0, "{report:?}");
+        assert!(
+            cloud.active_lock("cas-pb01").is_none(),
+            "stale lease reacquired: {report:?}"
+        );
+    }
 }
 
 fn factory_service(m: &Machine) -> cas::mcp::CasService {

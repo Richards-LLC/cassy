@@ -137,7 +137,8 @@
     ],
     "skills/cas-cli-craft/references/output-contract.md": [
       "7f1f89091bf24ef65a44fe774871c8541bb237f326b7ab485356059268cd66fb",
-      "ae67d8190695dd9160c5881db11be8d0f2db4a36ec9b2dfc4fc5d0f3281010dd"
+      "ae67d8190695dd9160c5881db11be8d0f2db4a36ec9b2dfc4fc5d0f3281010dd",
+      "fc7ee32eb764ec95e40dbd0151b988b21cbd56742f7e057a46e6734cd541ecfc"
     ],
     "skills/cas-cli-craft/scripts/terminal-qa.mjs": [
       "60821449e24fbf75b056f77e1880495acfc913ee3c9c50676df40be5e19c4b5d",

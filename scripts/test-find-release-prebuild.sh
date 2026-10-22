@@ -247,26 +247,26 @@ echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
 touch "$tmp/timeout-sequence/2.fail"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
 for timeout_status in 124 137; do
-printf '%s' "$timeout_status" >"$tmp/timeout-sequence/2.timeout"
-rm -f "$tmp/timeout-sequence/count"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
-  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
-expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
-if grep -qF 'falling back to the cold release build' <<<"$out"; then
-  printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
-  pass=$((pass + 1))
-else
-  printf 'FAIL in-flight timeout omitted its cold-build warning\n'
-  fail=$((fail + 1))
-fi
-if grep -qF "attempt 1 failed (timeout (exit $timeout_status))" <<<"$out" \
-    && ! grep -qF 'fixture-secret' <<<"$out"; then
-  printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
-  pass=$((pass + 1))
-else
-  printf 'FAIL timeout diagnostic missing exit %s or leaked API error: %s\n' "$timeout_status" "$out"
-  fail=$((fail + 1))
-fi
+  printf '%s' "$timeout_status" >"$tmp/timeout-sequence/2.timeout"
+  rm -f "$tmp/timeout-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
+    RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
+  expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
+  if grep -qF 'falling back to the cold release build' <<<"$out"; then
+    printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL in-flight timeout omitted its cold-build warning\n'
+    fail=$((fail + 1))
+  fi
+  if grep -qF "attempt 1 failed (timeout (exit $timeout_status))" <<<"$out" \
+      && ! grep -qF 'fixture-secret' <<<"$out"; then
+    printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL timeout diagnostic missing exit %s or leaked API error: %s\n' "$timeout_status" "$out"
+    fail=$((fail + 1))
+  fi
 done
 unset FAKE_RUNS_SEQUENCE_DIR
 

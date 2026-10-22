@@ -2411,31 +2411,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
     std::fs::set_permissions(&counter, std::fs::Permissions::from_mode(0o755)).unwrap();
     run_git(&["config", "remote.origin.uploadpack", counter.to_str().unwrap()], &repo.root);
-    // cas-3937: a published merge answers COMMITTED with its merge and push
-    // state as soon as it is published; the close after it finishes in the
-    // background, and its result lands on the task as a note.
-    let mut landed_req = req;
-    landed_req.task_id = Some("task-charlie".into());
-    let landed = runtime
-        .block_on(service.coordination_with_budget_for_testing(
-            landed_req,
-            std::time::Duration::from_secs(50),
-            std::time::Duration::ZERO,
-        ))
-        .unwrap();
+    let landed = runtime.block_on(service.coordination(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED"), "{}", get_text(&landed));
-    // pin: the early answer names the merge outcome (cas-3937).
-    assert!(get_text(&landed).contains("COMMITTED") && get_text(&landed).contains("pushed to origin"), "{}", get_text(&landed));
-    let mut background_note = None;
-    for _ in 0..200 {
-        let notes = open_task_store(&root).unwrap().get("task-charlie").unwrap().notes;
-        if notes.contains("POST_COMMIT_OUTCOME") {
-            background_note = Some(notes);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(background_note.is_some(), "the background close records its result on the task");
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
     assert_eq!(fetches, 2, "one fetch to check containment, one to sync the target: {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);

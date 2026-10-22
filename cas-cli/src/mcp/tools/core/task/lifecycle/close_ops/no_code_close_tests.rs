@@ -462,6 +462,10 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
             std::fs::write(worker_path.join("app.css"), "body { color: blue; }\n").unwrap();
             git(&worker_path, &["add", "app.css"]);
             git(&worker_path, &["commit", "-q", "-m", "Change stylesheet"]);
+            // Identify the unnamed work by its per-task lane so ordinary
+            // close reaches QA instead of the unrelated branch-identity gate.
+            let code_lane = format!("{LANE}-{code_id}");
+            git(repo, &["branch", &code_lane, LANE]);
             let declared = call(
                 &f.worker,
                 serde_json::json!({
@@ -482,6 +486,7 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
             // delivery. Keep the real pushed commit while restoring local.
             git(&worker_path, &["push", "-q", "origin", LANE]);
             git(&worker_path, &["reset", "--hard", "main"]);
+            git(repo, &["branch", "-f", &code_lane, "main"]);
             let remote = call(&f.worker, serde_json::json!({
                 "action": "close", "id": code_id, "reason": "Stylesheet changed", "no_delivery": true,
             })).await;

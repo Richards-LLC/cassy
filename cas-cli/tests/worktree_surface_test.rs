@@ -981,7 +981,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "alice work"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     park_merge_fixture(&cas_root, &wt_path, "alice", "merge-disabled");
     let svc = make_service(cas_root);
@@ -1068,7 +1068,7 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
-    let env = env.enter_dir(&repo_a.root);
+    let _env = env.enter_dir(&repo_a.root);
 
     let svc = make_service(cas_root_a);
     let mut req = coord_req("worktree_merge");
@@ -1263,7 +1263,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
-    let env = env.enter_dir(&repo_a.root);
+    let _env = env.enter_dir(&repo_a.root);
 
     // Constructing a fresh service after the binding write models process
     // restart: resolution must come from host persistence, never cwd/recency.
@@ -1832,7 +1832,7 @@ async fn test_worktree_merge_reports_not_found_not_disabled_when_nothing_matches
     disable_system_a(&cas_root);
     // No worktree created for "bob" in either system.
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let mut task = Task::new("missing-worker".into(), "Missing worker".into());
     task.assignee = Some("bob".into());
@@ -1979,7 +1979,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
         run_git(&["add", "."], &wt_path);
         run_git(&["commit", "-m", "alice work"], &wt_path);
 
-        let env = env.enter_dir(&repo.root);
+        let _env = env.enter_dir(&repo.root);
 
         let original_head = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
         let svc = make_service(cas_root);
@@ -2279,7 +2279,7 @@ async fn cas_cfd1_merges_pushed_parked_ref_without_touching_reused_dirty_worker(
     let status_before = git_stdout(&worker, &["status", "--porcelain"]);
     let index_path = git_stdout(&worker, &["rev-parse", "--git-path", "index"]);
     let index_before = std::fs::read(&index_path).unwrap();
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/alice".into());
@@ -2333,7 +2333,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         tips.push(git_stdout(&worker, &["rev-parse", "HEAD"]));
     }
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     // The peer's commit lands after the handler fetched and before its push.
     // A real pre-push hook provides ordering without sleeps or a Git mock.
     let peer = remote.path().join("peer");
@@ -2686,7 +2686,7 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "late work"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/closed-worker".to_string());
@@ -2747,7 +2747,7 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     run_git(&["add", "staging-only.txt"], &wt_path);
     run_git(&["commit", "-m", "staging delivery"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2794,7 +2794,7 @@ async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
 
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
 
@@ -2851,7 +2851,7 @@ async fn authorized_trunk_fallback_push_is_loud_cas_84df() {
     std::fs::write(wt_path.join("production.txt"), "published to trunk").unwrap();
     run_git(&["add", "production.txt"], &wt_path);
     run_git(&["commit", "-m", "production delivery"], &wt_path);
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
 
@@ -2887,7 +2887,7 @@ async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let wt_path = cas_root.join("worktrees").join("carol");
     repo.add_worktree(&wt_path, "factory/carol");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2926,7 +2926,7 @@ async fn test_worktree_merge_refuses_silent_trunk_when_no_task_id_and_no_epic_co
     let wt_path = cas_root.join("worktrees").join("dave");
     repo.add_worktree(&wt_path, "factory/dave");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2986,7 +2986,7 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "director work"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     park_merge_fixture(&cas_root, &wt_path, "hv-director", "cas-9fff");
     let svc = make_service(cas_root);
@@ -3358,7 +3358,7 @@ async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics
     let wt_path = cas_root.join("worktrees").join("mixed");
     repo.add_worktree(&wt_path, "factory/mixed");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     park_merge_fixture(&cas_root, &wt_path, "mixed", "t-ok");
     park_merge_fixture(&cas_root, &wt_path, "mixed", "t-nb");
     let svc = make_service(cas_root);
@@ -3403,7 +3403,7 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
     let wt_path = cas_root.join("worktrees").join("nb");
     repo.add_worktree(&wt_path, "factory/nb");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     park_merge_fixture(&cas_root, &wt_path, "nb", "t-nobranch");
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3459,7 +3459,7 @@ async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
     let wt_path = cas_root.join("worktrees").join("multi");
     repo.add_worktree(&wt_path, "factory/multi");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     park_merge_fixture(&cas_root, &wt_path, "multi", "t1");
     park_merge_fixture(&cas_root, &wt_path, "multi", "t2");
@@ -3519,7 +3519,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     // Sanity: this is NOT where the old hardcoded convention would look.
     assert_ne!(expected_root, cas_root.join("worktrees").join("erin"));
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     park_merge_fixture(&cas_root, &expected_root, "erin", "merge-custom-path");
     let svc = make_service(cas_root);
@@ -3571,7 +3571,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "match work"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3613,7 +3613,7 @@ async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3662,7 +3662,7 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("carol");
     repo.add_worktree(&wt_path, "factory/carol");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3713,7 +3713,7 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3764,7 +3764,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "lease work"], &wt_path);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -4987,7 +4987,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     run_git(&["commit", "-m", "tip drift after receipt"], &worker_path);
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
-    let env = env.enter_dir(&repo.root);
+    let _env = env.enter_dir(&repo.root);
     let supervisor_service = delivery_service(&cas_root, supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some("factory/bob".to_string());

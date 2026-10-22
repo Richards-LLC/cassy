@@ -1540,6 +1540,44 @@ fn candidate_worktree(sandbox: &CasSandbox) -> std::path::PathBuf {
     worktree
 }
 
+#[cfg(unix)]
+fn worktree_serve_command(
+    sandbox: &CasSandbox,
+    worktree: &std::path::Path,
+    installed: bool,
+) -> Command {
+    // Give this fixture its own PATH install, independent of the host's cas.
+    let bin = sandbox.path().join(if installed {
+        "installed-bin"
+    } else {
+        "other-bin"
+    });
+    std::fs::create_dir_all(&bin).unwrap();
+    if !bin.join("cas").exists() {
+        std::os::unix::fs::symlink(
+            if installed {
+                support::cas_binary()
+            } else {
+                std::env::current_exe().unwrap()
+            },
+            bin.join("cas"),
+        )
+        .unwrap();
+    }
+    let paths = std::iter::once(bin).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>(),
+    );
+    let mut command = sandbox.command();
+    command
+        .current_dir(worktree)
+        .env("CLAUDE_PROJECT_DIR", worktree)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_DIR");
+    command
+}
+
+#[cfg(unix)]
 #[test]
 fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
     let sandbox = CasSandbox::new();
@@ -1559,12 +1597,7 @@ fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
 
     // The candidate must not upgrade a live store found through a worktree.
     // CLAUDE_PROJECT_DIR identifies the worktree, not consent to mutate its parent.
-    let output = sandbox
-        .command()
-        .current_dir(&worktree)
-        .env("CLAUDE_PROJECT_DIR", &worktree)
-        .env_remove("CAS_ROOT")
-        .env_remove("CAS_DIR")
+    let output = worktree_serve_command(&sandbox, &worktree, false)
         .arg("serve")
         .output()
         .unwrap();
@@ -1634,6 +1667,80 @@ fn test_serve_repairs_m213_only_with_an_explicit_root_cas_a65b() {
         1,
         "automatic startup repair must record m213 as applied"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_worktree_store_stays_readable_without_candidate_cloud_sync_cas_a65b() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+    let sandbox = CasSandbox::new();
+    let worktree = candidate_worktree(&sandbox);
+    let server = MockServer::start().await;
+    let cloud = cas::cloud::CloudConfig {
+        endpoint: server.uri(),
+        token: Some("synthetic-test-token".into()),
+        ..Default::default()
+    };
+    cloud.save_to_cas_dir(sandbox.cas_root()).unwrap();
+    for (binding, installed, sync_allowed) in [
+        ("implicit", false, false),
+        ("invalid-root", false, false),
+        ("explicit", false, true),
+        ("installed", true, true),
+    ] {
+        server.reset().await;
+        let mock =
+            Mock::given(any()).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-10-22T10:00:00Z"
+            })));
+        let mock = if sync_allowed {
+            mock.expect(1..)
+        } else {
+            mock.expect(0)
+        };
+        let mock = mock.mount_as_scoped(&server).await;
+        let mut command = worktree_serve_command(&sandbox, &worktree, installed);
+        match binding {
+            "explicit" => {
+                command.env("CAS_ROOT", sandbox.cas_root());
+            }
+            "invalid-root" => {
+                command.env("CAS_ROOT", worktree.join("missing"));
+            }
+            _ => {}
+        }
+        let mut client = McpTestClient::spawn_command_capturing_stderr(command);
+        assert!(
+            client.initialize().error.is_none(),
+            "{binding}: current schemas must still serve"
+        );
+        assert!(
+            client.list_tools().error.is_none(),
+            "{binding}: ordinary reads must work"
+        );
+        if sync_allowed {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                mock.wait_until_satisfied(),
+            )
+            .await
+            .expect("authorized startup must reach the fixture cloud");
+        }
+        let stderr = client.stop_and_read_stderr();
+        if !sync_allowed {
+            assert!(
+                server.received_requests().await.unwrap().is_empty(),
+                "{binding}: candidate must not start cloud sync"
+            );
+            assert!(
+                stderr.contains("Cloud sync disabled")
+                    && stderr.contains("CAS_ROOT")
+                    && stderr.contains("HOME"),
+                "{binding}: isolation remedy missing: {stderr}"
+            );
+        }
+    }
 }
 
 #[test]

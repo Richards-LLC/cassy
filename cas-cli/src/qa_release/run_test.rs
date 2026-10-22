@@ -240,7 +240,7 @@ fn run_preflight_refusals() {
     // Row ids and arguments are refused before any evidence is copied.
     let mut bad = run::Record { row: "..".into(), verdict: "PASS".into(), evidence: Some(gate.evidence("bad")), ..run::Record::default() };
     let refusal = run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string();
-    assert!(refusal.contains("and not `.` or `..`"), "{refusal}");
+    assert!(refusal.contains("must start with a letter or digit"), "{refusal}");
     bad.row = "support".into();
     bad.verdict = "FAIL".into();
     assert_eq!(run::record(&gate.cas, Some(&gate.sha), &bad).unwrap_err().to_string(), "a FAIL needs --reason");

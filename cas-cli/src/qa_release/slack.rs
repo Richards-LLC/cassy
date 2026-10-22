@@ -105,12 +105,13 @@ impl DriverViolet {
             let refusal = PostError::new("release_gate_channel_refused", "the release-gate driver posts only to qa.release.slack_channel");
             return Box::pin(async move { Err(refusal) });
         }
+        let step = args.get("step").and_then(|s| s.as_str()).unwrap_or("").to_owned();
         tracing::info!(
             target: "cas::audit",
             agent_id = DRIVER_AGENT,
             pack_sha256 = %self.pack_sha256,
             channel = %self.channel,
-            step = args.get("step").and_then(Value::as_str).unwrap_or(""),
+            step = %step,
             "release-gate Violet post"
         );
         self.transport.post(args)

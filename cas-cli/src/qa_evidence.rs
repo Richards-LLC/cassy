@@ -2040,7 +2040,9 @@ fn validate_ledger_receipt(
         // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
         has_pass |= cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build");
         if cells.get(4) == Some(&blocked::VERDICT) {
-            let Some(blocked) = cells.get(6).and_then(|cell| BlockedExternal::from_evidence(cell))
+            let Some(blocked) = cells
+                .get(6)
+                .and_then(|cell| BlockedExternal::from_evidence(cell))
             else {
                 return Err(EvidenceRefusal::new(
                     format!(
@@ -2090,7 +2092,11 @@ fn validate_ledger_receipt(
             format!(
                 "owed: {}: neither PASS nor FAIL, so {} still owed",
                 owed.join("; "),
-                if owed.len() == 1 { "the cell is" } else { "the cells are" }
+                if owed.len() == 1 {
+                    "the cell is"
+                } else {
+                    "the cells are"
+                }
             ),
             format!(
                 "re-walk each owed cell once its provider recovers and record PASS or FAIL in {} (cas-qa-craft references/evidence-ledger.md)",

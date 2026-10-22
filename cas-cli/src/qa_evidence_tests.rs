@@ -1221,7 +1221,12 @@ fn ledger_blocked_external_cell_stays_owed() {
     )
     .unwrap();
     let refusal = validate_ledger(&ctx).unwrap_err();
-    assert!(refusal.problem.contains("blocked: provider=<provider> error=<error>"), "{refusal:?}");
+    assert!(
+        refusal
+            .problem
+            .contains("blocked: provider=<provider> error=<error>"),
+        "{refusal:?}"
+    );
 }
 
 #[test]

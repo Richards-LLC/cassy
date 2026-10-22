@@ -40,16 +40,21 @@ impl BlockedExternal {
         let rest = cell.strip_prefix(EVIDENCE_PREFIX)?.trim();
         let (provider, error) = rest.strip_prefix("provider=")?.split_once(" error=")?;
         let (provider, error) = (provider.trim(), error.trim());
-        (!provider.is_empty() && !provider.contains(char::is_whitespace) && !error.is_empty())
-            .then(|| Self {
+        (!provider.is_empty() && !provider.contains(char::is_whitespace) && !error.is_empty()).then(
+            || Self {
                 provider: provider.into(),
                 error: error.into(),
-            })
+            },
+        )
     }
 }
 
 impl fmt::Display for BlockedExternal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{VERDICT}{{provider={}, error={}}}", self.provider, self.error)
+        write!(
+            f,
+            "{VERDICT}{{provider={}, error={}}}",
+            self.provider, self.error
+        )
     }
 }

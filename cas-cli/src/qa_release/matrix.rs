@@ -60,6 +60,20 @@ pub fn expand(project_root: &Path, journey: &Journey, max_cells: u32) -> Result<
             .collect(),
         None => vec![None],
     };
+    // Count before materialising, so a huge matrix is refused cheaply.
+    let runs = journey.runs.unwrap_or(1).max(1);
+    let rows = journey
+        .matrix
+        .values()
+        .fold(records.len() as u64, |cells, values| cells.saturating_mul(values.len() as u64))
+        .saturating_mul(u64::from(runs));
+    if rows > u64::from(max_cells) {
+        return Err(format!(
+            "{} expands to {} cells × {runs} runs = {rows} rows, over qa.release.max_cells {max_cells}; narrow the matrix or raise the limit",
+            journey.id,
+            rows / u64::from(runs),
+        ));
+    }
     let mut cells: Vec<Cell> = records
         .into_iter()
         .map(|record| Cell { id: record.as_ref().map(|r| r.id.clone()).unwrap_or_default(), record, axes: BTreeMap::new() })
@@ -77,17 +91,27 @@ pub fn expand(project_root: &Path, journey: &Journey, max_cells: u32) -> Result<
             })
             .collect();
     }
-    let expansion = Expansion { cells, runs: journey.runs.unwrap_or(1).max(1) };
-    if expansion.rows() > u64::from(max_cells) {
-        return Err(format!(
-            "{} expands to {} cells × {} runs = {} rows, over qa.release.max_cells {max_cells}; narrow the matrix or raise the limit",
-            journey.id,
-            expansion.cells.len(),
-            expansion.runs,
-            expansion.rows()
-        ));
-    }
-    Ok(expansion)
+    Ok(Expansion { cells, runs })
+}
+
+/// Every row id a golden-set journey plans.
+pub fn planned_ids(project_root: &Path, journey: &Journey, max_cells: u32) -> Result<Vec<String>, String> {
+    let expansion = expand(project_root, journey, max_cells)?;
+    Ok(expansion
+        .cells
+        .iter()
+        .flat_map(|cell| (1..=expansion.runs).map(move |run| row_id(&journey.id, cell, run)))
+        .collect())
+}
+
+/// The labeled criteria this cell has no label for (cas-c4b5): unlabeled
+/// cells are debt, graded by the runner alone.
+pub fn unlabeled<'a>(labeled: &[&'a str], cell: &Cell) -> Vec<&'a str> {
+    labeled
+        .iter()
+        .filter(|c| cell.record.as_ref().and_then(|r| r.labels.get(**c)).is_none_or(serde_yaml::Value::is_null))
+        .copied()
+        .collect()
 }
 
 /// `<journey>.<cell>.r<run>` (`<journey>.r<run>` for a runs-only journey).
@@ -104,6 +128,9 @@ pub struct Coverage {
     pub runs: u32,
     pub required: u32,
     pub counted: u32,
+    /// Cells with no label for a labeled criterion: debt, runner-graded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlabeled: Vec<String>,
     /// Rows that do not count yet, owed with their row verdicts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
@@ -118,15 +145,20 @@ impl Coverage {
             self.required,
             self.cells,
             self.runs,
-            if self.missing.is_empty() { String::new() } else { format!("; owed: {}", self.missing.len()) }
-        )
+            if self.missing.is_empty() { String::new() } else { format!("; owed: {}", self.missing.len()) },
+        ) + &if self.unlabeled.is_empty() {
+            String::new()
+        } else {
+            format!("; unlabeled cells (debt): {}", self.unlabeled.join(", "))
+        }
     }
 }
 
-/// One golden journey's planned rows: `(row id, cell label)`.
+/// One golden journey's planned rows with their cells, and its labeled criteria.
 pub struct Planned<'a> {
     pub journey: &'a Journey,
-    pub rows: Vec<(String, String)>,
+    pub rows: Vec<(String, Cell)>,
+    pub labeled: Vec<&'a str>,
 }
 
 /// Rejects duplicate and unidentified runs within each cell of a journey with
@@ -135,7 +167,7 @@ pub struct Planned<'a> {
 /// against its planned rows; a planned row with no verdict is missing.
 pub fn settle(rows: &mut [Row], golden: &[Planned<'_>]) -> Vec<Coverage> {
     let mut coverage = Vec::new();
-    for Planned { journey, rows: planned } in golden {
+    for Planned { journey, rows: planned, labeled } in golden {
         let runs = journey.runs.unwrap_or(1).max(1);
         if let Some(key) = &journey.independence_key {
             let mut by_cell: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -170,7 +202,13 @@ pub fn settle(rows: &mut [Row], golden: &[Planned<'_>]) -> Vec<Coverage> {
         let counts = |id: &str| {
             rows.iter().any(|r| r.id == id && matches!(r.verdict, RowVerdict::Pass | RowVerdict::Fail { .. }))
         };
-        let cells = planned.iter().map(|(_, cell)| cell).collect::<std::collections::BTreeSet<_>>().len();
+        let cells = planned.iter().map(|(_, cell)| cell.id.as_str()).collect::<std::collections::BTreeSet<_>>().len();
+        let mut unlabeled: Vec<String> = planned
+            .iter()
+            .filter(|(_, cell)| !self::unlabeled(labeled, cell).is_empty())
+            .map(|(_, cell)| cell.id.clone())
+            .collect();
+        unlabeled.dedup();
         let missing: Vec<String> = planned.iter().filter(|(id, _)| !counts(id)).map(|(id, _)| id.clone()).collect();
         coverage.push(Coverage {
             journey: journey.id.clone(),
@@ -178,25 +216,34 @@ pub fn settle(rows: &mut [Row], golden: &[Planned<'_>]) -> Vec<Coverage> {
             runs,
             required: planned.len() as u32,
             counted: (planned.len() - missing.len()) as u32,
+            unlabeled,
             missing,
         });
     }
     coverage
 }
 
-/// Grades the adapter's `measured` values against the cell's labels with each
-/// criterion's `compare` (cas-aff3). A band miss is FAIL naming the % of the
-/// baseline; an unlabeled criterion is registry debt, not graded here.
+/// Grades a walked PASS cell: each labeled criterion the cell has a label for
+/// is graded against it with the criterion's `compare` (cas-aff3). A band
+/// miss is FAIL naming the % of the baseline; a labeled criterion with no
+/// `measured` value is NOT_EXERCISED (owed). Unlabeled criteria are debt and
+/// leave the runner's verdict.
 pub fn grade_measured(
     registry: &crate::qa_registry::Registry,
+    journey: &Journey,
     cell: &Cell,
     measured: &BTreeMap<String, f64>,
 ) -> Option<RowVerdict> {
     use crate::qa_registry::Compare;
     let labels = &cell.record.as_ref()?.labels;
     let mut misses = Vec::new();
-    for (criterion, value) in measured {
+    let mut unmeasured = Vec::new();
+    for criterion in registry.labeled_criteria(journey) {
         let Some(baseline) = labels.get(criterion).and_then(serde_yaml::Value::as_f64) else { continue };
+        let Some(value) = measured.get(criterion) else {
+            unmeasured.push(criterion);
+            continue;
+        };
         let compare = registry
             .invariants
             .get(criterion)
@@ -210,5 +257,11 @@ pub fn grade_measured(
             misses.push(format!("{criterion} measured {value} is {pct} of baseline {baseline}"));
         }
     }
-    (!misses.is_empty()).then(|| RowVerdict::Fail { reason: format!("band miss: {}", misses.join("; ")) })
+    if !misses.is_empty() {
+        return Some(RowVerdict::Fail { reason: format!("band miss: {}", misses.join("; ")) });
+    }
+    (!unmeasured.is_empty()).then(|| RowVerdict::NotExercised {
+        cause: NotExercisedCause::Automation,
+        detail: format!("no measured value for labeled {}", unmeasured.join(", ")),
+    })
 }

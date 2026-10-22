@@ -332,10 +332,6 @@ fn registry(cas_root: &Path) -> Result<(Registry, crate::config::QaConfig)> {
     Ok((registry, qa))
 }
 
-fn live_in(journey: &Journey, env: &str) -> bool {
-    journey.env_status.get(env).map_or(journey.status == "live", |s| s.status == "live")
-}
-
 fn git_ok(root: &Path, args: &[&str]) -> Option<String> {
     super::git(root, args)
         .filter(|output| output.status.success())
@@ -396,7 +392,7 @@ fn plan(
         None => None,
     };
     let mut rows = Vec::new();
-    for journey in registry.journeys.iter().filter(|j| live_in(j, &config.gate_env)) {
+    for journey in registry.journeys.iter().filter(|j| j.live_in(&config.gate_env)) {
         let why = match &impacted {
             _ if journey.release_always => "release_always",
             Some(ids) if ids.contains(&journey.id) => "impacted",
@@ -433,6 +429,18 @@ fn plan(
             cell: None,
             run: None,
         });
+    }
+    // One walk fills one row id: two journeys planning the same id would let
+    // a walk of one stand in for the other, so refuse before the freeze.
+    let mut owners: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in &rows {
+        if let Some(other) = owners.insert(&row.id, &row.journey).filter(|other| *other != row.journey) {
+            bail!(
+                "row id {} is planned by journeys {other} and {}; rename one before starting the gate",
+                printable(&row.id),
+                printable(&row.journey)
+            );
+        }
     }
     Ok(rows)
 }
@@ -910,7 +918,7 @@ impl Walk<'_> {
         let verdict = RowVerdict::grade(runner, walked.frames.len(), readback);
         match (&verdict, &planned.cell) {
             (RowVerdict::Pass, Some(cell)) => {
-                super::matrix::grade_measured(self.registry, cell, &answer.measured).unwrap_or(verdict)
+                super::matrix::grade_measured(self.registry, journey, cell, &answer.measured).unwrap_or(verdict)
             }
             _ => verdict,
         }
@@ -1143,13 +1151,14 @@ fn seal(cas_root: &Path, config: &ReleaseConfig, sha: &str) -> Result<Run> {
             .journeys
             .iter()
             .filter_map(|journey| {
-                let rows: Vec<(String, String)> = run
+                let rows: Vec<(String, super::matrix::Cell)> = run
                     .plan
                     .iter()
                     .filter(|p| p.journey == journey.id)
-                    .filter_map(|p| Some((p.id.clone(), p.cell.as_ref()?.label())))
+                    .filter_map(|p| Some((p.id.clone(), p.cell.clone()?)))
                     .collect();
-                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows })
+                let labeled = registry.labeled_criteria(journey);
+                (!rows.is_empty()).then_some(super::matrix::Planned { journey, rows, labeled })
             })
             .collect();
         pack.matrix = super::matrix::settle(&mut pack.rows, &golden);

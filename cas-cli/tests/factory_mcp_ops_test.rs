@@ -6634,7 +6634,7 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
 /// SQLite task state and the public factory GC handler.
 #[tokio::test]
 async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
-    let env = FactoryTestEnv::with_server_supervisor();
+    let env = review_target_env();
     init_sync_repo(&env, "review-control");
     let project = env.cas_root.parent().unwrap();
     // Real Cargo output is ignored; untracked reviewer notes are not.

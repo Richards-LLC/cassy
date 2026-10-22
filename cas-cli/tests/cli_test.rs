@@ -1266,6 +1266,67 @@ fn test_not_initialized_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no Cassy store here; run `cas init`"));
+
+    // cas-d6ab: styling follows the destination stream, independently of stdout.
+    #[cfg(unix)]
+    for (stdout_tty, stderr_tty, no_color) in [
+        (true, false, false),
+        (false, true, false),
+        (true, true, true),
+    ] {
+        use std::fs::File;
+        use std::io::{IsTerminal, Read};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::process::{Command as ProcessCommand, Stdio};
+
+        let (mut master_fd, mut slave_fd) = (-1, -1);
+        // SAFETY: openpty initializes two fresh owned descriptors on success.
+        assert_eq!(unsafe { libc::openpty(
+            &mut master_fd, &mut slave_fd, std::ptr::null_mut(),
+            std::ptr::null_mut(), std::ptr::null_mut(),
+        ) }, 0, "{}", std::io::Error::last_os_error());
+        let (mut master, slave) = unsafe {
+            (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd))
+        };
+        assert!(slave.is_terminal(), "fixture must provide a real TTY");
+        let mut command = ProcessCommand::new(cas::test_paths::cas_binary());
+        command.env_clear()
+            .env("HOME", temp.path().join(".test-home"))
+            .env("XDG_CONFIG_HOME", temp.path().join(".test-xdg-config"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("LC_ALL", "C")
+            .env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .current_dir(temp.path()).arg("status")
+            .stdin(Stdio::null())
+            .stdout(if stdout_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() })
+            .stderr(if stderr_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() });
+        if no_color { command.env("NO_COLOR", "1"); }
+        let output = command.output().unwrap();
+        drop(command);
+        let mut tty_output = Vec::new();
+        if stderr_tty {
+            // Keep the parent slave open until the diagnostic is drained: BSD
+            // may discard unread PTY output on the last slave's close.
+            while !tty_output.ends_with(b"\n") {
+                let mut descriptor = libc::pollfd {
+                    fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                };
+                assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 5_000) }, 1,
+                    "missing bounded PTY diagnostic: {tty_output:?}");
+                let mut bytes = [0; 4096];
+                let count = master.read(&mut bytes).unwrap();
+                assert!(count > 0, "PTY closed before diagnostic newline");
+                tty_output.extend_from_slice(&bytes[..count]);
+            }
+        }
+        drop(slave);
+        let error = if stderr_tty { &tty_output } else { &output.stderr };
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(String::from_utf8_lossy(error).contains("no Cassy store here"),
+            "missing diagnostic: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, stderr={error:?}");
+        assert_eq!(error.contains(&0x1b), stderr_tty && !no_color,
+            "stderr styling must follow its own TTY and NO_COLOR: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, no_color={no_color}, stderr={error:?}");
+    }
 }
 
 #[test]

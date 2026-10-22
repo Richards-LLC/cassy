@@ -2,11 +2,16 @@
 
 | Field | Contract |
 | --- | --- |
-| First two lines | A command failure opens with one red error mark and its message; a `CasError` suggestion follows only when available. |
+| First two lines | A command failure opens with one error mark and its message, red when stderr is a terminal and color is enabled; a `CasError` suggestion follows only when available. |
 | Scannable | The error mark is visually distinct from the message, with any suggestion label and remedy beneath it. |
 | Readable | The mark uses the foreground-safe `text_error` token; the message stays in the terminal foreground, and C locale uses `[ERROR]`. |
 | Machine output | Human errors go to stderr; JSON remains one stdout document and existing exit codes carry the result. |
 | Omitted | No stack trace, extra metadata, or new error advice is added; suggestions remain limited to `CasError` values. |
+
+The top-level human diagnostic detects color from stderr, its destination.
+Redirecting stderr produces plain text even when stdout remains a terminal;
+terminal stderr remains styled even when stdout is piped. `NO_COLOR` suppresses
+styling in either case. Error text, JSON stdout, and exit codes remain unchanged.
 
 ## Critique
 
@@ -23,3 +28,21 @@ terminal-qa: PASS cas-error-renderer · 11 runs · 0 fail · 0 warn · 0 allowed
 The 80-column palette render and light/dark text captures are in
 [`captures/after/cas-error-renderer`](captures/after/cas-error-renderer); the full raw runs and
 JSON report remain in the task artifact directory named by the receipt.
+
+## Stream-aware error critique (cas-d6ab)
+
+terminal-qa: PASS cas-d6ab · 11 runs · 0 fail · 0 warn · 0 allowed · &lt;artifacts&gt;/cas-d6ab/terminal-qa/status/report.json
+
+Supervisor candidate `6af456e4002f54739bf562b6d5c94c7d0e1696e9` passes
+`terminal-qa --strict`. A real mixed-stream PTY walk confirms piped stderr has
+no escapes with terminal stdout, terminal stderr remains styled with piped
+stdout, and `NO_COLOR` suppresses styling. All three preserve exit1 and leave
+the disposable project unmodified.
+
+| Dimension | Score | Evidence |
+| --- | ---: | --- |
+| Hierarchy | 5 | One error line states the missing store and names the `cas init` remedy. |
+| Fit | 5 | Human output is one line: 37 cells styled, 43 cells in the plain pipe capture. |
+| Craft | 5 | All eleven captures pass without warnings; stream redirection preserves text and the existing exit code. |
+| Theme safety | 5 | Four palettes at 80 and 120 columns pass; C locale and no-color retain readable plain output. |
+| Machine contract | 5 | Raw mixed-stream captures prove piped stderr has no ANSI; status refusal retains its existing stderr-only contract. |

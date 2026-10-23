@@ -4872,6 +4872,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         ("test-agent", "unnamed WIP before review", true),
         ("test-agent", "fix(cas-abcd): another task's work", false),
         ("other-worker", "unnamed WIP before review", false),
+        ("other-worker", "fix(cas-abcd): another task's work", false),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -4903,7 +4904,9 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             "action": "start", "id": task.id, "brief": true,
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");
-        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start.unwrap();
+        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        // No delivery anchor or task-naming subject: the server's start
+        // boundary must retain this worker's WIP across the hold.
         std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
         branch_transfer_git(root, &["add", "delivery.txt"]);
         branch_transfer_git(root, &["commit", "-m", message]);
@@ -4932,7 +4935,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         }
         let saved = tasks.get(&task.id).unwrap();
         assert_eq!(saved.status, if allowed { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
-        assert_eq!(saved.deliverables.factory_branch_start, Some(boundary));
+        assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read_to_string(root.join("delivery.txt")).unwrap(), "work before the block\n");
     }

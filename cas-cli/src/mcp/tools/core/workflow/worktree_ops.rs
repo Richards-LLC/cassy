@@ -4004,6 +4004,27 @@ impl CasCore {
         } else {
             None
         };
+        // An explicit branch names a delivery, while a worker-only request
+        // deliberately follows the task's latest parked source. Do not let a
+        // stale explicit branch silently merge a different parked round.
+        let requested_branch = id.strip_prefix("origin/").unwrap_or(id);
+        if implicit_delivery.is_none()
+            && let Some(source) = task_source.as_ref()
+            && requested_branch.starts_with("factory/")
+            && requested_branch != source.branch
+            && manager.git().resolve_commit(&format!("refs/heads/{requested_branch}"))
+                .is_some_and(|tip| tip != source.anchor)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "PARKED DELIVERY SOURCE CHANGED: the requested branch has a different tip. Retry with recorded branch {} at {}. No merge was attempted.",
+                    crate::worktree::GitOperations::visible_git_label(&source.branch),
+                    crate::worktree::GitOperations::visible_git_label(&source.anchor),
+                )),
+                data: None,
+            });
+        }
         let remote_source = if system_a.is_none() {
             self.prepare_remote_merge_source(
                 &manager, scoped_task.as_deref(), id, cleanup, task_source.as_ref(),

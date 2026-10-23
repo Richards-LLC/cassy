@@ -11430,6 +11430,91 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
 }
 
 #[tokio::test]
+async fn test_start_accepts_task_recovery_suffix_after_rebind_record_cleared_cas_0fdf() {
+    let home = TempDir::new().expect("home tempdir");
+    let session = "session-cas-0fdf";
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some(session)),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "suffix-recovery-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"cas-0fdf-fixture\"\n",
+    )
+    .unwrap();
+    add_epic_with_id(&env, "cas-0fdf-epic", TaskStatus::Open, "epic/requested");
+
+    let mut agent = Agent::new("test-agent-id".to_string(), worker.to_string());
+    agent.role = AgentRole::Worker;
+    agent.status = AgentStatus::Idle;
+    agent.factory_session = Some(session.to_string());
+    agent.metadata.insert(
+        "clone_path".to_string(),
+        worker_path.to_string_lossy().into_owned(),
+    );
+    env.agent_store().register(&agent).expect("register worker");
+
+    let task_id = "cas-0fdf";
+    let branch = format!("factory/{worker}-{task_id}-reviewed");
+    git_stdout(&worker_path, &["switch", "-c", &branch, "main"]);
+    let target = WorkTarget {
+        repo_selector: "project:cas-0fdf-fixture".to_string(),
+        target_branch: "epic/requested".to_string(),
+    };
+    let mut task = Task::new(task_id.to_string(), "recovery suffix restart".to_string());
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: target,
+        assignee: worker.to_string(),
+        branch: branch.clone(),
+        base_sha: git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+    });
+    let tasks = env.task_store();
+    tasks.add(&task).expect("add task with rebind start record");
+
+    // Reopening/resetting can clear the rebind boundary while leaving the
+    // worker on its task-owned recovery-suffix branch.
+    task.deliverables.factory_branch_start = None;
+    tasks.update(&task).expect("clear rebind start record");
+    let assigned = assign(&env, task_id, worker)
+        .await
+        .expect("assign task to the worker");
+
+    std::fs::write(worker_path.join("recovered.txt"), "preserve recovery work\n").unwrap();
+    git_stdout(&worker_path, &["add", "recovered.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "recovered work"]);
+    let recovered_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+
+    let start: TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start", "id": task_id
+    }))
+    .unwrap();
+    let started = get_text(
+        &env.service
+            .task(Parameters(start))
+            .await
+            .expect("start must accept the task's own recovery-suffix branch"),
+    );
+    assert!(
+        !assigned.contains(&format!("belongs to {task_id}-reviewed")),
+        "task update must recognize its own recovery suffix: {assigned}"
+    );
+    assert!(started.contains("Started") || started.contains(task_id), "{started}");
+    assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), recovered_tip);
+    assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), branch);
+    let saved = tasks.get(task_id).expect("started task");
+    assert_eq!(saved.status, TaskStatus::InProgress);
+    assert_eq!(
+        saved.deliverables.factory_branch_start.map(|start| start.branch),
+        Some(branch)
+    );
+}
+
+#[tokio::test]
 async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
     let home = TempDir::new().expect("home tempdir");
     let _guard = EnvGuard::set_optional(&[

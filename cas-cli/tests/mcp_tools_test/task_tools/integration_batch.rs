@@ -291,7 +291,17 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
         "action":"add", "task_id":TASK, "status":"rejected", "summary":"Ledger evidence incomplete; code unchanged",
         "dispatch_id":dispatch.id
     })).unwrap())).await.unwrap();
-    assert!(extract_text(rejected).contains("rejected"));
+    assert_eq!(
+        cas::store::open_verification_store(&cas_dir)
+            .unwrap()
+            .get_latest_for_task(TASK)
+            .unwrap()
+            .unwrap()
+            .status,
+        cas::types::VerificationStatus::Rejected,
+        "{}",
+        extract_text(rejected)
+    );
     for status in ["blocked", "open"] {
         service
             .task(Parameters(
@@ -305,7 +315,12 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
     }
     cas::store::open_agent_store(&cas_dir)
         .unwrap()
-        .try_claim(TASK, &format!("test-session-{}", std::process::id()), 1800, None)
+        .try_claim(
+            TASK,
+            &format!("test-session-{}", std::process::id()),
+            1800,
+            None,
+        )
         .unwrap();
     let retried = close(worker, Some(&receipt)).await;
     assert!(retried.contains("VERIFICATION REQUIRED"), "{retried}");

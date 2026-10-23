@@ -386,6 +386,7 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
 #[tokio::test]
 async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
+    for action in ["reset", "release", "orphan-release"] {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
@@ -403,12 +404,18 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
         .unwrap()
         .unwrap();
 
-    core.cas_task_reset(Parameters(TaskReleaseRequest {
-        task_id: qa_task.clone(),
-        force: Some(true),
-    }))
-    .await
-    .expect("supervisor reset clears the dead reviewer's task and pass claim");
+    let request = Parameters(TaskReleaseRequest { task_id: qa_task.clone(), force: Some(true) });
+    match action {
+        "reset" => { core.cas_task_reset(request).await.unwrap(); }
+        "release" | "orphan-release" => {
+            if action == "orphan-release" {
+                open_agent_store(&cas_dir).unwrap()
+                    .release_lease_for_task(&qa_task, "simulate expired lease").unwrap();
+            }
+            original.cas_task_release(request).await.unwrap();
+        }
+        _ => unreachable!(),
+    }
     let pending = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
         .unwrap()
         .unwrap();
@@ -430,6 +437,7 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
         .unwrap();
     assert_eq!(reclaimed.id, before.id);
     assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+    }
 }
 
 #[tokio::test]

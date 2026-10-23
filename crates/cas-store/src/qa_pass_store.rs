@@ -917,6 +917,78 @@ mod tests {
     }
 
     #[test]
+    fn retiring_reviewer_releases_claims_by_id_and_name_cas_8881() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::Agent;
+        for unregister in [false, true] {
+            for by_name in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let agents = SqliteAgentStore::open(dir.path()).unwrap();
+                agents.init().unwrap();
+                let agent = Agent::new("reviewer-id".into(), "reviewer-name".into());
+                agents.register(&agent).unwrap();
+                let now = Utc::now();
+                let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+                set_qa_task(dir.path(), &opened.id, "cas-qa1").unwrap();
+                let identity = if by_name { &agent.name } else { &agent.id };
+                claim_qa_pass(dir.path(), "cas-ui1", identity, now).unwrap();
+                // No active task lease: shutdown must release the pass itself.
+                if unregister {
+                    agents.unregister(&agent.id).unwrap();
+                } else {
+                    agents.graceful_shutdown(&agent.id).unwrap();
+                }
+                let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
+                assert_eq!(pending.state, QaPassState::Pending, "unregister={unregister}, by_name={by_name}");
+                assert!(pending.reviewer_agent_id.is_none());
+                assert_eq!(pending.id, opened.id);
+                assert_eq!(pending.deadline_at, opened.deadline_at);
+                assert!(matches!(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap(),
+                    QaPassOpen::AlreadyOpen(pass) if pass == pending));
+            }
+        }
+    }
+
+    #[test]
+    fn claim_reclaims_only_inactive_reviewers_cas_8881() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentStatus};
+        for status in [Some(AgentStatus::Active), Some(AgentStatus::Idle),
+            Some(AgentStatus::Stale), Some(AgentStatus::Shutdown), None] {
+            for by_name in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let agents = SqliteAgentStore::open(dir.path()).unwrap();
+                agents.init().unwrap();
+                let agent = Agent::new("reviewer-id".into(), "reviewer-name".into());
+                agents.register(&agent).unwrap();
+                let now = Utc::now();
+                let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+                let identity = if by_name { &agent.name } else { &agent.id };
+                claim_qa_pass(dir.path(), "cas-ui1", identity, now).unwrap();
+                // Simulate a legacy stale claim that escaped retirement cleanup.
+                let conn = open_conn(dir.path()).unwrap();
+                let conn = crate::shared_db::lock_connection(&conn).unwrap();
+                if let Some(status) = status {
+                    conn.execute("UPDATE agents SET status = ?1 WHERE id = ?2",
+                        params![status.to_string(), agent.id]).unwrap();
+                } else {
+                    conn.execute("DELETE FROM agents WHERE id = ?1", params![agent.id]).unwrap();
+                }
+                drop(conn);
+                let result = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now);
+                if matches!(status, Some(AgentStatus::Active | AgentStatus::Idle)) {
+                    assert!(result.unwrap_err().to_string().contains("already claimed"));
+                } else {
+                    let reclaimed = result.expect("inactive claimant cannot block replacement");
+                    assert_eq!(reclaimed.id, opened.id);
+                    assert_eq!(reclaimed.deadline_at, opened.deadline_at);
+                    assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn recovery_only_releases_expected_reviewer_cas_3172() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();

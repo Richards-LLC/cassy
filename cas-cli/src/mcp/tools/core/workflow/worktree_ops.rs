@@ -1718,10 +1718,12 @@ fn parked_merge_source(
     }
     let suffix = format!("-{task_id}");
     let candidate = (!source.ends_with(&suffix)).then(|| format!("{source}{suffix}"));
+    let mut candidate_exists = false;
     if let Some(candidate) = candidate.as_deref() {
         let local = git.resolve_commit(&format!("refs/heads/{candidate}"));
         let remote = git.resolve_commit(&format!("refs/remotes/origin/{candidate}"));
         let found = local.clone().or(remote);
+        candidate_exists = found.is_some();
         let usable = found.as_deref() == Some(anchor_sha.as_str());
         if usable {
             if local.is_none() {
@@ -1741,6 +1743,10 @@ fn parked_merge_source(
     let remedy = if candidate.is_none() {
         format!(
             "Restore this task's pushed delivery on the existing {source} branch, re-park it with checks, then retry (`worktree_merge id={source} task_id={task_id}`)."
+        )
+    } else if let Some(branch) = candidate.as_deref().filter(|_| candidate_exists) {
+        format!(
+            "Restore the reviewed delivery on the existing {branch} branch, re-park it with checks, then retry (`worktree_merge id={branch} task_id={task_id}`)."
         )
     } else {
         "Restore the reviewed delivery on a pushed task-owned branch and re-park it with checks before retrying with that branch.".to_string()
@@ -7470,8 +7476,16 @@ mod cas_7ce6_parked_merge_source_tests {
         assert!(refusal.contains(&anchor), "{refusal}");
         assert!(refusal.contains("id=factory/w-cas-park task_id=cas-park"), "{refusal}");
 
-        // No branch name is suggested when the task branch is absent.
+        // An origin-only task branch is still an existing recovery branch.
         git(path, &["branch", "-D", "factory/w-cas-park"]);
+        let wrong_tip = git(path, &["rev-parse", "HEAD"]);
+        git(path, &["update-ref", "refs/remotes/origin/factory/w-cas-park", &wrong_tip]);
+        let remote = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
+            .expect_err("origin task branch needs the reviewed delivery restored");
+        assert!(remote.contains("id=factory/w-cas-park task_id=cas-park"), "{remote}");
+
+        // No branch name is suggested when the task branch is absent.
+        git(path, &["update-ref", "-d", "refs/remotes/origin/factory/w-cas-park"]);
         let missing = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
             .expect_err("no task branch exists");
         assert!(!missing.contains("id=factory/w-cas-park"), "{missing}");

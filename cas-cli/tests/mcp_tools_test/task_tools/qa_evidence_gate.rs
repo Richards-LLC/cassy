@@ -541,12 +541,9 @@ journeys:
     invariants: [INV-COMPOSER]
     traffic: {share_pct: 100, basis: messages}
 "#;
-    let before = if case == "new live owner" {
-        registry.replace("owners: [web/composer.css]", "owners: [README.md]")
-    } else {
-        registry.to_string()
-    };
-    commit_file(&fx.repo, "docs/qa/journeys.yaml", &before);
+    if case != "new live owner" {
+        commit_file(&fx.repo, "docs/qa/journeys.yaml", registry);
+    }
     let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
     let bundle = fx.write_bundle(&head);
     let parked = close_text(&fx.core, TASK).await;

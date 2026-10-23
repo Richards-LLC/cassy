@@ -10267,6 +10267,19 @@ mod worker_commit_guard_tests {
             "bisect classification and detached checkout must remain usable: {value}"
         );
 
+        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
+        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
+        );
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HEAD is detached"));
+
         let commit = hook_git_write_input(&path, "git commit -m forbidden");
         let output = handle_pre_tool_use(&commit, None).expect("handler ok");
         let value = serde_json::to_value(output).unwrap();

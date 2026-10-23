@@ -2380,7 +2380,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             let stale = "factory/peer-worker";
             run_git(&["push", "origin", "main:refs/heads/factory/peer-worker"], &peer);
             // Cached origin data must not hide the real remote-only stale tip.
-            run_git(&["update-ref", &format!("refs/remotes/origin/{stale}"), &anchor], &repo.root);
+            run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{stale}")], &repo.root);
             assert!(git_stdout(&repo.root, &["branch", "--list", stale]).is_empty());
             env.set(cas::github_issue_attach::GH_BIN_ENV,
                 ci_check_run::ci_concluded(remote.path(), "failure"));
@@ -5624,6 +5624,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     if !system_a {
         // Legacy park metadata survives cleanup; the immutable receipt owns resume.
         gate_cleared_task.deliverables.parked_branch = Some(receipt.source_branch.clone());
+        let cleaned_origin = home.path().join("cleaned-origin.git");
+        run_git(&["init", "--bare", cleaned_origin.to_str().unwrap()], &repo.root);
+        run_git(&["config", &format!("url.{}.insteadOf", cleaned_origin.display()),
+            "git@github.com:org/delivery.git"], &repo.root);
+        run_git(&["push", "origin", "main"], &repo.root);
     }
     task_store
         .update(&gate_cleared_task)

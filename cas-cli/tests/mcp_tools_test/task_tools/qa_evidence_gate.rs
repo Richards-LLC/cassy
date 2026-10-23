@@ -548,7 +548,22 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
     ];
     for path in paths {
         let body = if path.ends_with(".yaml") {
-            "version: 1\njourneys: []\n"
+            r#"version: 1
+updated: "2026-10-23"
+invariants:
+  INV-COMPOSER:
+    statement: The composer remains visible
+    check: Read the composer after opening it
+journeys:
+  - id: COMPOSE
+    name: Open the composer
+    status: live
+    entry: {url: /compose, trigger: Open}
+    steps: [open, compose]
+    owners: [web/composer.css]
+    invariants: [INV-COMPOSER]
+    traffic: {share_pct: 100, basis: messages}
+"#
         } else {
             "QA documentation upkeep\n"
         };

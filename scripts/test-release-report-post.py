@@ -41,6 +41,7 @@ class StubState:
         # GH #908: how the hub answers the file post ("ok", "http_413",
         # or "file_too_large").
         self.file_mode = "ok"
+        self.html_ref = "main"
 
 
 def envelope(result: dict) -> bytes:
@@ -227,7 +228,7 @@ def handler_for(state: StubState):
                 else:
                     assert arguments["kind"] == "message"
                     assert arguments["reply_to"] == DEV_THREAD
-                    assert "https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v9.99.0.html" in arguments["text"]
+                    assert f"https://github.com/Richards-LLC/cassy/blob/{state.html_ref}/docs/release-reports/v9.99.0.html" in arguments["text"]
                     result = {
                         "_id": request_id,
                         "content": [
@@ -403,7 +404,7 @@ def run_token_selection_proof() -> None:
         names = {
             "VIOLET_SLACK_TOKEN_ENV", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "VIOLET_SLACK_TOKEN",
             "VIOLET_SLACK_TOKEN_CASSY_PROXY", "VIOLET_SLACK_TOKEN_SOUNDWAVE", "VIOLET_SLACK_TOKEN_SOUNDWAVE_64AF90",
-            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CONFIG_DIR", "CODEX_HOME",
             module.LEGACY_TRAIN_SELECTOR_ENV,
             module.LEGACY_TOKEN_SELECTOR_ENV,
             module.LEGACY_TOKEN_PREFIX,
@@ -416,6 +417,7 @@ def run_token_selection_proof() -> None:
             for name in names:
                 os.environ.pop(name, None)
             os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            os.environ["CODEX_HOME"] = str(config_dir / "codex")
             credentials = {
                 (module.LEGACY_TOKEN_PREFIX + "_CASSY_PROXY"): "proxy-token",
                 (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE"): "soundwave-token",
@@ -452,13 +454,14 @@ def run_token_selection_proof() -> None:
 def run_violet_credential_proof() -> None:
     module = adapter_module()
     names = {name for name in os.environ if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX))}
-    names |= {"VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", module.LEGACY_TRAIN_SELECTOR_ENV, "CLAUDE_CONFIG_DIR"}
+    names |= {"VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", module.LEGACY_TRAIN_SELECTOR_ENV, "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
     previous = {name: os.environ.get(name) for name in names}
     try:
         for name in names:
             os.environ.pop(name, None)
         with tempfile.TemporaryDirectory(prefix="violet-credentials-") as directory:
             os.environ["CLAUDE_CONFIG_DIR"] = directory
+            os.environ["CODEX_HOME"] = str(Path(directory) / "codex")
             credentials = {(module.LEGACY_TOKEN_PREFIX + "_TEST"): "legacy-token", module.LEGACY_BYPASS_ENV: "legacy-bypass"}
             assert module.resolve_token(credentials) == "legacy-token"
             assert module.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials) == "legacy-bypass"
@@ -533,11 +536,13 @@ def run_adapter(
     dev_thread: str = DEV_THREAD,
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
+    html_ref: str = "main",
 ):
     module = adapter_module()
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
+    state.html_ref = html_ref
     with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
         root = Path(directory)
         html = root / "v9.99.0.html"
@@ -558,6 +563,10 @@ def run_adapter(
                 environment.pop(name, None)
         environment.update(
             {
+                "HOME": str(root),
+                "CODEX_HOME": str(root / "codex-config"),
+                "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
+                "CAS_RELEASE_TRAIN_REPORT_HTML_REF": html_ref,
                 "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
                 "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
                 "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": user_thread,
@@ -567,6 +576,35 @@ def run_adapter(
                 "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
             }
         )
+        environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_URL", None)
+        if credential_mode.startswith("codex-"):
+            # Exercise the real subprocess resolver with competing credentials,
+            # not an explicit selector that would bypass registration discovery.
+            credentials.write_text(
+                "export VIOLET_SLACK_TOKEN_TEST='stub-token'\n"
+                "export VIOLET_SLACK_TOKEN_OTHER='wrong-token'\n"
+                "export VIOLET_VERCEL_BYPASS='stub-bypass'\n", encoding="utf-8",
+            )
+            environment.pop(module.LEGACY_TRAIN_SELECTOR_ENV)
+            if credential_mode == "codex-default":
+                environment.pop("CODEX_HOME")
+                config_dir = root / ".codex"
+            else:
+                config_dir = Path(environment["CODEX_HOME"])
+            config_dir.mkdir(parents=True)
+            if credential_mode != "codex-unregistered":
+                (config_dir / "config.toml").write_text(
+                    '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_SLACK_TOKEN_TEST"\n',
+                    encoding="utf-8",
+                )
+            if credential_mode == "codex-conflict":
+                claude_dir = Path(environment["CLAUDE_CONFIG_DIR"])
+                claude_dir.mkdir()
+                (claude_dir / ".claude.json").write_text(json.dumps({"mcpServers": {
+                    "violet": {"headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_OTHER}"}}
+                }}), encoding="utf-8")
+            if credential_mode == "codex-missing":
+                credentials.write_text("export VIOLET_SLACK_TOKEN_OTHER='wrong-token'\n", encoding="utf-8")
         environment.pop((module.LEGACY_TOKEN_PREFIX + "_TEST"), None)
         environment.pop(module.LEGACY_BYPASS_ENV, None)
         result = subprocess.run(
@@ -594,11 +632,27 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        for mode in ("violet", "both", "empty-violet"):
+        for mode in ("violet", "both", "empty-violet", "codex-default", "codex-custom"):
             result, fields = run_adapter(server, state, pdf, credential_mode=mode)
             assert result.returncode == 0, (mode, result.stderr)
             assert fields is not None, mode
         print("Violet transport: canonical-only, both names, and empty primary credentials passed against canonical-only hub")
+        for mode, expected in (
+            ("codex-unregistered", "multiple Violet token variables"),
+            ("codex-conflict", "conflicting Violet registrations"),
+            ("codex-missing", "unset or empty"),
+        ):
+            result, fields = run_adapter(server, state, pdf, credential_mode=mode)
+            assert result.returncode != 0 and expected in result.stderr, (mode, result.stderr)
+            assert fields is None and state.requests == [], "ambiguous or missing authority must refuse before network"
+            assert "stub-token" not in result.stderr and "wrong-token" not in result.stderr
+        print("Codex registration: default/custom homes passed; ambiguous/conflicting/missing credentials refused before network")
+        result, fields = run_adapter(server, state, pdf, html_ref="v9.99.0")
+        assert result.returncode == 0 and fields is not None, result.stderr
+        result, fields = run_adapter(server, state, pdf, html_ref="factory/temporary-report")
+        assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
+        assert fields is None and state.requests == [], "temporary report links must refuse before any upload"
+        print("Report links: main/tag accepted; temporary branch refused before network")
         result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")

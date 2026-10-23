@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -193,8 +194,8 @@ def resolve_secret(name: str, explicit_env: str | None, credentials: dict[str, s
     return ""
 
 
-def registered_violet_token_env() -> str | None:
-    """Return the token variable named by this machine's Claude registration."""
+def registered_claude_violet_token_env() -> str | None:
+    """Read Claude's variable reference without evaluating a header or secret."""
 
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     config_path = (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
@@ -221,6 +222,30 @@ def registered_violet_token_env() -> str | None:
         authorization,
     )
     return match.group(1) if match else None
+
+
+def registered_violet_token_env() -> str | None:
+    """Discover Claude/Codex registration; conflicting identities need a selector."""
+
+    claude = registered_claude_violet_token_env()
+    registered = [claude] if claude else []
+    codex_home = os.environ.get("CODEX_HOME")
+    config_path = (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
+    try:
+        document = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        document = {}
+    servers = document.get("mcp_servers", {})
+    if isinstance(servers, dict):
+        server = servers.get("violet") or servers.get(COMPATIBILITY["retired_server"])
+        if isinstance(server, dict) and "bearer_token_env_var" in server:
+            name = server["bearer_token_env_var"]
+            if not isinstance(name, str):
+                fail("registered Violet bearer selector must name a Violet Slack token variable")
+            registered.append(validated_token_selector(name))
+    if len({credential_names(name)[0] for name in registered}) > 1:
+        fail("conflicting Violet registrations; set VIOLET_SLACK_TOKEN_ENV")
+    return registered[0] if registered else None
 
 
 def select_token_env(candidates: set[str], registered_env: str | None) -> str | None:
@@ -662,7 +687,9 @@ def html_url(tag: str) -> str:
     if configured:
         return configured
     repo = os.environ.get("CAS_RELEASE_TRAIN_REPO", DEFAULT_REPO).strip().strip("/")
-    ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip()
+    ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip() or "main"
+    if ref not in {"main", tag}:
+        fail("release report HTML ref must be main or the release tag; temporary delivery branches cannot be published")
     return f"https://github.com/{repo}/blob/{ref}/docs/release-reports/{tag}.html"
 
 
@@ -720,6 +747,7 @@ def main(argv: list[str]) -> int:
 
     try:
         read_since = slack_timestamp_since(user_thread)
+        report_url = html_url(tag)
         pdf_bytes = pdf_path.read_bytes()
         check_upload_size(f"PDF {pdf_path.name}", len(pdf_bytes), hub_upload_limit())
         html_bytes = html_path.read_bytes()
@@ -776,7 +804,7 @@ def main(argv: list[str]) -> int:
                 "channel": channel,
                 "kind": "message",
                 "reply_to": dev_thread,
-                "text": f"Release report HTML: <{html_url(tag)}|open the standalone report>",
+                "text": f"Release report HTML: <{report_url}|open the standalone report>",
             },
         )
         html_file_id, _html_permalink = message_receipt(html_envelope, "HTML")

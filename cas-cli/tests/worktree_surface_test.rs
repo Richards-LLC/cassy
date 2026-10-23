@@ -2358,6 +2358,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             // The receiver saw the first parked tip before the worker rebased
             // its pushed task branch onto a newer target commit.
             run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")], &repo.root);
+            run_git(&["branch", branch, &anchor], &repo.root);
             run_git(&["switch", "epic/peer"], &repo.root);
             std::fs::write(repo.root.join("target-update.txt"), "target update\n").unwrap();
             run_git(&["add", "target-update.txt"], &repo.root);

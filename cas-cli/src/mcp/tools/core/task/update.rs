@@ -466,6 +466,19 @@ fn clean_idle_assignment_note(
     if !git.is_ancestor(&tip, &target) {
         return None;
     }
+    // cas-ff6c: start refuses another task's per-task branch rather than
+    // resetting it, so promise the cut start will ask for.
+    if let Some(owner_task) = crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch)
+        .filter(|owner_task| *owner_task != task.id)
+    {
+        return Some(format!(
+            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \
+             {target_branch}. That branch belongs to {owner_task}, so `task start` will ask the \
+             worker to cut factory/{name}-{task_id} from the target first.",
+            name = worker.name,
+            task_id = task.id,
+        ));
+    }
     Some(format!(
         "ℹ️ Worker '{}' has no active task and its clean {} branch is behind {}. \
          `task start` will reset that branch to the target before work begins.",

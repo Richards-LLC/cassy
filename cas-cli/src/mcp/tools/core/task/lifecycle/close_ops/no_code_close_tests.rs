@@ -1231,8 +1231,10 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     for (lane, foreign_after_start, rebase_after_start) in [
         (LANE, false, false),
         (LANE, true, false),
-        ("factory/nocode-worker-cas-a0b1", false, false),
-        ("factory/nocode-worker-cas-a0b1", true, false),
+        // cas-ff6c: a per-task lane is this task's own; start refuses
+        // another task's per-task branch rather than reusing it.
+        ("factory/nocode-worker-cas-ead0", false, false),
+        ("factory/nocode-worker-cas-ead0", true, false),
         (LANE, false, true),
     ] {
         let f = fixture(&mut env, "main");

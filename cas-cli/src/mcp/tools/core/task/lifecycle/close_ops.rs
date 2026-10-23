@@ -8602,6 +8602,20 @@ impl CasCore {
                     // a new branch tip requires the delivery anchor to move.
                     let anchor = measured_branch.as_deref()
                         .and_then(|branch| resolve_branch_sha(&close_project_root, branch));
+                    // A merged delivery may have had its source refs cleaned
+                    // up. Reject also carries content refusals: keep that
+                    // decision instead of trying to re-park the integrated
+                    // anchor and replacing it with a missing-source error.
+                    if anchor.is_none()
+                        && task.status == TaskStatus::AwaitingMerge
+                        && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
+                            commit_is_merged_into_parent(
+                                &close_project_root, anchor, &resolved_parent_branch,
+                            )
+                        })
+                    {
+                        return Ok(Self::tool_error(msg));
+                    }
                     // cas-44e93: the merge reads the pushed branch, so a
                     // commit origin lacks can never be the delivery anchor.
                     if let Some(branch) = measured_branch.as_deref()

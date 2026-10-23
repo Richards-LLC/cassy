@@ -1503,6 +1503,15 @@ fn worktree_merge_mcp_error(
             "use a temporary worktree, merge there by hand, then move the branch ref and remove the temporary worktree.".to_string(),
         ),
     };
+    // Git details already contain structural line breaks (porcelain/status or
+    // stderr). Keep those rows, but escape controls and hidden text within each.
+    let visible_details = |details: &str| {
+        details
+            .split('\n')
+            .map(crate::worktree::GitOperations::visible_git_label)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let source_branch = crate::worktree::GitOperations::visible_git_label(source_branch);
     let target_branch = crate::worktree::GitOperations::visible_git_label(target_branch);
     let mut message = match error {
@@ -1515,7 +1524,11 @@ fn worktree_merge_mcp_error(
              1. Resolve on {source_branch} by rebasing or merging {target_branch}, then retry.\n\
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree.",
-            paths.join(", ")
+            paths
+                .iter()
+                .map(|path| crate::worktree::GitOperations::visible_git_label(path))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         WorktreeError::Git(GitError::MergeConflict) => format!(
             "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}; \
@@ -1527,15 +1540,20 @@ fn worktree_merge_mcp_error(
              2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
              resolve and commit the conflicts, then remove the temporary worktree."
         ),
-        WorktreeError::Git(GitError::MergeInProgress(details)) => format!(
-            "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
+        WorktreeError::Git(GitError::MergeInProgress(details)) => {
+            let details = visible_details(&details);
+            format!(
+                "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
              MERGE_HEAD and unresolved index state: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Resolve and commit the \
              existing merge, or {abort_advice}, \
              before retrying the merge into {target_branch}."
-        ),
-        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
-            "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
+            )
+        }
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
+            let details = visible_details(&details);
+            format!(
+                "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
              tracked changes on paths this merge would write: {details}.\n\n\
              worktree_merge did not attempt {source_branch}. Residue on paths the merge \
              does NOT touch is ignored — the merge runs in an ephemeral worktree and \
@@ -1547,7 +1565,8 @@ fn worktree_merge_mcp_error(
              2. Or merge out of band without touching the shared checkout: \
              {detached_advice}\n\n\
              `force=true` does not bypass shared-checkout residue."
-        ),
+            )
+        }
         WorktreeError::Git(GitError::TargetTipChanged {
             ref branch,
             ref expected,
@@ -1555,15 +1574,18 @@ fn worktree_merge_mcp_error(
         }) => {
             let branch = crate::worktree::GitOperations::visible_git_label(branch);
             format!(
-            "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
-             {source_branch} was being merged.\n\n\
-             The merge ran in an ephemeral worktree and was discarded rather than \
-             published over the concurrent update — {target_branch} still points at the \
-             other writer's commit and no shared checkout was touched. Re-run the merge \
-             against the new tip."
+                "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
+                 {source_branch} was being merged.\n\n\
+                 The merge ran in an ephemeral worktree and was discarded rather than \
+                 published over the concurrent update — {target_branch} still points at the \
+                 other writer's commit and no shared checkout was touched. Re-run the merge \
+                 against the new tip."
             )
-        },
-        other => format!("Failed to merge worktree: {other}"),
+        }
+        other => format!(
+            "Failed to merge worktree: {}",
+            visible_details(&other.to_string()),
+        ),
     };
     if let Err(refusal) = remedies {
         message.push_str("\n\n");
@@ -1598,6 +1620,52 @@ fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
         }
     }
     (token.to_string(), format!("factory/{token}"))
+}
+
+/// Delivery spellings are matched against an already-authorized worker/task;
+/// their suffix is never an authority for the worker identity (cas-4fe8).
+fn task_delivery_branch_matches(branch: &str, worker: &str, task_id: &str) -> bool {
+    if branch == format!("factory/{worker}") {
+        return true;
+    }
+    let prefix = format!("factory/{worker}-");
+    let Some(rest) = branch.strip_prefix(&prefix) else { return false; };
+    let base = rest.strip_suffix("-fix")
+        .or_else(|| rest.strip_suffix("-resume"))
+        .or_else(|| rest.rsplit_once("-r").and_then(|(base, round)| {
+            (!round.is_empty() && round.bytes().all(|b| b.is_ascii_digit())).then_some(base)
+        }))
+        .unwrap_or(rest);
+    base == task_id || base.strip_prefix("cas-").is_some_and(|short| {
+        short.len() >= 4 && short.bytes().all(|b| b.is_ascii_hexdigit())
+            && task_id.strip_prefix("cas-").is_some_and(|full| full.starts_with(short))
+    })
+}
+
+/// Read-only Git discovery, bounded just like the subsequent exact-branch fetch.
+fn merge_source_refs(repo: &Path, args: &[&str]) -> Result<Vec<String>, McpError> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0");
+    let output = crate::worktree::GitOperations::run_command_bounded(
+        command, Duration::from_secs(10),
+    ).map_err(|error| McpError {
+        code: ErrorCode::INTERNAL_ERROR,
+        message: Cow::from(format!("Cannot inspect delivery branches: {error}")),
+        data: None,
+    })?;
+    if !output.status.success() {
+        return Err(McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!(
+                "Cannot inspect delivery branches: {}", String::from_utf8_lossy(&output.stderr).trim(),
+            )),
+            data: None,
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| {
+        // ls-remote emits SHA<TAB>ref; for-each-ref emits just the ref.
+        line.split_whitespace().last()?.strip_prefix("refs/heads/").map(str::to_owned)
+    }).collect())
 }
 
 /// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
@@ -3451,6 +3519,109 @@ impl CasCore {
         Ok((Box::new(task), worker))
     }
 
+    /// A server-recorded delivery keeps its assignee even when the approved
+    /// branch has a recovery suffix that cannot be parsed as a worker name.
+    fn recorded_task_merge_source(
+        &self, task: &cas_types::Task, branch: &str,
+    ) -> Result<Option<(String, String)>, McpError> {
+        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+            return Ok(None);
+        };
+        if start.branch != branch
+            || task.assignee.as_deref() != Some(start.assignee.as_str())
+            || task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        {
+            return Ok(None);
+        }
+        let agents = self.open_agent_store()?;
+        let worker = crate::mcp::tools::core::task::resolve_agent_identity(
+            agents.as_ref(), &start.assignee,
+        ).map(|agent| agent.name).unwrap_or_else(|| start.assignee.clone());
+        Ok(Some((worker, branch.to_string())))
+    }
+
+    /// Prefer the task's recorded source, discovering names only if it is absent.
+    /// The task/agent identity authorizes the worker independently of branch spelling.
+    fn task_merge_source(
+        &self,
+        repo: &Path,
+        task: Option<&cas_types::Task>,
+        id: &str,
+    ) -> Result<Option<RemoteMergeSource>, McpError> {
+        let Some(task) = task.filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+        else { return Ok(None); };
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+        else { return Ok(None); };
+        let agents = self.open_agent_store()?;
+        let identity = task.assignee.clone().or_else(|| {
+            agents.get_lease(&task.id).ok().flatten()
+                .filter(|lease| lease.is_valid()).map(|lease| lease.agent_id)
+        });
+        let Some(identity) = identity else { return Ok(None); };
+        let assignee = agents.get(&identity).ok().map(|agent| agent.name)
+            .unwrap_or_else(|| identity.strip_prefix("factory/").unwrap_or(&identity).to_string());
+        authorize_explicit_task_for_system_b_worker(task, &assignee, agents.as_ref())?;
+        let requested = id.strip_prefix("origin/").unwrap_or(id);
+        if requested != anchor && !identity_belongs_to_worker(requested, &assignee, agents.as_ref())
+            && !task_delivery_branch_matches(requested, &assignee, &task.id)
+            && self.recorded_task_merge_source(task, requested)?.is_none()
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "worktree_merge authorization failed: source {id} does not belong to worker {assignee} and task {}. No merge was attempted.", task.id,
+                )),
+                data: None,
+            });
+        }
+        let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let recorded = task.deliverables.parked_branch.as_deref().filter(|b| !b.trim().is_empty());
+        if let Some(branch) = recorded {
+            if !task_delivery_branch_matches(branch, &assignee, &task.id)
+                && self.recorded_task_merge_source(task, branch)?.is_none()
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "worktree_merge authorization failed: recorded source {branch} does not belong to worker {assignee} and task {}.", task.id,
+                    )),
+                    data: None,
+                });
+            }
+            if git.resolve_commit(&format!("refs/heads/{branch}")).is_some()
+                || (git.has_origin_remote() && !merge_source_refs(repo, &[
+                    "ls-remote", "--heads", "origin", &format!("refs/heads/{branch}"),
+                ])?.is_empty())
+            {
+                return Ok(Some(RemoteMergeSource {
+                    assignee, branch: branch.into(), anchor: anchor.into(),
+                }));
+            }
+        }
+        let mut branches = merge_source_refs(repo, &["for-each-ref", "--format=%(refname)", "refs/heads/factory/"])?;
+        if git.has_origin_remote() {
+            branches.extend(merge_source_refs(repo, &[
+                "ls-remote", "--heads", "origin", &format!("refs/heads/factory/{assignee}*"),
+            ])?);
+        }
+        branches.retain(|branch| task_delivery_branch_matches(branch, &assignee, &task.id));
+        branches.sort();
+        branches.dedup();
+        if branches.len() != 1 {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "AMBIGUOUS DELIVERY SOURCE: task {} has {} candidates: {}. Record the intended branch and anchor, then retry. No merge was attempted.",
+                    task.id, branches.len(), if branches.is_empty() { "none".into() } else { branches.join(", ") },
+                )),
+                data: None,
+            });
+        }
+        Ok(Some(RemoteMergeSource {
+            assignee, branch: branches.pop().expect("one source"), anchor: anchor.into(),
+        }))
+    }
+
     /// Resolve a remote-only delivery through task and supervisor authority.
     /// The real pushed branch is materialized locally for the existing CI/QA
     /// gates; divergent local refs are never overwritten.
@@ -3460,7 +3631,7 @@ impl CasCore {
         task: Option<&cas_types::Task>,
         id: &str,
         cleanup: Option<bool>,
-        worker_hint: Option<&str>,
+        selected: Option<&RemoteMergeSource>,
     ) -> Result<Option<RemoteMergeSource>, McpError> {
         let Some(task) = task.filter(|task| {
             task.status == cas_types::TaskStatus::AwaitingMerge
@@ -3468,14 +3639,10 @@ impl CasCore {
         }) else {
             return Ok(None);
         };
-        let (Some(branch), Some(anchor)) = (
-            task.deliverables.parked_branch.as_deref(),
-            task.deliverables.factory_branch_anchor.as_deref(),
-        ) else {
-            return Ok(None);
-        };
-        let (branch_worker, canonical_branch) = system_b_merge_source(branch, Some(&task.id));
-        let assignee = worker_hint.unwrap_or(&branch_worker).to_string();
+        let Some(selected) = selected else { return Ok(None); };
+        let branch = selected.branch.as_str();
+        let anchor = selected.anchor.as_str();
+        let assignee = selected.assignee.clone();
         // Live local workers retain their existing merge/dirty-tree policy.
         if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
             return Ok(None);
@@ -3487,9 +3654,7 @@ impl CasCore {
             )),
             data: None,
         };
-        if canonical_branch != branch
-            || !(id == branch || id == assignee || id == format!("origin/{branch}") || id == anchor)
-            || anchor.len() != 40
+        if anchor.len() != 40
             || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(refuse(format!(
@@ -3829,10 +3994,40 @@ impl CasCore {
             data: None,
         })?;
 
+        // A transactional receipt with no legacy parked branch already binds
+        // its source and may resume after all source refs were cleaned up.
+        let task_source = if system_a.is_none()
+            && (transactional_delivery.is_none()
+                || scoped_task.as_deref().is_some_and(|task| task.deliverables.parked_branch.is_some()))
+        {
+            self.task_merge_source(&cwd, scoped_task.as_deref(), id)?
+        } else {
+            None
+        };
+        // An explicit branch names a delivery, while a worker-only request
+        // deliberately follows the task's latest parked source. Do not let a
+        // stale explicit branch silently merge a different parked round.
+        let requested_branch = id.strip_prefix("origin/").unwrap_or(id);
+        if implicit_delivery.is_none()
+            && let Some(source) = task_source.as_ref()
+            && requested_branch.starts_with("factory/")
+            && requested_branch != source.branch
+            && manager.git().resolve_commit(&format!("refs/heads/{requested_branch}"))
+                .is_some_and(|tip| tip != source.anchor)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "PARKED DELIVERY SOURCE CHANGED: the requested branch has a different tip. Retry with recorded branch {} at {}. No merge was attempted.",
+                    crate::worktree::GitOperations::visible_git_label(&source.branch),
+                    crate::worktree::GitOperations::visible_git_label(&source.anchor),
+                )),
+                data: None,
+            });
+        }
         let remote_source = if system_a.is_none() {
             self.prepare_remote_merge_source(
-                &manager, scoped_task.as_deref(), id, cleanup,
-                implicit_delivery.as_ref().map(|(_, worker)| worker.as_str()),
+                &manager, scoped_task.as_deref(), id, cleanup, task_source.as_ref(),
             )?
         } else {
             None
@@ -3842,7 +4037,9 @@ impl CasCore {
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
         if let Some(task_id) = task_id
-            && let Some(refusal) = self.independent_qa_merge_refusal(task_id, id, &cwd)
+            && let Some(refusal) = self.independent_qa_merge_refusal(
+                task_id, task_source.as_ref().map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
+            )
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -3877,6 +4074,7 @@ impl CasCore {
                     // path, but has its own Git ref (GH #1040).
                     let (assignee, source_branch) = remote_source.as_ref()
                         .map(|source| (source.assignee.clone(), source.branch.clone()))
+                        .or_else(|| task_source.as_ref().map(|source| (source.assignee.clone(), source.branch.clone())))
                         .or_else(|| implicit_delivery.as_ref().map(|(task, worker)| (
                             worker.clone(), task.deliverables.parked_branch.clone().expect("validated parked branch"),
                         )))
@@ -5130,14 +5328,21 @@ impl CasCore {
         let auto_close_expected = transactional_delivery.is_none()
             && !ci_override
             && push_outcome.is_published();
-        let ci_confirmed = matches!(branch_ci_state, BranchCiState::Green { .. });
+        let ci_admission = if ci_override {
+            cas_types::MergeCiAdmission::Override
+        } else if matches!(branch_ci_state, BranchCiState::Green { .. }) {
+            cas_types::MergeCiAdmission::Green
+        } else {
+            cas_types::MergeCiAdmission::Advisory
+        };
         let push_note = match (task_id, merge_commit.as_deref()) {
-            (Some(task_id), Some(merge_sha)) if auto_close_expected => {
+            (Some(task_id), Some(merge_sha))
+                if transactional_delivery.is_none() && push_outcome.is_published() => {
                 let outcome = self
-                    .close_after_published_merge(task_id, merge_sha, ci_confirmed)
+                    .close_after_published_merge(task_id, merge_sha, ci_admission)
                     .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
-                format!("{push_note}{}", outcome.receipt(task_id))
+                format!("{push_note}\nCI admission: {}\n{}", ci_admission.label(), outcome.receipt(task_id))
             }
             _ => push_note,
         };
@@ -6585,11 +6790,18 @@ mod tests {
         for (source, visible) in [
             ("factory/worker", "factory/worker"),
             ("factory/control\u{85}label", "factory/control\\u{85}label"),
+            ("factory/line\u{2028}label", "factory/line\\u{2028}label"),
+            (
+                "factory/paragraph\u{2029}label",
+                "factory/paragraph\\u{2029}label",
+            ),
         ] {
             let error = worktree_merge_mcp_error(
                 WorktreeError::Git(GitError::MergeConflictPaths(vec![
                     "src/one.rs".to_string(),
                     "src/two.rs".to_string(),
+                    "src/bidi\u{202e}name.rs".to_string(),
+                    "src/line\u{2028}name.rs".to_string(),
                 ])),
                 source,
                 "epic/example",
@@ -6599,12 +6811,16 @@ mod tests {
             assert!(message.contains("CONTENT CONFLICT"));
             assert!(message.contains("src/one.rs"));
             assert!(message.contains("src/two.rs"));
+            assert!(message.contains("src/bidi\\u{202e}name.rs"), "{message:?}");
+            assert!(message.contains("src/line\\u{2028}name.rs"), "{message:?}");
+            assert!(!message.contains('\u{202e}'), "{message:?}");
             assert!(message.contains("restored"));
             assert!(message.contains("temporary worktree"));
             assert!(message.contains(visible), "{message:?}");
             assert!(!message.contains('\u{85}'), "{message:?}");
+            assert!(!message.contains(['\u{2028}', '\u{2029}']), "{message:?}");
             assert_eq!(error.code, super::ErrorCode::INTERNAL_ERROR);
-            if source.contains('\u{85}') {
+            if source.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
                 // pin: refused rendering must explain why no command can be pasted.
                 assert!(message.contains("no copyable command"), "{message}");
             }
@@ -6643,6 +6859,34 @@ mod tests {
         assert!(dirty_message.contains("paths this merge would write"));
         assert!(dirty_message.contains("does NOT touch is ignored"));
         assert!(dirty_message.contains("git worktree add --detach"));
+
+        // The Git subprocess's text is untrusted even when branch names are safe.
+        let detail = "UU path\u{1b}[31m\u{202e}spoof\u{2028}line\u{2029}end\n M second\tfile.rs\n";
+        for git_error in [
+            GitError::MergeInProgress(detail.into()),
+            GitError::MergeCheckoutDirty(detail.into()),
+            GitError::CommandFailed(detail.into()),
+        ] {
+            let message = worktree_merge_mcp_error(
+                WorktreeError::Git(git_error),
+                "factory/worker",
+                "epic/example",
+            )
+            .message
+            .into_owned();
+            assert!(
+                message.contains("path\\u{1b}[31m\\u{202e}spoof\\u{2028}line\\u{2029}end"),
+                "{message:?}"
+            );
+            assert!(
+                !message.contains(['\u{1b}', '\u{202e}', '\u{2028}', '\u{2029}', '\t']),
+                "{message:?}"
+            );
+            assert!(
+                message.contains("end\n M second\\tfile.rs\n"),
+                "{message:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

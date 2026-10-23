@@ -1,0 +1,8 @@
+[WARN] local-only proof.cjs - 34 B - art-ffc9d485
+     recorded locally; Cloud delivery failed
+     sha256 9f72b7fbdcae1216afb9604428a18351041e293faa2a71d74b08007e92b43dd7
+     artifact upload failed: the object store answered 403 (the upload URL
+       may have expired; publish again to get a fresh one) Failing
+       interaction: PUT <upload url for artifact cloud-qa> -> 403: {"error":
+       "signed Content-Type mismatch"}
+  -> cas artifact show art-ffc9d485

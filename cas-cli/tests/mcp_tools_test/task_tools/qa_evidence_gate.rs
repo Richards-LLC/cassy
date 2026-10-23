@@ -203,6 +203,119 @@ impl Fx {
     }
 }
 
+#[tokio::test]
+async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_daa6() {
+    for changed_diff in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        let fx = fixture(&mut env, &[], "Open the composer");
+        let cas_dir = fx.repo.join(".cas");
+        let config = cas_dir.join("config.toml");
+        let body = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[project]\ncanonical_id = \"receipt-fixture\"\n",
+                body.replace("independent_pass = false", "independent_pass = true"),
+            ),
+        )
+        .unwrap();
+        std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+        // Local managed setup is deliberately absent from the landed history.
+        let base = commit_file(&fx.repo, ".claude/settings.json", "{}\n");
+        let first = commit_file(&fx.repo, "web/composer.css", ".composer{gap:4px}\n");
+        let second = commit_file(&fx.repo, "web/composer.js", "export const ready = true;\n");
+        let reviewed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:8px}\n");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        let target = cas::types::WorkTarget {
+            repo_selector: "project:receipt-fixture".into(),
+            target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+            work_target: target,
+            assignee: "test-agent".into(),
+            branch: "factory/test-agent".into(),
+            base_sha: base,
+        });
+        task.deliverables.factory_branch_anchor = Some(reviewed.clone());
+        task.deliverables.parked_branch = Some("factory/test-agent".into());
+        let round = fx.artifacts.join(TASK).join("independent-qa/round-1");
+        std::fs::create_dir_all(&round).unwrap();
+        let ledger = round.join("LEDGER.md");
+        std::fs::write(&ledger, "# Independent real-build QA\n").unwrap();
+        let bundle = round.join("bundle.json");
+        std::fs::write(
+            &bundle,
+            serde_json::json!({
+                "schema": 1, "producer": "independent-qa", "task_id": TASK,
+                "head_sha": reviewed,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
+        tasks.update(&task).unwrap();
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(
+            &cas_dir,
+            &cas_store::NewQaPass {
+                task_id: TASK,
+                implementer_agent_id: "test-agent",
+                branch: "factory/test-agent",
+                bound_head: &reviewed,
+                deadline_at: now + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+        cas_store::claim_qa_pass(&cas_dir, TASK, "independent-reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(
+            &cas_dir,
+            TASK,
+            "independent-reviewer",
+            cas::types::QaVerdict::Approved,
+            "Reviewed delivery",
+            None,
+            ledger.to_str().unwrap(),
+            now,
+        )
+        .unwrap();
+        git(&fx.repo, &["checkout", "-q", "main"]);
+        commit_file(&fx.repo, "unrelated.txt", "another task\n");
+        git(&fx.repo, &["cherry-pick", &format!("{first}^..{second}")]);
+        if changed_diff {
+            // The final CSS patch still matches; an earlier unreviewed
+            // change must fail the aggregate comparison.
+            std::fs::write(fx.repo.join("web/composer.js"), "export const ready = false;\n").unwrap();
+            git(&fx.repo, &["add", "web/composer.js"]);
+            git(&fx.repo, &["commit", "-q", "--amend", "--no-edit"]);
+        }
+        git(&fx.repo, &["cherry-pick", &reviewed]);
+        let receipt = git(&fx.repo, &["rev-parse", "HEAD"]);
+        assert_ne!(reviewed, receipt);
+        git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+        let mut request = close_req(TASK);
+        request.commit_receipt = Some(receipt);
+        let output = match fx.core.cas_task_close(Parameters(request)).await {
+            Ok(result) => extract_text(result),
+            Err(error) => error.message.to_string(),
+        };
+        if changed_diff {
+            assert_ne!(fx.status(), TaskStatus::Closed, "{output}");
+            assert!(
+                output.contains("QA evidence") || output.contains("INDEPENDENT QA"),
+                "{output}"
+            );
+        } else {
+            assert_eq!(fx.status(), TaskStatus::Closed, "{output}");
+            assert!(fx.notes().contains(bundle.to_str().unwrap()));
+            assert_eq!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().len(), 1);
+        }
+    }
+}
+
 /// The cas-8cfe incident had a commit-time anchor at A, a clean delivery at B,
 /// and a fresh B bundle before the first park. Exercise the public close path
 /// both with the incident's explicit receipt and with branch discovery.

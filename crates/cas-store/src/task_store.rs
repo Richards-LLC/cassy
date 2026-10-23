@@ -353,6 +353,7 @@ impl SqliteTaskStore {
                 // must re-park and re-merge before Cassy may close for it.
                 persisted_deliverables.parked_close_reason = None;
                 persisted_deliverables.green_merge_commit = None;
+                persisted_deliverables.merge_ci_admission = None;
             }
 
             // Updates preserve the row's provenance. Only creation supplies a
@@ -1290,11 +1291,17 @@ impl TaskStore for SqliteTaskStore {
         self.append_note_inner(task_id, formatted_note, receipt_id, true)
     }
 
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             let rows = tx.execute(
                 "UPDATE tasks
-                 SET deliverables = json_set(deliverables, '$.green_merge_commit', ?1),
+                 SET deliverables = json_set(deliverables, '$.green_merge_commit', ?1,
+                                             '$.merge_ci_admission', ?5),
                      updated_at = ?2
                  WHERE id = ?3
                    AND status = ?4
@@ -1306,6 +1313,7 @@ impl TaskStore for SqliteTaskStore {
                     Utc::now().to_rfc3339(),
                     task_id,
                     TaskStatus::AwaitingMerge.to_string(),
+                    admission.as_str(),
                 ],
             )?;
             Ok(rows == 1)

@@ -183,7 +183,7 @@ fn main() -> ExitCode {
 
                 let mut err_out = std::io::stderr();
                 let theme = ActiveTheme::default();
-                let mut fmt = Formatter::stdout(&mut err_out, theme);
+                let mut fmt = Formatter::stderr(&mut err_out, theme);
 
                 let message = if init_command {
                     cli::human_init_error_message(&e)

@@ -2035,38 +2035,71 @@ fn validate_inherited_scoped_failures(
     ))
 }
 
-/// Resolve a conventional sibling `foo_tests.rs` only when `foo.rs` (or
-/// `foo/mod.rs`) actually mounts that file. Filename similarity alone proves
-/// nothing: a standalone module, comment or example must remain uncovered.
-fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
-    let file = std::path::Path::new(path);
-    let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
-    if parent_name.is_empty() {
-        return None;
+/// Mount discovery is local to one changed-source batch: each directory is
+/// listed once and each candidate parent is read/parsed once with one parser.
+struct SiblingTestParents {
+    parser: Option<cas_code::parser::RustParser>,
+    directories: std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+    mounts: std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+}
+
+impl SiblingTestParents {
+    fn new() -> Self {
+        Self {
+            parser: cas_code::parser::RustParser::new().ok(),
+            directories: Default::default(),
+            mounts: Default::default(),
+        }
     }
-    let directory = file.parent()?;
-    let changed_file = proof_repo.join(file).canonicalize().ok()?;
-    let mut parser = cas_code::parser::RustParser::new().ok()?;
-    for parent in [
-        directory.join(format!("{parent_name}.rs")),
-        directory.join(parent_name).join("mod.rs"),
-    ] {
-        let absolute = proof_repo.join(&parent);
-        let Ok(body) = std::fs::read_to_string(&absolute) else {
-            continue;
-        };
-        let Ok(mounts) = parser.explicit_external_modules(&body) else {
-            continue;
-        };
-        for (_name, relative) in mounts {
-            if absolute
-                .parent()?
-                .join(relative)
-                .canonicalize()
-                .ok()
-                .as_ref()
-                != Some(&changed_file)
-            {
+
+    /// Resolve a sibling only through an explicit AST mount whose canonical
+    /// target is the changed file. Comments and lookalike names prove nothing.
+    fn parent(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
+        let file = std::path::Path::new(path);
+        let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
+        if parent_name.is_empty() {
+            return None;
+        }
+        let directory = file.parent()?;
+        let changed_file = proof_repo.join(file).canonicalize().ok()?;
+        let parser = self.parser.as_mut()?;
+        let candidates = self
+            .directories
+            .entry(directory.to_path_buf())
+            .or_insert_with(|| {
+                let mut candidates: Vec<_> = std::fs::read_dir(proof_repo.join(directory))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| directory.join(entry.file_name()))
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+                    .collect();
+                candidates.sort();
+                candidates
+            });
+        // Keep conventional foo/mod.rs mounts, including ../foo_tests.rs.
+        for parent in candidates
+            .iter()
+            .cloned()
+            .chain(std::iter::once(directory.join(parent_name).join("mod.rs")))
+        {
+            if parent == file {
+                continue;
+            }
+            let mounts = self.mounts.entry(parent.clone()).or_insert_with(|| {
+                let absolute = proof_repo.join(&parent);
+                let Some(directory) = absolute.parent() else {
+                    return Vec::new();
+                };
+                std::fs::read_to_string(&absolute)
+                    .ok()
+                    .and_then(|body| parser.explicit_external_modules(&body).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(_name, relative)| directory.join(relative).canonicalize().ok())
+                    .collect()
+            });
+            if !mounts.contains(&changed_file) {
                 continue;
             }
             let normalized = parent.to_str()?.replace('\\', "/");
@@ -2075,8 +2108,8 @@ fn sibling_test_parent(proof_repo: &std::path::Path, path: &str) -> Option<Vec<S
             let source = source.strip_suffix("/mod").unwrap_or(source);
             return Some(source.split('/').map(str::to_string).collect());
         }
+        None
     }
-    None
 }
 
 /// Convert changed Rust source paths into crate-relative module paths that
@@ -2089,6 +2122,7 @@ pub(crate) fn changed_source_modules(
     paths: &[String],
 ) -> Vec<SourceModule> {
     let mut modules = std::collections::BTreeSet::new();
+    let mut sibling_tests = None;
     for path in paths {
         let normalized = path.replace('\\', "/");
         let Some((crate_path, source)) = normalized.split_once("/src/") else {
@@ -2105,7 +2139,13 @@ pub(crate) fn changed_source_modules(
                 .unwrap_or(crate_path)
                 .to_ascii_lowercase(),
             segments: source.split('/').map(str::to_string).collect(),
-            test_parent: sibling_test_parent(proof_repo, &normalized),
+            test_parent: if normalized.ends_with("_tests.rs") {
+                sibling_tests
+                    .get_or_insert_with(SiblingTestParents::new)
+                    .parent(proof_repo, &normalized)
+            } else {
+                None
+            },
         });
     }
     modules.into_iter().collect()
@@ -7657,6 +7697,21 @@ impl CasCore {
                 .unwrap_or(&self.cas_root)
                 .to_path_buf(),
         };
+
+        // A start recorded on the preceding parked lane must not prevent
+        // an independently proven integrated receipt from reaching close.
+        // This only retires stale attribution; it never rebinds a branch or
+        // skips the checkout, pre-close, merge, QA or verification gates.
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && task.deliverables.factory_branch_start.is_some()
+        {
+            let lease_history = self.open_agent_store().ok()
+                .and_then(|store| store.get_lease_history(&req.id, None).ok())
+                .unwrap_or_default();
+            task_attribution::recover_stale_start_for_integrated_receipt(
+                &close_project_root, &mut task, receipt, &lease_history,
+            );
+        }
 
         // Resolve the worker checkout before the branch target so a degraded
         // close (where Cassy's own root is not inside a repository) can still
@@ -13388,6 +13443,23 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+#[derive(serde::Deserialize)]
+struct ReferenceHistory {
+    version: u64,
+    files: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    #[serde(flatten)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn parse_reference_history(bytes: &[u8]) -> Result<ReferenceHistory, String> {
+    let history: ReferenceHistory =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if history.version != 1 {
+        return Err(format!("unsupported reference history version {}", history.version));
+    }
+    Ok(history)
+}
+
 /// cas-2ea6: the most a keyed regeneration may take inside a close gate. A
 /// few keys took about 1 s on cas-src (40 keys: 6 s); a whole-history run
 /// takes about 30 s, which no close gate can spend.
@@ -13438,7 +13510,6 @@ fn dropped_ledger_keys_regenerate(
     anchor: &str,
     target: &str,
 ) -> Option<Vec<String>> {
-    type Entries = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
     let show = |revision: &str, path: &str| {
         std::process::Command::new("git")
             .args(["show", &format!("{revision}:{path}")])
@@ -13448,19 +13519,8 @@ fn dropped_ledger_keys_regenerate(
             .filter(|output| output.status.success())
             .map(|output| output.stdout)
     };
-    let entries = |bytes: &[u8]| -> Option<Entries> {
-        let doc: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-        doc.get("files")?
-            .as_object()?
-            .iter()
-            .map(|(key, hashes)| {
-                let hashes = hashes.as_array()?.iter().map(|hash| hash.as_str().map(str::to_owned)).collect::<Option<_>>()?;
-                Some((key.clone(), hashes))
-            })
-            .collect()
-    };
-    let delivered = entries(&show(anchor, REFERENCE_HISTORY_LEDGER)?)?;
-    let landed = entries(&show(target, REFERENCE_HISTORY_LEDGER)?)?;
+    let delivered = parse_reference_history(&show(anchor, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
+    let landed = parse_reference_history(&show(target, REFERENCE_HISTORY_LEDGER)?).ok()?.files;
     let dropped: Vec<String> = delivered
         .iter()
         .filter(|(key, hashes)| landed.get(*key).is_none_or(|kept| !hashes.is_subset(kept)))
@@ -13505,7 +13565,7 @@ fn dropped_ledger_keys_regenerate(
     if !output.ok()?.status.success() {
         return None;
     }
-    let regenerated = entries(&std::fs::read(&fresh).ok()?)?;
+    let regenerated = parse_reference_history(&std::fs::read(&fresh).ok()?).ok()?.files;
     dropped
         .iter()
         .all(|key| regenerated.get(key) == landed.get(key))
@@ -17690,7 +17750,7 @@ fn preferred_diff_target_ref(repo_path: &std::path::Path, parent_branch: &str) -
     }
 }
 
-fn preferred_diff_target_ref_for_delivery(
+pub(crate) fn preferred_diff_target_ref_for_delivery(
     repo_path: &std::path::Path,
     parent_branch: &str,
     delivery_mode: cas_types::DeliveryMode,
@@ -32660,6 +32720,93 @@ esac
             regenerated_artifact_drop_note(p, &tip, &paths).is_some(),
             "cas-baf7 accepts a bundle-only drop when the delivery carries source"
         );
+    }
+
+    /// cas-af3b: a failed optional blob probe must leave the ordinary line
+    /// proof available. Both the batched lookup and a later blob read can
+    /// fail while Git diffs remain readable.
+    #[test]
+    fn unreadable_reference_history_blobs_fall_back_to_line_proof_cas_af3b() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let path = p.join(REFERENCE_HISTORY_LEDGER);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let history = |hashes: &[&str]| {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "files": {"skills/demo/references/guide.md": hashes},
+            }))
+            .unwrap()
+        };
+        std::fs::write(&path, history(&["base"])).unwrap();
+        git(p, &["add", REFERENCE_HISTORY_LEDGER]);
+        git(p, &["commit", "-qm", "baseline ledger"]);
+        let parent = rev_parse_local(p, "HEAD");
+        std::fs::write(&path, history(&["base", "delivered"])).unwrap();
+        git(p, &["commit", "-qam", "cas-test1: add reference hash"]);
+        let delivery = rev_parse_local(p, "HEAD");
+        std::fs::write(p.join("unrelated-one.txt"), "one\n").unwrap();
+        git(p, &["add", "unrelated-one.txt"]);
+        git(p, &["commit", "-qm", "later unrelated edit one"]);
+        let targets = [rev_parse_local(p, "HEAD"), {
+            std::fs::write(p.join("unrelated-two.txt"), "two\n").unwrap();
+            git(p, &["add", "unrelated-two.txt"]);
+            git(p, &["commit", "-qm", "later unrelated edit two"]);
+            rev_parse_local(p, "HEAD")
+        }];
+
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let real_git = std::env::split_paths(&original_path)
+            .map(|dir| dir.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("real git on PATH");
+        let shim_dir = p.join("git-shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let shim = shim_dir.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$1" = cat-file ]; then
+  case "$CAS_AF3B_FAIL" in
+    batch) [ "$2" = '--batch-check=%(objectname) %(objecttype)' ] && exit 87 ;;
+    blob) [ "$2" = blob ] && exit 87 ;;
+  esac
+fi
+exec "$CAS_AF3B_REAL_GIT" "$@"
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AF3B_REAL_GIT", &real_git);
+        env.set(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(shim_dir.clone()).chain(std::env::split_paths(&original_path)),
+            )
+            .unwrap(),
+        );
+        for (mode, target) in ["batch", "blob"].into_iter().zip(targets) {
+            env.set("CAS_AF3B_FAIL", mode);
+            let presence = super::delivery_evolution::line_content_presence(
+                p,
+                &parent,
+                &delivery,
+                &target,
+                REFERENCE_HISTORY_LEDGER,
+            );
+            assert_eq!(
+                presence,
+                Ok(Some(DeliveryContentPresence::Present {
+                    paths: vec![REFERENCE_HISTORY_LEDGER.to_string()],
+                })),
+                "{mode} failure must use the ordinary line proof"
+            );
+        }
     }
 
     /// cas-2ea6: the cas-9dee shape. A lane's reference-history ledger records

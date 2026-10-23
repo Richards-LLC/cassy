@@ -750,7 +750,7 @@ impl GitOperations {
                     descendant = %descendant,
                     result = ?other,
                     "cas-aae6: `git merge-base --is-ancestor` could not answer; \
-                     treating as not-an-ancestor, so a real epic stack may be under-reported"
+                     treating as not-an-ancestor, so a real ancestry relationship may be missed"
                 );
                 false
             }

@@ -18,6 +18,7 @@ fn cas_setup_cmd(root: &TempDir) -> Command {
         .env("SHELL", "/bin/bash")
         .env("PATH", "/usr/bin")
         .env_remove("CAS_ROOT")
+        .env_remove("COLUMNS")
         .env_remove("CAS_CLOUD_TOKEN")
         .env_remove("CAS_CLOUD_ENDPOINT")
         .env_remove("VIKTOR_API_KEY")

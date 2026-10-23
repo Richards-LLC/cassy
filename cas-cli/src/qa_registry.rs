@@ -37,9 +37,73 @@ pub struct Registry {
     pub manual_checks: BTreeMap<String, ManualCheck>,
     pub fixtures: Option<BTreeMap<String, Fixture>>,
     pub bug_families: BTreeMap<String, BugFamily>,
+    /// GH #1346: project QA safety policy every journey inherits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<Safety>,
     pub journeys: Vec<Journey>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// QA modes a project may declare; an unknown mode is treated as fixture-only.
+pub const SAFETY_MODES: [&str; 3] = ["fixture-only", "staging", "production-read-back"];
+const SAFETY_FIELDS: [&str; 3] = ["mode", "forbidden_hosts", "protected_credentials"];
+
+/// GH #1346: where QA may run and what it must never reach.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Safety {
+    pub mode: String,
+    /// Hosts QA must never contact (`api.example.com`, `*.example.com` or a URL).
+    pub forbidden_hosts: Vec<String>,
+    /// Environment variables carrying credentials QA must never be able to use.
+    pub protected_credentials: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Safety {
+    /// Fail safe: only an exact staging or read-back mode permits real systems.
+    pub fn fixture_only(&self) -> bool {
+        !matches!(self.mode.as_str(), "staging" | "production-read-back")
+    }
+
+    /// Whether `host` is, or is a subdomain of, a forbidden host.
+    pub fn forbids_host(&self, host: &str) -> Option<&str> {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.forbidden_hosts.iter().map(String::as_str).find(|raw| {
+            let entry = url::Url::parse(raw)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| raw.trim().to_owned())
+                .to_ascii_lowercase();
+            let entry = entry.trim_start_matches("*.").trim_end_matches('.');
+            !entry.is_empty() && (host == entry || host.ends_with(&format!(".{entry}")))
+        })
+    }
+
+    /// One line for task notes and QA briefs.
+    pub fn brief(&self) -> String {
+        let mut out = if self.fixture_only() {
+            "QA safety: fixture-only. Walk against stubs; prove zero non-loopback requests."
+                .to_owned()
+        } else {
+            format!("QA safety: {}.", self.mode)
+        };
+        if !self.forbidden_hosts.is_empty() {
+            out.push_str(&format!(
+                " Never contact: {}.",
+                self.forbidden_hosts.join(", ")
+            ));
+        }
+        if !self.protected_credentials.is_empty() {
+            out.push_str(&format!(
+                " Never read, use or rotate: {}.",
+                self.protected_credentials.join(", ")
+            ));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -297,6 +361,9 @@ pub struct Journey {
     pub fixtures: Vec<String>,
     pub traffic: Option<Traffic>,
     pub spec: Option<String>,
+    /// GH #1344: `planned` names a spec a later task will write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_status: Option<String>,
     pub known_failure: Option<String>,
     pub finisher: Option<String>,
     pub evidence: Option<Mapping>,
@@ -346,6 +413,7 @@ pub struct Problem {
 pub struct ValidationReport {
     pub problems: Vec<Problem>,
     pub debt: Vec<Problem>,
+    pub single_reference_owner_groups: BTreeMap<String, String>,
 }
 
 /// Parse delivered-head bytes without consulting the working tree or Git.
@@ -771,6 +839,20 @@ impl Registry {
                 report.misspelled_fields(&subject, &fixture.extra, &FIXTURE_FIELDS);
             }
         }
+        if let Some(safety) = &self.safety {
+            if !SAFETY_MODES.contains(&safety.mode.as_str()) {
+                report.problem(
+                    "safety",
+                    "safety.mode",
+                    format!(
+                        "mode {:?} must be one of {}",
+                        safety.mode,
+                        SAFETY_MODES.join(", ")
+                    ),
+                );
+            }
+            report.misspelled_fields("safety", &safety.extra, &SAFETY_FIELDS);
+        }
         report.globs(
             "ignore",
             self.ignore.iter().map(String::as_str),
@@ -881,8 +963,39 @@ impl Registry {
                 tracked,
                 journey.status != "dead",
             );
-            if let Some(spec) = &journey.spec {
-                if !tracked.contains(spec) {
+            let planned = match journey.spec_status.as_deref() {
+                None => false,
+                Some("planned") => true,
+                Some(other) => {
+                    report.problem(
+                        "spec_status",
+                        id,
+                        format!("unknown spec_status {other:?}; use planned or omit it"),
+                    );
+                    false
+                }
+            };
+            match journey.spec.as_ref() {
+                Some(spec) if planned && tracked.contains(spec) => report.debt(
+                    "stale_planned_spec",
+                    id,
+                    &format!("spec {spec:?} is tracked now; remove spec_status: planned"),
+                ),
+                None if planned => report.debt(
+                    "stale_planned_spec",
+                    id,
+                    "spec_status: planned names no spec; add spec or remove spec_status",
+                ),
+                _ => {}
+            }
+            if let Some(spec) = journey.spec.as_ref().filter(|spec| !tracked.contains(spec)) {
+                if planned {
+                    report.debt(
+                        "planned_spec",
+                        id,
+                        &format!("planned spec {spec:?} is not written yet; drop spec_status once it is tracked"),
+                    );
+                } else {
                     report.problem(
                         "untracked_spec",
                         id,
@@ -923,7 +1036,14 @@ impl Registry {
                     if journey.invariants.is_empty() {
                         report.problem("missing_invariants", id, "live journeys need invariants");
                     }
-                    if journey.traffic.is_none() {
+                    // GH #1344: with no snapshot there is no share to declare yet.
+                    if journey.traffic.is_none() && self.traffic_snapshot.is_none() {
+                        report.debt(
+                            "unmeasured_traffic",
+                            id,
+                            "no traffic_snapshot yet; the journey's share is unallocated",
+                        );
+                    } else if journey.traffic.is_none() {
                         report.problem(
                             "missing_traffic",
                             id,
@@ -978,6 +1098,20 @@ impl Registry {
                         format!("unknown journey {journey:?}"),
                     );
                 }
+            }
+        }
+        for name in self.owner_groups.keys() {
+            let mut consumers = self
+                .journeys
+                .iter()
+                .filter(|journey| journey.owner_groups.contains(name));
+            if let (Some(journey), None) = (consumers.next(), consumers.next()) {
+                report.single_reference_owner_groups.insert(name.clone(), journey.id.clone());
+                report.debt(
+                    "single_reference_owner_group",
+                    &format!("owner_groups.{name}"),
+                    &format!("referenced only by journey {}; review shared ownership membership", journey.id),
+                );
             }
         }
         report
@@ -1121,7 +1255,10 @@ journeys:
         );
         let report = check(dir.path(), Path::new(&config.qa().registry.path)).unwrap();
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert!(report.debt.is_empty());
+        assert_eq!(
+            report.debt.iter().map(|row| row.code.as_str()).collect::<Vec<_>>(),
+            ["single_reference_owner_group"]
+        );
         let registry = load(&dir.path().join(custom_path)).unwrap();
         assert_eq!(
             registry.journeys[0].owners.globs(),
@@ -1173,6 +1310,8 @@ journeys:
         let debt: Vec<_> = report
             .debt
             .iter()
+            // Owner-group cardinality is covered by the CLI regression.
+            .filter(|row| row.code != "single_reference_owner_group")
             .map(|p| (p.code.as_str(), p.subject.as_str()))
             .collect();
         assert_eq!(
@@ -1212,6 +1351,7 @@ journeys:
         let report = check(repo(&yaml).path(), Path::new(DEFAULT_PATH)).unwrap();
         let rows = |rows: &[Problem]| {
             rows.iter()
+                .filter(|row| row.code != "single_reference_owner_group")
                 .map(|p| format!("{} {} {}", p.code, p.subject, p.message))
                 .collect::<Vec<_>>()
         };
@@ -1308,6 +1448,39 @@ journeys:
                 ),
                 vec![],
                 vec!["unmeasured_traffic"],
+            ),
+            (
+                "planned spec and a new journey without a traffic snapshot are pending",
+                GABBER
+                    .replace(
+                        "traffic_snapshot: {as_of: \"2026-10-20\", window_days: 30, accounts: 100}\n",
+                        "traffic_snapshot: null\n",
+                    )
+                    .replace(
+                        "    traffic: {share_pct: 80, basis: New accounts, source: Analytics}\n",
+                        "",
+                    )
+                    .replace(
+                        "    spec: tests/signup.spec.ts\n",
+                        "    spec: tests/new/x.spec.ts\n    spec_status: planned\n",
+                    ),
+                vec![],
+                vec!["planned_spec", "unmeasured_traffic"],
+            ),
+            (
+                "a planned marker left on a tracked spec warns",
+                GABBER.replace(
+                    "    spec: tests/signup.spec.ts\n",
+                    "    spec: tests/signup.spec.ts\n    spec_status: planned\n",
+                ),
+                vec![],
+                vec!["stale_planned_spec"],
+            ),
+            (
+                "a shipped journey's missing spec still fails",
+                GABBER.replace("spec: tests/signup.spec.ts", "spec: tests/new/x.spec.ts"),
+                vec!["untracked_spec"],
+                vec![],
             ),
             (
                 "measured share needs a basis",
@@ -1437,6 +1610,7 @@ journeys:
                 report
                     .debt
                     .iter()
+                    .filter(|row| row.code != "single_reference_owner_group")
                     .map(|p| p.code.as_str())
                     .collect::<Vec<_>>(),
                 debt,
@@ -1444,7 +1618,7 @@ journeys:
             );
             assert!(report.problems.iter().chain(&report.debt).all(|p| {
                 p.subject == "B2-home"
-                    || ["invariants.", "manual_checks.", "fixtures."]
+                    || ["invariants.", "manual_checks.", "fixtures.", "owner_groups."]
                         .iter()
                         .any(|prefix| p.subject.starts_with(prefix))
             }));

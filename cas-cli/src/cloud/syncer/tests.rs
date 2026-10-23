@@ -2273,6 +2273,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         (TaskStatus::InProgress, TaskStatus::Cancelled),
         (TaskStatus::Blocked, TaskStatus::InProgress),
         (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
+        (TaskStatus::AwaitingMerge, TaskStatus::Closed),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
@@ -2311,6 +2312,120 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         assert_eq!(result.pulled_tasks, 1);
         assert_eq!(store.get(&local.id).unwrap().status, after);
         assert_eq!(result.task_status_transitions.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn team_pull_reports_peer_close_blocked_by_local_lifecycle_cas_33bc() {
+    for (offset, reason) in [
+        (-1, "lifecycle_timestamp"),
+        (60, "local_mutation_or_delivery_or_live_execution"),
+    ] {
+        let project = "peer-close-owner";
+        let mut local = Task::new("cas-peer-closed".into(), "peer delivery".into());
+        local.status = TaskStatus::AwaitingMerge;
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        local.deliverables.parked_branch = Some("factory/replay".into());
+        let remote = team_task_fixture(
+            &local.id,
+            TaskStatus::Closed,
+            project,
+            project,
+            local.updated_at + chrono::Duration::seconds(offset),
+        );
+        let (temp, result, store, queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![remote],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            Some(cas_types::WorkerDeliveryState::AwaitingMerge),
+            None,
+        )
+        .await;
+
+        assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(result.errors.iter().any(|error| {
+            error.contains(&local.id)
+                && error.contains("closed")
+                && error.contains("awaiting_merge")
+                && error.contains(reason)
+                && error.contains("cas cloud conflicts --json")
+        }), "peer close must name the skipped row and guard: {:?}", result.errors);
+
+        // cas-45f4: after the cursor advances, both pull paths must still
+        // surface the journaled guard even when Cloud sends no task rows.
+        use crate::store::{
+            open_commit_link_store, open_event_store, open_file_change_store,
+            open_prompt_store, open_rule_store_local, open_skill_store_local,
+            open_spec_store, open_store_local,
+        };
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let team_id = "team-cas-2125";
+        let watermark = "2026-09-01T12:00:00Z";
+        assert_eq!(
+            queue.get_metadata(&format!("last_team_pull_at_{team_id}_{project}")).unwrap().as_deref(),
+            Some(watermark),
+        );
+        // Give the personal scope an established cursor too.
+        queue.set_metadata("last_pull_at", watermark).unwrap();
+        for endpoint in [super::pull::PULL_PATH.to_string(), format!("/api/teams/{team_id}/sync/pull")] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .and(query_param("since", watermark))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "entries": [], "tasks": [], "rules": [], "skills": [],
+                    "pulled_at": watermark, "team_id": team_id, "status": "ok",
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+        }
+        let pull = |team: bool| {
+            // A new syncer proves that the warning survives process-local state.
+            let syncer = CloudSyncer::new_for_project(
+                queue.clone(),
+                crate::cloud::CloudConfig {
+                    endpoint: server.uri(), token: Some("test-token".into()),
+                    ..Default::default()
+                },
+                CloudSyncerConfig::default(), project.into(), temp.path(),
+            );
+            let entries = open_store_local(temp.path()).unwrap();
+            let rules = open_rule_store_local(temp.path()).unwrap();
+            let skills = open_skill_store_local(temp.path()).unwrap();
+            if team {
+                syncer.pull_team(team_id, project, entries.as_ref(), store.as_ref(), rules.as_ref(), skills.as_ref())
+            } else {
+                syncer.pull(
+                    entries.as_ref(), store.as_ref(), rules.as_ref(), skills.as_ref(),
+                    open_spec_store(temp.path()).unwrap().as_ref(),
+                    open_event_store(temp.path()).unwrap().as_ref(),
+                    open_prompt_store(temp.path()).unwrap().as_ref(),
+                    open_file_change_store(temp.path()).unwrap().as_ref(),
+                    open_commit_link_store(temp.path()).unwrap().as_ref(),
+                )
+            }.unwrap()
+        };
+        let journal_count = queue.list_conflicts(100).unwrap().len();
+        for team in [false, true] {
+            let second = pull(team);
+            assert_eq!(second.pulled_tasks, 0);
+            assert_eq!(second.errors, result.errors, "guard must persist on empty pull (team={team})");
+            assert_eq!(queue.list_conflicts(100).unwrap().len(), journal_count, "reporting must not journal the conflict again");
+        }
+        let mut resolved = store.get(&local.id).unwrap();
+        resolved.status = TaskStatus::Closed;
+        store.update(&resolved).unwrap();
+        for team in [false, true] {
+            assert!(pull(team).errors.is_empty(), "resolved guard must stop surfacing (team={team})");
+        }
     }
 }
 

@@ -238,7 +238,7 @@ pub(super) fn analyze(
                 spec: journey.spec.clone(),
                 known_failure: None,
                 matches: vec![],
-                evidence_required: evidence_required(journey),
+                evidence_required: evidence_required(journey, None),
             });
         }
         sort_journeys(&mut report.journeys);
@@ -256,31 +256,30 @@ pub(super) fn analyze(
                 .into(),
         );
     } else {
-        let revision = tree.head.as_deref().unwrap_or("HEAD");
-        let last = git(
-            repo,
-            &[
-                "log",
-                "-1",
-                "--format=%H",
-                revision,
-                "--",
-                ".claude/CODEMAP.md",
-            ],
-        )?;
-        let last = last.trim();
-        if !last.is_empty() {
-            let mut structural = changes_for_diff(repo, last, tree.head.as_deref())?;
-            if tree.head.is_none() {
-                structural.extend(untracked(repo)?);
-            }
-            let count = structural
-                .iter()
-                .filter(|c| c.status.starts_with(['A', 'D', 'R']))
-                .count();
-            if count > 0 {
-                warnings.push(format!("CODEMAP is stale ({count} structural changes since {last}): unowned files may be mislabelled."));
-            }
+        // GH #1340: the freshness source `cas codemap status` and
+        // `cas qa journeys --status` use: committed history after the CODEMAP
+        // commit on the measured ref, so neither that commit's own files nor
+        // untracked checkout debris count as drift.
+        use crate::hooks::handlers::handlers_events::{codemap, docs_freshness::Measurement};
+        let measurement = match &tree.head {
+            Some(head) => Measurement {
+                root: repo.to_path_buf(),
+                store: repo.join(".cas"),
+                reference: head.clone(),
+            },
+            // A linked worktree's shared store names its task's integration ref.
+            None => Measurement::at(
+                repo,
+                &crate::store::detect::find_cas_root_ignoring_env(repo)
+                    .unwrap_or_else(|_| repo.join(".cas")),
+            ),
+        };
+        let count = codemap::evaluate_codemap_at(&measurement)
+            .and_then(|evaluation| evaluation.structural_change_count());
+        if let (Some(count @ 1..), Some(last)) =
+            (count, measurement.last_commit(".claude/CODEMAP.md"))
+        {
+            warnings.push(format!("CODEMAP is stale ({count} structural changes since {last}): unowned files may be mislabelled."));
         }
     }
     warnings.append(&mut report.warnings);

@@ -532,3 +532,52 @@ mod exit_and_summary;
 mod learning_rule_duplicate;
 /// Test that Stop blocks when duplicate_detection is enabled and threshold is exceeded
 mod post_tool_and_flow;
+
+#[test]
+fn notification_hook_finishes_webhook_before_cli_exits() {
+    use std::io::Read;
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    init_cas(&dir);
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/webhook", server.server_addr());
+    set_config_value(&dir, "notifications.enabled", "true");
+    set_config_value(&dir, "notifications.on_idle_prompt", "true");
+    set_config_value(
+        &dir,
+        "notifications.webhook_url",
+        &format!("\"{endpoint}\""),
+    );
+
+    let receiver = std::thread::spawn(move || {
+        let Some(mut request) = server.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            return None;
+        };
+        let path = request.url().to_string();
+        let mut body = String::new();
+        request.as_reader().read_to_string(&mut body).unwrap();
+        request.respond(tiny_http::Response::empty(200)).unwrap();
+        Some((path, body))
+    });
+    let input = serde_json::json!({
+        "session_id": "cas-e3e8-notification",
+        "cwd": dir.path().to_string_lossy(),
+        "hook_event_name": "idle_prompt",
+    });
+    let output = cas_cmd(&dir)
+        .args(["hook", "Notification"])
+        .env("NO_PROXY", "*")
+        .write_stdin(input.to_string())
+        .output()
+        .unwrap();
+    let received = receiver.join().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Notification event:"), "{stderr}");
+    assert!(stderr.contains("Notification webhook delivered"), "{stderr}");
+    let (path, body) = received.expect("curl reached the loopback webhook before CLI exit");
+    assert_eq!(path, "/webhook");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["text"], "Claude is waiting for your input");
+}

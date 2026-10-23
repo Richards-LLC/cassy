@@ -42,6 +42,7 @@ Global `--json` emits one object with these stable top-level fields:
 | `ignored` | Paths excluded by registry ignore filters. |
 | `upkeep` | `codemap`, `product_overview`, and `registry`, each `{required, reasons}`. These are impact signals; this command installs no close gate. |
 | `warnings` | Missing product/map context, stale CODEMAP, missing registry, validation problems and seed debt. |
+| `safety` | The registry's `safety` block, present only when declared. |
 
 Journeys sort live, dark, dead; within a status, highest traffic first, null
 last, then id. Matches contain `{file, glob, via}`; `via` is `owners` or
@@ -49,7 +50,11 @@ last, then id. Matches contain `{file, glob, via}`; `via` is `owners` or
 positive matching patterns. Rename impacts include both old and new paths.
 
 Live evidence describes an entry walk on staging with a fresh persona and a
-system-of-record read-back of its invariant ids. The environment metadata stays
+system-of-record read-back of its invariant ids. A registry `safety` block
+changes that: `fixture-only` (or an unknown mode) asks for a walk against stubs
+proving zero non-loopback requests, `production-read-back` for a read-only
+production walk, and the note leads with a one-line safety summary naming the
+forbidden hosts and protected credentials. The environment metadata stays
 in JSON so reviewers can select their declared QA environment. Dark evidence
 says "prove it stays unreachable"; dead evidence says "none (NOT A ROUTE)".
 

@@ -19,7 +19,7 @@ use crate::cloud::{
     maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
-use crate::ui::theme::ActiveTheme;
+use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::store::{
     AgentStore, open_agent_store, open_commit_link_store, open_event_store, open_file_change_store,
@@ -2593,7 +2593,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 } else {
                     let theme = ActiveTheme::default();
                     let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, theme);
+                    let mut fmt = Formatter::stderr(&mut err, theme);
                     let error_color = fmt.theme().palette.status_error;
                     fmt.write_colored("  \u{2717} ", error_color)?;
                     fmt.write_raw("Session expired")?;
@@ -3367,7 +3367,11 @@ impl SyncSummary {
         self.team_healed_task_dependencies_from_cloud += team.healed_task_dependencies_from_cloud;
         self.deleted_task_dependencies += team.deleted_task_dependencies;
         self.skipped_task_dependencies_by_tombstone += team.skipped_task_dependencies_by_tombstone;
-        self.team_errors.extend(team.errors.clone());
+        for error in &team.errors {
+            if !self.errors.contains(error) && !self.team_errors.contains(error) {
+                self.team_errors.push(error.clone());
+            }
+        }
         self.skipped_lww += team.skipped_lww;
         for (reason, count) in &team.rejected_by_reason {
             *self.rejected_by_reason.entry(reason.clone()).or_default() += count;
@@ -3537,11 +3541,15 @@ pub(crate) fn render_sync_summary(
                     .map(|count| pull_summary_label(key, *count))
             })
             .collect::<Vec<_>>();
-            let mut details = if count_details.is_empty() {
-                vec!["nothing newer".to_string()]
-            } else {
-                vec![count_details.join(", ")]
-            };
+            let mut details = Vec::new();
+            if !count_details.is_empty() {
+                details.push(count_details.join(", "));
+            } else if summary.team_counts.is_empty()
+                && summary.errors.is_empty()
+                && summary.team_errors.is_empty()
+            {
+                details.push("nothing newer".to_string());
+            }
             let conflicts = summary.conflicts_resolved + summary.team_conflicts_resolved;
             if conflicts > 0 {
                 details.push(format!("{conflicts} conflicts resolved"));
@@ -3602,14 +3610,12 @@ pub(crate) fn render_sync_summary(
                 "personal only".to_string()
             });
             let error_count = summary.errors.len() + summary.team_errors.len();
+            let separator = format!(" {} ", Icons::separator_dot(fmt.unicode()));
+            let details = details.join(&separator);
             let message = if error_count == 0 {
-                format!("Pull complete · {}", details.join(" · "))
+                format!("Pull complete{separator}{details}")
             } else {
-                format!(
-                    "Pull incomplete · {} errors · {}",
-                    error_count,
-                    details.join(" · ")
-                )
+                format!("Pull incomplete{separator}{error_count} errors{separator}{details}")
             };
             if error_count == 0 && !summary.memory_fold_conflicts.is_empty() {
                 render_memory_fold_warning(fmt, summary.memory_fold_conflicts.len())?;
@@ -3670,6 +3676,7 @@ pub(crate) fn render_sync_summary(
             }
         }
         SyncSummaryKind::Push => {
+            let separator = format!(" {} ", Icons::separator_dot(fmt.unicode()));
             let team_pending = summary.team_backlog_pending;
             let team_failed = summary.team_backlog_failed;
             let push_complete = summary.push_complete();
@@ -3692,7 +3699,7 @@ pub(crate) fn render_sync_summary(
                     if !team_counts.is_empty() {
                         parts.push(format!("team {}", team_counts.join(", ")));
                     }
-                    fmt.success(&format!("Push complete · {}", parts.join(" · ")))?;
+                    fmt.success(&format!("Push complete{separator}{}", parts.join(&separator)))?;
                 } else {
                     let reasons = rejection_reason_labels(summary);
                     let rejected = rejected_total(summary);
@@ -3756,11 +3763,11 @@ pub(crate) fn render_sync_summary(
                     {
                         parts.push("run cas cloud queue --retry".to_string());
                     }
-                    fmt.warning(&format!("Push incomplete · {}", parts.join(" · ")))?;
+                    fmt.warning(&format!("Push incomplete{separator}{}", parts.join(&separator)))?;
                 }
                 // cas-25c1: never let a clean team receipt stand alone over a
                 // personal queue of parked or rejected rows.
-                if let Some((true, line)) = held_personal_line(summary) {
+                if let Some((true, line)) = held_personal_line(summary, &separator) {
                     fmt.warning(&line)?;
                 }
             } else {
@@ -3777,7 +3784,7 @@ pub(crate) fn render_sync_summary(
                     summary.failed + team_failed
                 ))?;
                 fmt.newline()?;
-                if let Some((_, line)) = held_personal_line(summary) {
+                if let Some((_, line)) = held_personal_line(summary, &separator) {
                     fmt.write_raw(&format!("    {line}"))?;
                     fmt.newline()?;
                 }
@@ -3999,7 +4006,7 @@ fn execute_push_with_output(
             println!("{}", serde_json::json!({"status": "error", "message": msg}));
         } else if emit_output {
             let mut err = io::stderr();
-            let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
+            let mut fmt = Formatter::stderr(&mut err, ActiveTheme::default());
             let error_color = fmt.theme().palette.status_error;
             fmt.write_colored("  \u{2717} ", error_color)?;
             fmt.write_raw(&msg)?;
@@ -4098,6 +4105,16 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     // The delegated implementation clears the `last_team_pull_at_` watermark
     // for `--full` and invokes `execute_team_pull` for standalone pulls too.
     execute_pull_with_output(args, cli, cas_root, true)
+}
+
+fn print_pull_summary(summary: &SyncSummary, verbose: bool) -> io::Result<()> {
+    if summary.errors.is_empty() && summary.team_errors.is_empty() {
+        let mut out = io::stdout();
+        render_sync_summary(&mut Formatter::stdout(&mut out, ActiveTheme::default()), summary, verbose)
+    } else {
+        let mut err = io::stderr();
+        render_sync_summary(&mut Formatter::stderr(&mut err, ActiveTheme::default()), summary, verbose)
+    }
 }
 
 fn execute_pull_with_output(
@@ -4265,9 +4282,7 @@ fn execute_pull_with_output(
             }
             println!("{output}");
         } else if emit_output {
-            let mut out = io::stdout();
-            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+            print_pull_summary(&summary, cli.verbose)?;
         }
 
         // Return the display-ready result so callers such as `cas update` can
@@ -4635,7 +4650,7 @@ pub(crate) fn refresh_team_linked_backlog(
 }
 
 /// The held-personal line of a push receipt, and whether it needs attention.
-fn held_personal_line(summary: &SyncSummary) -> Option<(bool, String)> {
+fn held_personal_line(summary: &SyncSummary, separator: &str) -> Option<(bool, String)> {
     let held = summary.held_personal_pending + summary.held_personal_failed;
     if held == 0 && summary.team_only_mismatch == 0 {
         return None;
@@ -4655,12 +4670,12 @@ fn held_personal_line(summary: &SyncSummary) -> Option<(bool, String)> {
     }
     if summary.team_only_mismatch > 0 {
         text.push_str(&format!(
-            " \u{b7} cloud.team_only is off but {} row(s) were rejected as team_owned_project: {}",
+            "{separator}cloud.team_only is off but {} row(s) were rejected as team_owned_project: {}",
             summary.team_only_mismatch,
             crate::cloud::push_reason_hint("team_owned_project")
         ));
     } else if summary.held_personal_failed > 0 {
-        text.push_str(" \u{b7} see `cas cloud queue`");
+        text.push_str(&format!("{separator}see `cas cloud queue`"));
     }
     Some((
         summary.held_personal_failed > 0 || summary.team_only_mismatch > 0,
@@ -4711,9 +4726,7 @@ fn execute_team_only_pull_with_output(
         summary.merge_team_summary(&team_summary);
     }
     if emit_output && !cli.json {
-        let mut out = io::stdout();
-        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+        print_pull_summary(&summary, cli.verbose)?;
     }
     Ok(summary)
 }
@@ -5630,7 +5643,7 @@ fn execute_projects(args: &CloudProjectsArgs, cli: &Cli, cas_root: &Path) -> any
             } else {
                 let theme = ActiveTheme::default();
                 let mut err = io::stderr();
-                let mut fmt = Formatter::stdout(&mut err, theme);
+                let mut fmt = Formatter::stderr(&mut err, theme);
                 let error_color = fmt.theme().palette.status_error;
                 fmt.write_colored("  \u{2717} ", error_color)?;
                 fmt.write_raw("Session expired")?;
@@ -8150,6 +8163,7 @@ mod team_cmd_tests {
 
     #[test]
     fn cas_e29c_pull_warns_with_remedy_and_preserves_team_warning_ids() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let result = crate::cloud::SyncResult {
             memory_fold_conflicts: vec!["source-fold0123456789ab".into()],
             conflicts_resolved: 1,
@@ -8184,19 +8198,36 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_zero_pull_as_one_quiet_line() {
-        let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-
-        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-
-        assert_eq!(
-            tf.output(),
-            "[OK] Pull complete · nothing newer · personal only\n"
-        );
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
+        for (locale, expected) in [
+            ("C.UTF-8", [
+                "[OK] Pull complete · nothing newer · personal only\n",
+                "[OK] Pull complete · team 1 task · team + personal\n",
+            ]),
+            ("C", [
+                "[OK] Pull complete - nothing newer - personal only\n",
+                "[OK] Pull complete - team 1 task - team + personal\n",
+            ]),
+        ] {
+            env.set("LC_ALL", locale);
+            for (team_tasks, expected) in expected.into_iter().enumerate() {
+                let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
+                if team_tasks > 0 {
+                    summary.merge_team_pull(&crate::cloud::SyncResult {
+                        pulled_tasks: team_tasks,
+                        ..Default::default()
+                    });
+                }
+                let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+                render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+                assert_eq!(tf.output(), expected, "locale={locale}");
+            }
+        }
     }
 
     #[test]
     fn sync_summary_renders_only_nonzero_pull_kinds() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 pulled_entries: 3,
@@ -8219,18 +8250,22 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_prints_pull_errors_in_non_verbose_mode() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 errors: vec!["task deserialize error (id=cas-bad): invalid status".to_string()],
+                conflicts_resolved: 1,
                 ..Default::default()
             },
             true,
         );
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(120);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
 
         render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
 
         assert!(tf.output().contains("Pull incomplete · 1 errors"));
+        assert!(!tf.output().contains("nothing newer"));
+        assert!(tf.output().lines().all(|line| line.chars().count() <= 80));
         assert!(
             tf.output()
                 .contains("- task deserialize error (id=cas-bad)")
@@ -8239,6 +8274,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_merges_team_counts_conflicts_and_healed_edges() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 pulled_entries: 3,
@@ -8265,6 +8301,19 @@ mod team_cmd_tests {
             tf.output(),
             "[OK] Pull complete · 3 entries · 12 conflicts resolved · team 2 entries, 1 task · edges 6 pushed, 10 pulled · team + personal\n"
         );
+
+        // cas-45f4: both pull scopes can report the same durable guard.
+        let guard = "Task cas-peer: remote closed skipped; local awaiting_merge";
+        let result = crate::cloud::SyncResult {
+            errors: vec![guard.to_string()],
+            ..Default::default()
+        };
+        let mut combined = SyncSummary::pull(&result, true);
+        combined.merge_team_pull(&result);
+        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+        render_sync_summary(&mut tf.fmt(), &combined, false).unwrap();
+        assert!(tf.output().contains("Pull incomplete · 1 errors"));
+        assert_eq!(tf.output().matches(guard).count(), 1);
     }
 
     /// `cas update` has to name what happened to edges: a bare "healed" count
@@ -8273,6 +8322,7 @@ mod team_cmd_tests {
     /// different event from one that was.
     #[test]
     fn sync_summary_names_edge_deletes_and_tombstone_skips() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(
             &crate::cloud::SyncResult {
                 healed_task_dependencies_to_cloud: 2,
@@ -8294,6 +8344,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_verbose_renders_counted_conflict_details() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let now = chrono::Utc::now();
         let mut result = crate::cloud::SyncResult::default();
         result.record_conflict(crate::cloud::SyncConflict {
@@ -8460,6 +8511,7 @@ mod team_cmd_tests {
 
     #[test]
     fn cas_fd42_team_summary_names_intentional_memory_parks() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         use crate::cloud::{EntityType, SyncOperation};
         let temp = tempfile::tempdir().unwrap();
         let queue = SyncQueue::open(temp.path()).unwrap();
@@ -8512,6 +8564,7 @@ mod team_cmd_tests {
     /// queue commands count and name the team-only fix.
     #[test]
     fn cas_25c1_team_linked_push_receipt_reports_held_personal_rejections() {
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(false);
         let mut summary = team_only_push_summary();
 
@@ -8564,6 +8617,12 @@ mod team_cmd_tests {
             verbose.contains("    Personal queue held (team-linked sync pushes team rows only): 1 pending, 3 failed/parked"),
             "{verbose}"
         );
+        locale_guard.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains(" - cloud.team_only is off but 2 row(s)"), "{output}");
+        assert!(!output.contains('·'), "{output}");
     }
 
     /// cas-25c1: with `cloud.team_only` on, held rejections are still counted
@@ -8571,6 +8630,7 @@ mod team_cmd_tests {
     /// incomplete instead of reading "0 pending".
     #[test]
     fn cas_25c1_team_only_receipt_counts_team_backlog_without_the_fix_hint() {
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let (temp, _queue) = cas_25c1_queue_with_held_rejections(true);
         let mut summary = team_only_push_summary();
 
@@ -8586,6 +8646,12 @@ mod team_cmd_tests {
         assert!(output.contains("3 failed/parked"), "{output}");
         assert!(output.contains("see `cas cloud queue`"), "{output}");
         assert!(!output.contains("cloud.team_only is off"), "{output}");
+        locale_guard.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains(" - see `cas cloud queue`"), "{output}");
+        assert!(!output.contains('·'), "{output}");
     }
 
     /// cas-25c1: a nothing-newer team pull advances the team watermark, but
@@ -8669,6 +8735,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_renders_successful_push_with_batch_and_pending_counts() {
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::push(
             &crate::cloud::SyncResult {
                 batches_run: 2,
@@ -8677,11 +8744,15 @@ mod team_cmd_tests {
             crate::cloud::PushScope::All,
             None,
         );
-        let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
-
-        render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
-
-        assert_eq!(tf.output(), "[OK] Push complete · 2 batches · 0 pending\n");
+        for (locale, expected) in [
+            ("C.UTF-8", "[OK] Push complete · 2 batches · 0 pending\n"),
+            ("C", "[OK] Push complete - 2 batches - 0 pending\n"),
+        ] {
+            locale_guard.set("LC_ALL", locale);
+            let mut tf = crate::ui::components::test_helpers::TestFormatter::plain(80);
+            render_sync_summary(&mut tf.fmt(), &summary, false).unwrap();
+            assert_eq!(tf.output(), expected, "locale={locale}");
+        }
     }
 
     /// cas-f64e x cas-cf1f: one sync carries both the push-side per-row
@@ -8690,6 +8761,7 @@ mod team_cmd_tests {
     /// SyncResult must not let either set swallow the other.
     #[test]
     fn push_row_outcomes_and_dependency_edge_outcomes_both_render() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 0,
             failed: 1,
@@ -8737,6 +8809,7 @@ mod team_cmd_tests {
     /// stays reserved for failures the cloud never explained.
     #[test]
     fn sync_summary_separates_lww_skips_from_named_cloud_rejections() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 4,
             failed: 3,
@@ -8810,6 +8883,7 @@ mod team_cmd_tests {
     /// remediation, and reports the post-upgrade requeue it performed.
     #[test]
     fn verbose_push_summary_lists_each_rejection_reason_with_its_remediation() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let mut backlog = crate::cloud::PushBacklog {
             pending: 0,
             failed: 1,
@@ -8848,6 +8922,7 @@ mod team_cmd_tests {
 
     #[test]
     fn sync_summary_groups_identical_push_failures_once_with_retry_hint() {
+        let mut locale_guard = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let message = "Client version 3.7.7 is below minimum 3.8.0";
         let mut summary = SyncSummary::push(
             &crate::cloud::SyncResult {
@@ -8867,10 +8942,17 @@ mod team_cmd_tests {
             tf.output(),
             "[WARN] Push incomplete · 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) · run cas cloud queue --retry\n"
         );
+        locale_guard.set("LC_ALL", "C");
+        let mut ascii = crate::ui::components::test_helpers::TestFormatter::plain(400);
+        render_sync_summary(&mut ascii.fmt(), &summary, false).unwrap();
+        let output = ascii.output();
+        assert!(output.contains("[WARN] Push incomplete - 43 rows failed (Client version 3.7.7 is below minimum 3.8.0) - run cas cloud queue --retry"), "{output}");
+        assert!(!output.contains('·'), "{output}");
     }
 
     #[test]
     fn sync_summary_styled_output_uses_formatter_status_color() {
+        let _locale = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
         let summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), false);
         let mut tf = crate::ui::components::test_helpers::TestFormatter::styled(80);
 

@@ -51,6 +51,11 @@
       "reason": "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the builtins and agent_definition_contract_test markers."
     },
     {
+      "path": "skills/cas-qa-craft/references/independent-pass.md",
+      "rule": "task-id",
+      "reason": "A concrete base-shared failure illustrates why a defect covered by a delivery's added journey invariant is unmet."
+    },
+    {
       "path": "skills/cas-supervisor/references/reference.md",
       "rule": "task-id",
       "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents."

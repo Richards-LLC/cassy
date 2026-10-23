@@ -57,8 +57,8 @@ pub enum PublishDisposition {
 }
 
 impl PublishDisposition {
-    /// Every disposition is a successful publish: the record exists and can be
-    /// referenced. Only the *storage* outcome differs.
+    /// Only a completed Cloud commit is delivered across machines; every
+    /// other disposition retains a local record without claiming delivery.
     pub fn is_committed(&self) -> bool {
         matches!(self, PublishDisposition::Committed { .. })
     }
@@ -80,9 +80,8 @@ impl PublishDisposition {
             PublishDisposition::NotLoggedIn => {
                 "recorded locally; not logged in to Cassy Cloud".to_string()
             }
-            PublishDisposition::UploadFailed { reason } => {
-                format!("recorded locally; the upload did not complete: {reason}")
-            }
+            PublishDisposition::UploadFailed { .. } =>
+                "recorded locally; Cloud delivery failed".to_string(),
         }
     }
 }
@@ -417,10 +416,14 @@ fn upload(
         },
     )?;
 
-    if let Err(error) = store.mark_committed(&artifact.id, completed.url.as_deref()) {
+    // Retry only local bookkeeping: replaying Cloud or proof attachment could
+    // create another object or receipt. The store retry honors wait budgets.
+    if let Err(error) = cas_store::shared_db::with_write_retry(|| {
+        store.mark_committed(&artifact.id, completed.url.as_deref())
+    }) {
         return Err(UploadFailure::Failed {
             step: cloud::UploadStep::Complete,
-            reason: format!("could not record the completion locally: {error}"),
+            reason: format!("uploaded, not committed locally: {error}"),
             interaction: format!("artifact {}", artifact.id),
         });
     }
@@ -643,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn every_disposition_reads_as_a_successful_publish_with_a_storage_caveat() {
+    fn every_disposition_reports_whether_cloud_commit_completed() {
         let cases = [
             PublishDisposition::Committed {
                 cloud_url: Some("https://c/x".to_string()),
@@ -675,12 +678,26 @@ mod tests {
 mod cloud_double_tests {
     use super::*;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// sha256("hello world")
     const HELLO_SHA256: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+    thread_local! {
+        static COMPLETION_WRITER: std::cell::RefCell<Option<Arc<Mutex<rusqlite::Connection>>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn release_completion_writer(_: i32) -> bool {
+        COMPLETION_WRITER.with(|writer| {
+            writer.borrow_mut().take().unwrap().lock().unwrap()
+                .execute_batch("COMMIT").unwrap();
+        });
+        // The first UPDATE really fails with SQLITE_BUSY; only a retry succeeds.
+        false
+    }
 
     struct Fixture {
         _dir: TempDir,
@@ -710,6 +727,14 @@ mod cloud_double_tests {
     /// The double answers exactly as petra-stella-cloud#84 does: 201 from
     /// begin, and a complete body without a durable URL.
     async fn cloud_double(complete_status: u16, complete_body: serde_json::Value) -> MockServer {
+        cloud_double_with_writer(complete_status, complete_body, None).await
+    }
+
+    async fn cloud_double_with_writer(
+        complete_status: u16,
+        complete_body: serde_json::Value,
+        writer: Option<Arc<Mutex<rusqlite::Connection>>>,
+    ) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/artifacts/begin"))
@@ -734,10 +759,16 @@ mod cloud_double_tests {
             .expect(1)
             .mount(&server)
             .await;
+        let response = ResponseTemplate::new(complete_status).set_body_json(complete_body);
         Mock::given(method("POST"))
             .and(path("/api/artifacts/5f0c2b1e-cloud/complete"))
             .and(body_string_contains(HELLO_SHA256))
-            .respond_with(ResponseTemplate::new(complete_status).set_body_json(complete_body))
+            .respond_with(move |_: &wiremock::Request| {
+                if let Some(writer) = &writer {
+                    writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE").unwrap();
+                }
+                response.clone()
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -753,7 +784,10 @@ mod cloud_double_tests {
 
     #[tokio::test]
     async fn publish_commits_through_the_cloud_double_and_the_record_opens_a_signed_view_url() {
-        let server = cloud_double(
+        let f = fixture();
+        let database = f.roots.project_root.join(".cas/cas.db");
+        let writer = Arc::new(Mutex::new(rusqlite::Connection::open(&database).unwrap()));
+        let server = cloud_double_with_writer(
             200,
             serde_json::json!({
                 "artifact_id": "5f0c2b1e-cloud",
@@ -761,6 +795,7 @@ mod cloud_double_tests {
                 "size_bytes": 11,
                 "sha256": HELLO_SHA256
             }),
+            Some(writer.clone()),
         )
         .await;
         Mock::given(method("GET"))
@@ -780,7 +815,9 @@ mod cloud_double_tests {
 
         let client = client(&server);
         let (outcome, view) = tokio::task::spawn_blocking(move || {
-            let f = fixture();
+            let pooled = cas_store::shared_db::shared_connection(&database).unwrap();
+            COMPLETION_WRITER.with(|slot| *slot.borrow_mut() = Some(writer));
+            pooled.lock().unwrap().busy_handler(Some(release_completion_writer)).unwrap();
             let context = PublishContext {
                 store: &f.store,
                 roots: f.roots.clone(),
@@ -788,6 +825,15 @@ mod cloud_double_tests {
                 cloud: Some(client.clone()),
             };
             let outcome = publish(&context, &f.file).expect("publish");
+            cas_store::shared_db::install_busy_handler(&pooled.lock().unwrap()).unwrap();
+            assert!(outcome.disposition.is_committed(), "{outcome:?}");
+            assert_eq!(f.store.list_for_task("cas-29624").unwrap().len(), 1);
+            let (note, warnings) = proof::prepare_note(
+                &f.store, "cas-29624", &outcome.artifact.id,
+                &f.roots.task_artifacts_dir, false,
+            ).unwrap();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(note.matches("ARTIFACT_PROOF:").count(), 1, "{note}");
             let view = signed_view(&f.store, Some(&client), &outcome.artifact.id);
             (outcome, view.map(|view| view.view))
         })
@@ -808,6 +854,34 @@ mod cloud_double_tests {
         let view = view.expect("a committed record has a signed view URL");
         assert!(view.url.ends_with("/blob/view?signature=view-sig"));
         assert_eq!(view.name.as_deref(), Some("report.pdf"));
+    }
+
+    #[tokio::test]
+    async fn completion_retry_exhaustion_keeps_the_uploaded_record_honest_cas_9968() {
+        let f = fixture();
+        let database = f.roots.project_root.join(".cas/cas.db");
+        let writer = Arc::new(Mutex::new(rusqlite::Connection::open(&database).unwrap()));
+        let server = cloud_double_with_writer(200, serde_json::json!({"status": "committed"}), Some(writer.clone())).await;
+        let client = client(&server);
+        tokio::task::spawn_blocking(move || {
+            let pooled = cas_store::shared_db::shared_connection(&database).unwrap();
+            pooled.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
+            let outcome = publish(&PublishContext {
+                store: &f.store, roots: f.roots.clone(), task_id: "cas-29624".into(), cloud: Some(client),
+            }, &f.file).unwrap();
+            cas_store::shared_db::install_busy_handler(&pooled.lock().unwrap()).unwrap();
+            writer.lock().unwrap().execute_batch("COMMIT").unwrap();
+            assert_eq!(outcome.artifact.status, "uploaded");
+            assert!(!outcome.disposition.is_committed());
+            let PublishDisposition::UploadFailed { reason } = &outcome.disposition else { panic!("{outcome:?}") };
+            assert!(reason.contains("uploaded, not committed locally"), "{reason}");
+            assert_eq!(f.store.list_for_task("cas-29624").unwrap().len(), 1);
+            let (note, warnings) = proof::prepare_note(
+                &f.store, "cas-29624", &outcome.artifact.id, &f.roots.task_artifacts_dir, false,
+            ).unwrap();
+            assert!(!note.contains("ARTIFACT_PROOF:"), "{note}");
+            assert_eq!(warnings.len(), 1);
+        }).await.unwrap();
     }
 
     #[tokio::test]

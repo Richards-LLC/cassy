@@ -744,6 +744,17 @@ impl CasService {
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_rebind_branch(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("task", "rebind_branch"))?;
+        let branch = req.branch.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "branch required for rebind_branch"))?;
+        let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for rebind_branch"))?;
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.rebind_task_branch(&id, &branch, &reason)
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("Branch approval failed: {error}"))))
+    }
+
     pub(super) async fn task_available(
         &self,
         req: TaskRequest,
@@ -950,7 +961,10 @@ impl CasService {
         // cas-f0a1: candidates are matched too, so a repeat observation
         // counts against the lesson it repeats instead of starting over.
         let candidates = cas_store::similar_rule_candidates(&self.inner.cas_root, &content)
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Failed to read similar rule candidates");
+                Vec::new()
+            });
         let mut candidate_report = String::new();
         if !candidates.is_empty() {
             candidate_report.push_str(&format!(
@@ -1169,4 +1183,59 @@ impl CasService {
     }
 
     // Agent implementations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_similar_warns_on_candidate_read_failure_cas_0ab2() {
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        assert!(core.cached_config.set(crate::config::Config::default()).is_ok());
+        let rule = crate::types::Rule::new("cas-0ab2".into(), "Keep candidate reads visible".into());
+        core.open_rule_store().unwrap().init().unwrap();
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+        core.open_search_index().unwrap().index_rule(&rule).unwrap();
+        cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", "cas-0ab2", "ver-1")
+            .unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        for failed_read in [false, true] {
+            if failed_read {
+                // Keep the table present so schema initialization cannot repair it.
+                cas_store::shared_db::shared_connection(&root.join("cas.db"))
+                    .unwrap().lock().unwrap()
+                    .execute_batch("ALTER TABLE rule_candidates RENAME COLUMN category TO missing_category")
+                    .unwrap();
+            }
+            let mut log = tempfile::tempfile().unwrap();
+            let capture = log.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || capture.try_clone().unwrap()).finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            let result = service.rule(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "check_similar", "content": rule.content, "threshold": 0.0
+            })).unwrap())).await.unwrap();
+            drop(guard);
+            let text = result.content.iter().filter_map(|part| part.as_text())
+                .map(|part| part.text.as_str()).collect::<Vec<_>>().join("\n");
+            assert!(text.contains("Found 1 similar rule(s)") && text.contains(&rule.id), "{text}");
+            assert_eq!(text.contains("Similar rule candidates (1)"), !failed_read, "{text}");
+            log.rewind().unwrap();
+            let mut warning = String::new();
+            log.read_to_string(&mut warning).unwrap();
+            assert_eq!(warning.contains("WARN"), failed_read, "{warning}");
+            if failed_read {
+                assert!(warning.contains("candidate") && warning.contains("no such column"), "{warning}");
+            }
+        }
+    }
 }

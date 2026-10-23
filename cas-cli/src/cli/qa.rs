@@ -181,6 +181,32 @@ pub enum QaCommand {
     },
 }
 
+/// Compare the checkout with the pinned upkeep commit, including a newly
+/// created registry that Git has not tracked yet. Unavailable is not equal.
+fn working_tree_differs(root: &Path, registry: &str, upkeep: &UpkeepReport) -> Option<bool> {
+    let (_, sha) = upkeep.measured_ref.rsplit_once('@')?;
+    let diff = Command::new("git")
+        .args(["diff", "--quiet", sha, "--"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    match diff.status.code()? {
+        1 => Some(true),
+        0 => {
+            let committed = Command::new("git")
+                .args(["show", &format!("{sha}:{registry}")])
+                .current_dir(root)
+                .output()
+                .ok()?;
+            Some(
+                committed.status.success().then_some(committed.stdout)
+                    != std::fs::read(root.join(registry)).ok(),
+            )
+        }
+        _ => None,
+    }
+}
+
 pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match command {
         QaCommand::Candidate(args) => candidate(args, cli, cas_root),
@@ -218,14 +244,21 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     crate::qa_seed::status(&project_root, &qa)?
                 };
                 let upkeep = status.then(|| {
-                    UpkeepReport::at(
+                    let mut report = UpkeepReport::at(
                         &Measurement::integration_at(&project_root, cas_root.unwrap_or(&local_cas)),
                         &qa,
-                    )
+                    );
+                    report.registry.unit = "validation/ownership issue(s)";
+                    report
+                });
+                let differs = upkeep.as_ref().and_then(|report| {
+                    working_tree_differs(&project_root, &qa.registry.path, report)
                 });
                 if cli.json {
                     let mut value = serde_json::to_value(&result)?;
                     if let Some(upkeep) = &upkeep {
+                        value["source"] = serde_json::json!("working_tree");
+                        value["differs_from_measured_ref"] = serde_json::to_value(differs)?;
                         value["upkeep"] = serde_json::to_value(upkeep)?;
                     }
                     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -234,30 +267,46 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                         "MISSING"
                     } else if !result.valid {
                         "INVALID"
-                    } else if upkeep.as_ref().is_some_and(|report| {
-                        report
-                            .artifacts()
-                            .iter()
-                            .any(|artifact| artifact.drift_count.is_some_and(|count| count > 0))
-                    }) {
-                        "DRIFT"
-                    } else if upkeep.as_ref().is_some_and(|report| {
-                        report
-                            .artifacts()
-                            .iter()
-                            .any(|artifact| artifact.drift_count.is_none())
-                    }) {
-                        "UNKNOWN"
-                    } else if result.debt_count > 0 || !result.unowned_surfaces.is_empty() {
+                    } else if result.debt_count > 0 {
+                        "DEBT"
+                    } else if *status {
+                        "PASS"
+                    } else if !result.unowned_surfaces.is_empty() {
                         "DEBT"
                     } else {
                         "READY"
                     };
+                    if *status {
+                        println!(
+                            "{verdict}: {} problem(s), {} debt item(s) (working tree)",
+                            result.problems.len(), result.debt_count
+                        );
+                    } else {
+                        println!(
+                            "{verdict}: {} journey(s), {} added",
+                            result.journeys, result.added
+                        );
+                    }
                     println!(
-                        "{verdict}: {} journey(s), {} added",
-                        result.journeys, result.added
+                        "Next: cas qa journeys --{}",
+                        if result.present { "check" } else { "seed" }
                     );
+                    if *status {
+                        println!("Working tree:");
+                        println!("  Journeys: {}  Added: {}", result.journeys, result.added);
+                        println!(
+                            "  Seeded: {}  Unowned surfaces: {}",
+                            result.seeded, result.unowned_surfaces.len()
+                        );
+                        if let Some(line) = result.planned_specs_line() {
+                            println!("{line}");
+                        }
+                        if differs == Some(true) {
+                            println!("Working tree differs from measured ref.");
+                        }
+                    }
                     if let Some(upkeep) = &upkeep {
+                        println!("Integration upkeep:");
                         let line = measured_ref_line(&upkeep.measured_ref);
                         println!("{line}");
                         for artifact in upkeep.artifacts() {
@@ -270,7 +319,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                             if let Some(debt) = artifact.debt_count {
                                 println!("  Curation debt: {debt} (separate from drift)");
                             }
-                            if cli.verbose
+                            if (cli.verbose || artifact.name == "journey registry")
                                 && let Some(detail) = &artifact.detail
                             {
                                 println!("  {detail}");
@@ -280,15 +329,12 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                             println!("Full ref: cas qa journeys --status --json");
                         }
                     }
-                    println!(
-                        "Next: cas qa journeys --{}",
-                        if result.present { "check" } else { "seed" }
-                    );
-                    println!(
-                        "Seeded: {}  Unowned surfaces: {}",
-                        result.seeded,
-                        result.unowned_surfaces.len()
-                    );
+                    if !*status {
+                        println!(
+                            "Seeded: {}  Unowned surfaces: {}",
+                            result.seeded, result.unowned_surfaces.len()
+                        );
+                    }
                     println!("Registry: {}", result.path);
                 }
                 return Ok(());
@@ -344,6 +390,21 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                 }
                 if let Some(notice) = debt_summary.history_notice {
                     println!("History reset: {notice}");
+                }
+                for (group, journey) in &report.single_reference_owner_groups {
+                    let group = group.escape_debug().to_string();
+                    let journey = journey.escape_debug().to_string();
+                    let warning = format!("WARN owner group {group}: only journey {journey}");
+                    if warning.len() <= 80 {
+                        println!("{warning}");
+                    } else {
+                        let suffix = " (full: --json)";
+                        let room = 80 - "WARN owner group ".len() - ": only journey ".len() - suffix.len();
+                        let group_room = (room / 2).max(room.saturating_sub(journey.len()));
+                        let group = crate::ui::widgets::truncate(&group, group_room);
+                        let journey = crate::ui::widgets::truncate(&journey, room - group.len());
+                        println!("WARN owner group {group}: only journey {journey}{suffix}");
+                    }
                 }
                 if !cli.verbose && (!report.debt.is_empty() || debt_summary.history_error.is_some()) {
                     println!("Details: cas qa journeys --check --verbose");

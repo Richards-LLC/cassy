@@ -74,7 +74,7 @@ fn print_help_text(
             Err(err) => {
                 let mut stderr = io::stderr();
                 let theme = ActiveTheme::default();
-                let mut fmt = Formatter::stdout(&mut stderr, theme);
+                let mut fmt = Formatter::stderr(&mut stderr, theme);
                 let _ = StatusLine::error(format!("Failed to serialize config docs: {err}"))
                     .render(&mut fmt);
             }

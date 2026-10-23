@@ -539,9 +539,9 @@ function checkWordSplit(lines, columns, run, referenceText) {
 }
 
 function isLiteralProgressEllipsis(text) {
-  // Only known complete progress copy proves the final word is not cut off.
-  // Keep the interior space literal so table column gaps cannot match.
-  return /^ *Reconfiguring Cassy\.\.\. *$/.test(text);
+  // Complete final nouns are documented in cas-cli-craft's output contract.
+  // Require one progress sentence with literal interior spaces, not column gaps.
+  return /^ *[A-Z][a-z]+ing(?: [A-Za-z][A-Za-z0-9_-]*)* (?:Cassy|dependencies|packages|files|configuration)\.\.\. *$/.test(text);
 }
 
 function checkTruncation(lines, run, escapeFlag) {

@@ -227,6 +227,20 @@ pub struct CodemapFreshnessEvaluation {
     pub evaluated_ref: String,
 }
 
+impl CodemapFreshnessEvaluation {
+    /// Structural changes since the CODEMAP commit; None when CODEMAP.md is missing.
+    pub fn structural_change_count(&self) -> Option<usize> {
+        match &self.staleness {
+            None => Some(0),
+            Some(CodemapStaleness::Missing) => None,
+            Some(
+                CodemapStaleness::Stale { total_changes, .. }
+                | CodemapStaleness::SignificantlyStale { total_changes, .. },
+            ) => Some(*total_changes),
+        }
+    }
+}
+
 /// Threshold for "significantly stale" — 10+ structural changes warrants urgent messaging.
 const SIGNIFICANT_STALENESS_THRESHOLD: usize = 10;
 

@@ -213,7 +213,10 @@ fn reconcile_reused_factory_branch(
     // cas-32fa: only anchors on this worker's branch count. A task
     // transferred from another worker carries that worker's anchors, and
     // this worker's leftover edits are not its prior work.
-    let has_prior_task_work = || {
+    // Equal-tip starts consult this before checking a dirty tree; reuse the
+    // answer rather than walking the same attribution history twice.
+    let prior_task_work = std::cell::OnceCell::new();
+    let has_prior_task_work = || *prior_task_work.get_or_init(|| {
         task_identity.is_some_and(|identity| {
             identity
                 .known_commits
@@ -226,7 +229,7 @@ fn reconcile_reused_factory_branch(
                 )
                 .is_some_and(|(own, _)| own.is_some())
         })
-    };
+    });
 
     // Fresh tasks must not inherit another task's edits; resets must not
     // discard edits. Proven task continuations may retain their own dirty
@@ -251,7 +254,8 @@ fn reconcile_reused_factory_branch(
             if !has_prior_task_work() {
                 return Err(format!(
                     "Cannot start task: {expected_branch} has uncommitted changes from earlier work, \
-                     not this task. Stash them with `git stash push -u -m \"<tag>\"` before starting; \
+                     not this task. Stash them, including untracked files, with \
+                     `git stash push -u -m \"<tag>\"` before starting; \
                      committing them on this branch would later be refused as unattributed work."
                 ));
             }
@@ -374,7 +378,8 @@ fn reconcile_reused_factory_branch(
         // Only the reusable base lane may move after preserving its old tip.
         if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some() {
             return Err(format!(
-                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` before starting."
+                "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` BEFORE `{tool_prefix}task action=start`; do not start and then switch branches.",
+                tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
             ));
         }
         require_clean_tracked_tree()?;
@@ -884,16 +889,52 @@ fn open_task_similarity(
             .collect(),
         None => std::collections::HashSet::new(),
     };
+    let tasks = task_store.list(None).map_err(|error| error.to_string())?;
+    let sibling_descriptions: Vec<_> = tasks.iter()
+        .filter(|task| siblings.contains(&task.id)
+            && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
+        .map(|task| task.description.as_str())
+        .collect();
+    let epic_description = tasks.iter().find(|task| epic_id == Some(task.id.as_str()))
+        .map(|task| task.description.as_str()).unwrap_or_default();
+    let common_blocks: std::collections::HashSet<String> = description.split("\n\n")
+        .map(str::trim)
+        .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
+            && (epic_description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
+                || sibling_descriptions.iter().all(|description| {
+                    description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
+                })))
+        .map(str::to_string)
+        .collect();
     let mut overlap = OpenTaskOverlap::default();
-    for task in task_store.list(None).map_err(|error| error.to_string())? {
+    for task in tasks {
         if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
             || epic_id == Some(task.id.as_str())
             || (exclude_epics && task.task_type == TaskType::Epic)
         {
             continue;
         }
+        // Siblings often repeat one mandatory safety/build block. Discount
+        // multiline paragraphs shared by every open sibling or declared by the
+        // epic, only when both briefs retain scope outside them. A block shared
+        // by just a pair remains scope, as do identical full briefs and titles.
+        let (candidate_scope, existing_scope) = if siblings.contains(&task.id) {
+            let candidate_blocks: Vec<_> = description.split("\n\n").map(str::trim).collect();
+            let existing_blocks: Vec<_> = task.description.split("\n\n").map(str::trim).collect();
+            let candidate = candidate_blocks.into_iter()
+                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
+            let existing = existing_blocks.into_iter()
+                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
+            if !candidate.trim().is_empty() && !existing.trim().is_empty() {
+                (candidate, existing)
+            } else {
+                (description.to_string(), task.description.clone())
+            }
+        } else {
+            (description.to_string(), task.description.clone())
+        };
         let Some((score, identifiers)) =
-            task_similarity(title, description, &task.title, &task.description)
+            task_similarity(title, &candidate_scope, &task.title, &existing_scope)
         else {
             continue;
         };
@@ -3555,6 +3596,56 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn sibling_safety_block_does_not_hide_distinct_scope_cas_8bcb() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "boilerplate-planner");
+        std::fs::create_dir_all(env.home().join("project")).unwrap();
+        let core = CasCore::with_daemon(env.home().join("project"), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        let mut epic = Task::new("cas-safety-epic".into(), "QA journeys".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).unwrap();
+        let safety = "SAFETY: never read backend .env; stub /api/ and abort production hosts.\n\
+                      BUILD: NUXT_SSR=false; use 200.html and tests/auth.setup.ts.\n\
+                      DELIVER: ledger rows PASS or FAIL; all HARD assertions apply.";
+        for (title, scope) in [
+            ("Walk checkout", "Verify checkout-payment on /checkout in pages/checkout.vue."),
+            ("Walk account", "Verify account-profile on /account in pages/account.vue."),
+            ("Walk search", "Verify search-results on /search in pages/search.vue."),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert!(!receipt.contains("SIBLING OVERLAP"), "{title}: {receipt}");
+        }
+        let mut duplicate = child_request("Inspect payment journey", epic.id.clone());
+        duplicate.description = Some(format!(
+            "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
+        ));
+        let receipt = text(core.cas_task_create(Parameters(duplicate)).await.unwrap());
+        assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
+        assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
+        assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+
+        // Shared scope in just a pair is not epic-wide boilerplate, even
+        // when the two briefs also repeat the real safety block.
+        let settlement = "Read ledgerStore in src/ledger.ts.\nRepair settlementReader in src/settlement.ts.";
+        for (title, scope, should_warn) in [
+            ("Inspect settlement storage", "Unique extraction scope.", false),
+            ("Repair settlement history", "Unique history scope.", true),
+        ] {
+            let mut request = child_request(title, epic.id.clone());
+            request.description = Some(format!("{scope}\n\n{settlement}\n\n{safety}"));
+            let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
+            assert_eq!(receipt.contains("SIBLING OVERLAP"), should_warn, "{title}: {receipt}");
+            if should_warn {
+                assert!(receipt.contains("ledgerStore"), "pair-only scope stays visible: {receipt}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
         let mut env = TestEnvGuard::temp_home();
         for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
@@ -5227,12 +5318,9 @@ mod related_recall_response_tests {
     #[tokio::test]
     async fn recent_other_epic_plan_requires_confirmation_before_creating_child() {
         let temp = TempDir::new().expect("temp project");
-        let mut env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_SESSION_ID", Some("planning-supervisor-one")),
-            ("CAS_AGENT_NAME", Some("planning-supervisor-one")),
-            ("CAS_FACTORY_MODE", None),
-            ("CAS_FACTORY_SESSION", None),
-        ]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", "planning-supervisor-one");
+        env.set("CAS_AGENT_NAME", "planning-supervisor-one");
         let first = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         first
             .cas_task_create(Parameters(epic_request(
@@ -5280,6 +5368,11 @@ mod related_recall_response_tests {
         store.add_dependency(&legacy).unwrap();
         first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
             .await.expect("anonymous historical metadata is not evidence of another planner");
+
+        // A parallel MCP instance resolves the same registered caller.
+        let parallel = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        parallel.cas_task_create(Parameters(child_request("Own parallel child", epic_id.clone())))
+            .await.expect("the same supervisor's other MCP instance is not a competitor");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");

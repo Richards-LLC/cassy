@@ -51,6 +51,10 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
     std::fs::write(repo.join("product.rs"), "pub fn product() {}\n").unwrap();
     git(repo, &["add", "product.rs"]);
     git(repo, &["commit", "-q", "-m", "fix(cas-3d72): product content"]);
+    // Never-merge workflow proofs still inspect intermediate commits, even
+    // though ordinary evidence deliveries are judged by their net diff.
+    git(repo, &["rm", "product.rs"]);
+    git(repo, &["commit", "-q", "-m", "revert(cas-3d72): product content"]);
     git(repo, &["checkout", "-q", "main"]);
 
     let mut task = assigned(id, TaskType::Task, "main");
@@ -93,6 +97,7 @@ async fn never_merge_workflow_proof_closes_without_foreign_delivery_cas_3d72() {
         format!("never-merge:branch:{product_branch}").into();
     let refused = call(&f.supervisor, contaminated).await;
     assert!(refused.contains("EVIDENCE ONLY CLOSE REJECTED"), "{refused}");
+    assert!(refused.contains("product.rs"), "{refused}");
     assert_eq!(f.task(id).status, TaskStatus::Blocked, "{refused}");
     let response = call(&f.supervisor, request).await;
     assert_closed_without_lane(&f, id, &response);
@@ -1332,5 +1337,74 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
             assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(lane));
             assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{response}");
         }
+    }
+}
+
+/// A legacy start recorded the preceding parked task's lane before the worker
+/// switched to its own lane. Only a proven integrated delivery can recover it;
+/// neither an arbitrary receipt nor supervisor review erases delivery checks.
+#[tokio::test]
+async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
+    let mut env = TestEnvGuard::temp_home();
+    for (supervisor, same_lane) in [(false, false), (true, false), (false, true), (true, true)] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-8603";
+        let old_lane = format!("{LANE}-cas-a0b1");
+        let own_lane = format!("{LANE}-{id}");
+        // The old delivery remains an immutable object, but its lane was
+        // reset after the next start. Do not repair it by grafting our work.
+        git(repo, &["branch", &old_lane, "main"]);
+        let old_tip = git(repo, &["rev-parse", &old_lane]);
+        git(&worker_path, &["checkout", "-q", "-b", &own_lane, "main"]);
+        std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(&worker_path, &["add", "own.rs"]);
+        git(&worker_path, &["commit", "-q", "-m", "fix(cas-8603): own delivery"]);
+        let receipt = git(&worker_path, &["rev-parse", "HEAD"]);
+        git(&worker_path, &["push", "-q", "origin", &own_lane]);
+        git(repo, &["merge", "-q", "--no-ff", &own_lane, "-m", "Merge own delivery"]);
+        git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge preceding delivery"]);
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-8603): empty receipt"]);
+        let empty = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        git(repo, &["checkout", "-q", "-b", "unmerged", "main"]);
+        std::fs::write(repo.join("later.rs"), "pub fn later() {}\n").unwrap();
+        git(repo, &["add", "later.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-8603): not integrated"]);
+        let unmerged = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(),
+            branch: if same_lane { own_lane.clone() } else { old_lane.clone() },
+            base_sha: f.foreign_tip.clone(),
+        });
+        f.put(&task);
+        claim(&f, id);
+        let caller = if supervisor { &f.supervisor } else { &f.worker };
+        for rejected in [None, Some(empty.as_str()), Some(unmerged.as_str()), Some(f.foreign_tip.as_str())] {
+            let response = call(caller, serde_json::json!({
+                "action": "close", "id": id, "reason": "Reviewed delivery",
+                "commit_receipt": rejected, "supervisor_override": supervisor,
+            })).await;
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{rejected:?}: {response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, task.deliverables.factory_branch_start,
+                "a refused receipt must not erase the start record: {response}");
+        }
+        let response = call(caller, serde_json::json!({
+            "action": "close", "id": id, "reason": "Reviewed integrated own delivery",
+            "commit_receipt": receipt, "supervisor_override": supervisor,
+        })).await;
+        if same_lane {
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "an own-lane history rewrite still refuses: {response}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start, task.deliverables.factory_branch_start);
+        } else {
+            assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}: {response}");
+            assert!(f.task(id).notes.contains(&f.foreign_tip), "the original boundary must remain audited");
+        }
+        assert_eq!(git(repo, &["rev-parse", &old_lane]), old_tip,
+            "recovery must not move the previous task's lane");
     }
 }

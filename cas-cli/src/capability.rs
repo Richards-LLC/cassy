@@ -18,6 +18,7 @@ use cas_pty::{Harness, HarnessConformanceReceipt};
 use fs2::FileExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
@@ -293,9 +294,11 @@ fn probe_claude_auth_with(
                 Err(error) => return Err(error),
             }
         }
-        if let Ok(evidence) =
+        if let Ok(mut evidence) =
             serde_json::from_reader::<_, CapabilityEvidence>((&mut file).take(8192))
         {
+            // The cache is user-writable; it cannot extend a state's freshness.
+            evidence.ttl_ms = evidence.ttl_ms.min(evidence.availability.default_ttl_ms());
             let interval = evidence.ttl_ms.max(CLAUDE_AUTH_PROBE_INTERVAL_MS);
             if now_ms >= evidence.observed_at_ms
                 && now_ms < evidence.observed_at_ms.saturating_add(interval)
@@ -333,6 +336,7 @@ fn write_claude_auth_cache(file: &mut File, evidence: &CapabilityEvidence) -> st
 }
 
 fn ssh_login_keychain_unavailable(
+    account_dir: Option<&str>,
     deadline: Deadline,
     run: &mut impl FnMut(
         &mut Command,
@@ -363,8 +367,18 @@ fn ssh_login_keychain_unavailable(
             }
         }
     }
+    // Match Claude's secure-storage selector: hash the NFC selector text, not
+    // a canonicalized path. An unscoped process uses the legacy service.
+    let service = account_dir
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| {
+            let normalized: String = dir.nfc().collect();
+            let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+            format!("Claude Code-credentials-{}", &hash[..8])
+        })
+        .unwrap_or_else(|| "Claude Code-credentials".to_string());
     let mut metadata = Command::new("security");
-    metadata.args(["find-generic-password", "-s", "Claude Code-credentials"]);
+    metadata.args(["find-generic-password", "-s", &service]);
     matches!(run(&mut metadata, deadline, AUTH_PROBE_TIMEOUT), Ok(output) if output.status.code() == Some(36))
 }
 
@@ -379,7 +393,7 @@ fn probe_claude_auth_uncached(
         Duration,
     ) -> Result<std::process::Output, BoundedCommandError>,
 ) -> CapabilityEvidence {
-    if macos_ssh && ssh_login_keychain_unavailable(deadline, run) {
+    if macos_ssh && ssh_login_keychain_unavailable(account_dir, deadline, run) {
         return unknown(
             now_ms,
             "macOS login keychain locked in ssh session",
@@ -409,7 +423,7 @@ fn probe_claude_auth_uncached(
                 Ok(_) => unavailable(
                     now_ms,
                     "Claude auth status is logged out",
-                    "Run `claude login`, then rerun doctor.",
+                    "Run `claude login`, then retry doctor after one minute.",
                 ),
                 Err(_) => unknown(
                     now_ms,
@@ -643,7 +657,7 @@ mod tests {
             ),
             (
                 "security",
-                "if [ \"$1\" = list-keychains ]; then printf '%s\\n' \"$CLAUDE_TEST_KEYCHAINS\"; else exit \"$CLAUDE_TEST_KEYCHAIN_EXIT\"; fi",
+                "if [ \"$1\" = list-keychains ]; then printf '%s\\n' \"$CLAUDE_TEST_KEYCHAINS\"; else printf '%s' \"$3\" > \"$HOME/keychain-service\"; exit \"$CLAUDE_TEST_KEYCHAIN_EXIT\"; fi",
             ),
         ] {
             let path = bin.join(name);
@@ -720,15 +734,28 @@ mod tests {
         env.set("SSH_CONNECTION", "fixture");
         env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":false}"#);
         env.set("CLAUDE_TEST_EXIT", "1");
-        for (profile, search_list) in [
-            (None, "    \"/Library/Keychains/System.keychain\""),
+        for (profile, search_list, expected_service) in [
+            (None, "    \"/Library/Keychains/System.keychain\"", None),
             (
                 Some("listed-but-locked"),
                 "    \"/Users/fixture/Library/Keychains/login.keychain-db\"",
+                None,
+            ),
+            (
+                Some("profile-e\u{301}"),
+                "    \"/Users/fixture/Library/Keychains/login.keychain-db\"",
+                Some("Claude Code-credentials-789b3bab"),
             ),
         ] {
             env.set("CLAUDE_TEST_KEYCHAINS", search_list);
             let evidence = fixture_claude_probe(&env, profile, 10, true);
+            if let Some(expected_service) = expected_service {
+                assert_eq!(
+                    std::fs::read_to_string(env.home().join("keychain-service")).unwrap(),
+                    expected_service,
+                    "metadata lookup must use the selected profile's NFC path hash"
+                );
+            }
             assert_eq!(evidence.availability, CapabilityAvailability::Unknown);
             // pin: incident #1294 requires this diagnostic instead of login advice.
             assert_eq!(
@@ -778,16 +805,43 @@ mod tests {
         let refreshed = fixture_claude_probe(&env, None, 300_010, false);
         assert_eq!(refreshed.availability, CapabilityAvailability::Unavailable);
         assert_eq!(refreshed.observed_at_ms, 300_010);
+        // An external `claude login` cannot notify this process's cache. Its
+        // logged-out advice must explain the bounded delay before a new probe.
+        env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
+        let after_login = fixture_claude_probe(&env, None, 301_010, false);
+        let login_advice_matches = after_login == refreshed
+            && after_login.remediation.as_deref().is_some_and(|advice| advice.contains("one minute"));
+        let logged_in = fixture_claude_probe(&env, None, 360_010, false);
+        assert_eq!(logged_in.availability, CapabilityAvailability::Available);
         env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
         env.set("CLAUDE_TEST_EXIT", "1");
-        let failed = fixture_claude_probe(&env, None, 360_010, false);
+        let failed = fixture_claude_probe(&env, None, 660_010, false);
         assert_eq!(failed.availability, CapabilityAvailability::Unknown);
-        let repeated = fixture_claude_probe(&env, None, 370_010, false);
+        let repeated = fixture_claude_probe(&env, None, 670_010, false);
         assert_eq!(
             repeated, failed,
             "transient failures must also throttle probes without refreshing evidence"
         );
-        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 4);
+        // The credential-free cache is user-writable: a forged TTL must not
+        // extend either the returned freshness or the normal probe interval.
+        let cache = std::fs::read_dir(env.home().join(".cas/cache/claude-auth"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                serde_json::from_slice::<CapabilityEvidence>(&std::fs::read(path).unwrap())
+                    .unwrap().observed_at_ms == failed.observed_at_ms
+            })
+            .unwrap();
+        let mut forged = failed.clone();
+        forged.ttl_ms = u64::MAX;
+        std::fs::write(&cache, serde_json::to_vec(&forged).unwrap()).unwrap();
+        let clamped = fixture_claude_probe(&env, None, 680_010, false);
+        let expired = fixture_claude_probe(&env, None, 720_010, false);
+        assert!(
+            login_advice_matches && clamped == failed && expired.observed_at_ms == 720_010,
+            "login delay advice={login_advice_matches}; tampered TTL returned {clamped:?}; expiry returned {expired:?}"
+        );
+        assert_eq!(std::fs::read_to_string(calls).unwrap().lines().count(), 6);
     }
 
     #[test]

@@ -62,6 +62,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `manual_checks` | Optional `ID: {statement, check, reason?, pending_checker?, definition?, labeled?, compare?}` map of criteria with no executable checker. `reason` is `human_judgment` (a person must grade it) or `checker_unwritten` (automatable, so `pending_checker` is required). |
 | `fixtures` | Optional `name: {description, provider, labels?}` map. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
+| `safety` | Optional `{mode, forbidden_hosts?, protected_credentials?}` QA policy every journey inherits. `mode` is `fixture-only`, `staging` or `production-read-back`; any other value is a validation problem and renders as fixture-only. `forbidden_hosts` takes hosts, `*.domain` or URLs; `protected_credentials` names environment variables. The QA preflight refuses a round whose environment sets a protected credential or whose `qa.deployed_origins` names a forbidden host. |
 | `journeys` | Required non-empty list. |
 
 ## Journeys
@@ -81,8 +82,9 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `invariants` | Required non-empty list for curated live journeys; each id must resolve. |
 | `manual_checks` | Optional list of header `manual_checks` ids; each id must resolve. |
 | `fixtures` | Optional fixture names; validated when the header declares fixtures. |
-| `traffic` | Required for curated live journeys: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. |
+| `traffic` | Required for curated live journeys when the header has a `traffic_snapshot`: `{share_pct: number or null, basis, source?}`. A numeric share needs a non-empty `basis` naming what was counted; a null share needs none. With no snapshot, an omitted `traffic` is unallocated-share debt. |
 | `spec` | Optional tracked automated journey file. |
+| `spec_status` | Optional `planned`: the `spec` path is a later task's deliverable, so an untracked path is `planned_spec` debt instead of an `untracked_spec` failure. Remove it once the spec is tracked: a marker left on a tracked spec, or on a journey without `spec`, is `stale_planned_spec` debt. `cas qa journeys --status` lists planned specs not yet written, and `cas qa impact` reports them as planned rather than as a spec to open. |
 | `known_failure` | Optional open task id explaining a currently failing spec. |
 | `finisher` | Optional journey id this entry ends in; must resolve. |
 | `evidence` | Optional free-form map of previous ledger/verdict metadata. |
@@ -306,8 +308,12 @@ carry `seeded: true` and need review before they describe verified user behavior
 No source or product context means seeding refuses instead of inventing a journey.
 
 `cas qa journeys --status` reports missing/invalid registries, journey and seed
-counts, debt, and unowned surfaces for the checkout. It also reports upkeep drift
-for CODEMAP, PRODUCT_OVERVIEW, and the journey registry at the integration ref:
+counts, debt, and unowned surfaces under `Working tree`. Its headline problem
+and debt totals use the same validation as `--check`. A separate `Integration
+upkeep` section reports drift for CODEMAP, PRODUCT_OVERVIEW, and the journey
+registry at the labelled integration ref. Registry upkeep counts validation
+problems plus unowned surface files and displays both counts; curation debt is
+separate. A notice appears when the working tree differs from that ref:
 
 ```bash
 cas qa journeys --status
@@ -317,7 +323,9 @@ cas qa journeys --status --json
 `Measured ref: origin/<target>@<sha>` names the exact fetched snapshot. This
 report keeps the integration ref even when the checkout is ahead or behind it;
 it does not fetch. A long human ref is shortened with `--json` as the full-ref
-escape. JSON retains coverage fields and adds `upkeep`, with `measured_ref` and
+escape. JSON labels coverage fields with `source: "working_tree"` and adds
+`differs_from_measured_ref` (boolean, or null when comparison is unavailable).
+The separate `upkeep` object contains `measured_ref` and
 `codemap`, `product_overview`, and `registry` objects. Each artifact has `path`,
 `state`, nullable `drift_count`, and an explicit `unit`. Missing artifacts and
 unavailable refs are not zero drift. The existing individual freshness commands

@@ -1136,7 +1136,9 @@ fn commit_messages(
 /// The declared append-only builtin ledger owns added hashes under each file
 /// key, not JSON lines. A merged union may reorder keys/arrays or change commas
 /// without losing any delivery. Other generated outputs keep their existing
-/// artifact rules; deletions and metadata edits keep the ordinary line proof.
+/// artifact rules. Delivery-side deletions and metadata edits keep the ordinary
+/// line proof. Once additions qualify, a later ordinary commit removing an
+/// added hash remains Dropped; only the cas-2ea6 regeneration rule can accept it.
 fn reference_history_additions_presence(
     repo: &Path,
     parent: &str,
@@ -1148,33 +1150,34 @@ fn reference_history_additions_presence(
     if path != super::REFERENCE_HISTORY_LEDGER {
         return Ok(None);
     }
-    #[derive(serde::Deserialize)]
-    struct History {
-        version: u64,
-        files: BTreeMap<String, BTreeSet<String>>,
-        #[serde(flatten)]
-        metadata: BTreeMap<String, serde_json::Value>,
-    }
-    let blobs = path_blobs(repo, &[parent, delivery, target], path)
-        .ok_or_else(|| format!("could not inspect reference-history blobs for `{path}`"))?;
-    let read = |revision: &str| -> Result<Option<History>, String> {
-        let Some(blob) = blobs.get(revision).and_then(Option::as_ref) else {
-            return Ok(None);
-        };
-        let contents = text(repo, &["cat-file", "blob", blob])?;
-        let history: History = serde_json::from_str(&contents)
-            .map_err(|error| format!("invalid reference history `{revision}:{path}`: {error}"))?;
-        if history.version != 1 {
-            return Err(format!(
-                "unsupported reference history version at `{revision}:{path}`"
-            ));
-        }
-        Ok(Some(history))
-    };
-    let Some(delivered) = read(delivery)? else {
+    let Some(blobs) = path_blobs(repo, &[parent, delivery, target], path) else {
         return Ok(None);
     };
-    let before = read(parent)?;
+    enum ReadHistory {
+        Missing,
+        Unavailable,
+        Parsed(super::ReferenceHistory),
+    }
+    let read = |revision: &str| -> Result<ReadHistory, String> {
+        let Some(blob) = blobs.get(revision).and_then(Option::as_ref) else {
+            return Ok(ReadHistory::Missing);
+        };
+        let Ok(contents) = text(repo, &["cat-file", "blob", blob]) else {
+            return Ok(ReadHistory::Unavailable);
+        };
+        let history = super::parse_reference_history(contents.as_bytes())
+            .map_err(|error| format!("invalid reference history `{revision}:{path}`: {error}"))?;
+        Ok(ReadHistory::Parsed(history))
+    };
+    let delivered = match read(delivery)? {
+        ReadHistory::Parsed(history) => history,
+        ReadHistory::Missing | ReadHistory::Unavailable => return Ok(None),
+    };
+    let before = match read(parent)? {
+        ReadHistory::Parsed(history) => Some(history),
+        ReadHistory::Missing => None,
+        ReadHistory::Unavailable => return Ok(None),
+    };
     if before.as_ref().is_some_and(|before| {
         before.metadata != delivered.metadata
             || before.files.iter().any(|(key, hashes)| {
@@ -1201,7 +1204,11 @@ fn reference_history_additions_presence(
     if added.is_empty() {
         return Ok(None);
     }
-    let landed = read(target)?;
+    let landed = match read(target)? {
+        ReadHistory::Parsed(history) => Some(history),
+        ReadHistory::Missing => None,
+        ReadHistory::Unavailable => return Ok(None),
+    };
     // Metadata delivered with a newly introduced ledger still needs the
     // ordinary proof if the target changed it. Inherited metadata isn't ours.
     if before.is_none()

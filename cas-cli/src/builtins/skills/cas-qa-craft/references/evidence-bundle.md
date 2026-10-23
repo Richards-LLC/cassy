@@ -83,8 +83,11 @@ journey evaluation scores polish for it.
   CSS class renames do not add a finding when that identity agrees. Historical
   reports without identity evidence require matching selectors; keep them
   fail-closed. The delivered run must
-  still be fresh, strict and local. List the base build's findings as
-  follow-ups in the ledger; they are not this delivery's defects.
+  still be fresh, strict and local. Classify base-build findings under
+  [independent-pass §3](independent-pass.md#3-correctness-paths): failures within
+  the delivery's stated purpose, acceptance criteria, demo statement, or a
+  journey invariant its diff adds or edits are unmet even when base shares them.
+  Only findings outside those scopes are pre-existing follow-ups in the ledger.
   Both reports must record their findings in one of two shapes: a top-level
   `findings` list (the builtin visual-qa.mjs), or per render as
   `renders[].issues` with the page in `input` (a per-source project

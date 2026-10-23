@@ -181,7 +181,12 @@ impl TaskStore for MockTaskStore {
         Ok(Some(now))
     }
 
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();
         let task = tasks
@@ -191,6 +196,7 @@ impl TaskStore for MockTaskStore {
             return Ok(false);
         }
         task.deliverables.green_merge_commit = Some(merge_commit.to_string());
+        task.deliverables.merge_ci_admission = Some(admission);
         task.updated_at = Utc::now();
         Ok(true)
     }

@@ -311,6 +311,98 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
 }
 
 #[test]
+fn dead_runtime_gui_endpoints_are_scoped_cas_0700() {
+    use crate::ui::factory::{SessionManager, create_metadata, gui_socket_path};
+    use std::os::unix::net::UnixListener;
+
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    let other = crate::store::init_cas_dir(&env.home().join("other")).unwrap();
+    // A reaped child supplies a real dead PID without assuming a host PID range.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = child.id();
+    assert!(child.wait().unwrap().success());
+    let name = "dead-gui-0700";
+    let socket = gui_socket_path(name);
+    let mut failures = Vec::new();
+    let unresolved = env.home().join("deleted/.cas");
+    // The other-project held row proves filtering precedes endpoint refusal.
+    // One unresolved-project row covers missing, inactive and held sockets.
+    let cases: [(bool, &std::path::Path, &[Option<bool>]); 7] = [
+        (true, &other, &[Some(false)]),
+        (true, &other, &[Some(true)]),
+        (true, &root, &[Some(false)]),
+        (true, &root, &[Some(true)]),
+        (false, &other, &[Some(false)]),
+        (false, &other, &[Some(true)]),
+        (true, &unresolved, &[None, Some(false), Some(true)]),
+    ];
+    for (recorded, project, endpoints) in cases {
+        let mut metadata = create_metadata(
+            name,
+            dead_pid,
+            "supervisor",
+            &[],
+            None,
+            project.parent().unwrap().to_str(),
+            None,
+        );
+        if recorded {
+            SessionManager::new().save_metadata(&metadata).unwrap();
+        } else {
+            let _ = std::fs::remove_file(crate::ui::factory::metadata_path(name));
+        }
+        for endpoint in endpoints {
+            let held = *endpoint == Some(true);
+            let listener = endpoint.and_then(|held| {
+                let listener = UnixListener::bind(&socket).unwrap();
+                held.then_some(listener)
+            });
+            let result = RuntimeInventory::discover(&root);
+            match result {
+                Err(error) if recorded && held && project != other => {
+                    if !error.contains(name) || !error.contains(&format!("cas kill -- {name}")) {
+                        failures.push(format!("held endpoint lacks named remedy: {error}"));
+                    }
+                }
+                Err(error) if !recorded && held => {
+                    assert!(error.contains("unattributed"), "{error}");
+                }
+                Err(error) => failures.push(format!(
+                    "recorded={recorded}, project={}, endpoint={endpoint:?}: {error}",
+                    project.display()
+                )),
+                Ok(_) if held && (!recorded || project != other) => {
+                    failures.push("held endpoint was allowed".into())
+                }
+                Ok(_) => {}
+            }
+            assert_eq!(
+                socket.exists(),
+                endpoint.is_some(),
+                "inventory must not change the socket path it probes"
+            );
+            drop(listener);
+            if endpoint.is_some() {
+                std::fs::remove_file(&socket).unwrap();
+            }
+        }
+        if project == unresolved {
+            metadata.daemon_pid = std::process::id();
+            SessionManager::new().save_metadata(&metadata).unwrap();
+            let error = RuntimeInventory::discover(&root)
+                .err()
+                .expect("live unresolved session must refuse");
+            assert!(
+                error.contains(name) && error.contains(&format!("cas kill -- {name}")),
+                "{error}"
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     let env = crate::test_support::TestEnvGuard::temp_home();
     let scope = scope();
@@ -343,8 +435,14 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     crate::ui::factory::SessionManager::new()
         .save_metadata(&metadata)
         .unwrap();
+    // The earlier runtime thread exited. Keep a real listener held here:
+    // a stale PID with a refused endpoint is now intentionally skipped.
+    let socket = crate::ui::factory::gui_socket_path("bind-fx");
+    std::fs::remove_file(&socket).unwrap();
+    let _held = std::os::unix::net::UnixListener::bind(socket).unwrap();
     let stale = client.repair(&root, &scope).unwrap();
     assert!(matches!(stale.outcome, RepairOutcome::Blocked));
+    assert!(stale.error.unwrap().contains("cas kill -- bind-fx"));
     std::fs::write(&metadata_path, b"{").unwrap();
     let corrupt = client.repair(&root, &scope).unwrap();
     assert!(matches!(corrupt.outcome, RepairOutcome::Blocked));

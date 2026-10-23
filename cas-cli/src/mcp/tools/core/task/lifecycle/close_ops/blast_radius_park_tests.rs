@@ -221,6 +221,39 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         &mut ScopedProofTargetCache::default(),
     )
     .expect("mounted tests remain covered without a changed parent");
+
+    // cas-087d: a single close may change several mounted siblings whose
+    // filenames describe their scope rather than repeat their parent's name.
+    let named = repo.path().join("cas-cli/src/named");
+    std::fs::create_dir(&named).unwrap();
+    let mut changed = Vec::new();
+    task.proof_targets.clear();
+    for (parent, tests) in [
+        ("peers", "peers_scope_tests"),
+        ("peer_mailbox", "peer_mailbox_user_scope_tests"),
+    ] {
+        std::fs::write(named.join(format!("{tests}.rs")), "#[test] fn scoped() {}\n").unwrap();
+        std::fs::write(
+            named.join(format!("{parent}.rs")),
+            format!("#[cfg(test)]\n#[path = \"{tests}.rs\"] mod tests;\n"),
+        ).unwrap();
+        changed.push(format!("cas-cli/src/named/{tests}.rs"));
+        task.proof_targets.push(format!("cas-cli named::{parent}"));
+    }
+    validate_risk_close_proofs_with_base_and_target_and_cache(
+        &task, &changed, repo.path(), repo.path(), None, None,
+        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
+    ).expect("actual path mounts cover differently named sibling test files");
+
+    std::fs::write(
+        named.join("peers.rs"),
+        "// #[path = \"peers_scope_tests.rs\"] mod tests;\n",
+    ).unwrap();
+    assert_eq!(
+        uncovered_blast_radius_modules(repo.path(), &changed, &task.proof_targets),
+        ["named::peers_scope_tests"],
+        "a comment cannot claim a differently named sibling",
+    );
 }
 
 /// A parent's capped tests cover a mounted sibling and exercised child through

@@ -47,6 +47,14 @@ pub(super) fn at_park(
         Ok(snapshot) => snapshot,
         Err(message) => return warning(store, task, message),
     };
+    let target_tip = freshest_target_ref(repo, target);
+    // A landed ownership repair can satisfy an older receipt. An unmerged
+    // delivery still answers to its own registry, including newly added owners.
+    let ownership_head = if git(repo, &["merge-base", "--is-ancestor", &head, &target_tip]).is_ok() {
+        &target_tip
+    } else {
+        &head
+    };
     check(
         store,
         task,
@@ -54,6 +62,7 @@ pub(super) fn at_park(
         &qa,
         &base,
         &head,
+        ownership_head,
         paths.as_deref(),
         override_reason,
     )
@@ -282,6 +291,7 @@ fn check(
     qa: &QaConfig,
     base: &str,
     head: &str,
+    ownership_head: &str,
     paths: Option<&[String]>,
     override_reason: Option<&str>,
 ) -> Result<Vec<String>, String> {
@@ -320,7 +330,7 @@ fn check(
     if qa.registry.enforce == RegistryEnforcement::Off {
         return Ok(vec![]);
     }
-    let result = inspect(task, repo, &qa, base, head, paths);
+    let result = inspect(task, repo, &qa, base, head, ownership_head, paths);
     match result {
         Ok((findings, warnings)) => finish(
             store,
@@ -346,6 +356,7 @@ fn inspect(
     qa: &QaConfig,
     base: &str,
     head: &str,
+    ownership_head: &str,
     paths: Option<&[String]>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<String>)> {
     let mut changes = crate::qa_impact::io::changes_for_diff(repo, base, Some(head))?;
@@ -457,7 +468,39 @@ fn inspect(
             return Ok((findings, warnings));
         }
     };
-    let unowned: Vec<_> = impact
+    // Only G2 uses current ownership. G1/G3 retain the delivered registry and
+    // every gate retains the task's original changes, never the target's diff.
+    // Ownership is independent of legacy catalog selection.
+    let ownership_impact = if ownership_head != head {
+        let current = (|| -> anyhow::Result<Option<crate::qa_impact::Impact>> {
+            let paths = tracked(repo, ownership_head)?;
+            let Some(text) = read(repo, ownership_head, &qa.registry.path, &paths)? else {
+                return Ok(None);
+            };
+            let registry = crate::qa_registry::parse(&text)?;
+            let codemap = read(repo, head, ".claude/CODEMAP.md", &after_paths)?.unwrap_or_default();
+            Ok(Some(crate::qa_impact::impact_for_changes(
+                Some(&registry),
+                qa,
+                &changes,
+                &codemap,
+            )))
+        })();
+        match current {
+            Ok(impact) => impact,
+            Err(error) => {
+                warnings.push(format!(
+                    "UPKEEP WARNING: target ownership unavailable (using delivered registry): {error:#}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let unowned: Vec<_> = ownership_impact
+        .as_ref()
+        .unwrap_or(&impact)
         .unowned
         .iter()
         .filter(|file| {

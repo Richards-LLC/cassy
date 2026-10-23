@@ -1,0 +1,3 @@
+[OK] published proof.cjs - 34 B - art-821f89d5
+     stored in Cloud (private)
+     sha256 9f72b7fbdcae1216afb9604428a18351041e293faa2a71d74b08007e92b43dd7

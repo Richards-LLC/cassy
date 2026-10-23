@@ -27,12 +27,20 @@ fail=0
 # Exercise the real lookup with logical time: process scheduling must not use
 # up a fixture's one-second deadline. Unsetting Bash's special SECONDS makes it
 # an ordinary variable; the real retry sleeps advance it deterministically.
-# API timeouts are represented by the fake gh's exit124, the timeout process
+# API timeouts are represented by the fake gh's exit124/137, the timeout process
 # boundary's public result, rather than waiting for a real child to be killed.
 run_lookup() (
     unset SECONDS
     SECONDS=0
-    sleep() { SECONDS=$((SECONDS + $1)); }
+    sleep() {
+        SECONDS=$((SECONDS + $1))
+        if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+            printf '%s\n' "$SECONDS" >"$FAKE_LOOKUP_CLOCK_FILE"
+        fi
+    }
+    if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+        printf '0\n' >"$FAKE_LOOKUP_CLOCK_FILE"
+    fi
     source "$lookup_script" "$@"
 )
 
@@ -86,7 +94,9 @@ case "$2" in
       sequence_file="$FAKE_RUNS_SEQUENCE_DIR/$count.json"
       if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.fail" ]]; then
         echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
-        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then exit 124; fi
+        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then
+          exit "$(<"$FAKE_RUNS_SEQUENCE_DIR/$count.timeout")"
+        fi
         exit 1
       fi
       [[ -f "$sequence_file" ]] || sequence_file="$FAKE_RUNS_SEQUENCE_DIR/last.json"
@@ -100,13 +110,19 @@ case "$2" in
     run_id="${run_id%%/artifacts*}"
     file="${FAKE_ARTIFACTS_DIR:?}/$run_id.json"
     if [[ ! -f "$file" ]]; then exit 1; fi
-    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" ]]; then
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-always" ]]; then
+      echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+      exit 1
+    fi
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" || -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]]; then
       count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
       count=0
       [[ -f "$count_file" ]] && count="$(<"$count_file")"
       count=$((count + 1))
       printf '%s\n' "$count" >"$count_file"
-      if [[ "$count" == 1 ]]; then
+      failures=1
+      [[ ! -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]] || failures="$(<"$FAKE_ARTIFACTS_DIR/$run_id.fail-count")"
+      if (( count <= failures )); then
         echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
         exit 1
       fi
@@ -214,32 +230,88 @@ fi
 unset FAKE_RUNS_SEQUENCE_DIR
 rm -f "$tmp/artifacts/555.fail-once" "$tmp/artifacts/555.artifact-attempts"
 
+# One broken completed run must not consume the poll's entire remaining wait
+# before the next completed run can supply its valid artifacts.
+mkdir -p "$tmp/fair-sequence"
+echo '{"workflow_runs":[{"id":666,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/fair-sequence/1.json"
+echo '{"workflow_runs":[
+  {"id":666,"status":"completed","conclusion":"success"},
+  {"id":777,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/fair-sequence/2.json"
+printf '%s' "$both_live" >"$tmp/artifacts/666.json"
+printf '%s' "$both_live" >"$tmp/artifacts/777.json"
+touch "$tmp/artifacts/666.fail-always"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/fair-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  run_lookup faircommit 2>"$tmp/fair.err")"
+expect_field "$out" found true 'a persistently failing artifacts query does not starve another completed run'
+expect_field "$out" run-id 777 'the other completed run is adopted within the same poll'
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# A lone completed run can recover after several failed artifact queries,
+# even if it was already completed at the initial lookup.
+echo '{"workflow_runs":[{"id":888,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
+printf '%s' "$both_live" >"$tmp/artifacts/888.json"
+printf '4\n' >"$tmp/artifacts/888.fail-count"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=60 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  run_lookup recoverycommit 2>"$tmp/recovery.err")"
+expect_field "$out" found true 'a lone completed run recovers after more than two failed queries'
+expect_field "$out" run-id 888 'the recovered completed run is adopted'
+
+# A just-completed run whose queries never recover uses the bounded wait,
+# then reports a query failure rather than claiming its artifacts are absent.
+mkdir -p "$tmp/query-failure-sequence"
+echo '{"workflow_runs":[{"id":889,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/query-failure-sequence/1.json"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/query-failure-sequence/last.json"
+printf '%s' "$both_live" >"$tmp/artifacts/889.json"
+touch "$tmp/artifacts/889.fail-always"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/query-failure-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" run_lookup outagecommit 2>"$tmp/query-failure.err")"
+expect_field "$out" found false 'persistent artifact query failure falls back at the deadline'
+if [[ "$(<"$tmp/query-clock")" == 12 ]] \
+    && grep -qF 'artifacts query failed' <<<"$out" \
+    && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
+  printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+  fail=$((fail + 1))
+fi
+unset FAKE_RUNS_SEQUENCE_DIR
+
 # 9. A timed-out poll stays within the deadline and falls back with a sanitized
 # timeout diagnostic.
 mkdir -p "$tmp/timeout-sequence"
 echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
   >"$tmp/timeout-sequence/1.json"
-touch "$tmp/timeout-sequence/2.fail" "$tmp/timeout-sequence/2.timeout"
-rm -f "$tmp/timeout-sequence/count"
+touch "$tmp/timeout-sequence/2.fail"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
-  RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
-expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
-if grep -qF 'falling back to the cold release build' <<<"$out"; then
-  printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
-  pass=$((pass + 1))
-else
-  printf 'FAIL in-flight timeout omitted its cold-build warning\n'
-  fail=$((fail + 1))
-fi
-if grep -qF 'attempt 1 failed (timeout (exit 124))' <<<"$out" \
-    && ! grep -qF 'fixture-secret' <<<"$out"; then
-  printf 'ok   a timed-out poll reports exit 124 without leaking API error contents\n'
-  pass=$((pass + 1))
-else
-  printf 'FAIL timeout diagnostic missing exit 124 or leaked API error: %s\n' "$out"
-  fail=$((fail + 1))
-fi
+for timeout_status in 124 137; do
+  printf '%s' "$timeout_status" >"$tmp/timeout-sequence/2.timeout"
+  rm -f "$tmp/timeout-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
+    RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
+  expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
+  if grep -qF 'falling back to the cold release build' <<<"$out"; then
+    printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL in-flight timeout omitted its cold-build warning\n'
+    fail=$((fail + 1))
+  fi
+  if grep -qF "attempt 1 failed (timeout (exit $timeout_status))" <<<"$out" \
+      && ! grep -qF 'fixture-secret' <<<"$out"; then
+    printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL timeout diagnostic missing exit %s or leaked API error: %s\n' "$timeout_status" "$out"
+    fail=$((fail + 1))
+  fi
+done
 unset FAKE_RUNS_SEQUENCE_DIR
 
 # 10. A missing commit declines rather than crash the workflow step.

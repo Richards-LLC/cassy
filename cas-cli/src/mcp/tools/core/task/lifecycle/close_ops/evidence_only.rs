@@ -1,4 +1,4 @@
-//! Successful evidence closes measure immutable unmerged history rather than
+//! Successful evidence closes measure the immutable delivery's net diff rather than
 //! caller-supplied file lists or the mutable worker checkout.
 use super::{Task, resolve_close_delivery_branch};
 use crate::git_evidence::{git_text, resolve_ref_commit_sha};
@@ -86,7 +86,7 @@ pub(super) fn measure(repo: &Path, task: &Task, target: &str, reference: &str) -
     if commits.is_empty() {
         return Err("evidence-only requires 1–256 unmerged commits; use ordinary close for integrated delivery".into());
     }
-    let paths = measure_paths(repo, &commits, false)?;
+    let paths = measure_paths(repo, &[(base.clone(), tip.clone())], false)?;
     Ok(Measurement { base, tip, paths, audit: None })
 }
 
@@ -153,7 +153,18 @@ fn measure_workflow_proof(repo: &Path, task: &Task, target: &str, branch: &str) 
         .filter(|commit| required.contains(commit)
             || !super::task_attribution::commit_claims_another_task(repo, commit, &identity))
         .collect();
-    let paths = measure_paths(repo, &commits, true)?;
+    // Workflow proofs are intentionally never delivered: every intermediate
+    // commit must stay workflow-only, even when later commits revert it.
+    let mut comparisons = Vec::with_capacity(commits.len());
+    for commit in &commits {
+        if super::git_commit_parent_count(repo, commit) != 1 {
+            return Err("never-merge workflow proof requires non-merge commits with one parent".into());
+        }
+        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])
+            .ok_or("cannot resolve an evidence commit parent")?;
+        comparisons.push((parent, commit.clone()));
+    }
+    let paths = measure_paths(repo, &comparisons, true)?;
     Ok(Measurement {
         base: target.to_string(), tip: target.to_string(), paths: Vec::new(),
         audit: Some(format!(
@@ -170,19 +181,14 @@ fn workflow_path(path: &str) -> bool {
         && matches!(Path::new(path).extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
 }
 
-fn measure_paths(repo: &Path, commits: &[String], workflow_only: bool) -> Result<Vec<String>, String> {
+fn measure_paths(repo: &Path, comparisons: &[(String, String)], workflow_only: bool) -> Result<Vec<String>, String> {
     let mut paths = BTreeSet::new();
-    for commit in commits {
-        if workflow_only && super::git_commit_parent_count(repo, commit) != 1 {
-            return Err("never-merge workflow proof requires non-merge commits with one parent".into());
-        }
-        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])
-            .ok_or("cannot resolve an evidence commit parent")?;
-        // Check every commit, including reverted changes and merge resolutions.
-        // Disabling rename detection measures both original and destination paths.
+    for (base, tip) in comparisons {
+        // Disabling rename detection measures both original and destination
+        // paths; raw modes also expose executable/symlink/submodule changes.
         let diff = git_text(
             repo,
-            &["diff", "--raw", "-z", "--no-renames", &parent, commit, "--"],
+            &["diff", "--raw", "-z", "--no-renames", base, tip, "--"],
         )
         .ok_or("cannot measure evidence commit paths and modes")?;
         let mut fields = diff.split('\0').filter(|field| !field.is_empty());

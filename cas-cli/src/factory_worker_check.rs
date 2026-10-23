@@ -1837,6 +1837,9 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     if let Err(error) = crate::ui::factory::seed_worker_target_from_baseline(&cas_root, &repo) {
         tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
     }
+    if let Err(error) = crate::factory_review_scratch::seed_target_from_worker(&cas_root, &repo) {
+        tracing::warn!(%error, "review worker seed skipped; Cargo will rebuild privately");
+    }
     #[cfg(unix)]
     let target_lease = crate::factory_target_cache::owner::acquire(&cas_root, &repo)?;
     // cas-3f93: the private target, relocated when `[factory] scratch_root` is set.
@@ -1886,8 +1889,20 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     } else {
         let mut command = Command::new(cargo);
         command.arg("check");
+        // cas-edeb: a nested check must not reuse an outer test's lease runner.
+        if let Some(variable) = crate::factory_target_cache::owner::host_runner_env() {
+            command.env_remove(variable);
+        }
         command
     };
+    #[cfg(unix)]
+    if test.is_some()
+        && target_lease.is_none()
+        && let Some(variable) = crate::factory_target_cache::owner::host_runner_env()
+    {
+        // Managed review checkouts have no lease-aware runner to replace this value.
+        command.env_remove(variable);
+    }
     #[cfg(unix)]
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
@@ -2879,9 +2894,9 @@ fi"#);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
-        // A capped outer test already has a release runner. Observe only what
-        // this fixture's check/test invocation installs, not inherited state.
-        env.remove(&variable);
+        // cas-edeb: nested checks can inherit a capped outer test's runner.
+        // Check must clear it; test mode must install its own release runner.
+        env.set(&variable, "/inherited/outer-test-runner");
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,
@@ -2935,6 +2950,51 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             free.is_ok_and(|lease| lease.is_some()),
             "a leaked test child must not hold the worktree's target lease"
         );
+    }
+
+    /// cas-edeb: managed review checkouts have no target lease, so nested
+    /// tests must not inherit the outer host's test-binary runner.
+    #[cfg(unix)]
+    #[test]
+    fn managed_review_test_does_not_inherit_host_runner_cas_edeb() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
+        env.set(&variable, "/inherited/outer-test-runner");
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        fixture_commit(&repo);
+        let head = fixture_head(&repo);
+        let root = repo.join(".cas");
+        crate::store::init_cas_dir(&repo).unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new("cas-proof".into(), "proof".into()))
+            .unwrap();
+        let checkout =
+            crate::factory_review_scratch::create(&root, &repo, "cas-proof", None, &head).unwrap();
+        assert!(
+            crate::factory_target_cache::owner::acquire(&root, &checkout.path)
+                .unwrap()
+                .is_none(),
+            "managed review checkouts do not own worker target leases"
+        );
+
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            &format!(
+                r#"[ "$1" = nextest ] || exit 2
+[ -z "${{{variable}:-}}" ] || {{ echo 'test command inherited host runner' >&2; exit 3; }}
+python3 -c 'import os, sys; sys.exit(0 if not os.environ.get("{variable}") else 4)'
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
+            ),
+        );
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]
+            .map(str::to_string);
+        execute_at_with_scope(&root, &args, &checkout.path, &fake, None, None).unwrap();
     }
 
     /// cas-f616: a lane proof's `--tests` step continues its `--lib` PASS at

@@ -154,6 +154,41 @@ pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDae
     typed
 }
 
+/// A completed write to the PTY is not a completed read by the fixture's cat.
+/// Hold that consumer until the queue receipts submit, then let it run on the
+/// next Tokio turn, as a loaded host can naturally do (cas-470e1 / cas_f265).
+#[tokio::test(flavor = "current_thread")]
+async fn typed_once_waits_for_the_submitted_turn_to_reach_the_consumer() {
+    if !fixture_child("typed_once_waits_for_the_submitted_turn_to_reach_the_consumer") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let pid = daemon.app.mux.pane_process_group_id(daemon.app.supervisor_name()).unwrap();
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            // This is only the private shell process created by fixture().
+            unsafe { libc::kill(self.0 as i32, libc::SIGCONT); }
+        }
+    }
+    let _resume_on_failure = Resume(pid);
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
+    let id = event(&daemon, BODY);
+    daemon.process_prompt_queue().await.unwrap();
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let resume = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGCONT) }, 0);
+        }).await.expect("physical submit must be receipted before the consumer resumes");
+    });
+    typed_once(&root, &mut daemon, BODY).await;
+    resume.await.unwrap();
+}
+
 fn nothing_typed_or_relayed(root: &tempfile::TempDir, daemon: &FactoryDaemon) {
     assert!(teams_messages(daemon).is_empty());
     assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());

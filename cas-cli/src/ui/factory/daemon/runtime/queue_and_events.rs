@@ -7177,14 +7177,16 @@ impl FactoryDaemon {
     /// running background task repaints its pane, so the 2-second silence bar
     /// held these wakes until an unrelated turn started (98.5 s in the live
     /// cas-ca26 probe). The typing, readiness and tool-call vetoes stay. Without that
-    /// transcript evidence (`None` or mid-turn) the ordinary policy decides.
+    /// transcript evidence the ordinary policy decides. cas-e6d7: that
+    /// evidence is a turn end seen after the last turn start; a read tail with
+    /// no turn record (a turn longer than the read window) does not count.
     pub fn supervisor_self_reminder_wake(
         pane_target: &str,
         supervisor_name: &str,
-        mid_turn: Option<bool>,
+        turn_completed: bool,
         pane: PaneWakeState,
     ) -> Option<WakeDecision> {
-        if pane_target != supervisor_name || mid_turn != Some(false) {
+        if pane_target != supervisor_name || !turn_completed {
             return None;
         }
         Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
@@ -7363,6 +7365,12 @@ impl FactoryDaemon {
             .as_ref()
             .filter(|completion| completion.at > after)
             .map(|completion| completion.at)
+    }
+    fn prepared_turn_completed(&self, pane: &str) -> bool {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)
+            .is_some_and(|inputs| inputs.turn_completed())
     }
     fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
         self.queue_jobs
@@ -10058,7 +10066,7 @@ impl FactoryDaemon {
                                     Self::supervisor_self_reminder_wake(
                                         &pane_target,
                                         self.app.supervisor_name(),
-                                        self.prepared_mid_turn(&pane_target),
+                                        self.prepared_turn_completed(&pane_target),
                                         pane_state,
                                     )
                                 })

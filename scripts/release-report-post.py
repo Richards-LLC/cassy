@@ -37,6 +37,12 @@ LEGACY_TOKEN_PREFIX = COMPATIBILITY["legacy_token_prefix"]
 LEGACY_BYPASS_ENV = COMPATIBILITY["legacy_bypass_env"]
 LEGACY_TOKEN_SELECTOR_ENV = COMPATIBILITY["legacy_token_selector_env"]
 LEGACY_TRAIN_SELECTOR_ENV = COMPATIBILITY["legacy_train_selector_env"]
+TOKEN_SELECTOR_ENV_NAMES = (
+    "VIOLET_SLACK_TOKEN_ENV",
+    "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV",
+    LEGACY_TRAIN_SELECTOR_ENV,
+    LEGACY_TOKEN_SELECTOR_ENV,
+)
 DEFAULT_CHANNEL = "cas-internal"
 DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -233,7 +239,7 @@ def codex_config_path() -> Path:
     return (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
 
 
-def registered_codex_violet_token_env() -> tuple[str, Path] | None:
+def registered_codex_violet_token_env() -> tuple[str, Path, bool] | None:
     """Read the registered Codex bearer reference without evaluating a secret."""
 
     config_path = codex_config_path()
@@ -249,10 +255,12 @@ def registered_codex_violet_token_env() -> tuple[str, Path] | None:
         return None
 
     name = server.get("bearer_token_env_var")
+    is_authorization_header = False
     if name is None:
         env_headers = server.get("env_http_headers")
         if isinstance(env_headers, dict):
             name = env_headers.get("Authorization")
+            is_authorization_header = name is not None
     if name is None:
         return None
     if not isinstance(name, str):
@@ -269,19 +277,19 @@ def registered_codex_violet_token_env() -> tuple[str, Path] | None:
             f"{config_path}: registered Violet bearer selector must name a credential variable; "
             "set VIOLET_SLACK_TOKEN_ENV or correct the Codex registration"
         )
-    return credential_names(name)[0], config_path
+    return credential_names(name)[0], config_path, is_authorization_header
 
 
-def registered_violet_token_registration() -> tuple[str, Path] | None:
+def registered_violet_token_registration() -> tuple[str, Path, bool] | None:
     """Discover Claude/Codex registration; conflicting identities need a selector."""
 
     claude = registered_claude_violet_token_env()
-    registered = [(claude, claude_config_path())] if claude else []
+    registered = [(claude, claude_config_path(), False)] if claude else []
     codex = registered_codex_violet_token_env()
     if codex:
         registered.append(codex)
-    if len({credential_names(name)[0] for name, _ in registered}) > 1:
-        paths = ", ".join(str(path) for _, path in registered)
+    if len({(credential_names(name)[0], is_header) for name, _, is_header in registered}) > 1:
+        paths = ", ".join(str(path) for _, path, _ in registered)
         fail(f"conflicting Violet registrations in {paths}; set VIOLET_SLACK_TOKEN_ENV")
     return registered[0] if registered else None
 
@@ -305,7 +313,7 @@ def select_token_env(candidates: set[str], registered_env: str | None) -> str | 
     return None
 
 
-def validated_token_selector(name: str) -> str:
+def validated_token_selector(name: str, source_env: str) -> str:
     """Explicit bearer selectors may reference only Violet token credentials."""
     name = name.strip()
     canonical = credential_names(name)[0]
@@ -314,27 +322,24 @@ def validated_token_selector(name: str) -> str:
                     or canonical.startswith("VIOLET_SLACK_TOKEN_"))
             or canonical == "VIOLET_SLACK_TOKEN_ENV"):
         fail(
-            "Violet bearer selector must name a Violet Slack token variable; "
-            f"check {codex_config_path()} and set VIOLET_SLACK_TOKEN_ENV to a valid token variable"
+            f"{source_env} must name a Violet Slack token variable; "
+            f"set {source_env} to a variable that contains the Violet token"
         )
     return canonical
 
 
 def resolve_token(credentials: dict[str, str]) -> str:
-    explicit = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
-                or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
-                or os.environ.get(LEGACY_TRAIN_SELECTOR_ENV)
-                or os.environ.get(LEGACY_TOKEN_SELECTOR_ENV))
+    source_env = next((name for name in TOKEN_SELECTOR_ENV_NAMES if os.environ.get(name)), None)
+    explicit = os.environ.get(source_env) if source_env else None
     if explicit:
-        explicit = validated_token_selector(explicit)
+        explicit = validated_token_selector(explicit, source_env)
     try:
         token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
     except AdapterError as exc:
         if not explicit:
             raise
         fail(
-            f"{exc}; check {codex_config_path()} and set VIOLET_SLACK_TOKEN_ENV "
-            "to a variable that contains the Violet token"
+            f"{exc}; {source_env or 'VIOLET_SLACK_TOKEN_ENV'} must select an available Violet token variable"
         )
     if token:
         return token
@@ -371,6 +376,15 @@ def resolve_token(credentials: dict[str, str]) -> str:
         f"no Violet token found; check {codex_config_path()}, set VIOLET_SLACK_TOKEN_ENV, "
         "or configure credentials.env"
     )
+
+
+def authorization_value(token: str) -> str:
+    """Use Codex env_http_headers.Authorization as a complete header value."""
+
+    if any(os.environ.get(name) for name in TOKEN_SELECTOR_ENV_NAMES):
+        return f"Bearer {token}"
+    registration = registered_violet_token_registration()
+    return token if registration and registration[2] else f"Bearer {token}"
 
 
 def request_json(
@@ -422,7 +436,15 @@ def request_json(
 
 
 class McpClient:
-    def __init__(self, url: str, token: str, bypass: str, timeout: float) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        bypass: str,
+        timeout: float,
+        *,
+        authorization: str | None = None,
+    ) -> None:
         self.url = url
         self.timeout = timeout
         self.mcp_url = parsed_http_url(url, "Violet MCP URL")
@@ -430,7 +452,7 @@ class McpClient:
             fail("Violet MCP URL must use HTTPS outside a loopback test endpoint")
         self.opener = urllib.request.build_opener(NoRedirectHandler())
         self.headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": authorization if authorization is not None else f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
@@ -754,6 +776,30 @@ def html_url(tag: str) -> str:
         fail("release report HTML ref must be main or the release tag; temporary delivery branches cannot be published")
     configured = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_URL")
     if configured:
+        try:
+            parsed = urllib.parse.urlsplit(configured)
+            port = parsed.port
+        except ValueError:
+            fail("CAS_RELEASE_TRAIN_REPORT_HTML_URL must use a GitHub blob URL for main or the release tag")
+        path_prefix = f"/{repo}/blob/"
+        ref_and_path = parsed.path[len(path_prefix):] if parsed.path.startswith(path_prefix) else ""
+        configured_ref, separator, report_path = ref_and_path.partition("/")
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname is None
+            or parsed.hostname.lower() != "github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+            or parsed.fragment
+            or not separator
+            or not report_path
+            or configured_ref not in {"main", tag}
+        ):
+            fail(
+                "CAS_RELEASE_TRAIN_REPORT_HTML_URL must use a GitHub blob URL for "
+                "main or the release tag"
+            )
         return configured
     return f"https://github.com/{repo}/blob/{ref}/docs/release-reports/{tag}.html"
 
@@ -825,7 +871,7 @@ def main(argv: list[str]) -> int:
         url = os.environ.get("CAS_RELEASE_TRAIN_REPORT_MCP_URL", DEFAULT_MCP_URL)
         channel = os.environ.get("CAS_RELEASE_TRAIN_REPORT_CHANNEL", DEFAULT_CHANNEL)
         timeout = float(os.environ.get("CAS_RELEASE_TRAIN_REPORT_TIMEOUT_SECS", "30"))
-        client = McpClient(url, token, bypass, timeout)
+        client = McpClient(url, token, bypass, timeout, authorization=authorization_value(token))
         client.call(
             "initialize",
             {

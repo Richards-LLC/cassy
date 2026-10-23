@@ -536,8 +536,8 @@ def run_selector_safety_proof() -> None:
                     except module.AdapterError as exc:
                         assert "must name a Violet Slack token" in str(exc)
                         assert "unrelated-fixture" not in str(exc)
-                        assert "config.toml" in str(exc)
                         assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
+                        assert "config.toml" not in str(exc)
                     else:
                         raise AssertionError("non-token selector must fail closed")
                     if selected != "VIOLET_SLACK_TOKEN_ENV":
@@ -554,8 +554,8 @@ def run_selector_safety_proof() -> None:
                 module.resolve_token(credentials)
             except module.AdapterError as exc:
                 assert "unset or empty" in str(exc)
-                assert "config.toml" in str(exc)
                 assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
+                assert "config.toml" not in str(exc)
             else:
                 raise AssertionError("missing explicit token must fail")
     print(f"Violet selector safety: {refusals} refusals + 3 legacy/modern authority controls passed")
@@ -569,14 +569,14 @@ def run_adapter(
     dev_thread: str = DEV_THREAD,
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
-    html_ref: str = "main",
+    html_ref: str | None = "main",
     html_url: str | None = None,
 ):
     module = adapter_module()
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
-    state.html_ref = html_ref
+    state.html_ref = html_ref or "main"
     with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
         root = Path(directory)
         html = root / "v9.99.0.html"
@@ -603,7 +603,6 @@ def run_adapter(
                 "HOME": str(root),
                 "CODEX_HOME": str(root / "codex-config"),
                 "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
-                "CAS_RELEASE_TRAIN_REPORT_HTML_REF": html_ref,
                 "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
                 "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
                 "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": user_thread,
@@ -613,6 +612,9 @@ def run_adapter(
                 "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
             }
         )
+        environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_REF", None)
+        if html_ref is not None:
+            environment["CAS_RELEASE_TRAIN_REPORT_HTML_REF"] = html_ref
         environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_URL", None)
         if html_url:
             environment["CAS_RELEASE_TRAIN_REPORT_HTML_URL"] = html_url
@@ -631,8 +633,10 @@ def run_adapter(
             }
             if credential_mode in custom_registrations:
                 token_name, registration = custom_registrations[credential_mode]
+                registered_value = "Bearer stub-token" if credential_mode == "codex-env-header" else "stub-token"
                 credentials.write_text(
-                    f"export {token_name}='stub-token'\nexport VIOLET_VERCEL_BYPASS='stub-bypass'\n",
+                    f"export {token_name}='{registered_value}'\n"
+                    "export VIOLET_VERCEL_BYPASS='stub-bypass'\n",
                     encoding="utf-8",
                 )
             else:
@@ -721,8 +725,28 @@ def main() -> int:
         )
         assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
         assert fields is None and state.requests == [], "manual HTML URLs must obey the ref policy"
+        result, fields = run_adapter(
+            server,
+            state,
+            pdf,
+            html_ref=None,
+            html_url=(
+                "https://github.com/Richards-LLC/cassy/blob/factory/temporary-report/"
+                "docs/release-reports/v9.99.0.html"
+            ),
+        )
+        assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
+        assert fields is None and state.requests == [], "manual factory URLs must refuse before network"
         print("Report links: main/tag accepted; temporary branch refused before network")
-        result, fields = run_adapter(server, state, pdf)
+        result, fields = run_adapter(
+            server,
+            state,
+            pdf,
+            html_url=(
+                "https://github.com/Richards-LLC/cassy/blob/main/"
+                "docs/release-reports/v9.99.0.html"
+            ),
+        )
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")
         assert fields is not None

@@ -2224,7 +2224,10 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         let mut target = default_target.clone();
         target.cwd = shell_cwd.clone();
         target.is_detached_checkout = git_words[write_index] == "checkout"
-            && git_words[write_index + 1..].iter().any(|word| word == "--detach");
+            && git_words[write_index + 1..]
+                .iter()
+                .take_while(|word| word.as_str() != "--")
+                .any(|word| word == "--detach");
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];

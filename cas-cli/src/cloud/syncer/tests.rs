@@ -2430,6 +2430,79 @@ async fn team_pull_reports_peer_close_blocked_by_local_lifecycle_cas_33bc() {
 }
 
 #[tokio::test]
+async fn successful_pull_keeps_applied_data_when_guard_report_read_fails_cas_963f() {
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store,
+        open_prompt_store, open_rule_store_local, open_skill_store_local,
+        open_spec_store, open_store_local, open_task_store_local,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for team in [false, true] {
+        let project = "guard-read-project";
+        let team_id = "guard-read-team";
+        let watermark = "2026-10-23T01:00:00Z";
+        let server = MockServer::start().await;
+        let endpoint = if team {
+            format!("/api/teams/{team_id}/sync/pull")
+        } else {
+            super::pull::PULL_PATH.to_string()
+        };
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "rules": [], "skills": [], "team_id": team_id,
+                "tasks": [team_task_fixture("cas-963f-applied", TaskStatus::Open,
+                    project, project, chrono::Utc::now())],
+                "pulled_at": watermark, "status": "ok",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("config.toml"),
+            format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+        let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+        queue.init().unwrap();
+        let entries = open_store_local(temp.path()).unwrap();
+        let tasks = open_task_store_local(temp.path()).unwrap();
+        let rules = open_rule_store_local(temp.path()).unwrap();
+        let skills = open_skill_store_local(temp.path()).unwrap();
+        let specs = open_spec_store(temp.path()).unwrap();
+        let events = open_event_store(temp.path()).unwrap();
+        let prompts = open_prompt_store(temp.path()).unwrap();
+        let changes = open_file_change_store(temp.path()).unwrap();
+        let commits = open_commit_link_store(temp.path()).unwrap();
+        // Break only the advisory journal read in this disposable database.
+        // Normal row application and pull cursor writes remain available.
+        rusqlite::Connection::open(temp.path().join("cas.db")).unwrap()
+            .execute_batch("DROP TABLE sync_conflicts").unwrap();
+        let syncer = CloudSyncer::new_for_project(
+            queue.clone(),
+            crate::cloud::CloudConfig {
+                endpoint: server.uri(), token: Some("test-token".into()),
+                ..Default::default()
+            },
+            CloudSyncerConfig::default(), project.into(), temp.path(),
+        );
+        let pulled = if team {
+            syncer.pull_team(team_id, project, entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref())
+        } else {
+            syncer.pull(entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref(),
+                specs.as_ref(), events.as_ref(), prompts.as_ref(), changes.as_ref(), commits.as_ref())
+        };
+        assert_eq!(tasks.get("cas-963f-applied").unwrap().status, TaskStatus::Open);
+        let cursor = if team { format!("last_team_pull_at_{team_id}_{project}") } else { "last_pull_at".into() };
+        assert_eq!(queue.get_metadata(&cursor).unwrap().as_deref(), Some(watermark));
+        let result = pulled.expect("advisory guard read must not fail an already applied pull");
+        assert_eq!(result.pulled_tasks, 1);
+        assert!(result.errors.iter().any(|error| error.contains("guarded peer closes")
+            && error.contains("sync_conflicts")), "team={team}: {:?}", result.errors);
+    }
+}
+
+#[tokio::test]
 async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     let project = "delivery-owner";
     let mut local = Task::new("cas-86eb-delivery".into(), "parked delivery".into());

@@ -126,6 +126,16 @@ Rules that keep that boundary honest:
 - Normalizing (lowercasing, trimming, stripping a trailing `/`) would not be a convenience — it would **merge two distinct projects** permanently and unattributably. The server deliberately refused to normalize for the same reason.
 - The client-side check is the **second** line of defence. The server filters on the id the client *sends* and echoes the stored column, so an id divergence never presents as a rejected row: the client gets an **empty envelope, indefinitely, with no warning on either side**. Silent starvation, not contamination. When sync "returns nothing", suspect an id mismatch upstream rather than assuming the row filter is eating data.
 
+Personal and team pulls repeat a skipped remote-close warning while the local
+task remains awaiting merge under the same recorded lifecycle guard. Three
+policy skips are excluded on both first and later pulls: configured `LocalWins`
+honors the operator's choice; a remote row that does not supersede the local
+revision has no newer authority; owner-wins rejects a non-owner replica. They
+remain ordinary conflict counts and journal evidence where recorded, without
+the repeated lifecycle-guard warning. Reading those advisory warnings happens
+after data and cursor application; a read failure is listed in the pull's
+errors and leaves the pull successful (cas-963f).
+
 **What page sync does NOT cover** (boundaries by construction, not gaps to paper over):
 
 - **Knowledge-page delete uses tombstones, never the generic DELETE route.** A local or provenance-cascade delete writes a durable ledger row and emits `{ id, deleted_at }` under `knowledge_tombstones` in the normal push envelope. Pull applies tombstones before page records, retains the guard after delivery, and therefore refuses any stale page record with the same id rather than resurrecting it. Every pulled tombstone is project-scoped before it can touch disk. A locally locked page is preserved with its body; only explicit local operator action may delete it. The generic `DELETE /api/sync/{type}/{id}` path remains unsuitable for `knowledge_page` because it cannot provide those retention, scope, lock, or no-resurrection guarantees.

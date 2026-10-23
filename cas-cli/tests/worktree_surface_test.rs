@@ -2255,7 +2255,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         ("delivery/reviewed-correction", false, false),
         ("factory/peer-worker-cas-0700", false, false),
         ("factory/peer-worker-cas-c28b6df4a2b653af", false, true),
-        ("factory/peer-worker-cas-c28b6df4a2b653af-rebased", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r10", false, false),
     ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -2354,7 +2354,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
-        if branch.ends_with("-rebased") {
+        if branch.ends_with("-r10") {
             // The receiver saw the first parked tip before the worker rebased
             // its pushed task branch onto a newer target commit.
             run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")], &repo.root);

@@ -10222,6 +10222,51 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
+    fn detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600() {
+        let repo = make_git_repo();
+        let path = repo.path().to_string_lossy().to_string();
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        let detach = std::process::Command::new("git")
+            .args(["checkout", "--detach", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(detach.status.success(), "{detach:?}");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(&path)),
+            ("CAS_AGENT_NAME", Some("bisect-worker")),
+        ]);
+
+        let classify = hook_git_write_input(
+            &path,
+            &format!("git bisect good\ngit checkout --detach {sha}"),
+        );
+        let output = handle_pre_tool_use(&classify, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "bisect classification and detached checkout must remain usable: {value}"
+        );
+
+        let commit = hook_git_write_input(&path, "git commit -m forbidden");
+        let output = handle_pre_tool_use(&commit, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HEAD is detached"));
+    }
+
+    #[test]
     fn paused_rebase_resolves_original_worker_branch_for_continuations() {
         let tmp = make_git_repo();
         let p = tmp.path();

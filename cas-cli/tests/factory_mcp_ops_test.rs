@@ -11268,10 +11268,6 @@ async fn test_start_accepts_task_recovery_suffix_after_rebind_record_cleared_cas
     let assigned = assign(&env, task_id, worker)
         .await
         .expect("assign task to the worker");
-    assert!(
-        !assigned.contains(&format!("belongs to {task_id}-reviewed")),
-        "task update must recognize its own recovery suffix: {assigned}"
-    );
 
     std::fs::write(worker_path.join("recovered.txt"), "preserve recovery work\n").unwrap();
     git_stdout(&worker_path, &["add", "recovered.txt"]);
@@ -11282,7 +11278,16 @@ async fn test_start_accepts_task_recovery_suffix_after_rebind_record_cleared_cas
         "action": "start", "id": task_id
     }))
     .unwrap();
-    let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
+    let started = get_text(
+        &env.service
+            .task(Parameters(start))
+            .await
+            .expect("start must accept the task's own recovery-suffix branch"),
+    );
+    assert!(
+        !assigned.contains(&format!("belongs to {task_id}-reviewed")),
+        "task update must recognize its own recovery suffix: {assigned}"
+    );
     assert!(started.contains("Started") || started.contains(task_id), "{started}");
     assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), recovered_tip);
     assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), branch);

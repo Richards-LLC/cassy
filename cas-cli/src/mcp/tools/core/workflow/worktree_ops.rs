@@ -7463,13 +7463,24 @@ mod cas_7ce6_parked_merge_source_tests {
         let ops = GitOperations::new(path.to_path_buf());
         git(path, &["reset", "-q", "--hard", "main"]);
         commit(path, "next-task");
+        // A named task branch exists, but needs the reviewed delivery restored.
+        git(path, &["branch", "factory/w-cas-park"]);
         let refusal = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
             .expect_err("source lacks the anchor");
         assert!(refusal.contains(&anchor), "{refusal}");
         assert!(refusal.contains("id=factory/w-cas-park task_id=cas-park"), "{refusal}");
 
+        // No branch name is suggested when the task branch is absent.
+        git(path, &["branch", "-D", "factory/w-cas-park"]);
+        let missing = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
+            .expect_err("no task branch exists");
+        assert!(!missing.contains("id=factory/w-cas-park"), "{missing}");
+
         // A per-task source is never re-suffixed.
         git(path, &["checkout", "-qb", "factory/w-cas-park"]);
-        assert!(parked_merge_source(&ops, "factory/w-cas-park", "cas-park", &anchor).is_err());
+        let per_task = parked_merge_source(&ops, "factory/w-cas-park", "cas-park", &anchor)
+            .expect_err("per-task source lacks the anchor");
+        assert!(per_task.contains("id=factory/w-cas-park task_id=cas-park"), "{per_task}");
+        assert!(!per_task.contains("factory/w-cas-park-cas-park"), "{per_task}");
     }
 }

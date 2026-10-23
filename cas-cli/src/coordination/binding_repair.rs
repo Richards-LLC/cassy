@@ -1,13 +1,12 @@
 //! One ordinary authenticated invocation: durable gate -> actual local drain ->
 //! submitting -> direct HTTP response -> validated immutable receipt storage.
+#[cfg(test)]
+use super::binding_runtime::RuntimeInventory;
+pub(crate) use super::binding_runtime::RuntimeSnapshot;
 use super::{
     binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope, PauseOrigin},
     binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
-
 };
-pub(crate) use super::binding_runtime::RuntimeSnapshot;
-#[cfg(test)]
-use super::binding_runtime::RuntimeInventory;
 use serde::Serialize;
 use std::{io::Read, path::Path, time::Duration};
 use uuid::Uuid;
@@ -142,7 +141,9 @@ impl OrdinaryBindingClient {
                 journal.release_unsubmitted(scope)
             } {
                 Ok(()) => error,
-                Err(release) => format!("{error}; pause not released ({release}), rerun `cas update`"),
+                Err(release) => {
+                    format!("{error}; pause not released ({release}), rerun `cas update`")
+                }
             };
             Ok(RepairReport::blocked(scope, pause.operation_id, error))
         };
@@ -151,7 +152,7 @@ impl OrdinaryBindingClient {
             inventory.validate()
         });
         match drained {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(error) => return blocked_before_submit(error),
         };
         if let Err(error) = crate::cloud::TeamRegistration::new(

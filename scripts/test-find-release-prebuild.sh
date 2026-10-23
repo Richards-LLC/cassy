@@ -270,20 +270,20 @@ printf '%s' "$both_live" >"$tmp/artifacts/889.json"
 touch "$tmp/artifacts/889.fail-always"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/query-failure-sequence"
 for artifact_status in 1 124 137; do
-rm -f "$tmp/query-failure-sequence/count"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
-  FAKE_ARTIFACT_EXIT_STATUS="$artifact_status" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
-  run_lookup outagecommit 2>"$tmp/query-failure.err")"
-expect_field "$out" found false "persistent artifact query failure (exit $artifact_status) falls back at the deadline"
-if [[ "$(<"$tmp/query-clock")" == 12 ]] \
-    && grep -qF 'artifacts query failed' <<<"$out" \
-    && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
-  printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
-  pass=$((pass + 1))
-else
-  printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
-  fail=$((fail + 1))
-fi
+  rm -f "$tmp/query-failure-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+    FAKE_ARTIFACT_EXIT_STATUS="$artifact_status" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+    run_lookup outagecommit 2>"$tmp/query-failure.err")"
+  expect_field "$out" found false "persistent artifact query failure (exit $artifact_status) falls back at the deadline"
+  if [[ "$(<"$tmp/query-clock")" == 12 ]] \
+      && grep -qF 'artifacts query failed' <<<"$out" \
+      && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
+    printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+    fail=$((fail + 1))
+  fi
 done
 unset FAKE_RUNS_SEQUENCE_DIR
 

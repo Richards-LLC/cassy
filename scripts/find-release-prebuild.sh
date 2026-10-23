@@ -187,7 +187,7 @@ artifacts_query_failed=false
 find_complete_run() {
     local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
     local artifact_query_ok artifact_attempt artifact_retry_limit
-    local remaining sleep_for failure_reason
+    local remaining sleep_for failure_reason permanent_failure=""
     complete_run_id=""
     artifacts_query_failed=false
     mapfile -t run_ids < <(jq -r \
@@ -208,14 +208,20 @@ find_complete_run() {
                 artifact_query_ok=true
                 break
             fi
+            failure_reason="$(<"$api_failure_file")"
+            failure_reason="${failure_reason:-exit code 1}"
+            # Definite HTTP client failures cannot recover by waiting. Still
+            # inspect other completed runs before declining the prebuild.
+            if [[ "$failure_reason" == HTTP\ 4[0-9][0-9] ]]; then
+                permanent_failure="run $run_id ($failure_reason)"
+                break
+            fi
             # The initial lookup tries once. During the wait, retry once here,
             # then check other runs; later polls can retry this run again.
             if [[ -z "$deadline" ]]; then
                 break
             fi
             remaining=$((deadline - SECONDS))
-            failure_reason="$(<"$api_failure_file")"
-            failure_reason="${failure_reason:-exit code 1}"
             if (( remaining <= 0 )); then
                 printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s) at the deadline\n' \
                     "$artifact_attempt" "$run_id" "$failure_reason" >&2
@@ -258,6 +264,9 @@ find_complete_run() {
             return 0
         fi
     done
+    if [[ -n "$permanent_failure" ]]; then
+        decline "prebuild artifacts query permanent failure for $sha: $permanent_failure"
+    fi
     return 1
 }
 
@@ -277,6 +286,7 @@ fi
 if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
     deadline=$((SECONDS + wait_seconds))
     failed_polls=0
+    run_query_failed=false
     retry_backoff=1
     retry_backoff_cap=30
     next_poll_delay="$poll_seconds"
@@ -292,7 +302,10 @@ if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
         (( SECONDS < deadline )) || break
 
         polled_runs_json=""
+        artifacts_query_failed=false
+        run_query_failed=false
         if ! polled_runs_json="$(fetch_runs "$deadline")"; then
+            run_query_failed=true
             failed_polls=$((failed_polls + 1))
             remaining=$((deadline - SECONDS))
             failure_reason="$(<"$api_failure_file")"
@@ -328,7 +341,9 @@ if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
         fi
     done
 
-    if [[ "$artifacts_query_failed" == true ]]; then
+    if [[ "$run_query_failed" == true ]]; then
+        decline "prebuild run lookup failed for $sha after ${wait_seconds}s ($failure_reason)"
+    elif [[ "$artifacts_query_failed" == true ]]; then
         decline "prebuild artifacts query failed for $sha after ${wait_seconds}s"
     elif has_pending_run "$runs_json"; then
         decline "prebuild still queued or in progress after ${wait_seconds}s"

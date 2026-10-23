@@ -874,23 +874,41 @@ fn checked_rebind_paths(
     let changes: Vec<_> = files.iter().map(crate::qa_impact::Change::modified).collect();
     let selected = |head| {
         crate::qa_impact::analyze(ctx.repo, qa, &changes, None, Some(head))
-            .map(|impact| impact.journeys.into_iter().map(|journey| {
-                let invariants = journey.invariants.into_iter()
-                    .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
-                    .collect::<BTreeMap<_, _>>();
-                (journey.id, (journey.status, invariants))
-            }).collect::<BTreeMap<_, _>>())
+            .map(|impact| {
+                let safety = impact.safety;
+                let journeys = impact.journeys.into_iter().map(|journey| {
+                    let invariants = journey.invariants.into_iter()
+                        .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
+                        .collect::<BTreeMap<_, _>>();
+                    (
+                        journey.id,
+                        (
+                            journey.status,
+                            journey.kind,
+                            journey.evidence_required,
+                            invariants,
+                        ),
+                    )
+                }).collect::<BTreeMap<_, _>>();
+                (journeys, safety)
+            })
             .map_err(|error| unreadable(error.to_string()))
     };
-    let before = selected(from)?;
-    let after = selected(to)?;
-    let changed: Vec<_> = before.keys().chain(after.keys()).collect::<BTreeSet<_>>()
-        .into_iter().filter(|id| before.get(*id) != after.get(*id)).collect();
-    if !changed.is_empty() {
+    let (before, before_safety) = selected(from)?;
+    let (after, after_safety) = selected(to)?;
+    let safety_changed = before_safety != after_safety;
+    let changed: BTreeSet<_> = before.keys().chain(after.keys())
+        .filter(|id| before.get(*id) != after.get(*id)).collect();
+    let mut affected = changed.clone();
+    if safety_changed {
+        affected.extend(before.keys());
+        affected.extend(after.keys());
+    }
+    if !affected.is_empty() || safety_changed {
         let mut invariants = BTreeSet::new();
-        for id in &changed {
-            let old = before.get(*id).map(|(_, invariants)| invariants);
-            let new = after.get(*id).map(|(_, invariants)| invariants);
+        for id in &affected {
+            let old = before.get(*id).map(|(_, _, _, invariants)| invariants);
+            let new = after.get(*id).map(|(_, _, _, invariants)| invariants);
             for key in old.into_iter().flat_map(|m| m.keys())
                 .chain(new.into_iter().flat_map(|m| m.keys()))
             {
@@ -900,9 +918,10 @@ fn checked_rebind_paths(
             }
         }
         return Err(EvidenceRefusal::new(format!(
-            "registry coverage changed: journeys [{}]; invariants [{}]",
-            changed.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", "),
+            "registry coverage changed: journeys [{}]; invariants [{}]; safety policy {}",
+            affected.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", "),
             invariants.into_iter().collect::<Vec<_>>().join(", "),
+            if safety_changed { "changed" } else { "unchanged" },
         ), rerun));
     }
     Ok(paths)

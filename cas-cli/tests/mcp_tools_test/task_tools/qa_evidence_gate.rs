@@ -518,7 +518,7 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 }
 
 #[tokio::test]
-async fn valid_bundle_rebinds_documentation_but_a_product_commit_makes_it_stale() {
+async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],

@@ -59,7 +59,8 @@ extern "C" fn record_client_exit_signal(signal: libc::c_int) {
     if let Err(first) =
         CLIENT_EXIT_SIGNAL.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed)
     {
-        // A second signal must work even while the main thread is in write_all.
+        // Re-raise the first signal with its default disposition: a second
+        // signal means terminal cleanup is stuck (for example in write_all).
         reraise_default_signal(first);
     }
 }
@@ -75,6 +76,17 @@ fn reraise_default_signal(signal: libc::c_int) {
         libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
         libc::raise(signal);
     }
+}
+
+fn install_client_exit_handler(signal: libc::c_int) -> io::Result<Option<libc::sigaction>> {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = record_client_exit_signal as *const () as libc::sighandler_t;
+    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(previous))
 }
 
 /// Restore on every return and panic unwind, including partial setup failures.
@@ -98,14 +110,9 @@ impl ClientTerminalGuard {
         for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
             // Install before changing the terminal; Drop rolls back any partial
             // registration. The handler never touches terminal locks or I/O.
-            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
-            action.sa_sigaction = record_client_exit_signal as *const () as libc::sighandler_t;
-            unsafe { libc::sigemptyset(&mut action.sa_mask) };
-            if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
-                return Err(io::Error::last_os_error());
+            if let Some(previous) = install_client_exit_handler(signal)? {
+                guard.previous_handlers.push((signal, previous));
             }
-            guard.previous_handlers.push((signal, previous));
         }
         let stop = Arc::clone(&guard.stop_watchdog);
         guard.watchdog = Some(
@@ -596,6 +603,43 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
     use crossterm::event::KeyEventState;
+
+    #[test]
+    fn ignored_client_signal_disposition_survives_handler_setup() {
+        const CHILD: &str = "CAS_IGNORED_CLIENT_SIGNAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut ignored: libc::sigaction = unsafe { std::mem::zeroed() };
+            ignored.sa_sigaction = libc::SIG_IGN;
+            unsafe { libc::sigemptyset(&mut ignored.sa_mask) };
+            assert_eq!(
+                unsafe { libc::sigaction(libc::SIGHUP, &ignored, std::ptr::null_mut()) },
+                0
+            );
+
+            assert!(install_client_exit_handler(libc::SIGHUP).unwrap().is_none());
+            let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current) },
+                0
+            );
+            assert_eq!(current.sa_sigaction, libc::SIG_IGN);
+            assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0);
+            assert_eq!(CLIENT_EXIT_SIGNAL.load(Ordering::Relaxed), 0);
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("ignored_client_signal_disposition_survives_handler_setup")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stdout).to_string()
+                + &String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn detects_dropped_images_from_plain_path_and_file_uri() {

@@ -7257,6 +7257,33 @@ mod cas_7ce6_parked_merge_source_tests {
     }
 
     #[test]
+    fn rebased_task_branch_rebinds_and_refusal_names_existing_branch_cas_5517() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (repo, mut task, tip) = rebased_lane();
+        let branch = "factory/w-cas-park";
+        git(repo.path(), &["branch", branch, &tip]);
+        task.deliverables.parked_branch = Some(branch.into());
+        let git_ops = GitOperations::new(repo.path().to_path_buf());
+        let old_anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
+        let refusal = parked_merge_source(&git_ops, branch, &task.id, old_anchor)
+            .expect_err("a stale anchor must not authorize a direct merge");
+        assert!(refusal.contains(&format!("id={branch} task_id={}", task.id)), "{refusal}");
+        assert!(!refusal.contains(&format!("{branch}-{}", task.id)), "{refusal}");
+        assert_eq!(git(repo.path(), &["rev-parse", branch]), tip);
+
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+        assert_eq!(core.parked_merge_source_for_task(&store, repo.path(), branch, "main", &task), Ok(None));
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+        git(repo.path(), &["checkout", "-q", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "-m", "integrate", branch]);
+        assert!(repo.path().join("parked").is_file());
+        assert!(repo.path().join("parked-second").is_file());
+        assert!(repo.path().join("target-update").is_file());
+    }
+
+    #[test]
     fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();

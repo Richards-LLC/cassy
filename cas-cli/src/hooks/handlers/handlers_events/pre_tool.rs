@@ -2224,7 +2224,10 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         let mut target = default_target.clone();
         target.cwd = shell_cwd.clone();
         target.is_detached_checkout = git_words[write_index] == "checkout"
-            && git_words[write_index + 1..].iter().any(|word| word == "--detach");
+            && git_words[write_index + 1..]
+                .iter()
+                .take_while(|word| word.as_str() != "--")
+                .any(|word| word == "--detach");
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -10266,6 +10269,19 @@ mod worker_commit_guard_tests {
             "deny",
             "bisect classification and detached checkout must remain usable: {value}"
         );
+
+        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
+        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
+        );
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HEAD is detached"));
 
         let commit = hook_git_write_input(&path, "git commit -m forbidden");
         let output = handle_pre_tool_use(&commit, None).expect("handler ok");

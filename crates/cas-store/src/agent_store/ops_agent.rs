@@ -316,6 +316,8 @@ impl SqliteAgentStore {
                 params![id],
             )?;
 
+            crate::qa_pass_store::release_qa_claims_for_agent_with_conn(&tx, id)?;
+
             let rows = tx.execute("DELETE FROM agents WHERE id = ?", params![id])?;
             if rows == 0 {
                 // SessionEnd, MCP shutdown, and factory teardown can all race

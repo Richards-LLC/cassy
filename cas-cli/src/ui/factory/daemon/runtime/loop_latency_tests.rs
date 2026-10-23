@@ -575,7 +575,7 @@ async fn flv2_external_reminders_never_on_lane() {
 }
 
 /// Factory loop v2 §6.6 (cas-6931; enforce mode C6, cas-9db0b): a store
-/// open, a `git` command, a `/proc` scan and a transcript read on an
+/// open, a `git` command, an OS process probe and a transcript read on an
 /// enforcing io or control lane each trip the assertion, naming the call,
 /// lane, step and site. Off a lane nothing is reported. The daemon loop's
 /// own lane (`LoopProgress::attach`) stays in report mode until C2c
@@ -600,7 +600,13 @@ fn flv2_no_blocking_call_on_lanes() {
             let _ = crate::git_evidence::git_text(dir.path(), &["rev-parse", "--git-dir"]);
         }),
         (BlockingKind::Proc, &|| {
-            let _ = wedged::RealProcessTable.pids();
+            if cfg!(target_os = "macos") {
+                // RealProcessTable is a no-op off Linux. Exercise libproc,
+                // the native process read used for macOS PID fingerprints.
+                assert!(crate::mcp::daemon::read_pid_starttime(std::process::id()).is_some());
+            } else {
+                let _ = wedged::RealProcessTable.pids();
+            }
         }),
         (BlockingKind::Transcript, &|| {
             let _ = wedged::transcript_has_in_flight_tool_call(

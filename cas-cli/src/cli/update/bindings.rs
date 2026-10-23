@@ -13,7 +13,7 @@ use super::ProjectPhase;
 use crate::cloud::CloudConfig;
 use crate::coordination::binding_intake::{IntakeJournal, IntakeScope};
 use crate::coordination::binding_reconciliation::NextAction;
-use crate::coordination::binding_repair::{OrdinaryBindingClient, RepairOutcome, RepairReport};
+use crate::coordination::binding_repair::{OrdinaryBindingClient, RepairOutcome, RepairReport, RuntimeSnapshot};
 
 /// The Violet hub authenticates production Cloud bearers only. A project on
 /// another Cloud (staging, a local test server) has no hub to ask.
@@ -54,6 +54,7 @@ pub(super) fn reconcile_project_bindings(
     cas_root: &Path,
     dry_run: bool,
     json: bool,
+    inventory: &RuntimeSnapshot,
 ) -> Option<ProjectPhase> {
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok()?;
     if config.endpoint.trim_end_matches('/') != PRODUCTION_CLOUD {
@@ -67,6 +68,7 @@ pub(super) fn reconcile_project_bindings(
         cas_types::violet_compatibility::violet_hub_url(),
         dry_run,
         json,
+        inventory,
     )
 }
 
@@ -76,6 +78,7 @@ fn reconcile_with(
     hub_url: &str,
     dry_run: bool,
     json: bool,
+    inventory: &RuntimeSnapshot,
 ) -> Option<ProjectPhase> {
     if !cas_root.join("cloud.json").exists() || !config.is_logged_in() {
         return None;
@@ -148,7 +151,7 @@ fn reconcile_with(
                 canonical_project_id: project_id.clone(),
                 channel_id: channel_id.clone(),
             };
-            match client.repair(cas_root, &scope) {
+            match client.repair_with_inventory(cas_root, &scope, inventory) {
                 Ok(report) => channel_result(channel_name, report),
                 Err(error) => ChannelResult {
                     channel_id,

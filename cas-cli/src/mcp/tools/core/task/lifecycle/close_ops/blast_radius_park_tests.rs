@@ -270,7 +270,7 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         &task, &changed[2..], repo.path(), repo.path(), None, None,
         BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
     ).expect_err("competing mounts require explicit physical proof scope");
-    assert!(error.contains("named::close_ops,") && error.contains("named::close_ops::alternate"),
+    assert!(error.contains("named/close_ops.rs") && error.contains("named/close_ops/alternate.rs"),
         "uncovered diagnostic must name both mounting parents: {error}");
     task.proof_targets.push("cas-cli named::close_ops::blast_radius_park_tests".into());
     validate_risk_close_proofs_with_base_and_target_and_cache(

@@ -56,6 +56,14 @@ Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
 receipts. Run the red test before fixing it, then commit and run the green test.
 
+Prove shared surfaces whole: for every changed production function, run its
+whole lib test module and every integration harness that calls it, for example
+`-E 'test(close_ops::)'` plus `--test worktree_surface_test -E 'test(close)'`.
+Before rewording user-facing text, grep the tests for the old wording. Measure
+a size or count claim on a real tree as well as a fixture. List each module run
+in the close reason. Named-only proofs missed same-module assertions
+and other callers' tests, so five deliveries failed at merge or review.
+
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,

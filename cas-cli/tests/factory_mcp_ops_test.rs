@@ -11137,6 +11137,11 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
             "{assigned}"
         );
         assert_eq!(
+            assigned.contains(&format!("cut factory/{worker}-{task_b}")),
+            worker_branch != format!("factory/{worker}"),
+            "{assigned}"
+        );
+        assert_eq!(
             store.get(&task_b).unwrap().assignee.as_deref(),
             Some(worker)
         );
@@ -11164,8 +11169,37 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
             "action": "start", "id": task_b
         }))
         .unwrap();
-        let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
-        assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
+        // cas-ff6c: the cas-8001 shape. Another task's merged per-task branch
+        // is refused, left unchanged, and the refusal names this task's cut.
+        let started_on = if worker_branch == format!("factory/{worker}") {
+            let started = get_text(&env.service.task(Parameters(start)).await.unwrap());
+            assert!(started.contains("REUSED FACTORY BRANCH RESET"), "{started}");
+            worker_branch.to_string()
+        } else {
+            let refused = env
+                .service
+                .task(Parameters(start.clone()))
+                .await
+                .expect_err("another task's per-task branch must not be reused");
+            let own = format!("factory/{worker}-{task_b}");
+            assert!(
+                refused.message.contains("cas-prior's per-task branch")
+                    && refused.message.contains(&format!(
+                        "git fetch origin epic/foreign && git switch -c {own} origin/epic/foreign && git push -u origin {own}"
+                    )),
+                "{refused}"
+            );
+            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
+            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
+            git_stdout(&worker_path, &["fetch", "origin", "epic/foreign"]);
+            git_stdout(&worker_path, &["switch", "-c", &own, "origin/epic/foreign"]);
+            get_text(&env.service.task(Parameters(start)).await.unwrap());
+            assert_eq!(
+                git_stdout(&worker_path, &["rev-parse", worker_branch]),
+                clean_tip
+            );
+            own
+        };
         assert_eq!(
             git_stdout(&worker_path, &["rev-parse", "HEAD"]),
             merged_target,
@@ -11173,8 +11207,10 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         );
         assert_eq!(
             git_stdout(&worker_path, &["branch", "--show-current"]),
-            worker_branch
+            started_on
         );
+        let recorded = store.get(&task_b).unwrap().deliverables.factory_branch_start;
+        assert_eq!(recorded.map(|start| start.branch), Some(started_on));
     }
 }
 
@@ -11788,7 +11824,7 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let started = env.service.task(Parameters(start)).await;
         if per_task {
             let error = started.expect_err("a parked per-task branch must stay frozen");
-            assert!(error.message.contains("parked for cas-pk01"), "{error}");
+            assert!(error.message.contains("cas-pk01's per-task branch"), "{error}");
             assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), parked_tip);
             assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
             assert!(

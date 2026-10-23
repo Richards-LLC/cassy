@@ -165,6 +165,37 @@ fn publish_parked_delivery_branch(
     )
 }
 
+/// cas-ff6c: starting a task on another task's `factory/<worker>-<task>`
+/// branch reset and reused that delivery ref (cas-8001), which broke
+/// worktree_merge and close attribution. Refuse and name the exact cut.
+fn foreign_task_branch_start_refusal(
+    worker_checkout: &std::path::Path,
+    worker_name: &str,
+    branch: &str,
+    owner_task: &str,
+    task_id: &str,
+    target_branch: &str,
+) -> String {
+    let own = format!("factory/{worker_name}-{task_id}");
+    let git = GitOperations::new(worker_checkout.to_path_buf());
+    let remedy = if git.resolve_commit(&format!("refs/heads/{own}")).is_some() {
+        format!("git switch {own}")
+    } else if git.has_origin_remote() {
+        format!(
+            "git fetch origin {target_branch} && git switch -c {own} origin/{target_branch} && git push -u origin {own}"
+        )
+    } else {
+        format!("git switch -c {own} {target_branch}")
+    };
+    format!(
+        "Cannot start task {task_id}: {branch} is {owner_task}'s per-task branch; reusing it for \
+         {task_id} breaks worktree_merge and close attribution. Leave {branch} unchanged, cut \
+         this task's own branch from `{target_branch}`, then retry \
+         `{tool_prefix}task action=start id={task_id}`:\n  {remedy}",
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+    )
+}
+
 /// The declared target eligible for a first-start branch reset at assignment.
 /// Assignment passes its proposed final status, so a batched ownership/status
 /// update cannot promise a reset that start will skip. Resumes with anchors
@@ -2360,7 +2391,33 @@ impl CasCore {
                         &worker.name,
                         &worker_branch,
                     ) == Some(task.id.as_str());
-                    let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
+                    // cas-ff6c: another task's per-task branch is that task's
+                    // delivery ref, never a reusable lane. A supervisor
+                    // rebind that recorded this branch for the task is exempt.
+                    if let Some(owner_task) = crate::factory_isolation::own_task_branch_task_id(
+                        &worker.name,
+                        &worker_branch,
+                    )
+                    .filter(|owner_task| *owner_task != task.id)
+                        && task
+                            .deliverables
+                            .factory_branch_start
+                            .as_ref()
+                            .is_none_or(|start| start.branch != worker_branch)
+                    {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            foreign_task_branch_start_refusal(
+                                worker_checkout,
+                                &worker.name,
+                                &worker_branch,
+                                owner_task,
+                                &task.id,
+                                target_branch,
+                            ),
+                        ));
+                    }
+                    let reset_note =if task.status == TaskStatus::Open && !is_current_task_branch {
                         let identity =
                             close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
                                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;

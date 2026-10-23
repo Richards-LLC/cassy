@@ -58,6 +58,8 @@ pub struct EvidenceContext<'a> {
     /// authenticated runs may stand in for a local build when local auth is
     /// impossible. Empty means local builds only.
     pub deployed_origins: &'a [String],
+    /// Configured registry and this delivery's attributed files, for rebind coverage.
+    pub rebind_scope: Option<(&'a crate::config::QaConfig, &'a [String])>,
 }
 
 /// Why evidence is refused. `problem` completes "its QA evidence bundle is …";
@@ -632,8 +634,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     let rebound_paths = if !head_covers_delivery
         && journeys::doc_only_rebind(ctx.repo, &manifest.head_sha, ctx.delivered_head)
     {
-        git(ctx.repo, &["diff", "--name-only", &manifest.head_sha, ctx.delivered_head])
-            .map(|diff| diff.lines().map(str::to_owned).collect::<Vec<_>>())
+        Some(checked_rebind_paths(ctx, &manifest.head_sha, ctx.delivered_head, &rerun)?)
     } else {
         None
     };
@@ -653,6 +654,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         if !journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
             return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
         }
+        checked_rebind_paths(ctx, &manifest.executed_head_sha, &manifest.head_sha, &rerun)?;
         committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
             EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
     } else if rebound_paths.is_some() {
@@ -844,6 +846,66 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         passed_expects: summary.passed,
         rebound_paths,
     })
+}
+
+/// Registry metadata may change without changing what this delivery must prove.
+/// Compare committed selections through the same engine used by close and QA.
+fn checked_rebind_paths(
+    ctx: &EvidenceContext<'_>,
+    from: &str,
+    to: &str,
+    rerun: &str,
+) -> Result<Vec<String>, EvidenceRefusal> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let unreadable = |error| EvidenceRefusal::new(
+        format!("uncheckable QA evidence rebind: {error}"), rerun,
+    );
+    // This follows the path proof. A failed Git read is not a stale-build verdict.
+    let diff = crate::qa_impact::io::git(ctx.repo, &["diff", "--name-only", from, to, "--"])
+        .map_err(|error| unreadable(error.to_string()))?;
+    let paths: Vec<String> = diff.lines().map(str::to_owned).collect();
+    let registry = ctx.rebind_scope.map(|(qa, _)| qa.registry.path.as_str())
+        .unwrap_or(crate::qa_registry::DEFAULT_PATH);
+    if !paths.iter().any(|path| path == registry) {
+        return Ok(paths);
+    }
+    let (qa, files) = ctx.rebind_scope.ok_or_else(||
+        unreadable("registry changed but the delivery's QA scope is unavailable".into()))?;
+    let changes: Vec<_> = files.iter().map(crate::qa_impact::Change::modified).collect();
+    let selected = |head| {
+        crate::qa_impact::analyze(ctx.repo, qa, &changes, None, Some(head))
+            .map(|impact| impact.journeys.into_iter().map(|journey| {
+                let invariants = journey.invariants.into_iter()
+                    .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
+                    .collect::<BTreeMap<_, _>>();
+                (journey.id, (journey.status, invariants))
+            }).collect::<BTreeMap<_, _>>())
+            .map_err(|error| unreadable(error.to_string()))
+    };
+    let before = selected(from)?;
+    let after = selected(to)?;
+    let changed: Vec<_> = before.keys().chain(after.keys()).collect::<BTreeSet<_>>()
+        .into_iter().filter(|id| before.get(*id) != after.get(*id)).collect();
+    if !changed.is_empty() {
+        let mut invariants = BTreeSet::new();
+        for id in &changed {
+            let old = before.get(*id).map(|(_, invariants)| invariants);
+            let new = after.get(*id).map(|(_, invariants)| invariants);
+            for key in old.into_iter().flat_map(|m| m.keys())
+                .chain(new.into_iter().flat_map(|m| m.keys()))
+            {
+                if old.and_then(|m| m.get(key)) != new.and_then(|m| m.get(key)) {
+                    invariants.insert(key.as_str());
+                }
+            }
+        }
+        return Err(EvidenceRefusal::new(format!(
+            "registry coverage changed: journeys [{}]; invariants [{}]",
+            changed.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", "),
+            invariants.into_iter().collect::<Vec<_>>().join(", "),
+        ), rerun));
+    }
+    Ok(paths)
 }
 
 /// The report a visual-QA script writes (`visual-qa.json`). A bundle's
@@ -2574,7 +2636,7 @@ pub fn run_close_gate_with_write_dir(
             ));
             if let Some(paths) = receipt.rebound_paths {
                 pass.notes.push(format!(
-                    "QA evidence rebind: {} -> {}; product and QA inputs unchanged; changed paths: {}.",
+                    "QA evidence rebind: {} -> {}; product inputs and selected QA coverage unchanged; changed paths: {}.",
                     receipt.head_sha, ctx.delivered_head, paths.join(", ")
                 ));
             }

@@ -59,7 +59,7 @@ pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
 };
 pub use app::provisioning::run_internal_provisioner;
-pub(crate) use app::render_and_ops::epic_workers::enqueue_context_resume_brief;
+pub(crate) use app::render_and_ops::epic_workers::{enqueue_context_resume_brief, preflight_spawn_base};
 mod boot;
 mod buffer_backend;
 mod client;

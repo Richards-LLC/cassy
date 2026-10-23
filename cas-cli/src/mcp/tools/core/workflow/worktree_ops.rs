@@ -3519,25 +3519,13 @@ impl CasCore {
         Ok((Box::new(task), worker))
     }
 
-    /// A server-recorded delivery keeps its assignee even when the approved
-    /// branch has a recovery suffix that cannot be parsed as a worker name.
-    fn recorded_task_merge_source(
-        &self, task: &cas_types::Task, branch: &str,
-    ) -> Result<Option<(String, String)>, McpError> {
-        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
-            return Ok(None);
-        };
-        if start.branch != branch
-            || task.assignee.as_deref() != Some(start.assignee.as_str())
-            || task.deliverables.work_target.as_ref() != Some(&start.work_target)
-        {
-            return Ok(None);
-        }
-        let agents = self.open_agent_store()?;
-        let worker = crate::mcp::tools::core::task::resolve_agent_identity(
-            agents.as_ref(), &start.assignee,
-        ).map(|agent| agent.name).unwrap_or_else(|| start.assignee.clone());
-        Ok(Some((worker, branch.to_string())))
+    /// An exact recorded branch is bound to its recorded owner and target.
+    fn recorded_task_merge_source(task: &cas_types::Task, branch: &str) -> bool {
+        task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+            start.branch == branch
+                && task.assignee.as_deref() == Some(start.assignee.as_str())
+                && task.deliverables.work_target.as_ref() == Some(&start.work_target)
+        })
     }
 
     /// Prefer the task's recorded source, discovering names only if it is absent.
@@ -3564,7 +3552,7 @@ impl CasCore {
         let requested = id.strip_prefix("origin/").unwrap_or(id);
         if requested != anchor && !identity_belongs_to_worker(requested, &assignee, agents.as_ref())
             && !task_delivery_branch_matches(requested, &assignee, &task.id)
-            && self.recorded_task_merge_source(task, requested)?.is_none()
+            && !Self::recorded_task_merge_source(task, requested)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -3578,7 +3566,7 @@ impl CasCore {
         let recorded = task.deliverables.parked_branch.as_deref().filter(|b| !b.trim().is_empty());
         if let Some(branch) = recorded {
             if !task_delivery_branch_matches(branch, &assignee, &task.id)
-                && self.recorded_task_merge_source(task, branch)?.is_none()
+                && !Self::recorded_task_merge_source(task, branch)
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,

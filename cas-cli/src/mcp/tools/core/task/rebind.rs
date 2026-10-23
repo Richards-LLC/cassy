@@ -85,6 +85,9 @@ impl CasCore {
                 expected.status,
                 TaskStatus::Open | TaskStatus::InProgress | TaskStatus::Blocked
             )
+            || (expected.status == TaskStatus::Blocked
+                && (expected.deliverables.parked_branch.is_some()
+                    || expected.deliverables.factory_branch_anchor.is_some()))
         {
             return Err(refused(
                 "only an unparked active task can rebind; use request_changes before replacing a parked delivery",

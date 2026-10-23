@@ -729,6 +729,42 @@ async fn release_reset_and_transfer_free_the_tasks_file_leases_cas_c55f_978d() {
         "release/reset/transfer must let the async runtime progress while Cloud is held");
 }
 
+#[tokio::test]
+async fn qa_release_failure_keeps_cloud_and_file_cleanup_cas_e27e() {
+    use cas::cloud::file_leases::FileLease;
+    for with_lease in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "alpha-sup");
+        alpha.put_task("cas-qa27", TaskType::Task);
+        start(&alpha.core, "cas-qa27", false).await.unwrap();
+        assert!(cloud.active_lock("cas-qa27").is_some());
+        assert_eq!(edit(&alpha, "alpha-sup", "cas-qa27", "src/qa27.rs").await, FileLease::Mine);
+        let now = Utc::now();
+        let opened = cas_store::open_qa_pass(&alpha.cas_dir, &cas_store::NewQaPass {
+            task_id: "cas-delivery27", implementer_agent_id: "implementer",
+            branch: "factory/implementer", bound_head: "aaaa1111",
+            deadline_at: now + Duration::minutes(45), max_rounds: 3,
+        }, now).unwrap();
+        let cas_store::QaPassOpen::Dispatched(pass) = opened else { panic!("fresh round"); };
+        cas_store::set_qa_task(&alpha.cas_dir, &pass.id, "cas-qa27").unwrap();
+        let before = cas_store::claim_qa_pass(&alpha.cas_dir, "cas-delivery27", &alpha.agent_id, now).unwrap();
+        if !with_lease {
+            open_agent_store(&alpha.cas_dir).unwrap().release_lease_for_task("cas-qa27", "simulate absent lease").unwrap();
+        }
+        let conn = rusqlite::Connection::open(alpha.cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_qa_release BEFORE UPDATE ON qa_passes
+            WHEN OLD.state = 'claimed' AND NEW.state = 'pending'
+            BEGIN SELECT RAISE(ABORT, 'injected QA release failure'); END;").unwrap();
+        let result = release(&alpha.core, "cas-qa27").await;
+        assert!(freed(&cloud, "cas-qa27").await, "with_lease={with_lease}: Cloud task claim still held: {result}");
+        assert!(file_freed(&cloud, "src/qa27.rs").await, "with_lease={with_lease}: file lease still held: {result}");
+        assert_eq!(open_task_store(&alpha.cas_dir).unwrap().get("cas-qa27").unwrap().status, TaskStatus::Open);
+        assert_eq!(cas_store::latest_qa_pass(&alpha.cas_dir, "cas-delivery27", now).unwrap().unwrap(), before);
+    }
+}
+
 /// cas-c55f, cas-978d: a close does not wait for a slow Cloud to release
 /// the task's claim or its file leases; both releases still reach the Cloud
 /// afterwards.

@@ -482,6 +482,42 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
 }
 
 #[tokio::test]
+async fn release_only_clears_the_callers_qa_claim_cas_e27e() {
+    for with_lease in [true, false] {
+        for mode in ["own-name", "own-id", "other-name", "other-id", "supervisor"] {
+            let mut env = TestEnvGuard::temp_home();
+            let (_temp, core, repo, task_id) = fixture(&mut env);
+            let cas_dir = repo.join(".cas");
+            assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+            let qa_task = qa_task_id(&cas_dir, &task_id);
+            let alpha = reviewer_core(&cas_dir, "worker-a");
+            alpha.cas_task_start(Parameters(IdRequest { id: qa_task.clone() })).await.unwrap();
+            let _bravo = reviewer_core(&cas_dir, "worker-b");
+            cas_store::release_qa_claim_for_task(&cas_dir, &qa_task).unwrap();
+            let name = if mode.starts_with("own") { "worker-a" } else { "worker-b" };
+            let identity = if mode.ends_with("id") {
+                format!("qa-session-{name}-{}", std::process::id())
+            } else { name.to_string() };
+            let before = cas_store::claim_qa_pass(&cas_dir, &task_id, &identity, chrono::Utc::now()).unwrap();
+            if !with_lease {
+                open_agent_store(&cas_dir).unwrap().release_lease_for_task(&qa_task, "simulate absent lease").unwrap();
+            }
+            let caller = if mode == "supervisor" { supervisor_core(&cas_dir) } else { alpha };
+            caller.cas_task_release(Parameters(TaskReleaseRequest { task_id: qa_task.clone(), force: None }))
+                .await.unwrap();
+            let after = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now()).unwrap().unwrap();
+            if mode.starts_with("other") {
+                assert_eq!(after, before, "with_lease={with_lease}, mode={mode}: releasing A cannot clear B's claim");
+            } else {
+                assert_eq!(after.state, cas::types::QaPassState::Pending, "with_lease={with_lease}, mode={mode}");
+                assert!(after.reviewer_agent_id.is_none());
+            }
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task).unwrap().status, TaskStatus::Open);
+        }
+    }
+}
+
+#[tokio::test]
 async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);

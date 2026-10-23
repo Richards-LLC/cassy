@@ -325,7 +325,29 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
             std::fs::read_to_string(root.join("daemon.log")).unwrap()
         );
     }
-    operator.write_all(&[0x11]).unwrap();
+
+    // A viewer's resize records its own geometry without replacing the active owner.
+    resize(&mut operator, 121, 41);
+    assert!(wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (121, 41)));
+    resize(&mut launch_client, 105, 33);
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(gui_size(&gui_socket), (121, 41));
+    drop(operator);
+    assert!(
+        wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (105, 33)),
+        "owner loss must use the remaining viewer's latest size"
+    );
+
+    let mut operator = connect_tui(&tui_socket);
+    resize(&mut operator, 180, 50);
+    assert!(wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (180, 50)));
+    std::thread::sleep(Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1));
+    launch_client.write_all(b"x").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (105, 33)),
+        "typing takeover must apply the new owner's recorded terminal size"
+    );
+    launch_client.write_all(&[0x11]).unwrap();
     drop(operator);
     drop(launch_client);
     assert!(

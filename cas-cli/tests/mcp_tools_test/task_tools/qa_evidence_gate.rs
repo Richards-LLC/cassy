@@ -519,7 +519,7 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
-    for case in ["new live owner", "changed invariant", "neutral bug metadata"] {
+    for case in ["new live owner", "changed status", "changed invariant", "neutral bug metadata"] {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
@@ -561,8 +561,9 @@ journeys:
     ];
     let after = match case {
         "new live owner" => registry.to_string(),
+        "changed status" => registry.replace("status: live", "status: dark\n    status_reason: feature disabled"),
         "changed invariant" => registry.replace("The composer remains visible", "The sent message remains visible"),
-        _ => format!("{registry}# bug: GH #1349 regression catalog upkeep\n"),
+        _ => registry.replace("check: Read the composer after opening it", "check: Read the composer after opening it\n    bug: {task: cas-56bf}"),
     };
     for path in paths {
         commit_file(&fx.repo, path, if path.ends_with(".yaml") { &after } else { "QA documentation upkeep\n" });

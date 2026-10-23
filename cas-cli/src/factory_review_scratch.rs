@@ -994,6 +994,26 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    #[cfg(unix)]
+    #[test]
+    fn review_bytes_excludes_hardlinks_retained_by_worker_cas_2ffc() {
+        let root = tempfile::tempdir().unwrap();
+        let review = root.path().join("review");
+        let target = review.join("repo/target");
+        let pending = review.join("trash/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        let worker = root.path().join("worker-artifact");
+        fs::write(&worker, b"shared-byte").unwrap();
+        fs::hard_link(&worker, target.join("shared")).unwrap();
+        fs::hard_link(&worker, pending.join("shared")).unwrap();
+        fs::write(target.join("private"), b"free").unwrap();
+        let sizes = review_bytes(&review);
+        assert_eq!(sizes.total, 26, "logical row size includes every path");
+        assert_eq!(sizes.target, 4, "deleting the target frees only private bytes");
+        assert_eq!(sizes.pending, 0, "shared pending bytes remain in the worker");
+    }
+
     #[test]
     fn write_owner_syncs_directory_after_rename_cas_a271() {
         let directory = tempfile::tempdir().unwrap();

@@ -730,10 +730,10 @@ fn hardlink_seed_tree_inner(
                 .path()
                 .strip_prefix(source_root)?
                 .components()
-                .any(|part| part.as_os_str() == ".fingerprint")
+                .any(|part| matches!(part.as_os_str().to_str(), Some(".fingerprint" | "build")))
             {
-                // Cargo rewrites freshness records in place. Sharing their
-                // inode lets one lane bless another lane's old rmeta as fresh.
+                // Cargo rewrites fingerprint and build-script outputs in place.
+                // Sharing their inode lets one lane change another's target.
                 // Keep the original mtime: making dep-info newer during a
                 // seed would also hide source changes from Cargo's mtime check.
                 std::fs::copy(entry.path(), &destination_entry)?;

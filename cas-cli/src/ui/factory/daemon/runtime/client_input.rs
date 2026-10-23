@@ -141,6 +141,15 @@ impl FactoryDaemon {
                         || self.owner_last_activity.elapsed()
                             > Duration::from_secs(INPUT_OWNER_IDLE_SECS);
                     if can_take {
+                        if self.owner_client_id != Some(client_id)
+                            && client.client_cols > 0
+                            && client.client_rows > 0
+                        {
+                            // A keystroke can take ownership without a Resize frame.
+                            // Feed the new owner's recorded size through the same
+                            // debounced layout/PTY path as an explicit resize.
+                            resize_event = Some((client.client_cols, client.client_rows));
+                        }
                         self.owner_client_id = Some(client_id);
                         self.owner_last_activity = now;
                         had_activity = true;

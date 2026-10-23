@@ -137,6 +137,9 @@ pub(super) fn reap_metadata_locked(
     let current = fs::symlink_metadata(path)?;
     if current.dev() != receipt.dev()
         || current.ino() != receipt.ino()
+        || !current.is_file()
+        || current.uid() != uid
+        || current.nlink() != 1
         || fs::read(path)? != expected
         || super::is_process_running(metadata.daemon_pid)
     {

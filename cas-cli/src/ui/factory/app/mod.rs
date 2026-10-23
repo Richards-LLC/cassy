@@ -8093,17 +8093,19 @@ mod spawn_isolation_tests {
 
         let tmp = TempDir::new().unwrap();
         let snapshot = tmp.path().join("snapshot");
-        let fingerprint = "debug/.fingerprint/cas-types-abc";
         let records = [
-            "lib-cas_types",
-            "lib-cas_types.json",
-            "dep-lib-cas_types",
-            "invoked.timestamp",
+            "debug/.fingerprint/cas-types-abc/lib-cas_types",
+            "debug/.fingerprint/cas-types-abc/lib-cas_types.json",
+            "debug/.fingerprint/cas-types-abc/dep-lib-cas_types",
+            "debug/.fingerprint/cas-types-abc/invoked.timestamp",
+            "debug/build/cas-abc/out/archive_fixture_sources.rs",
+            "debug/build/cas-abc/output",
+            "release/build/tool-abc/out/generated.rs",
         ];
-        std::fs::create_dir_all(snapshot.join(fingerprint)).unwrap();
         std::fs::create_dir_all(snapshot.join("debug/deps")).unwrap();
         for record in records {
-            let path = snapshot.join(fingerprint).join(record);
+            let path = snapshot.join(record);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"old freshness").unwrap();
             std::fs::File::open(path)
                 .unwrap()
@@ -8121,11 +8123,11 @@ mod spawn_isolation_tests {
             hardlink_seed_tree(&snapshot, worker, worker, &mut TargetSeedStats::default()).unwrap();
             for record in records {
                 assert_eq!(
-                    std::fs::metadata(worker.join(fingerprint).join(record))
+                    std::fs::metadata(worker.join(record))
                         .unwrap()
                         .modified()
                         .unwrap(),
-                    std::fs::metadata(snapshot.join(fingerprint).join(record))
+                    std::fs::metadata(snapshot.join(record))
                         .unwrap()
                         .modified()
                         .unwrap(),
@@ -8134,19 +8136,24 @@ mod spawn_isolation_tests {
             }
         }
 
-        // Cargo rewrites these freshness records in place when one lane rebuilds.
-        // Its sibling still has the old rmeta and must retain the old freshness.
+        // Cargo and build scripts use in-place writes, like cas-cli/build.rs.
+        // A sibling's generated sources and freshness must remain untouched.
         for record in records {
-            std::fs::write(worker_a.join(fingerprint).join(record), b"new freshness").unwrap();
+            std::fs::write(worker_a.join(record), b"new freshness").unwrap();
             for untouched in [&snapshot, &worker_b] {
                 assert_eq!(
-                    std::fs::read(untouched.join(fingerprint).join(record)).unwrap(),
+                    std::fs::read(untouched.join(record)).unwrap(),
                     b"old freshness",
                     "another lane refreshed {record} while its rmeta stayed old"
                 );
+                assert_eq!(
+                    std::fs::metadata(untouched.join(record)).unwrap().modified().unwrap(),
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(100),
+                    "another lane changed {record}'s mtime"
+                );
             }
             assert_eq!(
-                std::fs::metadata(worker_a.join(fingerprint).join(record))
+                std::fs::metadata(worker_a.join(record))
                     .unwrap()
                     .nlink(),
                 1

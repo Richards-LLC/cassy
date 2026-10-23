@@ -272,7 +272,16 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();
     task.created_at = chrono::Utc::now() - chrono::Duration::minutes(10);
-    tasks.update(&task).unwrap();
+    // Creation time is immutable on update; seed the historical task at add.
+    tasks.delete(TASK).unwrap();
+    tasks.add(&task).unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            TASK.into(),
+            "cas-be01".into(),
+            cas::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
     git(repo, &["checkout", "-q", "main"]);
     git(repo, &["merge", "--squash", "factory/test-agent"]);
     git(repo, &["commit", "-q", "-m", "Squash delivery (#3814)"]);
@@ -322,12 +331,22 @@ async fn cas_dbab_reclose_squash_after_rejected_verification() {
             None,
         )
         .unwrap();
-    let retried = close(worker, Some(&receipt)).await;
+    let retried = close(worker.clone(), Some(&receipt)).await;
     assert!(retried.contains("VERIFICATION REQUIRED"), "{retried}");
     let next = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
         .unwrap()
         .unwrap();
     assert_ne!(dispatch.id, next.id);
+    service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":TASK, "status":"approved", "summary":"Corrected ledger; unchanged delivery verified",
+        "dispatch_id":next.id
+    })).unwrap())).await.unwrap();
+    let closed = close(worker, Some(&receipt)).await;
+    assert_eq!(
+        tasks.get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
     assert_eq!(git(repo, &["rev-parse", "factory/test-agent"]), head);
     assert_eq!(
         tasks

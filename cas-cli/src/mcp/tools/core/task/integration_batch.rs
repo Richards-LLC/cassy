@@ -139,15 +139,7 @@ impl CasCore {
             )?,
         };
         let tip = resolve_task_commit_receipt_sha(&repo, tip)?;
-        // A worker checkout's local integration ref can lag the published
-        // branch. An existing origin ref is authoritative, even on mismatch.
-        let published_tip = if branch.starts_with("origin/") || branch.starts_with("refs/") {
-            revision(&repo, branch)
-        } else {
-            revision(&repo, &format!("origin/{branch}"))
-                .or_else(|| revision(&repo, branch))
-        };
-        if published_tip.as_deref() != Some(tip.as_str()) {
+        if revision(&repo, branch).as_deref() != Some(tip.as_str()) {
             return Err(
                 "INTEGRATION BATCH REJECTED: batch ref does not resolve to the supplied exact tip"
                     .into(),

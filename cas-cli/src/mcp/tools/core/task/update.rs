@@ -1482,7 +1482,21 @@ impl CasCore {
             // Priority controls shared build admission. A worker cannot evade
             // this guard by reopening its task, and unavailable authority must
             // refuse the entire update before ordinary fields are changed.
-            let caller_id = self.get_registered_agent_id_read_only()?;
+            let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+                let reason = if error.code == ErrorCode::INVALID_REQUEST {
+                    "priority changes require an already registered authenticated Cassy session"
+                        .to_string()
+                } else {
+                    format!(
+                        "could not verify an already registered authenticated Cassy session: {}",
+                        error.message
+                    )
+                };
+                Self::error(
+                    error.code,
+                    format!("TASK PRIORITY UPDATE REJECTED: {reason}"),
+                )
+            })?;
             let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
@@ -2838,6 +2852,62 @@ mod status_transition_tests {
             }
         }
         assert!(failures.is_empty(), "non-terminal priority bypass: {}", failures.join("; "));
+    }
+
+    #[tokio::test]
+    async fn unregistered_priority_reopen_refusal_names_priority_and_preserves_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        core.open_agent_store().unwrap().init().unwrap();
+
+        let mut failures = Vec::new();
+        for (status, status_name, refusal) in [
+            (
+                TaskStatus::Blocked,
+                "blocked",
+                "TASK PRIORITY UPDATE REJECTED",
+            ),
+            (
+                TaskStatus::Closed,
+                "closed",
+                "TASK UPDATE REJECTED: terminal task",
+            ),
+        ] {
+            let mut task = Task::new(
+                format!("cas-priority-reopen-{status_name}"),
+                "reopen with priority".into(),
+            );
+            task.status = status;
+            task.priority = Priority::MEDIUM;
+            tasks.add(&task).unwrap();
+
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id,
+                "status": "open",
+                "priority": 0,
+            }))
+            .unwrap();
+            let result = core.cas_task_update(Parameters(request)).await;
+            let stored = tasks.get(&task.id).unwrap();
+            match result {
+                Err(error)
+                    if error.message.contains(refusal)
+                        && stored.status == status
+                        && stored.priority == Priority::MEDIUM => {}
+                Err(error) => failures.push(format!("{status_name}: {}", error.message)),
+                Ok(response) => failures.push(format!(
+                    "{status_name}: unexpectedly accepted {response:?}"
+                )),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "priority reopen refusals: {}",
+            failures.join("; ")
+        );
     }
 
     #[tokio::test]

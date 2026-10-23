@@ -76,14 +76,14 @@ impl Git<'_> {
         label: &str,
     ) -> Result<(), String> {
         let parent = open_task_store(cas_root)
-            .and_then(|store| store.get_parent_epic(&task.id))
+            .and_then(|store| Ok(store.get_parent_epic(&task.id)?))
             .map_err(|error| format!("cannot resolve task integration target: {error}"))?;
         let target = match close_ops::effective_close_work_target(task, parent.as_ref()) {
             Some(target) => target.target_branch,
             None => {
                 let worktree_parent = task.worktree_id.as_deref().map(|id| {
                     open_worktree_store(cas_root)
-                        .and_then(|store| store.get(id))
+                        .and_then(|store| Ok(store.get(id)?))
                         .map(|worktree| worktree.parent_branch)
                         .map_err(|error| format!("cannot resolve task worktree target: {error}"))
                 }).transpose()?;

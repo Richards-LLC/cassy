@@ -205,17 +205,14 @@ impl CasCore {
             .or_else(|_| git.tip(&format!("refs/remotes/origin/{}", previous.branch)))
             .ok();
         let same_branch = previous.branch == branch;
-        let base = if same_branch {
-            previous.base_sha.clone()
-        } else {
-            let bases = git
-                .text(&["merge-base", "--all", &tip, &target_tip])
-                .map_err(refused)?;
-            if bases.lines().count() != 1 {
-                return Err(refused("replacement and target need a unique merge base"));
-            }
-            bases
-        };
+        // Recovery can rewrite a lane without changing its name. Attribute
+        // the replacement against the target, never an obsolete start base.
+        let base = git
+            .text(&["merge-base", "--all", &tip, &target_tip])
+            .map_err(refused)?;
+        if base.lines().count() != 1 {
+            return Err(refused("replacement and target need a unique merge base"));
+        }
         let mut rebound = expected.clone();
         rebound
             .deliverables
@@ -227,13 +224,23 @@ impl CasCore {
             branch: branch.to_string(),
             base_sha: base.clone(),
         });
-        let delivery = close_ops::task_attribution::started_delivery(&checkout, &rebound)
+        // The common root was validated above. A linked checkout need not
+        // duplicate its project configuration, and shares these same refs.
+        let delivery = close_ops::task_attribution::started_delivery(&context.repo_root, &rebound)
             .map_err(refused)?
             .ok_or_else(|| refused("replacement has no unmerged task delivery"))?;
         if delivery.commits.is_empty() {
             return Err(refused("replacement has no attributable commits"));
         }
-        if same_branch {
+        let anchor_still_reachable = match expected.deliverables.factory_branch_anchor.as_deref() {
+            Some(anchor) => git
+                .output(&["merge-base", "--is-ancestor", anchor, &tip])
+                .map_err(refused)?
+                .status
+                .success(),
+            None => true,
+        };
+        if same_branch && previous.base_sha == base && anchor_still_reachable {
             return Ok(Self::success(format!(
                 "Task {id} already records delivery branch {branch}; its base and audit are unchanged."
             )));

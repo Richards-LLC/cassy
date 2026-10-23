@@ -285,7 +285,7 @@ async fn cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_t
 }
 
 /// cas-c0d0 (GH #1246): an idle Claude supervisor with a running background
-/// task keeps repainting, so its pane is never 2 s silent. Live on 3.76.0 its
+/// task keeps repainting, so its pane is never 2 s silent. In the live cas-ca26 probe its
 /// own fired reminder sat gated 98.5 s until an unrelated turn started. With
 /// the transcript showing the turn ended, the first pass must type it once.
 #[tokio::test(flavor = "current_thread")]

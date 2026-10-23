@@ -7166,8 +7166,8 @@ impl FactoryDaemon {
     /// cas-c0d0 (GH #1246): the supervisor's own fired reminder, once its
     /// transcript records that the last turn ended. A Claude supervisor with a
     /// running background task repaints its pane, so the 2-second silence bar
-    /// held these wakes until an unrelated turn started (98.5 s live on
-    /// 3.76.0). The typing, readiness and tool-call vetoes stay. Without that
+    /// held these wakes until an unrelated turn started (98.5 s in the live
+    /// cas-ca26 probe). The typing, readiness and tool-call vetoes stay. Without that
     /// transcript evidence (`None` or mid-turn) the ordinary policy decides.
     pub fn supervisor_self_reminder_wake(
         pane_target: &str,

@@ -2657,6 +2657,26 @@ impl CasService {
             }
         }
 
+        // Refuse locally knowable provision failures before provider probes,
+        // brief/delivery-mode writes or the success-shaped enqueue receipt.
+        if isolate
+            && let Ok(repo) = crate::worktree::GitOperations::detect_repo_root(&self.inner.cas_root)
+        {
+            let focused_branch = ctx.factory_session.as_deref()
+                .and_then(|session| {
+                    crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named(session).epic_id
+                })
+                .and_then(|id| task_store.get(&id).ok())
+                .and_then(|epic| epic.branch);
+            crate::ui::factory::app::render_and_ops::epic_workers::preflight_spawn_base(
+                &self.inner.cas_root,
+                &repo,
+                req.task_id.as_deref(),
+                focused_branch.as_deref(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
+        }
+
         let slots = if worker_names.is_empty() {
             count as usize
         } else {

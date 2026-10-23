@@ -183,7 +183,7 @@ test("literal progress ellipses pass without a truncation escape", async (t) => 
 test("progress-like truncated table rows and cut-off words fail without an escape", async (t) => {
   const lines = ["Running  job-alpha  checkou...", "Loading configuration fi…", "Running  job-alpha  files...", "Building project... 12", "Fetching  updates…", "Building other...", "Reconfiguring Cassy..."];
   const report = await runTerminalQa({
-    command: [process.execPath, "-e", `console.log(${JSON.stringify(lines.join("\n"))})`],
+    command: [process.execPath, "-e", `const text = ${JSON.stringify(lines.join("\n"))}; console.log(process.env.LC_ALL === "C" ? text.replaceAll("…", "...") : text)`],
     out: tmpOut(t),
     label: "progress-like-truncation",
     progressNouns: ["project", "updates"],

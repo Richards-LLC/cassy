@@ -1983,11 +1983,16 @@ if [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
   echo \"Expected the exact worker branch '$expected' or your per-task branch '$expected-<task-id>'. Refusing to graft the current HEAD onto another branch.\" >&2
   exit 1
 fi
-# Push only the branch you are on, to the same name: a per-task branch never
-# advances the frozen factory/<name>, and factory/<name> never another ref.
+# Per-task work pushes only to its own name. On the reusable lane, also
+# permit publishing an explicitly named preservation ref to that same name;
+# HEAD:<another-task> must never turn this into a cross-task push.
 refs=\"\"
 while read local_ref local_sha remote_ref remote_sha; do
-  if [ \"$remote_ref\" != \"refs/heads/$branch\" ]; then
+  if [ \"$remote_ref\" != \"refs/heads/$branch\" ] && ! {
+    [ \"$branch\" = \"$expected\" ] &&
+    [ \"$local_ref\" = \"$remote_ref\" ] &&
+    own_task_branch \"${remote_ref#refs/heads/}\";
+  }; then
     record_push_rejection \"$remote_ref\"
     echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch.\" >&2
     exit 1

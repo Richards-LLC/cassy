@@ -1056,11 +1056,16 @@ mod tests {
         fs::hard_link(&worker, target.join("shared")).unwrap();
         fs::hard_link(&worker, pending.join("shared")).unwrap();
         fs::write(target.join("private"), b"free").unwrap();
+        fs::write(target.join("local"), b"local-pair").unwrap();
+        fs::hard_link(target.join("local"), target.join("local-copy")).unwrap();
         let sizes = review_bytes(&review);
-        assert_eq!(sizes.total, 26, "logical row size includes every path");
-        assert_eq!(sizes.target, 4, "deleting the target frees only private bytes");
+        assert_eq!(sizes.total, 46, "logical row size includes every path");
+        assert_eq!(sizes.target, 14, "intra-target inode is counted once");
         assert_eq!(sizes.pending, 0, "shared pending bytes remain in the worker");
-        assert_eq!(sizes.reclaimable, 4, "full review deletion retains worker inode");
+        assert_eq!(sizes.reclaimable, 14, "full review deletion retains worker inode");
+        assert_eq!(freeable_bytes(&target), 14, "target deletion owns both local links");
+        assert_eq!(freeable_bytes(&pending), 0, "worker still owns the pending inode");
+        assert_eq!(freeable_bytes(&review), 14, "whole review counts local inode once");
     }
 
     #[test]

@@ -4966,6 +4966,74 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
 }
 
 #[tokio::test]
+async fn restarted_worker_closes_merged_receipt_and_adopts_descendant_cas_f9e0() {
+    for (adopt, existing_task_branch) in [(false, false), (true, false), (true, true)] {
+        let mut env = TestEnvGuard::temp_home();
+        let BranchAdoptionFixture { temp, destination, service, mut task, mut source, receiver, .. } =
+            branch_adoption_fixture(&mut env);
+        let root = temp.path();
+        let cas_dir = root.join(".cas");
+        let git = branch_transfer_git;
+        task.created_at -= chrono::Duration::minutes(1);
+        git(root, &["commit", "--amend", "-m", &format!("fix({}): delivery", task.id)]);
+        let delivery = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["branch", "main"]);
+        git(root, &["switch", "main"]);
+        std::fs::write(root.join("README.md"), "Later target work\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-m", "Later target work"]);
+        let target_tip = git(root, &["rev-parse", "HEAD"]);
+        let origin = tempfile::TempDir::new().unwrap();
+        git(origin.path(), &["init", "--bare"]);
+        git(root, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(root, &["push", "origin", "main"]);
+        git(destination.path(), &["merge", "--ff-only", "main"]);
+        let own_branch = format!("factory/{}-{}", receiver.name, task.id);
+        if existing_task_branch {
+            git(destination.path(), &["switch", "-c", &own_branch]);
+        }
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.update(&task).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled=false\n").unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        source.role = AgentRole::Supervisor;
+        agents.update(&source).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let transfer = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": task.id, "to_agent": receiver.name,
+            "adopt_branch": adopt, "supervisor_override": true,
+        })).unwrap();
+        service.task(Parameters(transfer)).await.expect("recover the merged delivery");
+        assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), target_tip,
+            "adoption must preserve a receiver that already contains the delivery");
+        if adopt {
+            assert_eq!(git(destination.path(), &["branch", "--show-current"]), own_branch);
+        }
+        let recovered = tasks.get(&task.id).unwrap();
+        assert_eq!(recovered.deliverables.factory_branch_anchor.as_deref(), Some(delivery.as_str()),
+            "the delivery anchor must not advance to unrelated target work");
+        // Neither fresh receiver branch was published: only the original
+        // delivery receipt proves this task's integration at the close gate.
+        assert!(git(root, &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/factory/"]).is_empty());
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", &receiver.name);
+        env.set("CAS_AGENT_ID", &receiver.id);
+        env.set("CAS_CLONE_PATH", destination.path());
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(receiver.id.clone());
+        let request = serde_json::from_value(serde_json::json!({
+            "id": task.id, "reason": "Recovered integrated delivery", "commit_receipt": delivery,
+        })).unwrap();
+        let response = extract_text(core.cas_task_close(Parameters(request)).await.unwrap());
+        assert_eq!(tasks.get(&task.id).unwrap().status, cas::types::TaskStatus::Closed,
+            "adopt={adopt}, existing_task_branch={existing_task_branch}: {response}");
+        assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), target_tip);
+    }
+}
+
+#[tokio::test]
 async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7() {
     let mut env = TestEnvGuard::temp_home();
     let BranchAdoptionFixture { temp, destination, service, task, source, receiver, tip } = branch_adoption_fixture(&mut env);

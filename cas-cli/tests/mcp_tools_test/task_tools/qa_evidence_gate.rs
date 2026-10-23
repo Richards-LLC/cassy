@@ -518,7 +518,7 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 }
 
 #[tokio::test]
-async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
+async fn valid_bundle_rebinds_documentation_but_a_product_commit_makes_it_stale() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
@@ -572,8 +572,10 @@ journeys:
     // The reused artifacts genuinely predate B; SHA acceptance alone is insufficient.
     let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);
     let amended = Command::new("git")
-        .args(["-c", "user.name=CAS Test", "-c", "user.email=cas@example.test",
-            "commit", "--amend", "--no-edit", "-q"])
+        .args([
+            "-c", "user.name=CAS Test", "-c", "user.email=cas@example.test",
+            "commit", "--amend", "--no-edit", "-q",
+        ])
         .current_dir(&fx.repo)
         .env("GIT_COMMITTER_DATE", date)
         .output()
@@ -583,14 +585,15 @@ journeys:
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     let notes = fx.notes();
-    let rebind = notes.lines().find(|line| line.contains("QA evidence rebind"))
+    let rebind = notes.lines()
+        .find(|line| line.contains("QA evidence rebind"))
         .expect("close records why the earlier trace still covers this delivery");
     assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
     for path in paths {
         assert!(rebind.contains(path), "missing {path}: {rebind}");
     }
-    assert_eq!(std::fs::read_to_string(&bundle).unwrap().parse::<serde_json::Value>().unwrap()["head_sha"], head,
-        "close preserves the original execution manifest");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(manifest["head_sha"], head, "close preserves the original execution manifest");
 
     // The implementer pushes a fix after recording evidence: the bundle no
     // longer describes the delivery.

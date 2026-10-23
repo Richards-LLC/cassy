@@ -67,7 +67,7 @@ body{background:var(--surface);color:var(--ink);font-size:10pt;line-height:1.4}b
 h2{font-size:18pt;margin-bottom:4mm}h3{font-size:13pt}h4{font-size:10pt}h2,h3,h4,.section-top{break-after:avoid}.section-top{break-inside:avoid;page-break-inside:avoid}p{max-width:none;orphans:3;widows:3}
 .stats{gap:3mm;margin:4mm 0}.stat{break-inside:avoid;padding:3mm 4mm}.stat-value{font-size:20pt}.stat p{font-size:8pt}.stat-label{font-size:9pt}
 .method,details p,caption{font-size:8.5pt}.method{padding:3mm 4mm;break-inside:avoid}summary{font-size:9pt}
-.table-wrap{overflow:visible;margin:4mm 0}table{font-size:9pt;table-layout:fixed}thead{display:table-header-group}th,td{padding:1.6mm 2mm 1.6mm 0;font-size:8pt;overflow-wrap:anywhere}
+.table-wrap{overflow:visible;margin:4mm 0}table{font-size:9pt;table-layout:fixed}table:has(tbody tr:only-child){break-inside:avoid;page-break-inside:avoid}caption{break-after:avoid;page-break-after:avoid}thead{display:table-header-group;break-after:avoid;page-break-after:avoid}thead tr{break-after:avoid;page-break-after:avoid}tbody tr:first-child{break-before:avoid;page-break-before:avoid}th,td{padding:1.6mm 2mm 1.6mm 0;font-size:8pt;overflow-wrap:anywhere}
 tr,figure,pre,.change,.theme-label{break-inside:avoid;page-break-inside:avoid}
 .captures{gap:3mm;margin-top:3mm}.capture{padding:2mm}.capture img{max-height:70mm}
 a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-mono);overflow-wrap:anywhere;color:var(--ink-muted)}a{color:var(--ink);text-decoration:underline}

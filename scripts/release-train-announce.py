@@ -61,20 +61,21 @@ def body_lines(body: str) -> list[str]:
     return normalize_body(body).splitlines()
 
 
-# post-publication fills these from the release PR and the published assets;
-# they are the only tokens a draft may carry before publication (preflight).
-# cas-52de: {{RELEASE_PR}} is known only once the pipeline opens the PR.
-DIGEST_TOKENS = frozenset({"{{LINUX_SHA256}}", "{{MACOS_SHA256}}", "{{RELEASE_PR}}"})
+# release.sh resolves VERSION; publication fills the PR and asset digests.
+# Only these tokens may remain during draft lint/preflight, never when posting.
+PRE_PUBLICATION_TOKENS = frozenset({
+    "{{VERSION}}", "{{LINUX_SHA256}}", "{{MACOS_SHA256}}", "{{RELEASE_PR}}",
+})
 
 
-def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
+def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
     lines = body_lines(body)
     if not lines:
         fail(f"body {BODY_NAMES[index]} is empty")
     normalized = normalize_body(body)
     token = next(
         (match for match in re.finditer(r"\{\{.*?\}\}", normalized, flags=re.DOTALL)
-         if not (allow_digest_tokens and match.group() in DIGEST_TOKENS)),
+         if not (pre_publication and match.group() in PRE_PUBLICATION_TOKENS)),
         None,
     )
     if token:
@@ -103,7 +104,9 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
                     )
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
-        if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(lines[0]):
+        # Check the eventual title shape without changing the reviewed text.
+        label = lines[0].replace("{{VERSION}}", "0.0.0") if pre_publication else lines[0]
+        if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(label):
             fail(f"body {BODY_NAMES[index]} top-level must contain exactly two lines")
         if "Was:" not in lines[1] or "→ Now:" not in lines[1]:
             fail(f"body {BODY_NAMES[index]} top-level must use Was → Now")
@@ -128,14 +131,14 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
             fail(f"body {BODY_NAMES[index]} bullet spans more than two lines")
 
 
-def extract_bodies(draft: Path, allow_digest_tokens: bool = False) -> list[str]:
+def extract_bodies(draft: Path, pre_publication: bool = False) -> list[str]:
     text = draft.read_text(encoding="utf-8")
     bodies = re.findall(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", text, flags=re.DOTALL)
     if len(bodies) != 4:
         fail(f"draft must contain exactly four fenced bodies; found {len(bodies)}")
     for index, body in enumerate(bodies):
         bodies[index] = normalize_body(body)
-        lint_body(index, bodies[index], allow_digest_tokens)
+        lint_body(index, bodies[index], pre_publication)
     return bodies
 
 
@@ -144,7 +147,7 @@ def validate(draft_arg: str, body_dir_arg: str, pre_publication: bool = False) -
     body_dir = Path(body_dir_arg).expanduser().resolve()
     if not draft.is_file():
         fail(f"draft does not exist: {draft}")
-    bodies = extract_bodies(draft, allow_digest_tokens=pre_publication)
+    bodies = extract_bodies(draft, pre_publication=pre_publication)
     body_dir.mkdir(parents=True, exist_ok=True)
     for name, body in zip(BODY_NAMES, bodies):
         (body_dir / f"{name}.txt").write_text(body + "\n", encoding="utf-8")
@@ -407,7 +410,7 @@ def main(argv: list[str]) -> int:
             # this same implementation; placeholders are still allowed.
             for draft in argv[2:]:
                 try:
-                    extract_bodies(Path(draft), allow_digest_tokens=True)
+                    extract_bodies(Path(draft), pre_publication=True)
                 except ValueError as exc:
                     raise ValueError(f"{draft}: {exc}") from None
                 print(f"announce lint PASS · bodies=4 · draft={draft}")

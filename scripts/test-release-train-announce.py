@@ -136,7 +136,7 @@ class Announce(unittest.TestCase):
 
     def test_validate_rejects_named_tokens_in_every_body(self):
         for index, name in enumerate(announce.BODY_NAMES):
-            for token in ("{{INTERVENTIONS}}", "{{LINUX_SHA256}}", "{{UNKNOWN}}", "{{}}"):
+            for token in ("{{INTERVENTIONS}}", "{{LINUX_SHA256}}", "{{VERSION}}", "{{UNKNOWN}}", "{{}}"):
                 with self.subTest(body=name, token=token):
                     bodies = list(BODIES)
                     bodies[index] += " " + token
@@ -147,9 +147,33 @@ class Announce(unittest.TestCase):
                     self.assertIn(token, result.stderr)
                     self.assertIn("line 2" if index in (0, 2) else "line 1", result.stderr)
 
-    def test_pre_publication_allows_only_digest_tokens(self):
-        # Preflight runs before publication: the receipt-fillable digests are
-        # still placeholders there, and every other token must still fail.
+    def test_pre_publication_allows_release_tokens(self):
+        # release.sh resolves VERSION after draft preparation, including titles
+        # and links. The fast row and preflight must leave the source untouched.
+        bodies = [body.replace("9.99.8", "{{VERSION}}") for body in BODIES]
+        bodies[3] += " <https://example.test/v{{VERSION}}|release>"
+        self.write_draft(bodies)
+        original = self.draft.read_bytes()
+        command = [sys.executable, str(SCRIPT), "--validate", str(self.draft), str(self.body_dir)]
+        allowed = subprocess.run(command + ["--pre-publication"], capture_output=True, text=True)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        fast_row = subprocess.run([sys.executable, str(SCRIPT), "--lint", str(self.draft)],
+                                  capture_output=True, text=True)
+        self.assertEqual(fast_row.returncode, 0, fast_row.stderr)
+        self.assertEqual(self.draft.read_bytes(), original)
+        # pin: exported review text must retain VERSION; release.sh owns substitution.
+        self.assertEqual((self.body_dir / "user-top-level.txt").read_text(), bodies[0] + "\n")
+        strict = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(strict.returncode, 1)
+        self.assertIn("{{VERSION}}", strict.stderr)
+        adapter, writes = self.adapter()
+        with self.assertRaisesRegex(ValueError, "VERSION"):
+            self.post(adapter)
+        self.assertFalse(writes)
+        adapter.McpClient.assert_not_called()
+
+        # Receipt-fillable digests and PR remain allowed only before publication;
+        # arbitrary narrative placeholders must still fail in that phase.
         bodies = list(BODIES)
         bodies[1] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`."
         bodies[3] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`. PR #{{RELEASE_PR}}."

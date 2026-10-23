@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.75.0] - 2026-10-23
+
 ### Added
 
 - **Project progress words** — Let terminal QA accept project-declared progress nouns through repeatable `--progress-noun` flags or the `progressNouns` option, and treat the single-character `…` like `...`; cut words, column gaps, trailing counters and undeclared nouns still fail.

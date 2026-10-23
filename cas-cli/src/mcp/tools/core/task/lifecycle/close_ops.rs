@@ -14870,17 +14870,30 @@ fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> Strin
     )
 }
 
-/// A preservation ref is evidence of this delivery only while it still names
-/// the immutable recorded anchor. Prefer it to a reused worker lane, locally
-/// or on origin, without accepting a ref recycled for later work.
+/// Prefer a preservation ref to a reused lane only while its immutable anchor
+/// is integrated. A moved local branch must be measured live, never hidden by
+/// a stale origin ref; an unmerged old anchor cannot displace a current receipt.
 fn anchored_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Option<String> {
     let parked = task.deliverables.parked_branch.as_deref()?;
     let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
     if !is_safe_git_refname(parked) {
         return None;
     }
-    [parked.to_string(), format!("origin/{parked}")].into_iter()
-        .find(|branch| resolve_branch_sha(repo, branch).as_deref() == Some(anchor))
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{parked}")) {
+        parked.to_string()
+    } else {
+        format!("origin/{parked}")
+    };
+    if resolve_branch_sha(repo, &branch).as_deref() != Some(anchor) {
+        return None;
+    }
+    let target = task.deliverables.work_target.as_ref()?.target_branch.trim();
+    if !is_safe_git_refname(target) {
+        return None;
+    }
+    [target.to_string(), format!("origin/{target}")].into_iter()
+        .any(|target| git_commit_is_ancestor(repo, anchor, &target))
+        .then_some(branch)
 }
 
 /// [`close_measured_factory_branch`], refusing instead of binding to another

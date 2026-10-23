@@ -386,7 +386,7 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
 #[tokio::test]
 async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
-    for action in ["reset", "release", "orphan-release"] {
+    for action in ["reset", "release", "orphan-release", "shutdown"] {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
@@ -413,6 +413,23 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
                     .release_lease_for_task(&qa_task, "simulate expired lease").unwrap();
             }
             original.cas_task_release(request).await.unwrap();
+        }
+        "shutdown" => {
+            let agents = open_agent_store(&cas_dir).unwrap();
+            let agent = agents.list(None).unwrap().into_iter()
+                .find(|agent| agent.name == "dead-reviewer").unwrap();
+            agents.graceful_shutdown(&agent.id).unwrap();
+            let _role = SupervisorRole::enter(&mut test_env);
+            let service = CasService::new(supervisor_core(&cas_dir), None);
+            let requested = extract_text(service.verification(Parameters(verification(
+                serde_json::json!({"action":"qa_request", "task_id":task_id,
+                    "summary":"the reviewer shut down"})
+            ))).await.unwrap());
+            assert!(requested.contains("is pending;"), "{requested}");
+            // Restore the orphaned task row through the normal recovery path.
+            core.cas_task_release(Parameters(TaskReleaseRequest {
+                task_id: qa_task.clone(), force: None,
+            })).await.unwrap();
         }
         _ => unreachable!(),
     }

@@ -3891,7 +3891,6 @@ fn update_reaps_dead_metadata_without_touching_live_sessions_cas_9299() {
         drop(std::os::unix::net::UnixListener::bind(gui_socket_path(name)).unwrap());
     }
     let held = std::os::unix::net::UnixListener::bind(gui_socket_path("held9299")).unwrap();
-    std::fs::write(metadata_path("bad9299"), "incomplete receipt").unwrap();
     let args = update_test_args();
     let run = || refresh_all_projects_with_user_refresh(
         &args, &update_test_cli(true), None, None, None, None,
@@ -3899,13 +3898,14 @@ fn update_reaps_dead_metadata_without_touching_live_sessions_cas_9299() {
     ).unwrap();
     run();
     assert!(!metadata_path("dead9299").exists(), "update must reap a proven-dead record");
-    assert!(!metadata_path("held9299").exists(), "dead metadata is independent of retained socket paths");
+    assert!(metadata_path("held9299").exists(), "held metadata retains project attribution");
     assert!(metadata_path("live9299").exists());
-    assert!(metadata_path("bad9299").exists());
     assert!(gui_socket_path("live9299").exists());
     assert!(gui_socket_path("held9299").exists());
     assert_eq!(gui_socket_path("dead9299").exists(), !cfg!(target_os = "linux"));
+    std::fs::write(metadata_path("bad9299"), "incomplete receipt").unwrap();
     run();
+    assert!(metadata_path("bad9299").exists());
     assert!(metadata_path("live9299").exists(), "repeat cleanup retains live ownership");
     drop(held);
 }

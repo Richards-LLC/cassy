@@ -131,9 +131,9 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
             let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
             assert!(request.url().starts_with("/api/channels?"));
             request.respond(tiny_http::Response::from_string(serde_json::json!({
-                "channels": [MANAGED, FOREIGN].map(|id| serde_json::json!({
+                "channels": ([MANAGED, FOREIGN].map(|id| serde_json::json!({
                     "channel_id": id, "project_id": PROJECT
-                }))
+                })))
             }).to_string())).unwrap();
         }
         assert!(server.try_recv().unwrap().is_none(), "held runtime prevents Cloud submission");

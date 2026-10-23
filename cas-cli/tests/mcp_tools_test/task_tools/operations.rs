@@ -4900,7 +4900,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         });
         tasks.add(&task).unwrap();
         let service = CasService::new(core, None);
-        let start = || serde_json::from_value::<TaskRequest>(serde_json::json!({
+        let start = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
             "action": "start", "id": task.id, "brief": true,
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");

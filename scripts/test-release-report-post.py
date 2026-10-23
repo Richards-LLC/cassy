@@ -41,6 +41,7 @@ class StubState:
         # GH #908: how the hub answers the file post ("ok", "http_413",
         # or "file_too_large").
         self.file_mode = "ok"
+        self.html_ref = "main"
 
 
 def envelope(result: dict) -> bytes:
@@ -227,7 +228,7 @@ def handler_for(state: StubState):
                 else:
                     assert arguments["kind"] == "message"
                     assert arguments["reply_to"] == DEV_THREAD
-                    assert "https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v9.99.0.html" in arguments["text"]
+                    assert f"https://github.com/Richards-LLC/cassy/blob/{state.html_ref}/docs/release-reports/v9.99.0.html" in arguments["text"]
                     result = {
                         "_id": request_id,
                         "content": [
@@ -535,11 +536,13 @@ def run_adapter(
     dev_thread: str = DEV_THREAD,
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
+    html_ref: str = "main",
 ):
     module = adapter_module()
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
+    state.html_ref = html_ref
     with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
         root = Path(directory)
         html = root / "v9.99.0.html"
@@ -563,6 +566,7 @@ def run_adapter(
                 "HOME": str(root),
                 "CODEX_HOME": str(root / "codex-config"),
                 "CLAUDE_CONFIG_DIR": str(root / "claude-config"),
+                "CAS_RELEASE_TRAIN_REPORT_HTML_REF": html_ref,
                 "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
                 "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
                 "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": user_thread,
@@ -572,6 +576,7 @@ def run_adapter(
                 "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
             }
         )
+        environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_URL", None)
         if credential_mode.startswith("codex-"):
             # Exercise the real subprocess resolver with competing credentials,
             # not an explicit selector that would bypass registration discovery.
@@ -642,6 +647,12 @@ def main() -> int:
             assert fields is None and state.requests == [], "ambiguous or missing authority must refuse before network"
             assert "stub-token" not in result.stderr and "wrong-token" not in result.stderr
         print("Codex registration: default/custom homes passed; ambiguous/conflicting/missing credentials refused before network")
+        result, fields = run_adapter(server, state, pdf, html_ref="v9.99.0")
+        assert result.returncode == 0 and fields is not None, result.stderr
+        result, fields = run_adapter(server, state, pdf, html_ref="factory/temporary-report")
+        assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
+        assert fields is None and state.requests == [], "temporary report links must refuse before any upload"
+        print("Report links: main/tag accepted; temporary branch refused before network")
         result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")

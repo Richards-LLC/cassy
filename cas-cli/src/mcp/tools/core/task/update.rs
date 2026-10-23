@@ -2841,6 +2841,62 @@ mod status_transition_tests {
     }
 
     #[tokio::test]
+    async fn unregistered_priority_reopen_refusal_names_priority_and_preserves_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        core.open_agent_store().unwrap().init().unwrap();
+
+        let mut failures = Vec::new();
+        for (status, status_name, refusal) in [
+            (
+                TaskStatus::Blocked,
+                "blocked",
+                "TASK PRIORITY UPDATE REJECTED",
+            ),
+            (
+                TaskStatus::Closed,
+                "closed",
+                "TASK UPDATE REJECTED: terminal task",
+            ),
+        ] {
+            let mut task = Task::new(
+                format!("cas-priority-reopen-{status_name}"),
+                "reopen with priority".into(),
+            );
+            task.status = status;
+            task.priority = Priority::MEDIUM;
+            tasks.add(&task).unwrap();
+
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id,
+                "status": "open",
+                "priority": 0,
+            }))
+            .unwrap();
+            let result = core.cas_task_update(Parameters(request)).await;
+            let stored = tasks.get(&task.id).unwrap();
+            match result {
+                Err(error)
+                    if error.message.contains(refusal)
+                        && stored.status == status
+                        && stored.priority == Priority::MEDIUM => {}
+                Err(error) => failures.push(format!("{status_name}: {}", error.message)),
+                Ok(response) => failures.push(format!(
+                    "{status_name}: unexpectedly accepted {response:?}"
+                )),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "priority reopen refusals: {}",
+            failures.join("; ")
+        );
+    }
+
+    #[tokio::test]
     async fn priority_update_refuses_unreadable_agent_store_before_mutating_task() {
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

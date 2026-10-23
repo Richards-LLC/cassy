@@ -174,21 +174,23 @@ test("clean fixture passes with zero findings across every run", async (t) => {
 });
 
 test("literal progress ellipses pass without a truncation escape", async (t) => {
-  const { report } = await gate(t, "literal-progress-ellipsis.sh");
+  assert.deepEqual(analyzeCapture({ raw: "Installing dependencies…\n", run: "80.dark" }), []);
+  const { report } = await gate(t, "literal-progress-ellipsis.sh", { progressNouns: ["project", "updates"] });
   assert.equal(report.verdict, "PASS", JSON.stringify(report.findings, null, 2));
   assert.deepEqual(report.findings, []);
 });
 
 test("progress-like truncated table rows and cut-off words fail without an escape", async (t) => {
-  const lines = ["Running  job-alpha  checkou...", "Loading configuration fi...", "Running  job-alpha  files...", "Reconfiguring Cassy..."];
+  const lines = ["Running  job-alpha  checkou...", "Loading configuration fi…", "Running  job-alpha  files...", "Building project... 12", "Fetching  updates…", "Building other...", "Reconfiguring Cassy..."];
   const report = await runTerminalQa({
     command: [process.execPath, "-e", `console.log(${JSON.stringify(lines.join("\n"))})`],
     out: tmpOut(t),
     label: "progress-like-truncation",
+    progressNouns: ["project", "updates"],
   });
   assert.equal(report.verdict, "FAIL");
   assert.deepEqual(checks(report), ["truncation-without-escape"]);
-  assert.deepEqual([...new Set(report.findings.map((f) => f.detail.token))].sort(), ["checkou...", "fi...", "files..."]);
+  assert.deepEqual([...new Set(report.findings.map((f) => f.detail.token))].sort(), ["checkou...", "files...", "fi…", "other...", "project...", "updates…"]);
 });
 
 const DEFECTS = [
@@ -277,7 +279,7 @@ test("report.md opens with the receipt line and the receipt is the last stdout l
 test("the built-in CLI craft runner accepts literal progress ellipses through a symlinked skills directory", (t) => {
   const linkedScript = symlinkedBuiltinScript(t);
   const out = tmpOut(t);
-  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("Installing dependencies...")'], { encoding: "utf8" });
+  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--progress-noun", "project", "--progress-noun", "updates", "--", fixture("literal-progress-ellipsis.sh")], { encoding: "utf8" });
   assert.equal(cli.status, 0, cli.stderr + cli.stdout);
   assert.match(cli.stdout, /^terminal-qa: PASS symlinked-runner · 4 runs · 0 fail · 0 warn · 0 allowed · .*report\.json/m);
   const report = JSON.parse(fs.readFileSync(path.join(out, "report.json"), "utf8"));

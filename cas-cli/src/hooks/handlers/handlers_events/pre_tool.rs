@@ -2085,6 +2085,7 @@ struct GitCommandTarget {
     cwd: std::path::PathBuf,
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
+    is_detached_checkout: bool,
 }
 
 impl GitCommandTarget {
@@ -2098,6 +2099,7 @@ impl GitCommandTarget {
             cwd,
             git_dir: None,
             work_tree: None,
+            is_detached_checkout: false,
         }
     }
 
@@ -2221,6 +2223,8 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
 
         let mut target = default_target.clone();
         target.cwd = shell_cwd.clone();
+        target.is_detached_checkout = git_words[write_index] == "checkout"
+            && git_words[write_index + 1..].iter().any(|word| word == "--detach");
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -2431,6 +2435,13 @@ fn check_worker_git_commit_scope_at_target(
                 not the Claude Code PreToolUse harness)."
             ));
         }
+    }
+
+    // Checking out a commit during a bisect changes only the worker's own
+    // checkout. Keep the worktree containment check above, but do not apply
+    // the branch rule reserved for commits and other history mutations.
+    if is_isolated && target.is_detached_checkout {
+        return None;
     }
 
     // Resolve HEAD once. Protected branches retain the established WORKER
@@ -10264,6 +10275,22 @@ mod worker_commit_guard_tests {
             .as_str()
             .unwrap_or_default()
             .contains("HEAD is detached"));
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_checkout = hook_git_write_input(
+            &path,
+            &format!(
+                "git -C '{}' checkout --detach {sha}",
+                outside.path().display()
+            ),
+        );
+        let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside your assigned worktree"));
     }
 
     #[test]

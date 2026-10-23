@@ -539,6 +539,62 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
         fx.notes()
     );
 
+    // Gate-requested registry/ledger upkeep preserves the evaluated build.
+    let paths = [
+        "docs/qa/journeys.yaml",
+        "docs/qa/LEDGER.md",
+        ".claude/CODEMAP.md",
+        "docs/PRODUCT_OVERVIEW.md",
+    ];
+    for path in paths {
+        let body = if path.ends_with(".yaml") {
+            r#"version: 1
+updated: "2026-10-23"
+invariants:
+  INV-COMPOSER:
+    statement: The composer remains visible
+    check: Read the composer after opening it
+journeys:
+  - id: COMPOSE
+    name: Open the composer
+    status: live
+    entry: {url: /compose, trigger: Open}
+    steps: [open, compose]
+    owners: [web/composer.css]
+    invariants: [INV-COMPOSER]
+    traffic: {share_pct: 100, basis: messages}
+"#
+        } else {
+            "QA documentation upkeep\n"
+        };
+        commit_file(&fx.repo, path, body);
+    }
+    // The reused artifacts genuinely predate B; SHA acceptance alone is insufficient.
+    let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);
+    let amended = Command::new("git")
+        .args([
+            "-c", "user.name=CAS Test", "-c", "user.email=cas@example.test",
+            "commit", "--amend", "--no-edit", "-q",
+        ])
+        .current_dir(&fx.repo)
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .unwrap();
+    assert!(amended.status.success(), "{amended:?}");
+    let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    let notes = fx.notes();
+    let rebind = notes.lines()
+        .find(|line| line.contains("QA evidence rebind"))
+        .expect("close records why the earlier trace still covers this delivery");
+    assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
+    for path in paths {
+        assert!(rebind.contains(path), "missing {path}: {rebind}");
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(manifest["head_sha"], head, "close preserves the original execution manifest");
+
     // The implementer pushes a fix after recording evidence: the bundle no
     // longer describes the delivery.
     let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");

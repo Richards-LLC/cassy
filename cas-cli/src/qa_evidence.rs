@@ -83,6 +83,8 @@ pub struct BundleReceipt {
     pub manifest: PathBuf,
     pub head_sha: String,
     pub passed_expects: usize,
+    /// Verified documentation-only changes from the bundle to the delivery.
+    pub rebound_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,16 +616,6 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "push the delivery commit, then retry close".to_string(),
         )
     })?;
-    // A documented rebind preserves the execution revision. Only unchanged
-    // product/journey inputs across documentation-only commits can reuse it.
-    let delivered_time = if manifest.executed_head_sha.is_empty() {
-        delivered_time
-    } else if journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
-        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
-            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
-    } else {
-        return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
-    };
     let head_covers_delivery = manifest.head_sha == ctx.delivered_head
         || git(
             ctx.repo,
@@ -635,7 +627,17 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             ],
         )
         .is_some();
-    if !head_covers_delivery {
+    // Reuse the existing product/QA-input proof, never a second path classifier.
+    // Keep the cited manifest immutable: close records this rebind in task notes.
+    let rebound_paths = if !head_covers_delivery
+        && journeys::doc_only_rebind(ctx.repo, &manifest.head_sha, ctx.delivered_head)
+    {
+        git(ctx.repo, &["diff", "--name-only", &manifest.head_sha, ctx.delivered_head])
+            .map(|diff| diff.lines().map(str::to_owned).collect::<Vec<_>>())
+    } else {
+        None
+    };
+    if !head_covers_delivery && rebound_paths.is_none() {
         return Err(EvidenceRefusal::new(
             format!(
                 "stale: it was recorded for {} but the delivery is {} (a commit landed after the bundle, or the bundle is for another build)",
@@ -645,8 +647,26 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             rerun,
         ));
     }
+    // Freshness remains bound to the executed build, including manifests that
+    // already carry an explicit documentation-only rebind.
+    let delivered_time = if !manifest.executed_head_sha.is_empty() {
+        if !journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
+            return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
+        }
+        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
+            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
+    } else if rebound_paths.is_some() {
+        committer_time(ctx.repo, &manifest.head_sha).ok_or_else(||
+            EvidenceRefusal::new("recorded QA revision is unreadable", rerun.clone()))?
+    } else {
+        delivered_time
+    };
     if let Some(deployed) = manifest.deployed.as_ref() {
-        check_deployed_binding(ctx, deployed, &listed, &rerun)?;
+        let deployed_ctx = EvidenceContext {
+            delivered_head: if rebound_paths.is_some() { &manifest.head_sha } else { ctx.delivered_head },
+            ..*ctx
+        };
+        check_deployed_binding(&deployed_ctx, deployed, &listed, &rerun)?;
     }
     let created = chrono::DateTime::parse_from_rfc3339(manifest.created_at.trim())
         .map(|time| time.timestamp())
@@ -822,6 +842,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         manifest: manifest_path,
         head_sha: manifest.head_sha,
         passed_expects: summary.passed,
+        rebound_paths,
     })
 }
 
@@ -2551,6 +2572,12 @@ pub fn run_close_gate_with_write_dir(
                 short(&receipt.head_sha),
                 receipt.passed_expects
             ));
+            if let Some(paths) = receipt.rebound_paths {
+                pass.notes.push(format!(
+                    "QA evidence rebind: {} -> {}; product and QA inputs unchanged; changed paths: {}.",
+                    receipt.head_sha, ctx.delivered_head, paths.join(", ")
+                ));
+            }
         }
         EvidenceTier::Ledger { terminal_qa } => {
             let (ledger, deferred) = validate_ledger_receipt(ctx)

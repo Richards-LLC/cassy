@@ -32682,11 +32682,32 @@ esac
     /// cas-bdd2: the cas-cee5 cost shape. A four-path delivery is followed by
     /// a long merge-heavy history: every merge rewrites a line beside each
     /// delivered line, so each path's ownership walk takes `merge-base --all`
-    /// and two union diffs at every merge. One walk per path ran in sequence
-    /// with no memo (11.3s here at load ~10); the per-path walks now run
-    /// concurrently with merge bases memoized (2.9s), inside a tight budget.
+    /// and two union diffs at every merge. Count real merge-base commands
+    /// across paths instead of asserting elapsed time on a loaded runner.
     #[test]
     fn multi_path_delivery_across_a_merge_heavy_history_fits_a_tight_budget_cas_bdd2() {
+        const TRACE: &str = "CAS_TEST_BDD2_GIT_TRACE";
+        const MERGES: usize = 150;
+        let Some(trace) = std::env::var_os(TRACE) else {
+            // Git tracing is confined to this child, not the parallel suite's
+            // process environment. Reuse this case rather than add a helper test.
+            let capture = tempfile::tempdir().unwrap();
+            let trace = capture.path().join("git-trace.jsonl");
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::multi_path_delivery_across_a_merge_heavy_history_fits_a_tight_budget_cas_bdd2",
+                    "--nocapture",
+                ])
+                .env(TRACE, &trace)
+                .env("GIT_TRACE2_EVENT", &trace)
+                .output().unwrap();
+            assert!(child.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+                "child must execute the regression");
+            return;
+        };
         let dir = init_factory_repo("worker");
         let p = dir.path();
         let files = ["a.rs", "b.rs", "c.rs", "d.rs"];
@@ -32707,7 +32728,7 @@ esac
         let mut mark = 1;
         let mut mainline = delivery.clone();
         let blob = |file: &str, counter: usize| format!("delivered_{file}();\ncounter = {counter};\n");
-        for index in 0..150 {
+        for index in 0..MERGES {
             let side = mark;
             stream.push_str(&format!("commit refs/heads/side\nmark :{side}\n"));
             stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
@@ -32740,22 +32761,32 @@ esac
             import.stdin.take().unwrap().write_all(stream.as_bytes()).unwrap();
         }
         assert!(import.wait().unwrap().success(), "fast-import failed");
-        let _budget =
-            crate::git_evidence::measurement::Scope::new(std::time::Duration::from_secs(6));
-        let started = std::time::Instant::now();
-        let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
-        // Measured at load ~10: 11.3s before (sequential walks), 2.9s after.
-        assert!(
-            !crate::git_evidence::measurement::expired(),
-            "the per-path walks exhausted their budget after {:?}: {presence:?}",
-            started.elapsed()
+        // Exclude fixture setup. Seed one path so concurrent cache misses in
+        // the subsequent four-path call cannot change the operation count.
+        // Without the cas-bdd2 memo, each remaining path repeats every merge.
+        std::fs::write(&trace, "").unwrap();
+        let first_path = vec![files[0].to_string()];
+        assert_eq!(
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false),
+            DeliveryContentPresence::Present { paths: first_path },
         );
+        let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
         assert_eq!(
             presence,
             DeliveryContentPresence::Present {
                 paths: files.iter().map(|file| file.to_string()).collect()
             }
         );
+        let events = std::fs::read_to_string(trace).unwrap();
+        let merge_bases = events.lines().map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("Git Trace2 JSON")
+        }).filter(|event| {
+            event["event"] == "start"
+                && event["argv"][1] == "merge-base" && event["argv"][2] == "--all"
+        }).count();
+        assert!((1..=MERGES).contains(&merge_bases),
+            "{merge_bases} merge-base calls for {MERGES} merges across {} paths; expected shared memoization",
+            files.len());
     }
 
     /// cas-bdd2: a merge tip whose resolution rebuilt a regenerable bundle and

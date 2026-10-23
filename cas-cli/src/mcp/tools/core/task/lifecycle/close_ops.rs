@@ -6889,20 +6889,10 @@ impl CasCore {
             return None;
         }
 
-        // GH #873: the supervisor may merge the parked worker tip into the
-        // target and then fast-forward the mutable factory ref to that merge
-        // commit before the worker retries close. That merge is a delivery
-        // container, not a new task boundary; replacing the recorded anchor
-        // would make content proof inspect the merge's first-parent effect,
-        // which is often empty. Keep the historical anchor in that shape.
-        if let (Some(repo_path), Some(recorded_anchor)) = (
-            repo_path,
-            task.deliverables.factory_branch_anchor.as_deref(),
-        ) && merge_tip_contains_recorded_anchor(repo_path, factory_branch_anchor, recorded_anchor)
-        {
-            return None;
-        }
-
+        // GH #873 / #1355: a supervisor merge on the target is a delivery
+        // container, but an unmerged target-sync merge is a new park boundary.
+        // Side-parent ancestry alone cannot distinguish them; use the target
+        // integration check below, after the caller's attribution validation.
         // Once the recorded task delivery has landed, a later mutable
         // factory-branch tip cannot become this task's new delivery boundary.
         if let (Some(repo_path), Some(parent_branch), Some(recorded_anchor)) = (

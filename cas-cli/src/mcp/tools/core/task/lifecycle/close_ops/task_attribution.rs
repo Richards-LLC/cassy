@@ -66,8 +66,23 @@ pub(crate) fn started_delivery(
         && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
         && git_commit_is_ancestor(repo, anchor, &tip)
     {
-        tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
-            .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+        // GH #1355: a target-sync merge may restore a start base absent
+        // from the older park. Validate that fast-forward continuation before
+        // truncating to B, or close would test C's ancestry against stale B.
+        // Persistence still applies the sibling-lease and ownership fences.
+        let target = preferred_diff_target_ref_for_delivery(
+            repo, &start.work_target.target_branch, task.delivery_mode,
+        );
+        let restored_start = task.status == TaskStatus::AwaitingMerge
+            && !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+            && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            && parked_anchor_advance_with_target_is_attributable(
+                repo, anchor, &tip, &task.id, None, &target,
+            );
+        if !restored_start {
+            tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+                .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+        }
     }
     if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
         return Err(refuse("the base is no longer an ancestor of the delivery"));

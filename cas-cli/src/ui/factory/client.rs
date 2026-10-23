@@ -79,12 +79,30 @@ fn reraise_default_signal(signal: libc::c_int) {
 }
 
 fn install_client_exit_handler(signal: libc::c_int) -> io::Result<Option<libc::sigaction>> {
+    // nohup and callers may deliberately ignore a signal. Leave that
+    // disposition alone instead of turning it into an attach-time exit.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if current.sa_sigaction == libc::SIG_IGN {
+        return Ok(None);
+    }
+
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = record_client_exit_signal as *const () as libc::sighandler_t;
     unsafe { libc::sigemptyset(&mut action.sa_mask) };
     if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
         return Err(io::Error::last_os_error());
+    }
+    if previous.sa_sigaction == libc::SIG_IGN {
+        // Another thread changed the disposition after our query. Restore it
+        // immediately, and do not register it for Drop's death-by-signal path.
+        if unsafe { libc::sigaction(signal, &previous, std::ptr::null_mut()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(None);
     }
     Ok(Some(previous))
 }
@@ -128,7 +146,7 @@ impl ClientTerminalGuard {
                                 reraise_default_signal(signal);
                             }
                         }
-                        std::thread::park_timeout(Duration::from_millis(20));
+                        std::thread::park_timeout(Duration::from_millis(100));
                     }
                 })?,
         );
@@ -173,7 +191,7 @@ impl Drop for ClientTerminalGuard {
         if signal != 0 {
             // Preserve death-by-signal even when an error unwinds this guard.
             unsafe { libc::raise(signal) };
-            // A previously ignored/handled or masked signal must still terminate.
+            // A previously handled or masked signal must still terminate.
             reraise_default_signal(signal);
         }
     }

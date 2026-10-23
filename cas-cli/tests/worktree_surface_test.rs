@@ -2255,6 +2255,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         ("delivery/reviewed-correction", false, false),
         ("factory/peer-worker-cas-0700", false, false),
         ("factory/peer-worker-cas-c28b6df4a2b653af", false, true),
+        ("factory/peer-worker-cas-c28b6df4a2b653af-r10", false, false),
     ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -2353,6 +2354,34 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+        if branch.ends_with("-r10") {
+            // The receiver saw the first parked tip before the worker rebased
+            // its pushed task branch onto a newer target commit.
+            run_git(&["fetch", "origin", &format!("refs/heads/{branch}:refs/remotes/origin/{branch}")], &repo.root);
+            run_git(&["branch", branch, &anchor], &repo.root);
+            run_git(&["switch", "epic/peer"], &repo.root);
+            std::fs::write(repo.root.join("target-update.txt"), "target update\n").unwrap();
+            run_git(&["add", "target-update.txt"], &repo.root);
+            run_git(&["commit", "-m", "target update"], &repo.root);
+            run_git(&["push", "origin", "epic/peer"], &repo.root);
+            run_git(&["switch", "main"], &repo.root);
+            run_git(&["fetch", "origin", "epic/peer"], &peer);
+            run_git(&["rebase", "origin/epic/peer"], &peer);
+            let rebased_tip = git_stdout(&peer, &["rev-parse", "HEAD"]);
+            assert_ne!(rebased_tip, anchor);
+            run_git(&["push", "--force-with-lease", "origin", branch], &peer);
+            env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
+            let merged = svc.coordination(Parameters(request)).await
+                .expect("a reviewed same-patch rebase must merge from the pushed tip");
+            assert!(get_text(&merged).contains("Merged worktree"), "{}", get_text(&merged));
+            assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(rebased_tip.as_str()));
+            let landed = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+            assert_ne!(landed, before);
+            assert_eq!(landed, git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/peer"]));
+            assert!(git_stdout(&repo.root, &["show", "epic/peer:delivery.rs"]).contains("delivered"));
+            env.set_current_dir(&fixture_cwd);
+            continue;
+        }
         if branch == "delivery/reviewed-correction" {
             let refused = svc.coordination(Parameters(request)).await
                 .expect_err("an unsupported recorded name needs an actionable supervisor remedy");

@@ -888,8 +888,10 @@ branch, and that per-task branch with a recovery suffix are supported. Cassy
 derives the base from the unchanged target and refuses foreign task history;
 callers cannot supply a base that hides commits. The old branch/base/observed tip,
 new binding, approving supervisor and reason are recorded together. A missing
-old ref is recorded as unavailable. Repeating the same binding leaves its base
-and audit unchanged. Rebinding does not change Git, assignment, leases or claims,
+old ref is recorded as unavailable. After a history rewrite, rebinding the same
+branch name refreshes its obsolete base or unreachable anchor with the same audit.
+Repeating an unchanged binding leaves its base and audit unchanged. Rebinding does
+not change Git, assignment, leases or claims,
 and it does not waive proof, merge, QA or verification. The worker closes normally;
 the supervisor merges the recorded branch with an explicit task id.
 

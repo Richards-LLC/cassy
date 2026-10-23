@@ -292,6 +292,7 @@ pub fn create(
             is_managed_checkout(&cas, &path),
             "review checkout head or ownership changed"
         );
+        discard_legacy_seed_stage(&directory, &path, &lock)?;
         ensure!(
             git(&path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
             "review checkout has source changes; preserve them before retrying"
@@ -374,6 +375,25 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     }
     owner(cas, directory)
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
+}
+
+fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> Result<()> {
+    let staging = checkout.join(".target-seed-in-progress");
+    let metadata = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "legacy review seed stage is not a directory"
+    );
+    ensure!(
+        !crate::factory_target_cache::review_output_in_use(directory, lock),
+        "legacy review seed stage may still be in use"
+    );
+    fs::remove_dir_all(staging)?;
+    Ok(())
 }
 
 /// Resolve the task's assigned worker rather than another dispatch's output.
@@ -517,7 +537,7 @@ pub(crate) fn pending_reclaim_bytes(cas: &Path) -> u64 {
         .into_iter()
         .flat_map(|task| entries(&task))
         .filter_map(|directory| trash(cas, &directory).ok().flatten())
-        .map(|path| bytes(&path.join("target"), None))
+        .map(|path| freeable_bytes(&path.join("target")))
         .sum()
 }
 
@@ -552,9 +572,32 @@ fn bytes(path: &Path, limit: Option<u64>) -> u64 {
     size
 }
 
+fn freeable_file_bytes(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            return 0;
+        }
+    }
+    metadata.len()
+}
+
+fn freeable_bytes(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| freeable_file_bytes(&metadata))
+        .fold(0u64, u64::saturating_add)
+}
+
 #[derive(Default)]
 struct ReviewBytes {
     total: u64,
+    reclaimable: u64,
     target: u64,
     pending: u64,
 }
@@ -572,10 +615,12 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
     {
         if let Ok(metadata) = entry.metadata() {
             sizes.total = sizes.total.saturating_add(metadata.len());
+            let freeable = freeable_file_bytes(&metadata);
+            sizes.reclaimable = sizes.reclaimable.saturating_add(freeable);
             if entry.path().starts_with(&target) {
-                sizes.target = sizes.target.saturating_add(metadata.len());
+                sizes.target = sizes.target.saturating_add(freeable);
             } else if entry.path().starts_with(&pending) {
-                sizes.pending = sizes.pending.saturating_add(metadata.len());
+                sizes.pending = sizes.pending.saturating_add(freeable);
             }
         }
     }
@@ -647,6 +692,9 @@ fn reclaim(
             )? == expected,
             "review Git registration belongs to another repository"
         );
+        if clean {
+            discard_legacy_seed_stage(directory, &checkout, &lock)?;
+        }
         ensure!(
             git(
                 &checkout,
@@ -699,7 +747,7 @@ fn reclaim(
         return Ok(("target queued; source retained", 0));
     }
     let queued_bytes = queued.as_ref().map_or(0, |path| {
-        measured.map_or_else(|| bytes(&path.join("target"), None), |sizes| sizes.pending)
+        measured.map_or_else(|| freeable_bytes(&path.join("target")), |sizes| sizes.pending)
     });
     if clean && let Some(path) = &queued {
         // Keep ownership durable until every payload byte is gone. A verifier
@@ -750,7 +798,7 @@ fn reclaim(
             "review target contains tracked source"
         );
         let size = measured
-            .map_or_else(|| bytes(&target, None), |sizes| sizes.target)
+            .map_or_else(|| freeable_bytes(&target), |sizes| sizes.target)
             .saturating_add(queued_bytes);
         if clean {
             fs::remove_dir_all(&target)?;
@@ -765,8 +813,8 @@ fn reclaim(
         ));
     }
     let size = measured.map_or_else(
-        || bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 }),
-        |sizes| sizes.total,
+        || freeable_bytes(directory).saturating_add(if clean { queued_bytes } else { 0 }),
+        |sizes| sizes.reclaimable,
     );
     if !clean {
         return Ok(("reclaimable", size));
@@ -993,6 +1041,27 @@ pub(crate) fn unmanaged_large(cas: &Path) -> String {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[cfg(unix)]
+    #[test]
+    fn review_bytes_excludes_hardlinks_retained_by_worker_cas_2ffc() {
+        let root = tempfile::tempdir().unwrap();
+        let review = root.path().join("review");
+        let target = review.join("repo/target");
+        let pending = review.join("trash/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        let worker = root.path().join("worker-artifact");
+        fs::write(&worker, b"shared-byte").unwrap();
+        fs::hard_link(&worker, target.join("shared")).unwrap();
+        fs::hard_link(&worker, pending.join("shared")).unwrap();
+        fs::write(target.join("private"), b"free").unwrap();
+        let sizes = review_bytes(&review);
+        assert_eq!(sizes.total, 26, "logical row size includes every path");
+        assert_eq!(sizes.target, 4, "deleting the target frees only private bytes");
+        assert_eq!(sizes.pending, 0, "shared pending bytes remain in the worker");
+        assert_eq!(sizes.reclaimable, 4, "full review deletion retains worker inode");
+    }
 
     #[test]
     fn write_owner_syncs_directory_after_rename_cas_a271() {

@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.75.0] - 2026-10-23
+
+### Added
+
+- **Project progress words** — Let terminal QA accept project-declared progress nouns through repeatable `--progress-noun` flags or the `progressNouns` option, and treat the single-character `…` like `...`; cut words, column gaps, trailing counters and undeclared nouns still fail.
+
+### Fixed
+
+- **Dead session cleanup** — Take one runtime inventory per `cas update` for every project, and outside dry run reap owned, unchanged dead session records whose GUI endpoint is refused or missing; Linux keeps its socket-holder checks, macOS leaves socket paths in place, and a session change during the run asks for a rerun.
+
+- **Rebased fix-forward merges** — Merge a parked delivery whose remote branch was rebased to an equivalent tip without a manual Git merge, and name a suggested task branch only when it exists, never with a doubled task suffix.
+
+- **Recorded branch remedies** — Name `request_changes` or `rebind_branch` when a recorded delivery branch has an unsupported name, prefer a per-task branch over the bare worker branch, let receipt-backed resume run after source branches are removed, and name the requested branch and tip in an origin-only stale-tip refusal.
+
+- **Blocked delivery rebinding** — Refuse `rebind_branch` on a Blocked task that still has a parked delivery and name `request_changes` as the remedy, preserving its evidence until review.
+
+- **Same-branch parked closes** — Close a parked task from a validated, integrated commit receipt after its worker started another task on the same branch name, and treat a parked task reference already contained in the target as integrated rather than never pushed; foreign, empty and unmerged receipts still refuse.
+
+- **Review build seeding** — Copy mutable build-script outputs into seeded review targets instead of hardlinking them, recover orphaned seed stages, and count reclaimable bytes in GC only for files that deletion actually frees.
+
+- **Ignored signals stay ignored** — Keep a signal the parent process ignored (such as SIGHUP under nohup) ignored in the factory client, and poll its signal watcher every 100 ms instead of 20 ms.
+
+- **Successful pulls stay successful** — List a failed read of advisory skipped-close warnings among the pull's errors instead of reporting an already-applied cloud pull as failed; document the three policy skips that do not repeat that warning.
+
+- **Codex readiness paths** — Escape unsafe and invisible characters in Codex trust readiness messages for untrusted directories and unparsable configuration, using one shared character policy for hook and CLI diagnostics.
+
+- **Tests mounted beside a directory** — Count a test mounted by a parent file beside the test's directory toward that parent's proof scope, and refuse an alias mounted by two parents with a diagnostic naming both files.
+
+- **Report links on other default branches** — Point release report source and print-edition links at the repository's default branch instead of `main`.
+
+- **Release PDF assets table** — Keep the release report's assets table header with its first row, and flag an orphaned assets header in the PDF check.
+
+- **Prompt prebuild refusals** — Decline a release prebuild at once on a definite 401, 403 or 404 artifacts-query failure with a distinct reason, while rate limits, 408, 5xx, network errors and timeouts still retry; a final run-list failure reports its own cause.
+
+- **Version placeholders in drafts** — Accept the supported `{{VERSION}}` placeholder when linting a release draft before publication, while strict validation and posting still reject every unresolved token.
+
 ## [3.74.0] - 2026-10-22
 
 ### Added

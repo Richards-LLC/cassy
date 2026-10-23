@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated for the 3.74 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.75 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -76,7 +76,8 @@
 
 ## Factory runtime and terminals
 
-- `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/app/init.rs` - TUI state, startup wiring and warm target seeding.
+- `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/app/init.rs` - TUI state, startup wiring and warm target seeding (copied build outputs, orphan seed-stage recovery).
+- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session.rs` - attach client signal guard and session records reaped by update.
 - `cas-cli/src/ui/factory/app/provisioning.rs`, `cas-cli/src/ui/factory/app/render_and_ops/` - provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup delivery, events, probes, relays and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs` - lifecycle-owned Slack intake and pause control.
@@ -88,12 +89,13 @@
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_binary_skew.rs`, `cas-cli/src/history/epochs.rs` - live binary/version identity and runtime epoch history.
 - `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_build_guard.rs` - scratch paths and build-pressure admission.
-- `cas-cli/src/factory_review_scratch.rs` - review proof checkouts, inherited Cargo flags, assigned-target reuse and GC.
+- `cas-cli/src/factory_review_scratch.rs` - review proof checkouts, inherited Cargo flags, assigned-target reuse and GC freeable-inode accounting.
 - `cas-cli/src/factory_worker_check.rs` - capped checks/tests, receipt rebinding and supervisor-recorded evidence.
 - `cas-cli/src/factory_target_cache.rs`, `cas-cli/src/factory_target_cache/` - cache inventory/GC, ownership, baselines and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch, readiness and terminal snapshots.
 - `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, input injection and submit gating.
 - `crates/cas-pty/src/store_isolation.rs`, `crates/cas-pty/conformance/` - credential-store masking and harness conformance proofs.
+- `crates/cas-pty/src/display.rs` - shared terminal character policy for hook/readiness labels and CLI Git remedies.
 
 ## MCP and transport
 
@@ -135,7 +137,7 @@
 - **Contributor policy:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`.
 - **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs`; **release records:** `docs/release-notes/`, `docs/release-reports/`.
 - **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs, locale/width captures and `docs/design/cli/captures/`.
-- **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `cas-cli/src/cli/release_report.rs`.
+- **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/find-release-prebuild.sh`, `cas-cli/src/cli/release_report.rs`, `cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.
 - **Process-proof safety:** `scripts/run-verified-tests.sh`, `scripts/test-factory-client-terminal.py` - bounded discovery/process groups and PTY exit fixtures.
 - **Doc validation:** `scripts/check-changed-markdown.py`, `scripts/check-design-paths.py`, `scripts/release-train-announce.py` - Markdown, portable paths and four-body draft checks.

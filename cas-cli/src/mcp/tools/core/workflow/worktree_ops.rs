@@ -1643,7 +1643,7 @@ fn task_delivery_branch_matches(branch: &str, worker: &str, task_id: &str) -> bo
 }
 
 /// Read-only Git discovery, bounded just like the subsequent exact-branch fetch.
-fn merge_source_refs(repo: &Path, args: &[&str]) -> Result<Vec<String>, McpError> {
+fn merge_source_output(repo: &Path, args: &[&str]) -> Result<String, McpError> {
     let mut command = Command::new("git");
     command.args(args).current_dir(repo).env("GIT_TERMINAL_PROMPT", "0");
     let output = crate::worktree::GitOperations::run_command_bounded(
@@ -1662,10 +1662,31 @@ fn merge_source_refs(repo: &Path, args: &[&str]) -> Result<Vec<String>, McpError
             data: None,
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| {
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn merge_source_refs(repo: &Path, args: &[&str]) -> Result<Vec<String>, McpError> {
+    Ok(merge_source_output(repo, args)?.lines().filter_map(|line| {
         // ls-remote emits SHA<TAB>ref; for-each-ref emits just the ref.
         line.split_whitespace().last()?.strip_prefix("refs/heads/").map(str::to_owned)
     }).collect())
+}
+
+/// Requested origin refs must be read live, never from a stale tracking cache.
+fn requested_merge_source_tip(repo: &Path, branch: &str, origin_only: bool) -> Result<Option<String>, McpError> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    if !origin_only && let Some(tip) = git.resolve_commit(&format!("refs/heads/{branch}")) {
+        return Ok(Some(tip));
+    }
+    if !git.has_origin_remote() {
+        return Ok(None);
+    }
+    let refname = format!("refs/heads/{branch}");
+    Ok(merge_source_output(repo, &["ls-remote", "--heads", "origin", &refname])?
+        .lines().find_map(|line| {
+            let (tip, name) = line.split_once('\t')?;
+            (name == refname).then(|| tip.to_string())
+        }))
 }
 
 /// cas-7ce6: the branch that holds a parked task's reviewed `anchor`.
@@ -1697,10 +1718,12 @@ fn parked_merge_source(
     }
     let suffix = format!("-{task_id}");
     let candidate = (!source.ends_with(&suffix)).then(|| format!("{source}{suffix}"));
+    let mut candidate_exists = false;
     if let Some(candidate) = candidate.as_deref() {
         let local = git.resolve_commit(&format!("refs/heads/{candidate}"));
         let remote = git.resolve_commit(&format!("refs/remotes/origin/{candidate}"));
         let found = local.clone().or(remote);
+        candidate_exists = found.is_some();
         let usable = found.as_deref() == Some(anchor_sha.as_str());
         if usable {
             if local.is_none() {
@@ -1717,11 +1740,20 @@ fn parked_merge_source(
             "PARKED DELIVERY SOURCE MOVED: {source} @ {tip} has advanced past {task_id}'s parked branch_tip {anchor_sha}. Re-park the pushed, validated source before merging, or use a delivery branch at the exact parked tip. No merge was attempted."
         ));
     }
+    let remedy = if candidate.is_none() {
+        format!(
+            "Restore this task's pushed delivery on the existing {source} branch, re-park it with checks, then retry (`worktree_merge id={source} task_id={task_id}`)."
+        )
+    } else if let Some(branch) = candidate.as_deref().filter(|_| candidate_exists) {
+        format!(
+            "Restore the reviewed delivery on the existing {branch} branch, re-park it with checks, then retry (`worktree_merge id={branch} task_id={task_id}`)."
+        )
+    } else {
+        "Restore the reviewed delivery on a pushed task-owned branch and re-park it with checks before retrying with that branch.".to_string()
+    };
     Err(format!(
         "⚠️ PARKED DELIVERY NOT ON SOURCE: {source} @ {} does not contain {task_id}'s reviewed \
-         anchor {anchor}; the worker has likely moved it on to its next task. Merge the task's \
-         own delivery branch instead (`worktree_merge id={source}{suffix} task_id={task_id}`), \
-         after pushing the anchor there if it is missing. No merge was attempted.",
+         anchor {anchor}. {remedy} No merge was attempted.",
         &tip[..tip.len().min(12)]
     ))
 }
@@ -3519,25 +3551,13 @@ impl CasCore {
         Ok((Box::new(task), worker))
     }
 
-    /// A server-recorded delivery keeps its assignee even when the approved
-    /// branch has a recovery suffix that cannot be parsed as a worker name.
-    fn recorded_task_merge_source(
-        &self, task: &cas_types::Task, branch: &str,
-    ) -> Result<Option<(String, String)>, McpError> {
-        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
-            return Ok(None);
-        };
-        if start.branch != branch
-            || task.assignee.as_deref() != Some(start.assignee.as_str())
-            || task.deliverables.work_target.as_ref() != Some(&start.work_target)
-        {
-            return Ok(None);
-        }
-        let agents = self.open_agent_store()?;
-        let worker = crate::mcp::tools::core::task::resolve_agent_identity(
-            agents.as_ref(), &start.assignee,
-        ).map(|agent| agent.name).unwrap_or_else(|| start.assignee.clone());
-        Ok(Some((worker, branch.to_string())))
+    /// An exact recorded branch is bound to its recorded owner and target.
+    fn recorded_task_merge_source(task: &cas_types::Task, branch: &str) -> bool {
+        task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+            start.branch == branch
+                && task.assignee.as_deref() == Some(start.assignee.as_str())
+                && task.deliverables.work_target.as_ref() == Some(&start.work_target)
+        })
     }
 
     /// Prefer the task's recorded source, discovering names only if it is absent.
@@ -3564,12 +3584,12 @@ impl CasCore {
         let requested = id.strip_prefix("origin/").unwrap_or(id);
         if requested != anchor && !identity_belongs_to_worker(requested, &assignee, agents.as_ref())
             && !task_delivery_branch_matches(requested, &assignee, &task.id)
-            && self.recorded_task_merge_source(task, requested)?.is_none()
+            && !Self::recorded_task_merge_source(task, requested)
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
-                    "worktree_merge authorization failed: source {id} does not belong to worker {assignee} and task {}. No merge was attempted.", task.id,
+                    "worktree_merge authorization failed: source {id} does not belong to worker {assignee} and task {}. No merge was attempted. For a recorded legacy name, use task action=request_changes, restore its anchor on the assigned worker's owned task branch, then task action=rebind_branch with supervisor approval.", task.id,
                 )),
                 data: None,
             });
@@ -3578,12 +3598,12 @@ impl CasCore {
         let recorded = task.deliverables.parked_branch.as_deref().filter(|b| !b.trim().is_empty());
         if let Some(branch) = recorded {
             if !task_delivery_branch_matches(branch, &assignee, &task.id)
-                && self.recorded_task_merge_source(task, branch)?.is_none()
+                && !Self::recorded_task_merge_source(task, branch)
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "worktree_merge authorization failed: recorded source {branch} does not belong to worker {assignee} and task {}.", task.id,
+                        "worktree_merge authorization failed: recorded source {branch} does not belong to worker {assignee} and task {}. Use task action=request_changes, restore its anchor on the assigned worker's owned task branch, then task action=rebind_branch with supervisor approval.", task.id,
                     )),
                     data: None,
                 });
@@ -3607,6 +3627,10 @@ impl CasCore {
         branches.retain(|branch| task_delivery_branch_matches(branch, &assignee, &task.id));
         branches.sort();
         branches.dedup();
+        let bare = format!("factory/{assignee}");
+        if branches.iter().any(|branch| branch != &bare) {
+            branches.retain(|branch| branch != &bare);
+        }
         if branches.len() != 1 {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -3641,10 +3665,10 @@ impl CasCore {
         };
         let Some(selected) = selected else { return Ok(None); };
         let branch = selected.branch.as_str();
-        let anchor = selected.anchor.as_str();
+        let recorded_anchor = selected.anchor.as_str();
         let assignee = selected.assignee.clone();
         // Live local workers retain their existing merge/dirty-tree policy.
-        if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
+        if id != recorded_anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
             return Ok(None);
         }
         let refuse = |detail: String| McpError {
@@ -3654,11 +3678,11 @@ impl CasCore {
             )),
             data: None,
         };
-        if anchor.len() != 40
-            || !anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
+        if recorded_anchor.len() != 40
+            || !recorded_anchor.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(refuse(format!(
-                "task {} requires its recorded factory branch {branch} or exact anchor {anchor}",
+                "task {} requires its recorded factory branch {branch} or exact anchor {recorded_anchor}",
                 task.id
             )));
         }
@@ -3684,21 +3708,61 @@ impl CasCore {
         let pushed_ref = format!("refs/remotes/origin/{branch}");
         git.fetch_branch(&format!("+refs/heads/{branch}:{pushed_ref}"))
             .map_err(|error| refuse(format!("cannot fetch recorded origin/{branch}: {error}")))?;
-        if git.resolve_commit(&pushed_ref).as_deref() != Some(anchor) {
-            return Err(refuse(format!(
-                "origin/{branch} does not match task {} anchor {anchor}",
-                task.id
-            )));
+        let pushed_tip = git.resolve_commit(&pushed_ref)
+            .ok_or_else(|| refuse(format!("origin/{branch} did not resolve after fetch")))?;
+        let mut anchor = recorded_anchor.to_string();
+        if pushed_tip != anchor {
+            let parent_branch = &task.deliverables.work_target.as_ref()
+                .expect("filtered work target").target_branch;
+            let target = crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(
+                manager.repo_root(), parent_branch,
+            );
+            if git.is_ancestor(recorded_anchor, &pushed_tip)
+                || !crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
+                    manager.repo_root(), recorded_anchor, &pushed_tip, &target, &task.id,
+                )
+            {
+                return Err(refuse(format!(
+                    "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,
+                )));
+            }
+            let store = self.open_task_store()?;
+            self.advance_awaiting_merge_anchor(
+                store.as_ref(), task, manager.repo_root(), parent_branch, Some(&pushed_tip),
+            ).map_err(|error| refuse(format!("cannot rebind rebased delivery anchor: {error}")))?;
+            let rebound = store.get(&task.id)
+                .map_err(|error| refuse(format!("cannot reload rebased delivery anchor: {error}")))?;
+            if rebound.deliverables.factory_branch_anchor.as_deref() != Some(pushed_tip.as_str()) {
+                return Err(refuse(format!(
+                    "origin/{branch} does not match task {} anchor {recorded_anchor}", task.id,
+                )));
+            }
+            anchor = pushed_tip;
         }
         let local_ref = format!("refs/heads/{branch}");
         match git.resolve_commit(&local_ref) {
+            Some(local) if local == recorded_anchor && anchor != recorded_anchor => {
+                // Only the exact retired anchor may be moved. Git refuses a
+                // branch checked out in any worktree; never reset that checkout.
+                let output = Command::new("git")
+                    .args(["branch", "-f", branch, &anchor])
+                    .current_dir(manager.repo_root())
+                    .output()
+                    .map_err(|error| refuse(format!("cannot update local {branch}: {error}")))?;
+                if !output.status.success() {
+                    return Err(refuse(format!(
+                        "cannot update local {branch}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    )));
+                }
+            }
             Some(local) if local != anchor => {
                 return Err(refuse(format!(
                     "local {branch} disagrees with origin and the recorded anchor; reconcile the refs explicitly"
                 )));
             }
             None => {
-                git.create_branch_from(branch, anchor).map_err(|error| {
+                git.create_branch_from(branch, &anchor).map_err(|error| {
                     refuse(format!(
                         "cannot bind local {branch} to its pushed anchor: {error}"
                     ))
@@ -3706,7 +3770,7 @@ impl CasCore {
             }
             _ => {}
         }
-        if git.resolve_commit(&local_ref).as_deref() != Some(anchor) {
+        if git.resolve_commit(&local_ref).as_deref() != Some(anchor.as_str()) {
             return Err(refuse(format!(
                 "local {branch} moved while resolving the pushed delivery"
             )));
@@ -3714,7 +3778,7 @@ impl CasCore {
         Ok(Some(RemoteMergeSource {
             assignee,
             branch: branch.into(),
-            anchor: anchor.into(),
+            anchor,
         }))
     }
     /// Merge worktree back to parent
@@ -3994,9 +4058,17 @@ impl CasCore {
             data: None,
         })?;
 
-        // A transactional receipt with no legacy parked branch already binds
-        // its source and may resume after all source refs were cleaned up.
-        let task_source = if system_a.is_none()
+        // Post-merge receipt resumes must reach ancestry/content checks even
+        // when legacy park metadata names a branch cleanup already removed.
+        let receipt_resume = transactional_delivery.as_ref().filter(|(_, transaction)| {
+            matches!(transaction.state,
+                cas_types::WorkerDeliveryState::Merged | cas_types::WorkerDeliveryState::CloseReady)
+        }).map(|(receipt, _)| RemoteMergeSource {
+            assignee: receipt.worker_name.clone(),
+            branch: receipt.source_branch.clone(),
+            anchor: receipt.commit_sha.clone(),
+        });
+        let task_source = if system_a.is_none() && receipt_resume.is_none()
             && (transactional_delivery.is_none()
                 || scoped_task.as_deref().is_some_and(|task| task.deliverables.parked_branch.is_some()))
         {
@@ -4012,20 +4084,22 @@ impl CasCore {
             && let Some(source) = task_source.as_ref()
             && requested_branch.starts_with("factory/")
             && requested_branch != source.branch
-            && manager.git().resolve_commit(&format!("refs/heads/{requested_branch}"))
-                .is_some_and(|tip| tip != source.anchor)
+            && let Some(requested_tip) = requested_merge_source_tip(&cwd, requested_branch, id.starts_with("origin/"))?
+            && requested_tip != source.anchor
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
-                    "PARKED DELIVERY SOURCE CHANGED: the requested branch has a different tip. Retry with recorded branch {} at {}. No merge was attempted.",
+                    "PARKED DELIVERY SOURCE CHANGED: requested branch {} at {} has a different tip. Retry with recorded branch {} at {}. No merge was attempted.",
+                    crate::worktree::GitOperations::visible_git_label(requested_branch),
+                    crate::worktree::GitOperations::visible_git_label(&requested_tip),
                     crate::worktree::GitOperations::visible_git_label(&source.branch),
                     crate::worktree::GitOperations::visible_git_label(&source.anchor),
                 )),
                 data: None,
             });
         }
-        let remote_source = if system_a.is_none() {
+        let remote_source = if system_a.is_none() && receipt_resume.is_none() {
             self.prepare_remote_merge_source(
                 &manager, scoped_task.as_deref(), id, cleanup, task_source.as_ref(),
             )?
@@ -4038,7 +4112,7 @@ impl CasCore {
         // or was waived for the exact tip being merged.
         if let Some(task_id) = task_id
             && let Some(refusal) = self.independent_qa_merge_refusal(
-                task_id, task_source.as_ref().map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
+                task_id, task_source.as_ref().or(receipt_resume.as_ref()).map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
             )
         {
             return Err(McpError {
@@ -4075,6 +4149,11 @@ impl CasCore {
                     let (assignee, source_branch) = remote_source.as_ref()
                         .map(|source| (source.assignee.clone(), source.branch.clone()))
                         .or_else(|| task_source.as_ref().map(|source| (source.assignee.clone(), source.branch.clone())))
+                        .or_else(|| receipt_resume.as_ref().filter(|source| {
+                            let requested = id.strip_prefix("origin/").unwrap_or(id);
+                            requested == source.branch || requested == source.anchor
+                                || requested == source.assignee || requested == format!("factory/{}", source.assignee)
+                        }).map(|source| (source.assignee.clone(), source.branch.clone())))
                         .or_else(|| implicit_delivery.as_ref().map(|(task, worker)| (
                             worker.clone(), task.deliverables.parked_branch.clone().expect("validated parked branch"),
                         )))
@@ -7229,6 +7308,33 @@ mod cas_7ce6_parked_merge_source_tests {
     }
 
     #[test]
+    fn rebased_task_branch_rebinds_and_refusal_names_existing_branch_cas_5517() {
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let (repo, mut task, tip) = rebased_lane();
+        let branch = "factory/w-cas-park";
+        git(repo.path(), &["branch", branch, &tip]);
+        task.deliverables.parked_branch = Some(branch.into());
+        let git_ops = GitOperations::new(repo.path().to_path_buf());
+        let old_anchor = task.deliverables.factory_branch_anchor.as_deref().unwrap();
+        let refusal = parked_merge_source(&git_ops, branch, &task.id, old_anchor)
+            .expect_err("a stale anchor must not authorize a direct merge");
+        assert!(refusal.contains(&format!("id={branch} task_id={}", task.id)), "{refusal}");
+        assert!(!refusal.contains(&format!("{branch}-{}", task.id)), "{refusal}");
+        assert_eq!(git(repo.path(), &["rev-parse", branch]), tip);
+
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let core = crate::mcp::CasCore::with_daemon(repo.path().join(".cas"), None, None);
+        assert_eq!(core.parked_merge_source_for_task(&store, repo.path(), branch, "main", &task), Ok(None));
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+        git(repo.path(), &["checkout", "-q", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "-m", "integrate", branch]);
+        assert!(repo.path().join("parked").is_file());
+        assert!(repo.path().join("parked-second").is_file());
+        assert!(repo.path().join("target-update").is_file());
+    }
+
+    #[test]
     fn rebased_content_change_keeps_anchor_and_refuses_merge_cas_e833() {
         use cas_store::TaskStore;
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -7363,13 +7469,32 @@ mod cas_7ce6_parked_merge_source_tests {
         let ops = GitOperations::new(path.to_path_buf());
         git(path, &["reset", "-q", "--hard", "main"]);
         commit(path, "next-task");
+        // A named task branch exists, but needs the reviewed delivery restored.
+        git(path, &["branch", "factory/w-cas-park"]);
         let refusal = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
             .expect_err("source lacks the anchor");
         assert!(refusal.contains(&anchor), "{refusal}");
         assert!(refusal.contains("id=factory/w-cas-park task_id=cas-park"), "{refusal}");
 
+        // An origin-only task branch is still an existing recovery branch.
+        git(path, &["branch", "-D", "factory/w-cas-park"]);
+        let wrong_tip = git(path, &["rev-parse", "HEAD"]);
+        git(path, &["update-ref", "refs/remotes/origin/factory/w-cas-park", &wrong_tip]);
+        let remote = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
+            .expect_err("origin task branch needs the reviewed delivery restored");
+        assert!(remote.contains("id=factory/w-cas-park task_id=cas-park"), "{remote}");
+
+        // No branch name is suggested when the task branch is absent.
+        git(path, &["update-ref", "-d", "refs/remotes/origin/factory/w-cas-park"]);
+        let missing = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
+            .expect_err("no task branch exists");
+        assert!(!missing.contains("id=factory/w-cas-park"), "{missing}");
+
         // A per-task source is never re-suffixed.
         git(path, &["checkout", "-qb", "factory/w-cas-park"]);
-        assert!(parked_merge_source(&ops, "factory/w-cas-park", "cas-park", &anchor).is_err());
+        let per_task = parked_merge_source(&ops, "factory/w-cas-park", "cas-park", &anchor)
+            .expect_err("per-task source lacks the anchor");
+        assert!(per_task.contains("id=factory/w-cas-park task_id=cas-park"), "{per_task}");
+        assert!(!per_task.contains("factory/w-cas-park-cas-park"), "{per_task}");
     }
 }

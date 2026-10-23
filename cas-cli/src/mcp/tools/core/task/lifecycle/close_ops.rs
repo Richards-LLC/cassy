@@ -949,6 +949,8 @@ pub(crate) struct SourceModule {
     segments: Vec<String>,
     /// Actual parent module of a mounted sibling test; display stays physical.
     test_parent: Option<Vec<String>>,
+    /// Distinct mounting files when no single parent alias can be trusted.
+    ambiguous_test_parents: Vec<String>,
 }
 
 impl SourceModule {
@@ -2054,7 +2056,7 @@ impl SiblingTestParents {
 
     /// Resolve a sibling only through an explicit AST mount whose canonical
     /// target is the changed file. Comments and lookalike names prove nothing.
-    fn parent(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
+    fn parents(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
         let file = std::path::Path::new(path);
         let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
         if parent_name.is_empty() {
@@ -2077,11 +2079,16 @@ impl SiblingTestParents {
                 candidates.sort();
                 candidates
             });
+        // A parent beside the test directory can mount directory/*_tests.rs.
+        let adjacent_parent = directory.parent()?
+            .join(format!("{}.rs", directory.file_name()?.to_str()?));
+        let mut parents = std::collections::BTreeSet::new();
         // Keep conventional foo/mod.rs mounts, including ../foo_tests.rs.
         for parent in candidates
             .iter()
             .cloned()
             .chain(std::iter::once(directory.join(parent_name).join("mod.rs")))
+            .chain(std::iter::once(adjacent_parent))
         {
             if parent == file {
                 continue;
@@ -2102,13 +2109,9 @@ impl SiblingTestParents {
             if !mounts.contains(&changed_file) {
                 continue;
             }
-            let normalized = parent.to_str()?.replace('\\', "/");
-            let (_, source) = normalized.split_once("/src/")?;
-            let source = source.strip_suffix(".rs")?;
-            let source = source.strip_suffix("/mod").unwrap_or(source);
-            return Some(source.split('/').map(str::to_string).collect());
+            parents.insert(parent.to_str()?.replace('\\', "/"));
         }
-        None
+        Some(parents.into_iter().collect())
     }
 }
 
@@ -2132,6 +2135,24 @@ pub(crate) fn changed_source_modules(
             continue;
         };
         let source = source.strip_suffix("/mod").unwrap_or(source);
+        let parents = if normalized.ends_with("_tests.rs") {
+            sibling_tests
+                .get_or_insert_with(SiblingTestParents::new)
+                .parents(proof_repo, &normalized)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let test_parent = if let [parent] = parents.as_slice() {
+            parent.split_once("/src/")
+                .and_then(|(_, source)| source.strip_suffix(".rs"))
+                .map(|source| {
+                    source.strip_suffix("/mod").unwrap_or(source)
+                        .split('/').map(str::to_string).collect()
+                })
+        } else {
+            None
+        };
         modules.insert(SourceModule {
             crate_dir: crate_path
                 .rsplit('/')
@@ -2139,12 +2160,11 @@ pub(crate) fn changed_source_modules(
                 .unwrap_or(crate_path)
                 .to_ascii_lowercase(),
             segments: source.split('/').map(str::to_string).collect(),
-            test_parent: if normalized.ends_with("_tests.rs") {
-                sibling_tests
-                    .get_or_insert_with(SiblingTestParents::new)
-                    .parent(proof_repo, &normalized)
+            test_parent,
+            ambiguous_test_parents: if parents.len() > 1 {
+                parents
             } else {
-                None
+                Vec::new()
             },
         });
     }
@@ -2169,18 +2189,42 @@ pub(crate) fn uncovered_blast_radius_modules(
     changed_paths: &[String],
     proof_targets: &[String],
 ) -> Vec<String> {
+    uncovered_blast_radius_scope(proof_repo, changed_paths, proof_targets).0
+}
+
+/// Keep proof-target module names separate from explanatory mount diagnostics.
+fn uncovered_blast_radius_scope(
+    proof_repo: &std::path::Path,
+    changed_paths: &[String],
+    proof_targets: &[String],
+) -> (Vec<String>, String) {
     let proof_targets = cas_types::normalize_proof_targets(proof_targets);
     let mut uncovered = Vec::new();
+    let mut ambiguities = Vec::new();
     for module in changed_source_modules(proof_repo, changed_paths) {
         let covered = proof_targets
             .iter()
             .any(|target| proof_target_matches_module(target, &module));
         let name = module.display();
         if !covered && !uncovered.contains(&name) {
+            if !module.ambiguous_test_parents.is_empty() {
+                ambiguities.push(format!(
+                    "{name} (mounting parents: {})",
+                    module.ambiguous_test_parents.join(", "),
+                ));
+            }
             uncovered.push(name);
         }
     }
-    uncovered
+    let notice = if ambiguities.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; ambiguous test mounts: {}. Declare the physical test module explicitly",
+            ambiguities.join("; "),
+        )
+    };
+    (uncovered, notice)
 }
 
 fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
@@ -2272,12 +2316,13 @@ fn declared_risk_close_gaps(
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered =
-            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let (uncovered, notice) =
+            uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             gaps.push(format!(
-                "blast-radius uncovered source modules: {}",
-                uncovered.join(", ")
+                "blast-radius uncovered source modules: {}{}",
+                uncovered.join(", "),
+                notice,
             ));
         }
     }
@@ -2653,13 +2698,14 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered =
-            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let (uncovered, notice) =
+            uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. {}",
+                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}{}. {}",
                 task.id,
                 uncovered.join(", "),
+                notice,
                 proof_targets_scope_fix_command(task, &uncovered),
             ));
         }
@@ -7705,9 +7751,14 @@ impl CasCore {
         if let Some(receipt) = req.commit_receipt.as_deref()
             && task.deliverables.factory_branch_start.is_some()
         {
-            let lease_history = self.open_agent_store().ok()
-                .and_then(|store| store.get_lease_history(&req.id, None).ok())
-                .unwrap_or_default();
+            let lease_history = self.open_agent_store()
+                .map_err(|error| error.to_string())
+                .and_then(|store| store.get_lease_history(&req.id, None).map_err(|error| error.to_string()))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(task_id = %req.id, %error,
+                        "integrated receipt recovery could not read lease history; using the task-creation window");
+                    Vec::new()
+                });
             task_attribution::recover_stale_start_for_integrated_receipt(
                 &close_project_root, &mut task, receipt, &lease_history,
             );
@@ -10521,17 +10572,30 @@ impl CasCore {
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             if let Some(assignee) = task.assignee.as_deref() {
+                // A local parked ref need not have been published under its
+                // preservation name. Actual attributable, nonempty content
+                // integrated on the target is stronger proof than origin's
+                // tracking ref. Bare ancestry alone still proves nothing.
+                let recorded_anchor = anchored_parked_delivery_branch(&close_project_root, &task)
+                    .and(task.deliverables.factory_branch_anchor.as_deref());
+                let integrated_delivery = req.commit_receipt.as_deref().or(recorded_anchor)
+                    .zip(commit_receipt_window.as_ref())
+                    .is_some_and(|(receipt, window)| validate_task_commit_receipt(
+                        &close_project_root, receipt, &resolved_parent_branch, window,
+                    ).is_ok());
                 // cas-7efe: single close-time resolver, not a bare "main".
-                match check_factory_branch_merge_reality_with_delivery_mode(
-                    &close_project_root,
-                    assignee,
-                    &resolved_parent_branch,
-                    task.delivery_mode,
-                    Some(&task.id),
-                ) {
-                    MergeRealityOutcome::Proceed => {}
-                    MergeRealityOutcome::Refuse(msg) => {
-                        return Ok(Self::tool_error(msg));
+                if !integrated_delivery {
+                    match check_factory_branch_merge_reality_with_delivery_mode(
+                        &close_project_root,
+                        assignee,
+                        &resolved_parent_branch,
+                        task.delivery_mode,
+                        Some(&task.id),
+                    ) {
+                        MergeRealityOutcome::Proceed => {}
+                        MergeRealityOutcome::Refuse(msg) => {
+                            return Ok(Self::tool_error(msg));
+                        }
                     }
                 }
             }
@@ -14852,6 +14916,32 @@ fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> Strin
     )
 }
 
+/// Prefer a preservation ref to a reused lane only while its immutable anchor
+/// is integrated. A moved local branch must be measured live, never hidden by
+/// a stale origin ref; an unmerged old anchor cannot displace a current receipt.
+fn anchored_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Option<String> {
+    let parked = task.deliverables.parked_branch.as_deref()?;
+    let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
+    if !is_safe_git_refname(parked) {
+        return None;
+    }
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{parked}")) {
+        parked.to_string()
+    } else {
+        format!("origin/{parked}")
+    };
+    if resolve_branch_sha(repo, &branch).as_deref() != Some(anchor) {
+        return None;
+    }
+    let target = task.deliverables.work_target.as_ref()?.target_branch.trim();
+    if !is_safe_git_refname(target) {
+        return None;
+    }
+    [target.to_string(), format!("origin/{target}")].into_iter()
+        .any(|target| git_commit_is_ancestor(repo, anchor, &target))
+        .then_some(branch)
+}
+
 /// [`close_measured_factory_branch`], refusing instead of binding to another
 /// task's delivery (cas-93db). A worker's plain `factory/<assignee>` whose
 /// recent commits claim another task, and none this one, is that task's
@@ -14867,6 +14957,9 @@ pub(crate) fn resolve_close_delivery_branch(
 ) -> Result<String, String> {
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
+    }
+    if let Some(branch) = anchored_parked_delivery_branch(repo_path, task) {
+        return Ok(branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
         return Ok(branch);
@@ -32589,11 +32682,32 @@ esac
     /// cas-bdd2: the cas-cee5 cost shape. A four-path delivery is followed by
     /// a long merge-heavy history: every merge rewrites a line beside each
     /// delivered line, so each path's ownership walk takes `merge-base --all`
-    /// and two union diffs at every merge. One walk per path ran in sequence
-    /// with no memo (11.3s here at load ~10); the per-path walks now run
-    /// concurrently with merge bases memoized (2.9s), inside a tight budget.
+    /// and two union diffs at every merge. Count real merge-base commands
+    /// across paths instead of asserting elapsed time on a loaded runner.
     #[test]
     fn multi_path_delivery_across_a_merge_heavy_history_fits_a_tight_budget_cas_bdd2() {
+        const TRACE: &str = "CAS_TEST_BDD2_GIT_TRACE";
+        const MERGES: usize = 150;
+        let Some(trace) = std::env::var_os(TRACE) else {
+            // Git tracing is confined to this child, not the parallel suite's
+            // process environment. Reuse this case rather than add a helper test.
+            let capture = tempfile::tempdir().unwrap();
+            let trace = capture.path().join("git-trace.jsonl");
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp::tools::core::task::lifecycle::close_ops::merge_state_gate_tests::multi_path_delivery_across_a_merge_heavy_history_fits_a_tight_budget_cas_bdd2",
+                    "--nocapture",
+                ])
+                .env(TRACE, &trace)
+                .env("GIT_TRACE2_EVENT", &trace)
+                .output().unwrap();
+            assert!(child.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+                "child must execute the regression");
+            return;
+        };
         let dir = init_factory_repo("worker");
         let p = dir.path();
         let files = ["a.rs", "b.rs", "c.rs", "d.rs"];
@@ -32614,7 +32728,7 @@ esac
         let mut mark = 1;
         let mut mainline = delivery.clone();
         let blob = |file: &str, counter: usize| format!("delivered_{file}();\ncounter = {counter};\n");
-        for index in 0..150 {
+        for index in 0..MERGES {
             let side = mark;
             stream.push_str(&format!("commit refs/heads/side\nmark :{side}\n"));
             stream.push_str("committer fixture <fixture@example.test> 1767225600 +0000\n");
@@ -32647,22 +32761,32 @@ esac
             import.stdin.take().unwrap().write_all(stream.as_bytes()).unwrap();
         }
         assert!(import.wait().unwrap().success(), "fast-import failed");
-        let _budget =
-            crate::git_evidence::measurement::Scope::new(std::time::Duration::from_secs(6));
-        let started = std::time::Instant::now();
-        let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
-        // Measured at load ~10: 11.3s before (sequential walks), 2.9s after.
-        assert!(
-            !crate::git_evidence::measurement::expired(),
-            "the per-path walks exhausted their budget after {:?}: {presence:?}",
-            started.elapsed()
+        // Exclude fixture setup. Seed one path so concurrent cache misses in
+        // the subsequent four-path call cannot change the operation count.
+        // Without the cas-bdd2 memo, each remaining path repeats every merge.
+        std::fs::write(&trace, "").unwrap();
+        let first_path = vec![files[0].to_string()];
+        assert_eq!(
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false),
+            DeliveryContentPresence::Present { paths: first_path },
         );
+        let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
         assert_eq!(
             presence,
             DeliveryContentPresence::Present {
                 paths: files.iter().map(|file| file.to_string()).collect()
             }
         );
+        let events = std::fs::read_to_string(trace).unwrap();
+        let merge_bases = events.lines().map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("Git Trace2 JSON")
+        }).filter(|event| {
+            event["event"] == "start"
+                && event["argv"][1] == "merge-base" && event["argv"][2] == "--all"
+        }).count();
+        assert!((1..=MERGES).contains(&merge_bases),
+            "{merge_bases} merge-base calls for {MERGES} merges across {} paths; expected shared memoization",
+            files.len());
     }
 
     /// cas-bdd2: a merge tip whose resolution rebuilt a regenerable bundle and

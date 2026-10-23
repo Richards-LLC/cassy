@@ -228,17 +228,22 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
     std::fs::create_dir(&named).unwrap();
     let mut changed = Vec::new();
     task.proof_targets.clear();
-    for (parent, tests) in [
-        ("peers", "peers_scope_tests"),
-        ("peer_mailbox", "peer_mailbox_user_scope_tests"),
+    for (parent, tests, target) in [
+        ("peers", "peers_scope_tests", "named::peers"),
+        ("peer_mailbox", "peer_mailbox_user_scope_tests", "named::peer_mailbox"),
+        // cas-623f: match a tested child through the actual adjacent parent,
+        // not just the physical directory's already-covered ancestor path.
+        ("close_ops", "close_ops/blast_radius_park_tests", "named::close_ops::tests"),
     ] {
-        std::fs::write(named.join(format!("{tests}.rs")), "#[test] fn scoped() {}\n").unwrap();
+        let test_file = named.join(format!("{tests}.rs"));
+        std::fs::create_dir_all(test_file.parent().unwrap()).unwrap();
+        std::fs::write(test_file, "#[test] fn scoped() {}\n").unwrap();
         std::fs::write(
             named.join(format!("{parent}.rs")),
             format!("#[cfg(test)]\n#[path = \"{tests}.rs\"] mod tests;\n"),
         ).unwrap();
         changed.push(format!("cas-cli/src/named/{tests}.rs"));
-        task.proof_targets.push(format!("cas-cli named::{parent}"));
+        task.proof_targets.push(format!("cas-cli {target}"));
     }
     validate_risk_close_proofs_with_base_and_target_and_cache(
         &task, &changed, repo.path(), repo.path(), None, None,
@@ -254,6 +259,24 @@ fn declared_parent_covers_only_real_sibling_test_mounts_cas_ba56() {
         ["named::peers_scope_tests"],
         "a comment cannot claim a differently named sibling",
     );
+
+    // Two real mounting parents must not silently grant either parent's alias.
+    std::fs::write(
+        named.join("close_ops/alternate.rs"),
+        "#[path = \"blast_radius_park_tests.rs\"] mod tests;\n",
+    ).unwrap();
+    task.proof_targets.push("cas-cli named::close_ops::alternate::tests".into());
+    let error = validate_risk_close_proofs_with_base_and_target_and_cache(
+        &task, &changed[2..], repo.path(), repo.path(), None, None,
+        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
+    ).expect_err("competing mounts require explicit physical proof scope");
+    assert!(error.contains("named/close_ops.rs") && error.contains("named/close_ops/alternate.rs"),
+        "uncovered diagnostic must name both mounting parents: {error}");
+    task.proof_targets.push("cas-cli named::close_ops::blast_radius_park_tests".into());
+    validate_risk_close_proofs_with_base_and_target_and_cache(
+        &task, &changed[2..], repo.path(), repo.path(), None, None,
+        BuildProofs::DeferredToAssembly, &mut ScopedProofTargetCache::default(),
+    ).expect("an explicit physical module target resolves ambiguous parent aliases");
 }
 
 /// A parent's capped tests cover a mounted sibling and exercised child through

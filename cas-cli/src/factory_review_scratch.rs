@@ -1,4 +1,6 @@
 //! Disposable task/dispatch-owned proof checkouts shared by reviewers and GC.
+#[cfg(unix)]
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -158,7 +160,10 @@ fn stale_owner_temp(path: &Path) -> Result<bool> {
 /// flag arrays outside Git so Cargo keeps the same artifact identity, including
 /// its own target/cfg selection and environment override precedence.
 fn inherit_worker_rustflags(cas: &Path, directory: &Path) -> Result<()> {
-    let source = cas.parent().context("project root missing")?.join(".cargo/config.toml");
+    let source = cas
+        .parent()
+        .context("project root missing")?
+        .join(".cargo/config.toml");
     let mut inherited = toml::Table::new();
     match fs::read_to_string(source) {
         Ok(text) => {
@@ -168,17 +173,24 @@ fn inherit_worker_rustflags(cas: &Path, directory: &Path) -> Result<()> {
                     continue;
                 };
                 let flags = |table: &toml::Table| -> toml::Table {
-                    ["rustflags", "rustdocflags"].into_iter().filter_map(|key| {
-                        table.get(key).map(|value| (key.to_owned(), value.clone()))
-                    }).collect()
+                    ["rustflags", "rustdocflags"]
+                        .into_iter()
+                        .filter_map(|key| {
+                            table.get(key).map(|value| (key.to_owned(), value.clone()))
+                        })
+                        .collect()
                 };
                 let selected: toml::Table = if section == "build" {
                     flags(table)
                 } else {
-                    table.iter().filter_map(|(target, value)| {
-                        let selected = flags(value.as_table()?);
-                        (!selected.is_empty()).then(|| (target.clone(), toml::Value::Table(selected)))
-                    }).collect()
+                    table
+                        .iter()
+                        .filter_map(|(target, value)| {
+                            let selected = flags(value.as_table()?);
+                            (!selected.is_empty())
+                                .then(|| (target.clone(), toml::Value::Table(selected)))
+                        })
+                        .collect()
                 };
                 if !selected.is_empty() {
                     inherited.insert(section.to_owned(), toml::Value::Table(selected));
@@ -292,6 +304,7 @@ pub fn create(
             is_managed_checkout(&cas, &path),
             "review checkout head or ownership changed"
         );
+        discard_legacy_seed_stage(&directory, &path, &lock)?;
         ensure!(
             git(&path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
             "review checkout has source changes; preserve them before retrying"
@@ -376,6 +389,25 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
 }
 
+fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> Result<()> {
+    let staging = checkout.join(".target-seed-in-progress");
+    let metadata = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "legacy review seed stage is not a directory"
+    );
+    ensure!(
+        !crate::factory_target_cache::review_output_in_use(directory, lock),
+        "legacy review seed stage may still be in use"
+    );
+    fs::remove_dir_all(staging)?;
+    Ok(())
+}
+
 /// Resolve the task's assigned worker rather than another dispatch's output.
 /// Called only inside the review lane's existing build admission and lease.
 pub(crate) fn seed_target_from_worker(cas: &Path, checkout: &Path) -> Result<()> {
@@ -385,13 +417,22 @@ pub(crate) fn seed_target_from_worker(cas: &Path, checkout: &Path) -> Result<()>
     let record = owner(cas, checkout.parent().context("review directory missing")?)?;
     let task = crate::store::open_task_store(cas)?.get(&record.task_id)?;
     let agents = crate::store::open_agent_store(cas)?;
-    let worker = task.assignee.as_deref().and_then(|assignee| {
-        crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
-    }).filter(|agent| agent.role == cas_types::AgentRole::Worker);
+    let worker = task
+        .assignee
+        .as_deref()
+        .and_then(|assignee| {
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), assignee)
+        })
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker);
     if let Some(worker) = worker {
-        let source = worker.metadata.get("clone_path").map(PathBuf::from)
+        let source = worker
+            .metadata
+            .get("clone_path")
+            .map(PathBuf::from)
             .unwrap_or_else(|| cas.join("worktrees").join(&worker.name));
-        if let Some(stats) = crate::ui::factory::seed_review_target_from_worker(cas, &source, checkout)? {
+        if let Some(stats) =
+            crate::ui::factory::seed_review_target_from_worker(cas, &source, checkout)?
+        {
             tracing::info!(source=%stats.snapshot, files=stats.files, bytes=stats.bytes, "review target seeded from assigned worker");
         }
     }
@@ -517,7 +558,7 @@ pub(crate) fn pending_reclaim_bytes(cas: &Path) -> u64 {
         .into_iter()
         .flat_map(|task| entries(&task))
         .filter_map(|directory| trash(cas, &directory).ok().flatten())
-        .map(|path| bytes(&path.join("target"), None))
+        .map(|path| freeable_bytes(&path.join("target")))
         .sum()
 }
 
@@ -552,9 +593,68 @@ fn bytes(path: &Path, limit: Option<u64>) -> u64 {
     size
 }
 
+/// Disk space is released only when a deletion scope owns every link to an
+/// inode. Track just multi-link files so ordinary Cargo targets stay cheap.
+#[derive(Default)]
+struct FreeableInodes {
+    single_link_bytes: u64,
+    #[cfg(unix)]
+    linked: HashMap<(u64, u64), (u64, u64, u64)>, // (dev, ino) -> (size, nlink, seen)
+}
+
+impl FreeableInodes {
+    fn add(&mut self, metadata: &fs::Metadata) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() > 1 {
+                let entry = self
+                    .linked
+                    .entry((metadata.dev(), metadata.ino()))
+                    .or_insert((metadata.len(), metadata.nlink(), 0));
+                entry.1 = entry.1.max(metadata.nlink());
+                entry.2 = entry.2.saturating_add(1);
+                return;
+            }
+        }
+        self.single_link_bytes = self.single_link_bytes.saturating_add(metadata.len());
+    }
+
+    fn bytes(&self) -> u64 {
+        #[cfg(unix)]
+        {
+            self.linked
+                .values()
+                .filter(|(_, nlink, seen)| seen == nlink)
+                .fold(self.single_link_bytes, |total, (size, _, _)| {
+                    total.saturating_add(*size)
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            self.single_link_bytes
+        }
+    }
+}
+
+fn freeable_bytes(path: &Path) -> u64 {
+    let mut inodes = FreeableInodes::default();
+    for metadata in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+    {
+        inodes.add(&metadata);
+    }
+    inodes.bytes()
+}
+
 #[derive(Default)]
 struct ReviewBytes {
     total: u64,
+    reclaimable: u64,
     target: u64,
     pending: u64,
 }
@@ -564,6 +664,9 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
     let target = directory.join("repo/target");
     let pending = directory.join("trash/target");
     let mut sizes = ReviewBytes::default();
+    let mut whole_inodes = FreeableInodes::default();
+    let mut target_inodes = FreeableInodes::default();
+    let mut pending_inodes = FreeableInodes::default();
     for entry in walkdir::WalkDir::new(directory)
         .follow_links(false)
         .into_iter()
@@ -572,13 +675,17 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
     {
         if let Ok(metadata) = entry.metadata() {
             sizes.total = sizes.total.saturating_add(metadata.len());
+            whole_inodes.add(&metadata);
             if entry.path().starts_with(&target) {
-                sizes.target = sizes.target.saturating_add(metadata.len());
+                target_inodes.add(&metadata);
             } else if entry.path().starts_with(&pending) {
-                sizes.pending = sizes.pending.saturating_add(metadata.len());
+                pending_inodes.add(&metadata);
             }
         }
     }
+    sizes.reclaimable = whole_inodes.bytes();
+    sizes.target = target_inodes.bytes();
+    sizes.pending = pending_inodes.bytes();
     sizes
 }
 
@@ -647,6 +754,9 @@ fn reclaim(
             )? == expected,
             "review Git registration belongs to another repository"
         );
+        if clean {
+            discard_legacy_seed_stage(directory, &checkout, &lock)?;
+        }
         ensure!(
             git(
                 &checkout,
@@ -699,7 +809,10 @@ fn reclaim(
         return Ok(("target queued; source retained", 0));
     }
     let queued_bytes = queued.as_ref().map_or(0, |path| {
-        measured.map_or_else(|| bytes(&path.join("target"), None), |sizes| sizes.pending)
+        measured.map_or_else(
+            || freeable_bytes(&path.join("target")),
+            |sizes| sizes.pending,
+        )
     });
     if clean && let Some(path) = &queued {
         // Keep ownership durable until every payload byte is gone. A verifier
@@ -750,7 +863,7 @@ fn reclaim(
             "review target contains tracked source"
         );
         let size = measured
-            .map_or_else(|| bytes(&target, None), |sizes| sizes.target)
+            .map_or_else(|| freeable_bytes(&target), |sizes| sizes.target)
             .saturating_add(queued_bytes);
         if clean {
             fs::remove_dir_all(&target)?;
@@ -765,8 +878,8 @@ fn reclaim(
         ));
     }
     let size = measured.map_or_else(
-        || bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 }),
-        |sizes| sizes.total,
+        || freeable_bytes(directory).saturating_add(if clean { queued_bytes } else { 0 }),
+        |sizes| sizes.reclaimable,
     );
     if !clean {
         return Ok(("reclaimable", size));
@@ -993,6 +1106,50 @@ pub(crate) fn unmanaged_large(cas: &Path) -> String {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[cfg(unix)]
+    #[test]
+    fn review_bytes_excludes_hardlinks_retained_by_worker_cas_2ffc() {
+        let root = tempfile::tempdir().unwrap();
+        let review = root.path().join("review");
+        let target = review.join("repo/target");
+        let pending = review.join("trash/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        let worker = root.path().join("worker-artifact");
+        fs::write(&worker, b"shared-byte").unwrap();
+        fs::hard_link(&worker, target.join("shared")).unwrap();
+        fs::hard_link(&worker, pending.join("shared")).unwrap();
+        fs::write(target.join("private"), b"free").unwrap();
+        fs::write(target.join("local"), b"local-pair").unwrap();
+        fs::hard_link(target.join("local"), target.join("local-copy")).unwrap();
+        let sizes = review_bytes(&review);
+        assert_eq!(sizes.total, 46, "logical row size includes every path");
+        assert_eq!(sizes.target, 14, "intra-target inode is counted once");
+        assert_eq!(
+            sizes.pending, 0,
+            "shared pending bytes remain in the worker"
+        );
+        assert_eq!(
+            sizes.reclaimable, 14,
+            "full review deletion retains worker inode"
+        );
+        assert_eq!(
+            freeable_bytes(&target),
+            14,
+            "target deletion owns both local links"
+        );
+        assert_eq!(
+            freeable_bytes(&pending),
+            0,
+            "worker still owns the pending inode"
+        );
+        assert_eq!(
+            freeable_bytes(&review),
+            14,
+            "whole review counts local inode once"
+        );
+    }
 
     #[test]
     fn write_owner_syncs_directory_after_rename_cas_a271() {

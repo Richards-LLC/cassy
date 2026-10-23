@@ -3870,3 +3870,76 @@ fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
     let prose = output.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(prose.contains("cas update --sync") && !prose.contains("--user"), "{output}");
 }
+
+#[test]
+fn update_reaps_dead_metadata_without_touching_live_sessions_cas_9299() {
+    use crate::ui::factory::{SessionManager, create_metadata, gui_socket_path, metadata_path};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let roots = env.home().join("empty-projects");
+    std::fs::create_dir_all(&roots).unwrap();
+    env.set("CAS_PROJECT_ROOTS", &roots);
+    env.remove("CAS_ROOT");
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    assert!(child.wait().unwrap().success());
+    let manager = SessionManager::new();
+    for (name, pid) in [
+        ("dead9299", dead),
+        ("held9299", dead),
+        ("live9299", std::process::id()),
+    ] {
+        manager
+            .save_metadata(&create_metadata(
+                name,
+                pid,
+                "supervisor",
+                &[],
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
+    }
+    for name in ["dead9299", "live9299"] {
+        drop(std::os::unix::net::UnixListener::bind(gui_socket_path(name)).unwrap());
+    }
+    let held = std::os::unix::net::UnixListener::bind(gui_socket_path("held9299")).unwrap();
+    let args = update_test_args();
+    let run = || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(true),
+            None,
+            None,
+            None,
+            None,
+            || ProjectPhase::Skipped("isolated user phase".into()),
+        )
+        .unwrap()
+    };
+    run();
+    assert!(
+        !metadata_path("dead9299").exists(),
+        "update must reap a proven-dead record"
+    );
+    assert!(
+        metadata_path("held9299").exists(),
+        "held metadata retains project attribution"
+    );
+    assert!(metadata_path("live9299").exists());
+    assert!(gui_socket_path("live9299").exists());
+    assert!(gui_socket_path("held9299").exists());
+    assert_eq!(
+        gui_socket_path("dead9299").exists(),
+        !cfg!(target_os = "linux")
+    );
+    std::fs::write(metadata_path("bad9299"), "incomplete receipt").unwrap();
+    run();
+    assert!(metadata_path("bad9299").exists());
+    assert!(
+        metadata_path("live9299").exists(),
+        "repeat cleanup retains live ownership"
+    );
+    drop(held);
+}

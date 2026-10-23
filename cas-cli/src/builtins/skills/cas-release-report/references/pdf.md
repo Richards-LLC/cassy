@@ -12,7 +12,8 @@ HTML from Chromium with the same settings.
 
 The template declares margins, not a fixed `@page size`. Print CSS uses
 `break-before:auto` for sections and `break-inside:avoid` for cards, rows and
-figures. Repeat table headers, expand disclosures, wrap long commands/hashes,
+figures. Keep a table header with its first row while allowing later rows to
+paginate. Repeat table headers, expand disclosures, wrap long commands/hashes,
 print URL destinations and keep headings with their following content. Never fix
 short pages by shrinking the whole document or cropping text.
 
@@ -25,11 +26,12 @@ python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
 
 The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
 `receipt.json` with the page count, out-of-bounds text blocks, a
-`footer_only_last_page` flag, link targets and `local_links`. Text in the bottom margin counts
-as the running folio only when it is the PDF's title and/or "n / N". It exits non-zero on a bounds
-finding, when the last page holds only the closing folio, or on a link to a local
-file (a `file://` target or a checkout path), which no reader of the published PDF
-can open. `cas release report` names the source and print edition by their GitHub
+`footer_only_last_page` flag, `orphaned_assets_headers` pages, link targets and
+`local_links`. Text in the bottom margin counts as the running folio only when
+it is the PDF's title and/or "n / N". It exits non-zero on a bounds finding,
+an empty assets header separated from its row, a footer-only last page, or a
+link to a local file (a `file://` target or a checkout path), which no reader
+of the published PDF can open. `cas release report` names the source and print edition by their GitHub
 URLs on `main` when a GitHub repository is known; reports are committed after
 their release tag is created. Resolve the repository from `issues.repo`, falling
 back to the project's GitHub `origin`. The template keeps

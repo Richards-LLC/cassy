@@ -93,3 +93,21 @@ checkout-residue and generic failures. Ordinary quoted remedies retain their
 interactive Bash argv check; stale hook bytes remain unchanged. These exercise
 production functions with disposable fixtures; no live factory spawn or terminal
 palette walkthrough is claimed. Integrated execution remains merge-queue-owned.
+
+## cas-015d: readiness paths and shared display policy
+
+**First two lines:** Codex readiness still names the untrusted directory or
+malformed hooks file; invisible path characters print as visible escapes.
+**Scannable:** Existing blocking reasons retain their order and trust verdicts.
+**Readable:** Directory, hook-key labels and parse-failure paths use the same
+character policy as Git remedy refusal; their actual identity stays intact.
+**Machine output:** Readiness keys and stored trust lookup use raw path bytes;
+only human-facing reason/error strings escape display characters.
+**Omitted:** No new launch decision, trust mutation, command or terminal layout.
+The Unicode17/control predicate lives once in cas-pty and serves both crates.
+
+The existing readiness regression exercises bidi and zero-width paths through
+real readiness parsing, checks a stored hash still matches its raw hook key,
+and checks malformed hook/config bytes remain unchanged. Existing stale-hook
+and merge-error controls cover the other consumers. This is production-function
+fixture evidence; no live Codex spawn or terminal walkthrough is claimed.

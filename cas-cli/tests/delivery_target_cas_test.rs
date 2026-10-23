@@ -641,6 +641,19 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
                 original.deliverables.factory_branch_start);
             env.set("CAS_AGENT_ROLE", "supervisor");
             let supervisor = delivery_service(&cas_root, &supervisor_id);
+            // A failed review keeps its parked delivery until request_changes.
+            let mut blocked = original.clone();
+            blocked.status = TaskStatus::Blocked;
+            blocked.deliverables.parked_branch = Some(format!("factory/{worker}"));
+            blocked.deliverables.factory_branch_anchor = Some(original_tip.clone());
+            task_store.update(&blocked).unwrap();
+            let blocked_snapshot = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+            let refused = supervisor.task(Parameters(rebind())).await
+                .expect_err("a blocked parked delivery must be declined before rebinding");
+            assert!(refused.message.contains("request_changes"), "{refused}");
+            assert_eq!(serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(), blocked_snapshot,
+                "refusing a parked delivery must not mutate its recorded evidence");
+            task_store.update(&original).unwrap();
             run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);
             let refused = supervisor.task(Parameters(rebind())).await.expect_err("foreign work cannot be hidden by a new base");
             assert!(refused.message.contains("foreign"), "{refused}");

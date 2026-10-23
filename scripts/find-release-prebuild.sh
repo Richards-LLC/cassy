@@ -148,7 +148,10 @@ api_request() {
         failure_reason="timeout (exit $status)"
     else
         http_status="$(grep -oE 'HTTP [0-9]{3}' "$api_failure_file" | head -n1 || true)"
-        if [[ -n "$http_status" ]]; then
+        if grep -qi 'rate limit' "$api_failure_file"; then
+            # Preserve only this retry classification, never raw gh details.
+            failure_reason="${http_status:-request failed} (rate limit)"
+        elif [[ -n "$http_status" ]]; then
             failure_reason="$http_status"
         else
             failure_reason="exit code $status"
@@ -187,7 +190,7 @@ artifacts_query_failed=false
 find_complete_run() {
     local runs_json="$1" deadline="${2:-}" run_id artifacts_json complete name live
     local artifact_query_ok artifact_attempt artifact_retry_limit
-    local remaining sleep_for failure_reason
+    local remaining sleep_for failure_reason permanent_failure="" token_failure=""
     complete_run_id=""
     artifacts_query_failed=false
     mapfile -t run_ids < <(jq -r \
@@ -208,14 +211,24 @@ find_complete_run() {
                 artifact_query_ok=true
                 break
             fi
+            failure_reason="$(<"$api_failure_file")"
+            failure_reason="${failure_reason:-exit code 1}"
+            # Rate limits and request timeouts remain retryable. Inspect other
+            # completed runs before declining a definite auth/missing failure.
+            if [[ "$failure_reason" == 'HTTP 401' || "$failure_reason" == 'HTTP 403' \
+                || "$failure_reason" == 'HTTP 404' ]]; then
+                permanent_failure="run $run_id ($failure_reason)"
+                if [[ "$failure_reason" != 'HTTP 404' ]]; then
+                    token_failure="$permanent_failure"
+                fi
+                break
+            fi
             # The initial lookup tries once. During the wait, retry once here,
             # then check other runs; later polls can retry this run again.
             if [[ -z "$deadline" ]]; then
                 break
             fi
             remaining=$((deadline - SECONDS))
-            failure_reason="$(<"$api_failure_file")"
-            failure_reason="${failure_reason:-exit code 1}"
             if (( remaining <= 0 )); then
                 printf 'warning: Release Prebuild artifact lookup attempt %d for run %s failed (%s) at the deadline\n' \
                     "$artifact_attempt" "$run_id" "$failure_reason" >&2
@@ -258,6 +271,16 @@ find_complete_run() {
             return 0
         fi
     done
+    # A missing run does not rule out another run still publishing. Definite
+    # authentication/permission failures apply across runs using this token.
+    if [[ -n "$token_failure" ]]; then
+        permanent_failure="$token_failure"
+    elif has_pending_run "$runs_json"; then
+        permanent_failure=""
+    fi
+    if [[ -n "$permanent_failure" ]]; then
+        decline "prebuild artifacts query permanent failure for $sha: $permanent_failure"
+    fi
     return 1
 }
 
@@ -277,6 +300,7 @@ fi
 if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
     deadline=$((SECONDS + wait_seconds))
     failed_polls=0
+    run_query_failed=false
     retry_backoff=1
     retry_backoff_cap=30
     next_poll_delay="$poll_seconds"
@@ -292,7 +316,10 @@ if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
         (( SECONDS < deadline )) || break
 
         polled_runs_json=""
+        artifacts_query_failed=false
+        run_query_failed=false
         if ! polled_runs_json="$(fetch_runs "$deadline")"; then
+            run_query_failed=true
             failed_polls=$((failed_polls + 1))
             remaining=$((deadline - SECONDS))
             failure_reason="$(<"$api_failure_file")"
@@ -328,7 +355,9 @@ if has_pending_run "$runs_json" || [[ "$artifacts_query_failed" == true ]]; then
         fi
     done
 
-    if [[ "$artifacts_query_failed" == true ]]; then
+    if [[ "$run_query_failed" == true ]]; then
+        decline "prebuild run lookup failed for $sha after ${wait_seconds}s ($failure_reason)"
+    elif [[ "$artifacts_query_failed" == true ]]; then
         decline "prebuild artifacts query failed for $sha after ${wait_seconds}s"
     elif has_pending_run "$runs_json"; then
         decline "prebuild still queued or in progress after ${wait_seconds}s"

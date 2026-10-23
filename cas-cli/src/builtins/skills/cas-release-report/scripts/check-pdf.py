@@ -4,7 +4,8 @@
 Usage: python3 check-pdf.py REPORT.pdf ARTIFACT_DIR
 Needs PyMuPDF (`pip install pymupdf`). Writes one PNG per page and receipt.json
 into ARTIFACT_DIR, prints the receipt, and exits non-zero on a bounds finding,
-a footer-only last page, or a link to a local file.
+a footer-only last page, an empty assets table header without its row, or a
+link to a local file.
 """
 import json, re, sys
 from pathlib import Path
@@ -21,7 +22,9 @@ def running_folio(text):
 
 output = Path(sys.argv[2]); output.mkdir(parents=True, exist_ok=True)
 findings, links, files = [], [], []
+page_texts = []
 for number, page in enumerate(pdf, 1):
+    page_texts.append(page.get_text())
     page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5)).save(output / f'{number:02d}.png')
     links.extend(link['uri'] for link in page.get_links() if 'uri' in link)
     # Chromium prints a relative href as a launch link naming the local file.
@@ -43,8 +46,14 @@ footer_only = len(pdf) > 1 and bool(closing) and not any(block[3] <= max(closing
 # A file:// target, or one into a Cassy worktree, is dead for
 # every reader of the published PDF.
 local_links = files + [uri for uri in links if uri.lower().startswith('file:') or '/.cas/worktrees/' in uri]
+has_empty_assets_row = any('No published assets' in text for text in page_texts)
+orphaned_assets_headers = [number for number, text in enumerate(page_texts, 1)
+    if has_empty_assets_row
+    and re.search(r'\bRelease assets\s+ASSET\s+DIGEST\s+SIZE\b', text, re.I)
+    and 'No published assets' not in text]
 receipt = {'pages': len(pdf), 'bounds_findings': findings, 'footer_only_last_page': footer_only,
-           'links': links, 'local_links': local_links}
+           'links': links, 'local_links': local_links,
+           'orphaned_assets_headers': orphaned_assets_headers}
 (output / 'receipt.json').write_text(json.dumps(receipt, indent=2))
 print(json.dumps(receipt))
 if findings:
@@ -53,3 +62,6 @@ if footer_only:
     sys.exit('PDF ends on a page holding only the closing folio')
 if local_links:
     sys.exit('PDF holds a local file link no reader can open: ' + ', '.join(local_links))
+if orphaned_assets_headers:
+    sys.exit('PDF leaves the empty assets header without its first row on page(s): '
+             + ', '.join(map(str, orphaned_assets_headers)))

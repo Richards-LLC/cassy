@@ -212,7 +212,7 @@ pub(super) fn receipts_cover_targets(
         } else {
             package_dirs.get(first)?.clone()
         };
-        let module = SourceModule { crate_dir, segments: rest.to_vec(), test_parent: None };
+        let module = SourceModule { crate_dir, segments: rest.to_vec(), test_parent: None, ambiguous_test_parents: Vec::new() };
         let package = tested
             .iter()
             .find(|package| package_covers(package, &module, &package_dirs))?;
@@ -291,7 +291,7 @@ fn untested_changed_crates(repo: &Path, changed_paths: &[String], tested: &[Stri
     let tests = changed_paths.iter().filter_map(|path| {
         let (krate, _) = path.split_once("/tests/").filter(|_| path.ends_with(".rs"))?;
         let crate_dir = krate.rsplit('/').next()?.to_ascii_lowercase();
-        Some(SourceModule { crate_dir, segments: Vec::new(), test_parent: None })
+        Some(SourceModule { crate_dir, segments: Vec::new(), test_parent: None, ambiguous_test_parents: Vec::new() })
     });
     let mut untested = Vec::new();
     for module in changed_source_modules(repo, changed_paths).into_iter().chain(tests) {

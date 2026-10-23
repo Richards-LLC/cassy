@@ -111,8 +111,8 @@ case "$2" in
     file="${FAKE_ARTIFACTS_DIR:?}/$run_id.json"
     if [[ ! -f "$file" ]]; then exit 1; fi
     if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-always" ]]; then
-      echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
-      exit 1
+      echo "${FAKE_ARTIFACT_ERROR:-request failed}: HTTP ${FAKE_ARTIFACT_HTTP_STATUS:-502}; authorization: Bearer fixture-secret" >&2
+      exit "${FAKE_ARTIFACT_EXIT_STATUS:-1}"
     fi
     if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" || -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]]; then
       count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
@@ -269,19 +269,85 @@ echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}
 printf '%s' "$both_live" >"$tmp/artifacts/889.json"
 touch "$tmp/artifacts/889.fail-always"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/query-failure-sequence"
+for artifact_failure in 502 124 137 408 429 rate403; do
+  artifact_status=1
+  artifact_http_status="$artifact_failure"
+  artifact_error='request failed'
+  case "$artifact_failure" in
+    124|137) artifact_status="$artifact_failure"; artifact_http_status=502 ;;
+    rate403) artifact_http_status=403; artifact_error='secondary rate limit' ;;
+  esac
+  rm -f "$tmp/query-failure-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+    FAKE_ARTIFACT_EXIT_STATUS="$artifact_status" FAKE_ARTIFACT_HTTP_STATUS="$artifact_http_status" \
+    FAKE_ARTIFACT_ERROR="$artifact_error" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+    run_lookup outagecommit 2>"$tmp/query-failure.err")"
+  expect_field "$out" found false "persistent artifact query failure ($artifact_failure) falls back at the deadline"
+  if [[ "$(<"$tmp/query-clock")" == 12 ]] \
+      && grep -qF 'artifacts query failed' <<<"$out" \
+      && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
+    printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+    fail=$((fail + 1))
+  fi
+done
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# A definite permission failure on a completed run cannot recover by polling.
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
 out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
-  FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" run_lookup outagecommit 2>"$tmp/query-failure.err")"
-expect_field "$out" found false 'persistent artifact query failure falls back at the deadline'
-if [[ "$(<"$tmp/query-clock")" == 12 ]] \
-    && grep -qF 'artifacts query failed' <<<"$out" \
-    && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
-  printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+  FAKE_ARTIFACT_HTTP_STATUS=403 FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+  run_lookup forbiddencommit 2>"$tmp/forbidden.err")"
+if grep -qFx 'found=false' <<<"$out" \
+    && grep -q 'reason=.*permanent.*HTTP 403' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 0 ]] \
+    && ! grep -qF 'fixture-secret' "$tmp/forbidden.err"; then
+  printf 'ok   permanent artifacts permission failure declines without spending the wait budget\n'
   pass=$((pass + 1))
 else
-  printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+  printf 'FAIL permanent artifacts failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
   fail=$((fail + 1))
 fi
-unset FAKE_RUNS_SEQUENCE_DIR
+
+# A missing completed run must not prevent adoption of another run that is
+# still in progress and publishes its artifacts on the next poll.
+mkdir -p "$tmp/missing-run-sequence"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"},
+  {"id":890,"status":"in_progress","conclusion":null}]}' >"$tmp/missing-run-sequence/1.json"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"},
+  {"id":890,"status":"completed","conclusion":"success"}]}' >"$tmp/missing-run-sequence/last.json"
+printf '%s' "$both_live" >"$tmp/artifacts/890.json"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  FAKE_RUNS_SEQUENCE_DIR="$tmp/missing-run-sequence" FAKE_ARTIFACT_HTTP_STATUS=404 \
+  FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" run_lookup missingruncommit 2>"$tmp/missing-run.err")"
+if grep -qFx 'found=true' <<<"$out" && grep -qFx 'run-id=890' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 5 ]]; then
+  printf 'ok   a run-specific 404 keeps waiting for another pending run\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL a run-specific 404 canceled another pending run: %s\n' "$out"
+  fail=$((fail + 1))
+fi
+
+# The last actual poll determines the deadline cause, even after an earlier
+# artifacts failure. The final sleep consumes the remaining logical second.
+mkdir -p "$tmp/last-poll-sequence"
+cp "$tmp/runs.json" "$tmp/last-poll-sequence/1.json"
+touch "$tmp/last-poll-sequence/2.fail"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=1 \
+  FAKE_RUNS_SEQUENCE_DIR="$tmp/last-poll-sequence" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+  run_lookup lastpollcommit 2>"$tmp/last-poll.err")"
+if grep -qFx 'found=false' <<<"$out" \
+    && grep -q 'reason=.*run lookup failed.*HTTP 502' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 2 ]]; then
+  printf 'ok   final run-list failure replaces the previous artifacts deadline cause\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL final run-list failure has output: %s\n' "$out"
+  fail=$((fail + 1))
+fi
 
 # 9. A timed-out poll stays within the deadline and falls back with a sanitized
 # timeout diagnostic.

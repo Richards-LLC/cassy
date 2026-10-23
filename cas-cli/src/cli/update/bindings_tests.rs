@@ -83,7 +83,7 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
         seen
     });
 
-    let run = || reconcile_with(&root, &config, &format!("{endpoint}/mcp/slack"), false, true).unwrap();
+    let run = || reconcile_with(&root, &config, &format!("{endpoint}/mcp/slack"), false, true, &RuntimeSnapshot::capture(false)).unwrap();
     for _ in 0..2 {
         let ProjectPhase::Warning(detail) = run() else { panic!("a refused channel is a warning") };
         assert!(detail.starts_with(&format!("Slack {FOREIGN} blocked: ")), "{detail}");
@@ -109,4 +109,93 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
         "the repeat keeps the original fence"
     );
     assert_eq!(state.pauses.len(), 2, "a rerun reuses each channel's pause");
+}
+
+#[test]
+fn update_inventory_probes_each_socket_once_cas_9299() {
+    use crate::ui::factory::{SessionManager, gui_socket_path};
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    SessionManager::new().ensure_dir().unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(gui_socket_path("probe9299")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    let config = CloudConfig {
+        endpoint: endpoint.clone(),
+        token: Some("ordinary-fixture-user".into()),
+        team_id: Some(uuid::Uuid::new_v4().to_string()),
+        ..Default::default()
+    };
+    let remote = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let request = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert!(request.url().starts_with("/api/channels?"));
+            request
+                .respond(tiny_http::Response::from_string(
+                    serde_json::json!({
+                        "channels": ([MANAGED, FOREIGN].map(|id| serde_json::json!({
+                            "channel_id": id, "project_id": PROJECT
+                        })))
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        }
+        assert!(
+            server.try_recv().unwrap().is_none(),
+            "held runtime prevents Cloud submission"
+        );
+    });
+    let inventory = RuntimeSnapshot::capture(false);
+    for name in ["first", "second"] {
+        let root = env.home().join(name).join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[project]\ncanonical_id = {PROJECT:?}\n"),
+        )
+        .unwrap();
+        config.save_to_cas_dir(&root).unwrap();
+        let result = reconcile_with(
+            &root,
+            &config,
+            &format!("{endpoint}/mcp/slack"),
+            false,
+            true,
+            &inventory,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, ProjectPhase::Warning(_)),
+            "held endpoint must refuse"
+        );
+    }
+    remote.join().unwrap();
+    SessionManager::new()
+        .save_metadata(&crate::ui::factory::create_metadata(
+            "new9299",
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+    assert!(
+        inventory.validate().is_err(),
+        "a new runtime invalidates cached inventory"
+    );
+    let mut probes = 0;
+    while let Ok((stream, _)) = listener.accept() {
+        probes += 1;
+        drop(stream);
+    }
+    assert_eq!(
+        probes, 1,
+        "one shared update inventory across projects and channels"
+    );
 }

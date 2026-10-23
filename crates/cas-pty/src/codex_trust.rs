@@ -512,16 +512,7 @@ fn visible_hook_path(path: &Path) -> String {
         .to_string()
         .chars()
         .map(|character| {
-            if character.is_control()
-                || matches!(character,
-                    '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}'
-                    | '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}'
-                    | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
-                    | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
-                    | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
-                    | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
-                    | '\u{e0000}'..='\u{e0fff}')
-            {
+            if crate::is_unsafe_terminal_character(character) {
                 character.escape_default().to_string()
             } else {
                 character.to_string()
@@ -653,7 +644,7 @@ impl CodexLaunchReadiness {
         if !self.project_trusted {
             reasons.push(format!(
                 "directory {} is not trusted in Codex [projects]",
-                self.cwd.display()
+                visible_hook_path(&self.cwd)
             ));
         }
         for hook in self.hooks.iter().filter(|hook| hook.cas_owned) {
@@ -661,7 +652,11 @@ impl CodexLaunchReadiness {
                 hook.trust,
                 CodexHookTrust::Untrusted | CodexHookTrust::Modified
             ) {
-                reasons.push(format!("CAS hook {} is {:?}", hook.key, hook.trust));
+                reasons.push(format!(
+                    "CAS hook {} is {:?}",
+                    visible_hook_path(Path::new(&hook.key)),
+                    hook.trust
+                ));
             }
         }
         reasons
@@ -712,7 +707,7 @@ fn hook_file_readiness(
     let hooks: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("failed to parse {}: {error}", hooks_path.display()),
+            format!("failed to parse {}: {error}", visible_hook_path(hooks_path)),
         )
     })?;
     let state = config.get("hooks").and_then(|hooks| hooks.get("state"));

@@ -596,6 +596,7 @@ def run_adapter(
             if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX)) or name in {
                 "VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV,
                 "VIOLET_ACCOUNT_TOKEN", "VIOLET_BOT_TOKEN", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV",
+                module.LEGACY_TOKEN_SELECTOR_ENV,
             }:
                 environment.pop(name, None)
         environment.update(
@@ -630,15 +631,34 @@ def run_adapter(
                     "VIOLET_BOT_TOKEN",
                     '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_BOT_TOKEN"\n',
                 ),
+                "codex-env-header-selector": (
+                    "VIOLET_SLACK_TOKEN_CODEX",
+                    '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_SLACK_TOKEN_CODEX"\n',
+                ),
+                "codex-env-header-plain-competitor": (
+                    "VIOLET_BOT_TOKEN",
+                    '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_BOT_TOKEN"\n',
+                ),
+                "codex-env-header-conflict-selector": (
+                    "VIOLET_SLACK_TOKEN_CODEX",
+                    '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_SLACK_TOKEN_CODEX"\n',
+                ),
             }
             if credential_mode in custom_registrations:
                 token_name, registration = custom_registrations[credential_mode]
-                registered_value = "Bearer stub-token" if credential_mode == "codex-env-header" else "stub-token"
-                credentials.write_text(
-                    f"export {token_name}='{registered_value}'\n"
-                    "export VIOLET_VERCEL_BYPASS='stub-bypass'\n",
-                    encoding="utf-8",
-                )
+                prefixed_value_modes = {
+                    "codex-env-header-selector",
+                    "codex-env-header-conflict-selector",
+                }
+                registered_value = "Bearer stub-token" if credential_mode in prefixed_value_modes else "stub-token"
+                credential_lines = [f"export {token_name}='{registered_value}'"]
+                if credential_mode in {
+                    "codex-env-header-plain-competitor",
+                    "codex-env-header-conflict-selector",
+                }:
+                    credential_lines.append("export VIOLET_SLACK_TOKEN_OTHER='wrong-token'")
+                credential_lines.append("export VIOLET_VERCEL_BYPASS='stub-bypass'")
+                credentials.write_text("\n".join(credential_lines) + "\n", encoding="utf-8")
             else:
                 registration = '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_SLACK_TOKEN_TEST"\n'
                 credentials.write_text(
@@ -657,12 +677,14 @@ def run_adapter(
                 (config_dir / "config.toml").write_text(
                     registration, encoding="utf-8",
                 )
-            if credential_mode == "codex-conflict":
+            if credential_mode in {"codex-conflict", "codex-env-header-conflict-selector"}:
                 claude_dir = Path(environment["CLAUDE_CONFIG_DIR"])
                 claude_dir.mkdir()
                 (claude_dir / ".claude.json").write_text(json.dumps({"mcpServers": {
                     "violet": {"headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_OTHER}"}}
                 }}), encoding="utf-8")
+            if credential_mode in {"codex-env-header-selector", "codex-env-header-conflict-selector"}:
+                environment["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_CODEX"
             if credential_mode == "codex-missing":
                 credentials.write_text("export VIOLET_SLACK_TOKEN_OTHER='wrong-token'\n", encoding="utf-8")
         environment.pop((module.LEGACY_TOKEN_PREFIX + "_TEST"), None)
@@ -692,13 +714,23 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        header_modes = (
+            "codex-env-header",  # A: header-style registration, no selector, plain token
+            "codex-env-header-selector",  # B: explicit selector to a prefixed header variable
+            "codex-env-header-plain-competitor",  # C: header style plus another plain token
+            "codex-env-header-conflict-selector",  # E: conflict remedy selects the header variable
+        )
+        failures = []
         for mode in (
             "violet", "both", "empty-violet", "codex-default", "codex-custom",
-            "codex-account", "codex-env-header",
+            "codex-account", *header_modes,
         ):
             result, fields = run_adapter(server, state, pdf, credential_mode=mode)
-            assert result.returncode == 0, (mode, result.stderr)
-            assert fields is not None, mode
+            if result.returncode != 0:
+                failures.append((mode, result.stderr))
+            elif fields is None:
+                failures.append((mode, "missing receipt"))
+        assert not failures, failures
         print("Violet transport: canonical-only, both names, and empty primary credentials passed against canonical-only hub")
         for mode, expected in (
             ("codex-unregistered", "multiple Violet token variables"),

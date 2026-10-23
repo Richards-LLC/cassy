@@ -2558,6 +2558,10 @@ pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
 /// equality-only fingerprint contract as Linux's clock-tick value.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Proc,
+        "libproc PID fingerprint",
+    );
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     // SAFETY: proc_pidinfo initializes `size` bytes of the supplied

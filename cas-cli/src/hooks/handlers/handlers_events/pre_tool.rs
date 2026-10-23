@@ -2085,6 +2085,7 @@ struct GitCommandTarget {
     cwd: std::path::PathBuf,
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
+    is_detached_checkout: bool,
 }
 
 impl GitCommandTarget {
@@ -2098,6 +2099,7 @@ impl GitCommandTarget {
             cwd,
             git_dir: None,
             work_tree: None,
+            is_detached_checkout: false,
         }
     }
 
@@ -2221,6 +2223,11 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
 
         let mut target = default_target.clone();
         target.cwd = shell_cwd.clone();
+        target.is_detached_checkout = git_words[write_index] == "checkout"
+            && git_words[write_index + 1..]
+                .iter()
+                .take_while(|word| word.as_str() != "--")
+                .any(|word| word == "--detach");
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -2431,6 +2438,13 @@ fn check_worker_git_commit_scope_at_target(
                 not the Claude Code PreToolUse harness)."
             ));
         }
+    }
+
+    // Checking out a commit during a bisect changes only the worker's own
+    // checkout. Keep the worktree containment check above, but do not apply
+    // the branch rule reserved for commits and other history mutations.
+    if is_isolated && target.is_detached_checkout {
+        return None;
     }
 
     // Resolve HEAD once. Protected branches retain the established WORKER
@@ -10219,6 +10233,80 @@ mod worker_commit_guard_tests {
         assert!(msg.contains("git switch 'factory/worker{a,b}!e'"), "{msg}");
         assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("detached"));
+    }
+
+    #[test]
+    fn detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600() {
+        let repo = make_git_repo();
+        let path = repo.path().to_string_lossy().to_string();
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        let detach = std::process::Command::new("git")
+            .args(["checkout", "--detach", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(detach.status.success(), "{detach:?}");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(&path)),
+            ("CAS_AGENT_NAME", Some("bisect-worker")),
+        ]);
+
+        let classify = hook_git_write_input(
+            &path,
+            &format!("git bisect good\ngit checkout --detach {sha}"),
+        );
+        let output = handle_pre_tool_use(&classify, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "bisect classification and detached checkout must remain usable: {value}"
+        );
+
+        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
+        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
+        );
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HEAD is detached"));
+
+        let commit = hook_git_write_input(&path, "git commit -m forbidden");
+        let output = handle_pre_tool_use(&commit, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HEAD is detached"));
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_checkout = hook_git_write_input(
+            &path,
+            &format!(
+                "git -C '{}' checkout --detach {sha}",
+                outside.path().display()
+            ),
+        );
+        let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside your assigned worktree"));
     }
 
     #[test]

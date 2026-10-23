@@ -8646,7 +8646,11 @@ impl CasCore {
                         for boundary in req.commit_receipt.as_deref().into_iter()
                             .chain(park_anchor.as_deref())
                         {
-                            if !git_commit_is_ancestor(&close_project_root, boundary, tip) {
+                            if !git_commit_is_ancestor(&close_project_root, boundary, tip)
+                                && !target_reachable_squash_of(
+                                    &close_project_root, tip, boundary, &resolved_parent_branch,
+                                )
+                            {
                                 return Ok(Self::tool_error(format!(
                                     "PARK REFUSED: delivery anchor {boundary} is absent from {branch} at pushed tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
                                     crate::mcp::tools::core::guidance::caller_prefix(), task.id,
@@ -18349,6 +18353,27 @@ pub(crate) fn resolve_task_commit_receipt_sha(
     Ok(full_commit)
 }
 
+/// A squash may replace the source commit's identity, but must preserve its
+/// complete tree and already be reachable on the declared integration target.
+/// Keep source anchors unchanged so review and proof scope still name the work.
+fn target_reachable_squash_of(
+    repo: &std::path::Path,
+    source: &str,
+    receipt: &str,
+    target: &str,
+) -> bool {
+    if !is_safe_git_refname(source)
+        || !is_safe_git_refname(receipt)
+        || crate::git_evidence::git_commit_parent_count(repo, receipt) != 1
+        || !commit_is_merged_into_parent(repo, receipt, target)
+    {
+        return false;
+    }
+    let source_tree = resolve_branch_sha(repo, &format!("{source}^{{tree}}"));
+    source_tree.is_some()
+        && source_tree == resolve_branch_sha(repo, &format!("{receipt}^{{tree}}"))
+}
+
 pub(crate) fn validate_task_commit_receipt(
     repo_path: &std::path::Path,
     receipt: &str,
@@ -18405,7 +18430,10 @@ pub(crate) fn validate_task_commit_receipt(
         } else if task_attribution::in_work_window(
             window,
             commit_epoch,
-            commit_is_task_attributable(repo_path, &full_receipt, &window.identity),
+            commit_is_task_attributable(repo_path, &full_receipt, &window.identity)
+                || window.identity.known_commits.iter().any(|source| {
+                    target_reachable_squash_of(repo_path, source, &full_receipt, parent_branch)
+                }),
         ) {
             prior_cycle_basis = Some(format!(
                 " The commit predates the current work cycle beginning {} ({}), but it is \

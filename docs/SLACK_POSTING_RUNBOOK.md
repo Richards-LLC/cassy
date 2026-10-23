@@ -67,6 +67,26 @@ thread through `violet.violet_post` with `kind: file`, `reply_to=user_thread_id`
 `content_encoding: base64`. Read/encode the bytes programmatically from disk;
 never transcribe base64 through agent context. Link HTML from the Dev thread.
 
+The adapter discovers the Violet token variable from Claude's registration or
+Codex's `mcp_servers.violet.bearer_token_env_var` or
+`mcp_servers.violet.env_http_headers.Authorization`. The latter's environment
+variable must contain the complete header value, such as `Bearer <token>`;
+`bearer_token_env_var` contains only the token. Codex uses
+`CODEX_HOME/config.toml`, falling back to `~/.codex/config.toml`. It never
+evaluates configuration or chooses between conflicting registrations: set
+`VIOLET_SLACK_TOKEN_ENV` explicitly in that case. Missing registered credentials
+still fail before network access, rather than using another available token.
+
+Generated GitHub report links default to `main`.
+`CAS_RELEASE_TRAIN_REPORT_HTML_REF` may name `main` or the report's release tag;
+temporary delivery refs are rejected before uploading the PDF. Confirm the
+chosen published ref contains the HTML first. A manual
+`CAS_RELEASE_TRAIN_REPORT_HTML_URL` must point to a `github.com/<repo>/blob/main/`
+or `github.com/<repo>/blob/<release-tag>/` path and is checked before network
+access. Keep a working existing link
+and its branch until a durable target exists; prepare a Violet edit and perform
+it only after the report lands there. Preserve the returned edit receipt.
+
 Download the uploaded PDF and require source SHA-256 equality, successful PDF
 decode and matching page count before accepting it. Apply the hub skill's
 image decode/preview checks to image uploads. Byte count, `ok: true` or a

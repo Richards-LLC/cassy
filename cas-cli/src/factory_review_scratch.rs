@@ -127,6 +127,18 @@ fn write_owner_with_directory_sync(
     Ok(())
 }
 
+fn write_new_checkout_owner_with_parent_sync(
+    directory: &Path,
+    record: &Owner,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    write_owner(directory, record)?;
+    // The owner's child sync makes its contents durable; the store parent
+    // sync makes the new checkout directory entry durable before Git uses it.
+    sync_parent(directory.parent().context("review store parent missing")?)?;
+    Ok(())
+}
+
 fn stale_owner_temp(path: &Path) -> Result<bool> {
     let Some(suffix) = path
         .file_name()
@@ -277,7 +289,7 @@ pub fn create(
     let lock = lease(&directory, fresh)?;
     if fresh {
         // Write ownership before Git, so interrupted creation stays visible.
-        write_owner(
+        write_new_checkout_owner_with_parent_sync(
             &directory,
             &Owner {
                 schema_version: 1,
@@ -288,6 +300,7 @@ pub fn create(
                 created_at: Utc::now(),
                 last_used_at: Some(Utc::now()),
             },
+            |parent| File::open(parent)?.sync_all(),
         )?;
     } else {
         let record = owner(&cas, &directory)?;
@@ -1191,6 +1204,36 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("injected owner directory sync failure")
+        );
+    }
+
+    #[test]
+    fn new_checkout_syncs_store_parent_and_propagates_failure_cas_34b0() {
+        let store = tempfile::tempdir().unwrap();
+        let checkout = store.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let record = Owner {
+            schema_version: 1,
+            cas_root: store.path().to_path_buf(),
+            task_id: "cas-checkout-sync".into(),
+            dispatch_id: None,
+            head: "a".repeat(40),
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        let synced = Cell::new(false);
+        let result = write_new_checkout_owner_with_parent_sync(&checkout, &record, |parent| {
+            assert_eq!(parent, store.path());
+            assert!(checkout.join("owner.json").is_file());
+            synced.set(true);
+            Err(std::io::Error::other("injected store directory sync failure"))
+        });
+        assert!(synced.get(), "new checkout must sync its store parent");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected store directory sync failure")
         );
     }
 }

@@ -2,6 +2,29 @@ use crate::ui::factory::daemon::imports::*;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+fn record_client_resize(client: &mut ClientConnection, client_id: usize, cols: u16, rows: u16) {
+    client.client_cols = cols;
+    client.client_rows = rows;
+    if cols < COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Full {
+        client.view_mode = ClientViewMode::Compact;
+        tracing::info!(
+            "Client {} auto-switched to compact mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    } else if cols >= COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Compact {
+        client.view_mode = ClientViewMode::Full;
+        tracing::info!(
+            "Client {} auto-switched to full mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    }
+    client.needs_full_redraw = true;
+}
+
 impl FactoryDaemon {
     pub(super) fn accept_clients(&mut self) -> anyhow::Result<bool> {
         let mut any_new = false;
@@ -110,7 +133,28 @@ impl FactoryDaemon {
                         || self.owner_client_id == Some(client_id)
                         || self.owner_last_activity.elapsed()
                             > Duration::from_secs(INPUT_OWNER_IDLE_SECS);
+                    if !can_take {
+                        // Viewers retain their own latest size for owner loss,
+                        // without changing input ownership or the shared layout.
+                        for event in &events {
+                            if let ControlEvent::Resize(cols, rows) = event {
+                                record_client_resize(client, client_id, *cols, *rows);
+                                // Build/resize the viewer's compact render target too.
+                                // Full layout dimensions still come from the owner.
+                                resize_event = Some((*cols, *rows));
+                            }
+                        }
+                    }
                     if can_take {
+                        if self.owner_client_id != Some(client_id)
+                            && client.client_cols > 0
+                            && client.client_rows > 0
+                        {
+                            // A keystroke can take ownership without a Resize frame.
+                            // Feed the new owner's recorded size through the same
+                            // debounced layout/PTY path as an explicit resize.
+                            resize_event = Some((client.client_cols, client.client_rows));
+                        }
                         self.owner_client_id = Some(client_id);
                         self.owner_last_activity = now;
                         had_activity = true;
@@ -121,33 +165,8 @@ impl FactoryDaemon {
                             match event {
                                 ControlEvent::Detach => {},
                                 ControlEvent::Resize(cols, rows) => {
-                                    // Store per-client dimensions
                                     if let Some(c) = self.clients.get_mut(&client_id) {
-                                        c.client_cols = cols;
-                                        c.client_rows = rows;
-                                        // Auto-detect compact mode on first resize
-                                        if cols < COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Full
-                                        {
-                                            c.view_mode = ClientViewMode::Compact;
-                                            tracing::info!(
-                                                "Client {} auto-switched to compact mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        } else if cols >= COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Compact
-                                        {
-                                            c.view_mode = ClientViewMode::Full;
-                                            tracing::info!(
-                                                "Client {} auto-switched to full mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        }
-                                        c.needs_full_redraw = true;
+                                        record_client_resize(c, client_id, cols, rows);
                                     }
                                     resize_event = Some((cols, rows));
                                 }

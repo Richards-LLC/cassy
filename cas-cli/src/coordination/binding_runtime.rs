@@ -53,14 +53,36 @@ struct RuntimeRecord {
     metadata: SessionMetadata,
     project_root: Option<PathBuf>,
 }
+#[derive(PartialEq, Eq)]
+struct RuntimeRecordIdentity {
+    name: String,
+    created_at: String,
+    daemon_pid: u32,
+    daemon_pid_starttime: Option<u64>,
+    daemon_build_hash: Option<String>,
+    project_dir: Option<String>,
+    socket_path: String,
+}
+impl From<&SessionMetadata> for RuntimeRecordIdentity {
+    fn from(metadata: &SessionMetadata) -> Self {
+        Self {
+            name: metadata.name.clone(),
+            created_at: metadata.created_at.clone(),
+            daemon_pid: metadata.daemon_pid,
+            daemon_pid_starttime: metadata.daemon_pid_starttime,
+            daemon_build_hash: metadata.daemon_build_hash.clone(),
+            project_dir: metadata.project_dir.clone(),
+            socket_path: metadata.socket_path.clone(),
+        }
+    }
+}
 struct Snapshot {
     records: Vec<RuntimeRecord>,
     endpoints: std::collections::HashMap<PathBuf, EndpointObservation>,
     orphans: Vec<PathBuf>,
     directory: PathBuf,
-    directory_identity: Option<FileIdentity>,
     revision: Option<Vec<u8>>,
-    files: Vec<(PathBuf, FileIdentity)>,
+    files: std::collections::HashMap<PathBuf, RuntimeRecordIdentity>,
 }
 /// One machine scan owned by a single update invocation, never a global cache.
 /// Keep a failed scan too, so each binding reports it without rescanning.
@@ -159,8 +181,6 @@ impl Snapshot {
         let _transition = manager
             .lock_inventory(reap)
             .map_err(|_| "runtime inventory lock unavailable")?;
-        let original_directory =
-            FileIdentity::read(&directory).map_err(|_| "runtime inventory unavailable")?;
         let original_revision =
             Self::revision(&directory).map_err(|_| "runtime inventory revision unavailable")?;
         let mut snapshot = Self {
@@ -168,9 +188,8 @@ impl Snapshot {
             endpoints: std::collections::HashMap::new(),
             orphans: Vec::new(),
             directory: directory.clone(),
-            directory_identity: None,
             revision: None,
-            files: Vec::new(),
+            files: std::collections::HashMap::new(),
         };
         let mut recorded = std::collections::HashSet::new();
         let mut first_error = None;
@@ -229,10 +248,9 @@ impl Snapshot {
                     Err(error) => tracing::warn!(%error, "dead factory metadata retained"),
                 }
             }
-            let identity = FileIdentity::read(&path)
-                .map_err(|_| "runtime metadata unreadable")?
-                .ok_or("runtime metadata disappeared")?;
-            snapshot.files.push((path, identity));
+            snapshot
+                .files
+                .insert(path, RuntimeRecordIdentity::from(&metadata));
             let project_root = metadata.project_dir.as_deref().and_then(|project| {
                 crate::store::find_cas_root_ignoring_env(Path::new(project))
                     .ok()?
@@ -265,18 +283,13 @@ impl Snapshot {
                 }
             }
         }
-        snapshot.directory_identity =
-            FileIdentity::read(&directory).map_err(|_| "runtime inventory unavailable")?;
         snapshot.revision =
             Self::revision(&directory).map_err(|_| "runtime inventory revision unavailable")?;
-        if !reap
-            && (snapshot.directory_identity != original_directory
-                || snapshot.revision != original_revision)
-        {
-            return Err("factory sessions changed during inventory; rerun `cas update`".into());
-        }
         if let Some(error) = first_error {
             return Err(error.into());
+        }
+        if !reap && (snapshot.revision != original_revision || !snapshot.files_unchanged()) {
+            return Err("factory sessions changed during inventory; rerun `cas update`".into());
         }
         Ok(snapshot)
     }
@@ -299,17 +312,48 @@ impl Snapshot {
         })
     }
     fn validate(&self) -> Result<(), String> {
-        let unchanged = FileIdentity::read(&self.directory)
-            .is_ok_and(|value| value == self.directory_identity)
-            && Self::revision(&self.directory).is_ok_and(|value| value == self.revision)
-            && self.files.iter().all(|(path, expected)| {
-                FileIdentity::read(path).is_ok_and(|value| value.as_ref() == Some(expected))
-            });
+        // Progress, hold and epic-focus writes replace JSON files atomically.
+        // They are safe when the runtime identity and session names stay put.
+        let unchanged = Self::revision(&self.directory).is_ok_and(|value| value == self.revision)
+            && self.files_unchanged();
         if unchanged {
             Ok(())
         } else {
             Err("factory sessions changed since inventory; rerun `cas update`".into())
         }
+    }
+    fn files_unchanged(&self) -> bool {
+        let entries = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return self.files.is_empty();
+            }
+            Err(_) => return false,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(_) => return false,
+            };
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Some(expected) = self.files.get(&path) else {
+                return false;
+            };
+            let Ok(bytes) = fs::read(&path) else {
+                return false;
+            };
+            let Ok(metadata) = serde_json::from_slice::<SessionMetadata>(&bytes) else {
+                return false;
+            };
+            if RuntimeRecordIdentity::from(&metadata) != *expected {
+                return false;
+            }
+            seen.insert(path);
+        }
+        seen.len() == self.files.len()
     }
 }
 impl RuntimeInventory {

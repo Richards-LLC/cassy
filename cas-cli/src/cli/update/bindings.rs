@@ -13,7 +13,9 @@ use super::ProjectPhase;
 use crate::cloud::CloudConfig;
 use crate::coordination::binding_intake::{IntakeJournal, IntakeScope};
 use crate::coordination::binding_reconciliation::NextAction;
-use crate::coordination::binding_repair::{OrdinaryBindingClient, RepairOutcome, RepairReport, RuntimeSnapshot};
+use crate::coordination::binding_repair::{
+    OrdinaryBindingClient, RepairOutcome, RepairReport, RuntimeSnapshot,
+};
 
 /// The Violet hub authenticates production Cloud bearers only. A project on
 /// another Cloud (staging, a local test server) has no hub to ask.
@@ -84,7 +86,9 @@ fn reconcile_with(
         return None;
     }
     let token = config.token.as_deref()?.trim();
-    let team_id = CloudConfig::load_from_cas_dir(cas_root).ok()?.active_team_id()?;
+    let team_id = CloudConfig::load_from_cas_dir(cas_root)
+        .ok()?
+        .active_team_id()?;
     let project_id = crate::cloud::resolve_canonical_id(cas_root)?;
 
     // Channels this host already gated stay candidates even if their Violet
@@ -114,7 +118,10 @@ fn reconcile_with(
     match list_channels(hub_url, token, &project_id) {
         Ok(mapped) => {
             for mapping in mapped.into_iter().filter(|m| m.project_id == project_id) {
-                match channels.iter_mut().find(|(id, _)| *id == mapping.channel_id) {
+                match channels
+                    .iter_mut()
+                    .find(|(id, _)| *id == mapping.channel_id)
+                {
                     Some(known) => known.1 = mapping.channel_name,
                     None => channels.push((mapping.channel_id, mapping.channel_name)),
                 }
@@ -125,7 +132,9 @@ fn reconcile_with(
                 "Slack bindings: could not list Violet channel mappings ({error}); rerun `cas update`"
             )));
         }
-        Err(error) => tracing::warn!(%error, "Violet channel listing failed; reconciling gated channels only"),
+        Err(error) => {
+            tracing::warn!(%error, "Violet channel listing failed; reconciling gated channels only")
+        }
     }
     if channels.is_empty() {
         return None;
@@ -141,7 +150,11 @@ fn reconcile_with(
     }
     let client = match OrdinaryBindingClient::new(&config.endpoint, token) {
         Ok(client) => client,
-        Err(error) => return Some(ProjectPhase::Warning(format!("Slack bindings: {error}; run `cas login`"))),
+        Err(error) => {
+            return Some(ProjectPhase::Warning(format!(
+                "Slack bindings: {error}; run `cas login`"
+            )));
+        }
     };
     let results: Vec<ChannelResult> = channels
         .into_iter()
@@ -171,7 +184,11 @@ fn reconcile_with(
     Some(phase(&results))
 }
 
-fn list_channels(hub_url: &str, token: &str, project_id: &str) -> Result<Vec<ChannelMapping>, String> {
+fn list_channels(
+    hub_url: &str,
+    token: &str,
+    project_id: &str,
+) -> Result<Vec<ChannelMapping>, String> {
     #[derive(serde::Deserialize)]
     struct Listing {
         channels: Vec<ChannelMapping>,
@@ -179,7 +196,9 @@ fn list_channels(hub_url: &str, token: &str, project_id: &str) -> Result<Vec<Cha
     let mut url = url::Url::parse(hub_url).map_err(|_| "invalid Violet hub URL".to_string())?;
     url.set_path(CHANNEL_ROUTE);
     url.set_fragment(None);
-    url.query_pairs_mut().clear().append_pair("project_id", project_id);
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("project_id", project_id);
     let response = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(std::time::Duration::from_secs(20))
@@ -203,7 +222,10 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
         .as_ref()
         .map(|response| (response.code, response.next_action))
         .unzip();
-    let retry_after = report.response.as_ref().and_then(|response| response.retry_after_secs);
+    let retry_after = report
+        .response
+        .as_ref()
+        .and_then(|response| response.retry_after_secs);
     let outcome = match report.outcome {
         RepairOutcome::Managed => "managed",
         RepairOutcome::Blocked => "blocked",
@@ -238,19 +260,29 @@ fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {
 
 /// Cloud's own quiet window, not a client constant, says how long to wait.
 fn remedy(action: NextAction, channel: &str, retry_after_secs: Option<u64>) -> String {
-    let wait = retry_after_secs.map_or_else(|| "a few minutes".to_owned(), |secs| format!("{secs}s"));
+    let wait =
+        retry_after_secs.map_or_else(|| "a few minutes".to_owned(), |secs| format!("{secs}s"));
     match action {
         NextAction::StopLegacyIntake => format!(
             "wait {wait} for legacy intake on every machine to go quiet, then rerun `cas update`"
         ),
-        NextAction::InviteViolet => format!("run `/invite @Violet` in channel {channel}, then rerun `cas update`"),
+        NextAction::InviteViolet => {
+            format!("run `/invite @Violet` in channel {channel}, then rerun `cas update`")
+        }
         NextAction::Authenticate => "run `cas login`, then rerun `cas update`".into(),
-        NextAction::RestoreMembership => "check your Cassy Cloud team membership, then rerun `cas update`".into(),
-        NextAction::LinkTeamProject => "run `cas cloud team show` to check this project's team link, then rerun `cas update`".into(),
+        NextAction::RestoreMembership => {
+            "check your Cassy Cloud team membership, then rerun `cas update`".into()
+        }
+        NextAction::LinkTeamProject => {
+            "run `cas cloud team show` to check this project's team link, then rerun `cas update`"
+                .into()
+        }
         NextAction::ExplicitRelink | NextAction::OperatorRepair => format!(
             "resolve the mapping with `cas integrate violet --channel {channel}`, then rerun `cas update`"
         ),
-        NextAction::UpgradeClient => "run `cas update` again after installing the newest Cassy".into(),
+        NextAction::UpgradeClient => {
+            "run `cas update` again after installing the newest Cassy".into()
+        }
         NextAction::RetryLater | NextAction::FixRequest | NextAction::None => {
             format!("retry `cas update` after {wait}")
         }
@@ -277,7 +309,10 @@ fn print_results(project_id: &str, results: &[ChannelResult], json: bool) {
                 "Slack {name}: {} — {}{}",
                 result.outcome,
                 cause.as_deref().unwrap_or("not managed"),
-                remedy.as_deref().map(|r| format!("; {r}")).unwrap_or_default()
+                remedy
+                    .as_deref()
+                    .map(|r| format!("; {r}"))
+                    .unwrap_or_default()
             ),
         }
     }

@@ -276,7 +276,11 @@ impl SessionManager {
             ));
         }
         self.ensure_dir()?;
-        let _lock = socket_cleanup::transition_lock(self.sessions_dir.parent().unwrap())?;
+        let base = self
+            .sessions_dir
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing session base"))?;
+        let _lock = socket_cleanup::transition_lock(base)?;
         let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

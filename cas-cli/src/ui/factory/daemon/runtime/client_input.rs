@@ -104,6 +104,36 @@ impl FactoryDaemon {
                 if events.iter().any(|event| matches!(event, ControlEvent::Detach)) {
                     client.detaching = true;
                 }
+                // Every client owns its terminal dimensions, even while another
+                // client owns input. Keep viewer sizes current for owner loss.
+                for event in &events {
+                    if let ControlEvent::Resize(cols, rows) = event {
+                        client.client_cols = *cols;
+                        client.client_rows = *rows;
+                        if *cols < COMPACT_WIDTH_THRESHOLD
+                            && client.view_mode == ClientViewMode::Full
+                        {
+                            client.view_mode = ClientViewMode::Compact;
+                            tracing::info!(
+                                "Client {} auto-switched to compact mode ({}x{})",
+                                client_id,
+                                cols,
+                                rows
+                            );
+                        } else if *cols >= COMPACT_WIDTH_THRESHOLD
+                            && client.view_mode == ClientViewMode::Compact
+                        {
+                            client.view_mode = ClientViewMode::Full;
+                            tracing::info!(
+                                "Client {} auto-switched to full mode ({}x{})",
+                                client_id,
+                                cols,
+                                rows
+                            );
+                        }
+                        client.needs_full_redraw = true;
+                    }
+                }
                 let has_activity = !input_data.is_empty() || !events.is_empty();
                 if has_activity {
                     let can_take = self.owner_client_id.is_none()
@@ -121,34 +151,6 @@ impl FactoryDaemon {
                             match event {
                                 ControlEvent::Detach => {},
                                 ControlEvent::Resize(cols, rows) => {
-                                    // Store per-client dimensions
-                                    if let Some(c) = self.clients.get_mut(&client_id) {
-                                        c.client_cols = cols;
-                                        c.client_rows = rows;
-                                        // Auto-detect compact mode on first resize
-                                        if cols < COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Full
-                                        {
-                                            c.view_mode = ClientViewMode::Compact;
-                                            tracing::info!(
-                                                "Client {} auto-switched to compact mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        } else if cols >= COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Compact
-                                        {
-                                            c.view_mode = ClientViewMode::Full;
-                                            tracing::info!(
-                                                "Client {} auto-switched to full mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        }
-                                        c.needs_full_redraw = true;
-                                    }
                                     resize_event = Some((cols, rows));
                                 }
                                 ControlEvent::SetMode(mode) => {

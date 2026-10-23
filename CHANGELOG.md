@@ -17,7 +17,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Adopting an already merged delivery** — Let `transfer adopt_branch` keep a receiver HEAD that already contains the delivery tip when that HEAD is itself on the integration target, so a restarted worker closes with `commit_receipt` without a manual reset; refuse a HEAD carrying commits not on the target before assignment, lease or branch change, and match the docs and schema text.
 
-- **QA proof survives documentation commits** — Reuse a QA trace at close when later commits touch only docs, QA registry or ledgers, CODEMAP or PRODUCT_OVERVIEW and the journeys selected for the delivered files keep their owner, status and invariants, recording a rebind note naming both tips and the changed paths; product edits and changed journey selection still refuse by name.
+- **QA proof survives documentation commits** — Reuse a QA trace at close when later commits touch only docs, QA registry or ledgers, CODEMAP or PRODUCT_OVERVIEW and the delivered files select the same journeys with the same status and invariants, recording a rebind note naming both tips and the changed paths; product edits still refuse as stale, and a registry edit that changes that coverage refuses by name.
 
 - **Worktree document status** — Read `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` from the calling worktree in `cas codemap status`, project-overview status and the close drift checks when that checkout is level with or ahead of its target; behind or divergent checkouts keep the target snapshot.
 

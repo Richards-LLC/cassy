@@ -161,6 +161,7 @@ class Announce(unittest.TestCase):
                                   capture_output=True, text=True)
         self.assertEqual(fast_row.returncode, 0, fast_row.stderr)
         self.assertEqual(self.draft.read_bytes(), original)
+        # pin: exported review text must retain VERSION; release.sh owns substitution.
         self.assertEqual((self.body_dir / "user-top-level.txt").read_text(), bodies[0] + "\n")
         strict = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(strict.returncode, 1)

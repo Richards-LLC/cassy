@@ -7037,6 +7037,9 @@ async fn test_gc_reclaims_terminal_review_checkout_cas_3fb4() {
     let crashed_seed = owned.join(".target-seed-in-progress");
     std::fs::create_dir(&crashed_seed).unwrap();
     std::fs::write(crashed_seed.join("partial"), b"interrupted seed").unwrap();
+    let legacy_seed = checkout.join(".target-seed-in-progress");
+    std::fs::create_dir(&legacy_seed).unwrap();
+    std::fs::write(legacy_seed.join("partial"), b"interrupted seed").unwrap();
     let output = env
         .service
         .factory_request(Parameters(cleanup))

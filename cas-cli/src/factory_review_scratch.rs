@@ -292,6 +292,7 @@ pub fn create(
             is_managed_checkout(&cas, &path),
             "review checkout head or ownership changed"
         );
+        discard_legacy_seed_stage(&directory, &path, &lock)?;
         ensure!(
             git(&path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
             "review checkout has source changes; preserve them before retrying"
@@ -374,6 +375,25 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     }
     owner(cas, directory)
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
+}
+
+fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> Result<()> {
+    let staging = checkout.join(".target-seed-in-progress");
+    let metadata = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "legacy review seed stage is not a directory"
+    );
+    ensure!(
+        !crate::factory_target_cache::review_output_in_use(directory, lock),
+        "legacy review seed stage may still be in use"
+    );
+    fs::remove_dir_all(staging)?;
+    Ok(())
 }
 
 /// Resolve the task's assigned worker rather than another dispatch's output.
@@ -672,6 +692,9 @@ fn reclaim(
             )? == expected,
             "review Git registration belongs to another repository"
         );
+        if clean {
+            discard_legacy_seed_stage(directory, &checkout, &lock)?;
+        }
         ensure!(
             git(
                 &checkout,

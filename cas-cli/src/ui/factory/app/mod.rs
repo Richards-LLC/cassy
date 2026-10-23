@@ -607,7 +607,9 @@ pub(crate) fn seed_review_target_from_worker(
     crate::factory_scratch::ensure_same_filesystem(&source, &target)?;
     let source_commit = git_head(&worker)?;
     let skipped_crates = changed_workspace_crates(review, &source_commit, &git_head(review)?)?;
-    let staging = review.join(".target-seed-in-progress");
+    // Keep interrupted seeds in the owned scratch wrapper, outside Git. An
+    // aborted seed must not make its review checkout appear source-dirty.
+    let staging = review.with_file_name(".target-seed-in-progress");
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }

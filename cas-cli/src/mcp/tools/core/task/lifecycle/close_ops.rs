@@ -6889,10 +6889,20 @@ impl CasCore {
             return None;
         }
 
-        // GH #873 / #1355: a supervisor merge on the target is a delivery
-        // container, but an unmerged target-sync merge is a new park boundary.
-        // Side-parent ancestry alone cannot distinguish them; use the target
-        // integration check below, after the caller's attribution validation.
+        // GH #873 / #1355: a target-reachable tip is a delivery container,
+        // even when B's content proof is Unknown or Dropped. An unmerged
+        // target-sync merge can still advance the boundary. Push deliveries
+        // accept either target view; local_merge retains local authority.
+        if let (Some(repo_path), Some(parent_branch)) = (repo_path, parent_branch) {
+            let integrated = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+                git_commit_is_ancestor(repo_path, factory_branch_anchor, parent_branch)
+            } else {
+                commit_is_merged_into_parent(repo_path, factory_branch_anchor, parent_branch)
+            };
+            if integrated {
+                return None;
+            }
+        }
         // Once the recorded task delivery has landed, a later mutable
         // factory-branch tip cannot become this task's new delivery boundary.
         if let (Some(repo_path), Some(parent_branch), Some(recorded_anchor)) = (

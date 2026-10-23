@@ -130,9 +130,13 @@ fn write_owner_with_directory_sync(
 fn write_new_checkout_owner_with_parent_sync(
     directory: &Path,
     record: &Owner,
-    _sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    write_owner(directory, record)
+    write_owner(directory, record)?;
+    // The owner's child sync makes its contents durable; the store parent
+    // sync makes the new checkout directory entry durable before Git uses it.
+    sync_parent(directory.parent().context("review store parent missing")?)?;
+    Ok(())
 }
 
 fn stale_owner_temp(path: &Path) -> Result<bool> {

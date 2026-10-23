@@ -14,6 +14,7 @@
 //   node scripts/terminal-qa.mjs [--label <name>] [--out <dir>] [--widths 80,120]
 //        [--palettes dark,light,solarized-dark,solarized-light]
 //        [--allowlist <file.json>] [--strict] [--escape-flag --full]
+//        [--progress-noun <word>] (repeat for each project-specific complete noun)
 //        [--json-flag --json] [--timeout-ms 120000] -- <command> [args...]
 //
 // Runs: every width × palette in a pty (COLORFGBG hints the palette to
@@ -29,7 +30,7 @@
 //                                      wider capture shows the token whole (warn
 //                                      when no wider capture can confirm it)
 //   truncation-without-escape   fail   a truncated value has no escape flag;
-//                                      literal gerund progress lines ending in ... pass
+//                                      declared complete progress nouns before ... or … pass
 //   numeric-misalignment        fail   numbers in one table column with
 //                                      different right edges
 //   unicode-without-fallback    fail   bytes ≥ 0x80 emitted under LC_ALL=C
@@ -538,19 +539,28 @@ function checkWordSplit(lines, columns, run, referenceText) {
   return out;
 }
 
-function isLiteralProgressEllipsis(text) {
-  // Complete final nouns are documented in cas-cli-craft's output contract.
-  // Require one progress sentence with literal interior spaces, not column gaps.
-  return /^ *[A-Z][a-z]+ing(?: [A-Za-z][A-Za-z0-9_-]*)* (?:Cassy|dependencies|packages|files|configuration)\.\.\. *$/.test(text);
+const DEFAULT_PROGRESS_NOUNS = ["Cassy", "dependencies", "packages", "files", "configuration"];
+
+function validateProgressNouns(nouns) {
+  if (!Array.isArray(nouns) || nouns.some((noun) => typeof noun !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(noun))) {
+    throw new UsageError("progress nouns must be complete words starting with a letter, without spaces or ellipses");
+  }
 }
 
-function checkTruncation(lines, run, escapeFlag) {
+function isLiteralProgressEllipsis(text, progressNouns) {
+  // A declaration vouches for a whole final word, never a prefix or a counter.
+  // Require one progress sentence with literal interior spaces, not column gaps.
+  const match = /^ *[A-Z][a-z]+ing(?: [A-Za-z][A-Za-z0-9_-]*)* ([A-Za-z][A-Za-z0-9_-]*)(?:\.\.\.|…) *$/.exec(text);
+  return match !== null && (DEFAULT_PROGRESS_NOUNS.includes(match[1]) || progressNouns.includes(match[1]));
+}
+
+function checkTruncation(lines, run, escapeFlag, progressNouns) {
   const out = [];
   const full = lines.map(lineText).join("\n");
   if (full.includes(escapeFlag)) return out;
   lines.forEach((line, idx) => {
     const text = lineText(line);
-    if (isLiteralProgressEllipsis(text)) return;
+    if (isLiteralProgressEllipsis(text, progressNouns)) return;
     for (const tok of tokens(text)) {
       if (/(…|\.\.\.)$/.test(tok)) {
         out.push(
@@ -695,8 +705,10 @@ function checkJsonContract(raw, run, jsonFlag) {
  * @param {string} [opts.escapeFlag]         truncation escape flag (default --full)
  * @param {string} [opts.jsonFlag]           flag used for the json run (default --json)
  * @param {string} [opts.referenceText]      plain text of a wider capture, to confirm word splits
+ * @param {string[]} [opts.progressNouns]    additional complete final words for progress copy
  */
-export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty", escapeFlag = "--full", jsonFlag = "--json", referenceText = null }) {
+export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty", escapeFlag = "--full", jsonFlag = "--json", referenceText = null, progressNouns = [] }) {
+  validateProgressNouns(progressNouns);
   const pal = typeof palette === "string" ? PALETTES[palette] : palette;
   const runName = typeof run === "string" ? run : run.name;
   const kind = typeof run === "string" ? "pty" : run.kind ?? "pty";
@@ -709,7 +721,7 @@ export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty
     ...checkContrast(lines, pal, runName),
     ...checkOverflow(lines, columns, runName),
     ...checkWordSplit(lines, columns, runName, referenceText),
-    ...checkTruncation(lines, runName, escapeFlag),
+    ...checkTruncation(lines, runName, escapeFlag, progressNouns),
     ...checkNumericAlignment(lines, runName),
   ];
 }
@@ -912,6 +924,7 @@ export class UsageError extends Error {}
  * @param {string} [options.allowlist]      path to allowlist JSON
  * @param {boolean} [options.strict]
  * @param {string} [options.escapeFlag]
+ * @param {string[]} [options.progressNouns] additional complete final words for progress copy
  * @param {string} [options.jsonFlag]
  * @param {number} [options.timeoutMs]
  * @param {boolean} [options.quiet]         suppress stdout printing
@@ -923,11 +936,13 @@ export async function runTerminalQa(options) {
     palettes = Object.keys(PALETTES),
     strict = false,
     escapeFlag = "--full",
+    progressNouns = [],
     jsonFlag = null,
     timeoutMs = 120000,
     quiet = true,
   } = options;
   if (!command || command.length === 0) throw new UsageError("no command given after --");
+  validateProgressNouns(progressNouns);
   for (const p of palettes) if (!PALETTES[p]) throw new UsageError(`unknown palette "${p}" (known: ${Object.keys(PALETTES).join(", ")})`);
   for (const w of widths) if (!Number.isInteger(w) || w < 20) throw new UsageError(`invalid width "${w}"`);
   const [cmd, ...args] = command;
@@ -1016,7 +1031,7 @@ export async function runTerminalQa(options) {
       if (ref) referenceText = stripAnsi(ref.raw);
     }
     findingsAll.push(
-      ...analyzeCapture({ raw, columns: run.width ?? 80, palette: run.palette ?? "dark", run: { name: run.name, kind: run.kind }, escapeFlag, jsonFlag: jsonFlag ?? "--json", referenceText }),
+      ...analyzeCapture({ raw, columns: run.width ?? 80, palette: run.palette ?? "dark", run: { name: run.name, kind: run.kind }, escapeFlag, jsonFlag: jsonFlag ?? "--json", referenceText, progressNouns }),
     );
     if (run.kind === "json" && stderr.length > 0) {
       findingsAll.push(...analyzeCapture({ raw: stderr, columns: 80, palette: "dark", run: { name: "json.stderr", kind: "piped" }, escapeFlag }));
@@ -1056,6 +1071,7 @@ export async function runTerminalQa(options) {
     palettes,
     strict,
     escape_flag: escapeFlag,
+    progress_nouns: progressNouns,
     json_flag: jsonFlag,
     runs: runs.map((r) => ({ ...r })),
     findings,
@@ -1089,6 +1105,7 @@ export async function runTerminalQa(options) {
 const USAGE = `usage: terminal-qa.mjs [--label <name>] [--out <dir>] [--widths 80,120]
         [--palettes dark,light,solarized-dark,solarized-light] [--allowlist <file.json>]
         [--strict] [--escape-flag --full] [--json-flag --json] [--timeout-ms 120000]
+        [--progress-noun <word>] (repeatable)
         -- <command> [args...]`;
 
 export function parseArgs(argv) {
@@ -1109,6 +1126,7 @@ export function parseArgs(argv) {
     else if (a === "--widths") opts.widths = next().split(",").map((w) => Number(w.trim()));
     else if (a === "--palettes") opts.palettes = next().split(",").map((p) => p.trim()).filter(Boolean);
     else if (a === "--allowlist") opts.allowlist = next();
+    else if (a === "--progress-noun") (opts.progressNouns ??= []).push(next());
     else if (a === "--strict") opts.strict = true;
     else if (a === "--escape-flag") opts.escapeFlag = next();
     else if (a === "--json-flag") opts.jsonFlag = next();

@@ -290,6 +290,92 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+/// GH #1355: a pushed target-sync merge is the new park boundary, even
+/// when the saved start base arrived through that merge rather than B.
+#[tokio::test]
+async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
+    let mut env = TestEnvGuard::temp_home();
+    for (target_first, receipt, rewrite) in [(false, true, false), (true, false, false), (false, true, true)] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some(BRANCH.into());
+        let target_base = git(repo, &["rev-parse", "main"]);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(),
+            branch: BRANCH.into(),
+            base_sha: target_base.clone(),
+        });
+        tasks.update(&task).unwrap();
+        cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
+            task_id: TASK,
+            implementer_agent_id: "recovery-session",
+            branch: BRANCH,
+            bound_head: &f.predecessor,
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        }, chrono::Utc::now()).unwrap();
+        if target_first || rewrite {
+            git(&f.worker_path, &["reset", "--hard", "main"]);
+            if rewrite {
+                std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 99px; }\n").unwrap();
+                git(&f.worker_path, &["add", "footer.css"]);
+                git(&f.worker_path, &["commit", "-qm", "fix(cas-c6e1-fixture): rewritten delivery"]);
+            } else {
+                git(&f.worker_path, &["merge", "--no-ff", &f.predecessor, "-m", "merge target sync for cas-c6e1-fixture"]);
+            }
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert!(git_commit_is_ancestor(repo, &target_base, &tip));
+        assert_eq!(git_commit_is_ancestor(repo, &f.predecessor, &tip), !rewrite);
+        let origin = cas_dir.join("origin.git");
+        git(repo, &["init", "--bare", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", BRANCH]);
+        let result = f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some("Re-park current pushed merge tip".into()),
+            commit_receipt: receipt.then(|| tip.clone()),
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        })).await.unwrap();
+        let output = text(result);
+        let parked = tasks.get(TASK).unwrap();
+        if rewrite {
+            assert!(output.contains("rewrit") && !output.contains("base is no longer an ancestor"), "{output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.predecessor.as_str()));
+            continue;
+        }
+        assert!(output.contains("MERGE REQUIRED"), "{output}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds.iter().find(|round| round.bound_head == f.predecessor).unwrap().state,
+            cas_types::QaPassState::Superseded);
+        assert_eq!(rounds[0].bound_head, tip);
+        let service = crate::mcp::CasService::new(f.core, None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": TASK,
+            "summary": "Merge current delivery", "message": "Merge the re-parked tip",
+            "merge_request": true,
+        })).unwrap();
+        let output = text(service.coordination(Parameters(request)).await.unwrap());
+        assert!(!output.contains("RE-PARK"), "{output}");
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().poll_all(50).unwrap();
+        assert!(rows.iter().any(|row| {
+            crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                .is_some_and(|envelope| envelope.task_id == TASK && envelope.branch_tip == tip)
+        }), "{output}");
+    }
+}
+
 #[tokio::test]
 async fn recovery_tracked_merge_rejects_old_qa_and_selects_current_tip_cas_c6e1() {
     let mut env = TestEnvGuard::temp_home();

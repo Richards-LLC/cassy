@@ -354,18 +354,28 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         "the terminal mutation must commit before the compact receipt"
     );
 
-    loop {
-        let stored = task_store.get(&epic_id).expect("read closed epic");
-        if stored.notes.contains("GH515-NARRATIVE-START")
-            && stored.notes.contains("GH515-NARRATIVE-END")
-            && stored.notes.len() >= narrative.len()
-        {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let stored = task_store.get(&epic_id).expect("read closed epic");
+            if stored.notes.contains("GH515-NARRATIVE-START")
+                && stored.notes.contains("GH515-NARRATIVE-END")
+                && stored.notes.len() >= narrative.len()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        // Observe progress without a wall-clock deadline: factory contention
-        // may delay the detached writer but must not turn load into failure.
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let stored = task_store
+            .get(&epic_id)
+            .expect("read closed epic after timeout");
+        panic!(
+            "timed out waiting for deferred narrative; stored note length: {}",
+            stored.notes.len()
+        );
+    });
 }
 
 #[tokio::test]

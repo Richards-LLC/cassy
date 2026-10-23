@@ -10588,6 +10588,127 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
     );
 }
 
+/// A merged immutable anchor survives cleanup of both source refs. Content
+/// refusals must keep their real reason, and an unmerged anchor still refuses.
+#[tokio::test]
+async fn close_merged_anchor_after_source_cleanup_cas_9baa() {
+    let mut failures = Vec::new();
+    for shape in ["retained", "dropped", "unmerged"] {
+        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-9baa")]);
+        let env = FactoryTestEnv::with_server_supervisor();
+        let worker = "cleanup-worker";
+        let path = init_pushed_worker_repo(&env, worker);
+        let project = env.cas_root.parent().unwrap();
+        std::fs::write(env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"cleanup-project\"\n[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+        let mut task = Task::new("cas-9baa".into(), "Close cleaned-up delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.depth = TaskDepth::Light;
+        task.assignee = Some(worker.into());
+        task.risk = vec![cas_types::TaskRisk::None];
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cleanup-project".into(),
+            target_branch: "main".into(),
+        });
+        std::fs::write(path.join("delivery.txt"), "task contribution\n").unwrap();
+        git_stdout(&path, &["add", "delivery.txt"]);
+        git_stdout(&path, &["commit", "-qm", "cas-9baa: delivery"]);
+        let anchor = git_stdout(&path, &["rev-parse", "HEAD"]);
+        let branch = format!("factory/{worker}");
+        git_stdout(&path, &["push", "-q", "origin", &branch]);
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.parked_branch = Some(branch.clone());
+        env.task_store().add(&task).unwrap();
+        let drop_commit = if shape != "unmerged" {
+            git_stdout(
+                project,
+                &[
+                    "merge",
+                    "-q",
+                    "--no-ff",
+                    &branch,
+                    "-m",
+                    "integrate delivery",
+                ],
+            );
+            if shape == "dropped" {
+                git_stdout(project, &["rm", "delivery.txt"]);
+                git_stdout(project, &["commit", "-qm", "retire obsolete contribution"]);
+            }
+            Some(git_stdout(project, &["rev-parse", "HEAD"]))
+        } else {
+            None
+        };
+        git_stdout(project, &["push", "-q", "origin", "main"]);
+        git_stdout(project, &["push", "-q", "origin", "--delete", &branch]);
+        git_stdout(project, &["worktree", "remove", path.to_str().unwrap()]);
+        git_stdout(project, &["branch", "-D", &branch]);
+        git_stdout(project, &["fetch", "-q", "--prune", "origin"]);
+        assert!(
+            git_stdout(
+                project,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    &format!("refs/heads/{branch}"),
+                    &format!("refs/remotes/origin/{branch}")
+                ]
+            )
+            .is_empty()
+        );
+        let close = |review: Option<&str>| {
+            task_req(serde_json::json!({
+                "action": "close", "id": task.id, "commit_receipt": anchor,
+                "supervisor_override": review.is_some(),
+                "reason": review.unwrap_or("Delivery already merged; source branch cleaned up"),
+            }))
+        };
+        let result = get_text(&env.service.task(Parameters(close(None))).await.unwrap());
+        let stored = env.task_store().get(&task.id).unwrap();
+        if shape == "retained" {
+            if stored.status != TaskStatus::Closed {
+                failures.push(format!("retained: {result}"));
+            }
+        } else {
+            assert_eq!(
+                stored.status,
+                TaskStatus::AwaitingMerge,
+                "{shape}: {result}"
+            );
+            let reason = if shape == "dropped" {
+                "DELIVERY CONTENT DROPPED"
+            } else {
+                "FACTORY BRANCH MISSING"
+            };
+            if !result.contains(reason) || result.contains("PARK REFUSED") {
+                failures.push(format!("{shape}: expected {reason}, got {result}"));
+            }
+            assert_eq!(
+                stored.deliverables.factory_branch_anchor.as_deref(),
+                Some(anchor.as_str())
+            );
+            if shape == "dropped" {
+                let review = format!(
+                    "reviewed-drop: {} -- obsolete delivery intentionally retired",
+                    drop_commit.unwrap()
+                );
+                let reviewed = get_text(
+                    &env.service
+                        .task(Parameters(close(Some(&review))))
+                        .await
+                        .unwrap(),
+                );
+                assert_eq!(
+                    env.task_store().get(&task.id).unwrap().status,
+                    TaskStatus::Closed,
+                    "{reviewed}"
+                );
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// GH #1357/#1353: approval recovers a replaced start boundary, including
 /// linked checkouts whose project identity lives only at the common root.
 #[tokio::test]

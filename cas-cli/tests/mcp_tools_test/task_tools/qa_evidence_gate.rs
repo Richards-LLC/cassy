@@ -547,7 +547,12 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
         "docs/PRODUCT_OVERVIEW.md",
     ];
     for path in paths {
-        commit_file(&fx.repo, path, "QA documentation upkeep\n");
+        let body = if path.ends_with(".yaml") {
+            "version: 1\njourneys: []\n"
+        } else {
+            "QA documentation upkeep\n"
+        };
+        commit_file(&fx.repo, path, body);
     }
     // The reused artifacts genuinely predate B; SHA acceptance alone is insufficient.
     let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);

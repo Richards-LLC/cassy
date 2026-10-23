@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **Own branch per task** — Refuse `task start` while the worker's checkout is on another task's `factory/<worker>-cas-<id>` branch, printing the exact fetch, switch and push that cut the new task's own branch; a branch approved through `rebind_branch` still starts. The cas-worker skill now requires whole-module proof for shared surfaces.
+
+### Fixed
+
+- **Squash re-close after a rejection** — Re-close a squash-merged delivery with its squash receipt after a verifier rejection and blocked → open, instead of looping between park and close refusals that each named the other receipt; `merged_into=<branch>@<sha>` prefers `origin/<branch>` over a stale local branch.
+
+- **Adopting an already merged delivery** — Let `transfer adopt_branch` keep a receiver HEAD that already contains the delivery tip when that HEAD is itself on the integration target, so a restarted worker closes with `commit_receipt` without a manual reset; refuse a HEAD carrying commits not on the target before assignment, lease or branch change, and match the docs and schema text.
+
+- **QA proof survives documentation commits** — Reuse a QA trace at close when later commits touch only docs, QA registry or ledgers, CODEMAP or PRODUCT_OVERVIEW and the journeys selected for the delivered files keep their owner, status and invariants, recording a rebind note naming both tips and the changed paths; product edits and changed journey selection still refuse by name.
+
+- **Worktree document status** — Read `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` from the calling worktree in `cas codemap status`, project-overview status and the close drift checks when that checkout is level with or ahead of its target; behind or divergent checkouts keep the target snapshot.
+
+- **Detached checkout guard** — Allow a compound command such as `git bisect good` followed by `git checkout --detach <sha>` in an isolated worker checkout, while commits on a detached HEAD stay refused; a `--detach` after a `--` pathspec separator no longer skips the branch check.
+
+- **Terminal sizes across viewers** — Resize the factory screen to the new owner when a client takes input by typing, record every attached client's size so owner loss falls back to a real one, and give a narrow viewing terminal its compact view while the full layout follows the owner.
+
+- **Review checkout durability** — Sync the scratch store directory after creating a new review checkout, so a power loss cannot drop the checkout's entry, and propagate a failed sync.
+
+- **macOS lane checks** — Count macOS process lookups on daemon lanes as blocking process calls, as Linux already does, so lane enforcement and reports see them.
+
+- **Priority refusal wording** — Name the rejected priority update and the registered-session requirement when an unregistered client changes priority, instead of describing receipt submission.
+
+- **Release report credentials** — Discover the Violet token variable from Codex's `bearer_token_env_var` or `env_http_headers` Authorization entry as well as Claude's registration, accept every selector name the CLI accepts, and name the config file and the `VIOLET_SLACK_TOKEN_ENV` remedy when a choice stays ambiguous.
+
+- **Durable report links** — Refuse a report HTML link on a temporary delivery ref, a hand-set `CAS_RELEASE_TRAIN_REPORT_HTML_URL` outside `main` or the release tag, or one with `.` or `..` segments, before uploading the PDF.
+
 ## [3.75.0] - 2026-10-23
 
 ### Added

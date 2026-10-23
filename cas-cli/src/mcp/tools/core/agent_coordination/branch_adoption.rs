@@ -1,4 +1,4 @@
-//! Opt-in fast-forward handoff into a receiving worker's own checkout.
+//! Opt-in branch handoff preserving a receiving worker's existing delivery ancestry.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -167,9 +167,15 @@ pub(super) fn adopt_task_branch(
     )
     .map_err(|e| e.to_string())?;
     // Copy the recorded anchor without moving an advanced foreign source.
-    // The receiver's own work must still fast-forward; its existing task
-    // branch is checked separately below even during source recovery.
-    if !foreign_source && !git.ancestor("HEAD", &tip)? {
+    // A fresh receiver may already be on the integration target after this
+    // delivery merged. Preserve that HEAD rather than rewinding its checkout;
+    // `tip` remains the task's immutable delivery anchor in the receipt.
+    let receiver_tip = if !foreign_source && git.ancestor(&tip, "HEAD")? {
+        git.run(&["rev-parse", "HEAD"])?
+    } else {
+        tip.clone()
+    };
+    if !foreign_source && !git.ancestor("HEAD", &receiver_tip)? {
         return Err("receiver HEAD cannot fast-forward to the task delivery tip; reconcile the branches first".into());
     }
     let branch = worker_task_branch(&receiver.name, &task.id);
@@ -179,13 +185,15 @@ pub(super) fn adopt_task_branch(
         .status
         .success();
     if exists {
-        if !git.ancestor(&reference, &tip)? {
+        if !git.ancestor(&reference, &receiver_tip)?
+            && !git.ancestor(&receiver_tip, &reference)?
+        {
             return Err("receiver task branch cannot fast-forward to the delivery tip".into());
         }
         git.run(&["switch", &branch])?;
-        git.run(&["merge", "--ff-only", &tip])?;
+        git.run(&["merge", "--ff-only", &receiver_tip])?;
     } else {
-        git.run(&["switch", "-c", &branch, &tip])?;
+        git.run(&["switch", "-c", &branch, &receiver_tip])?;
     }
     verify_worker_worktree_binding(&receiver.name, destination, Some(&branch))
         .map_err(|e| e.to_string())?;

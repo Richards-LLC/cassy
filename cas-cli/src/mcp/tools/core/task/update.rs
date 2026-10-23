@@ -468,8 +468,10 @@ fn clean_idle_assignment_note(
     }
     // cas-ff6c: start refuses another task's per-task branch rather than
     // resetting it, so promise the cut start will ask for.
-    if let Some(owner_task) = crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch)
-        .filter(|owner_task| *owner_task != task.id)
+    if let Some(owner_task) =
+        crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch).filter(|owner_task| {
+            *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
+        })
     {
         return Some(format!(
             "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \

@@ -2390,7 +2390,11 @@ impl CasCore {
                     let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
                         &worker.name,
                         &worker_branch,
-                    ) == Some(task.id.as_str());
+                    )
+                    .is_some_and(|owner_task| {
+                        owner_task == task.id.as_str()
+                            || owner_task.starts_with(&format!("{}-", task.id))
+                    });
                     // cas-ff6c: another task's per-task branch is that task's
                     // delivery ref, never a reusable lane. A supervisor
                     // rebind that recorded this branch for the task is exempt.
@@ -2398,7 +2402,10 @@ impl CasCore {
                         &worker.name,
                         &worker_branch,
                     )
-                    .filter(|owner_task| *owner_task != task.id)
+                    .filter(|owner_task| {
+                        *owner_task != task.id
+                            && !owner_task.starts_with(&format!("{}-", task.id))
+                    })
                         && task
                             .deliverables
                             .factory_branch_start
@@ -2417,7 +2424,7 @@ impl CasCore {
                             ),
                         ));
                     }
-                    let reset_note =if task.status == TaskStatus::Open && !is_current_task_branch {
+                    let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
                         let identity =
                             close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
                                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;

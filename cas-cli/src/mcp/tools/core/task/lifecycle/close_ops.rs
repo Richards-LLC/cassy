@@ -2077,11 +2077,16 @@ impl SiblingTestParents {
                 candidates.sort();
                 candidates
             });
+        // A parent beside the test directory can mount directory/*_tests.rs.
+        let adjacent_parent = directory.parent()?.join(format!(
+            "{}.rs", directory.file_name()?.to_str()?,
+        ));
         // Keep conventional foo/mod.rs mounts, including ../foo_tests.rs.
         for parent in candidates
             .iter()
             .cloned()
             .chain(std::iter::once(directory.join(parent_name).join("mod.rs")))
+            .chain(std::iter::once(adjacent_parent))
         {
             if parent == file {
                 continue;

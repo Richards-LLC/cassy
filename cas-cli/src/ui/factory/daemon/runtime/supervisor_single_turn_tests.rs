@@ -69,8 +69,7 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         },
     )
     .unwrap();
-    daemon.app.mux.add_pane(
-        cas_mux::Pane::with_pty(
+    let mut pane = cas_mux::Pane::with_pty(
             &name,
             cas_mux::PaneKind::Supervisor,
             pty,
@@ -78,18 +77,31 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
             80,
             cli,
         )
-        .unwrap(),
-    );
+        .unwrap();
+    // This private shell has no harness startup phase to wait through.
+    pane.backdate_spawn_for_test(Duration::from_secs(6));
+    daemon.app.mux.add_pane(pane);
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
         .init_team_config(&[], root.path(), &Default::default(), "single-sup")
         .unwrap();
     daemon.teams = Some(teams);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    for pane in daemon.app.mux.panes_mut() {
-        pane.drain_output();
-    }
+    let mut banner = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for pane in daemon.app.mux.panes_mut() {
+                banner.extend(pane.drain_output().0);
+            }
+            if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
+                && root.path().join("input").is_file()
+                && daemon.app.mux.pane_ready_for_injection(&name)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("private supervisor must emit ready and open its input file");
     let bytes = daemon.app.mux.pane_bytes_received(&name).unwrap();
     assert!(bytes > 0);
     daemon.last_pane_output_bytes.insert(name.clone(), bytes);
@@ -145,10 +157,23 @@ pub(super) async fn settle_injected_writes(daemon: &mut FactoryDaemon) {
 /// The supervisor PTY received exactly one submitted turn containing `needle`
 /// and no Teams relay was written.
 pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDaemon, needle: &str) -> String {
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    daemon.process_prompt_queue().await.unwrap();
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    assert!(typed.contains(needle), "{typed:?}");
+    // cas_f265: queue admission, PTY write completion and the shell consuming
+    // those bytes happen on different turns/threads. A single pass followed by
+    // a file read can observe an empty/partial turn even after a fixed delay.
+    let mut typed = String::new();
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+            if typed.contains(needle) && typed.ends_with('\r')
+                && !daemon.app.mux.has_pending_injects()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(completed.is_ok(), "submitted turn did not reach the consumer: {typed:?}");
     assert_eq!(typed.matches('\r').count(), 1, "one PTY submit: {typed:?}");
     assert!(teams_messages(daemon).is_empty(), "no relay copy");
     typed

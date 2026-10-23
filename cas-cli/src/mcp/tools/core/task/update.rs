@@ -1482,7 +1482,21 @@ impl CasCore {
             // Priority controls shared build admission. A worker cannot evade
             // this guard by reopening its task, and unavailable authority must
             // refuse the entire update before ordinary fields are changed.
-            let caller_id = self.get_registered_agent_id_read_only()?;
+            let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+                let reason = if error.code == ErrorCode::INVALID_REQUEST {
+                    "priority changes require an already registered authenticated Cassy session"
+                        .to_string()
+                } else {
+                    format!(
+                        "could not verify an already registered authenticated Cassy session: {}",
+                        error.message
+                    )
+                };
+                Self::error(
+                    error.code,
+                    format!("TASK PRIORITY UPDATE REJECTED: {reason}"),
+                )
+            })?;
             let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,

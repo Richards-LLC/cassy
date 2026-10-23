@@ -10586,14 +10586,16 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
         supervisor.factory_session = Some("session-88c1".into());
         env.agent_store().update(&supervisor).unwrap();
-        // The start inherited a local-only supervisor commit. Its replacement
-        // is based on origin/main and cannot descend from that old boundary.
-        git(&[
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "supervisor local-only base",
-        ]);
+        // Squashing can lose only the anchor; reset recovery also drops an
+        // inherited local-only supervisor base. Both need an audited rebind.
+        if shape != "squashed-anchor" {
+            git(&[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "supervisor local-only base",
+            ]);
+        }
         let old_base = git(&["rev-parse", "HEAD"]);
         git(&[
             "commit",

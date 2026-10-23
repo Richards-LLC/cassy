@@ -1928,6 +1928,10 @@ impl CloudSyncer {
     /// A consumed peer close remains attention-worthy after its pull cursor
     /// advances. Both pull scopes report the durable guard until this local
     /// delivery's lifecycle changes, without fetching or journaling it again.
+    /// Policy conflicts are excluded: LocalWins honors operator choice, a
+    /// non-superseding row has no newer authority, and owner-wins rejects a
+    /// non-owner replica. Those remain ordinary conflict counts/journal rows,
+    /// rather than repeated lifecycle-guard warnings (cas-963f).
     fn report_guarded_peer_closes(
         &self,
         task_store: &dyn TaskStore,
@@ -2706,7 +2710,9 @@ impl CloudSyncer {
 
         self.reassert_quarantine();
 
-        self.report_guarded_peer_closes(task_store, &mut result)?;
+        if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
+            result.errors.push(format!("Could not report guarded peer closes: {error}"));
+        }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -3757,7 +3763,9 @@ impl CloudSyncer {
         for conflict in self.take_conflict_log() {
             result.record_conflict_detail(conflict);
         }
-        self.report_guarded_peer_closes(task_store, &mut result)?;
+        if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
+            result.errors.push(format!("Could not report guarded peer closes: {error}"));
+        }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }

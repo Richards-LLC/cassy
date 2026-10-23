@@ -687,7 +687,9 @@ def html_url(tag: str) -> str:
     if configured:
         return configured
     repo = os.environ.get("CAS_RELEASE_TRAIN_REPO", DEFAULT_REPO).strip().strip("/")
-    ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip()
+    ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip() or "main"
+    if ref not in {"main", tag}:
+        fail("release report HTML ref must be main or the release tag; temporary delivery branches cannot be published")
     return f"https://github.com/{repo}/blob/{ref}/docs/release-reports/{tag}.html"
 
 
@@ -745,6 +747,7 @@ def main(argv: list[str]) -> int:
 
     try:
         read_since = slack_timestamp_since(user_thread)
+        report_url = html_url(tag)
         pdf_bytes = pdf_path.read_bytes()
         check_upload_size(f"PDF {pdf_path.name}", len(pdf_bytes), hub_upload_limit())
         html_bytes = html_path.read_bytes()
@@ -801,7 +804,7 @@ def main(argv: list[str]) -> int:
                 "channel": channel,
                 "kind": "message",
                 "reply_to": dev_thread,
-                "text": f"Release report HTML: <{html_url(tag)}|open the standalone report>",
+                "text": f"Release report HTML: <{report_url}|open the standalone report>",
             },
         )
         html_file_id, _html_permalink = message_receipt(html_envelope, "HTML")

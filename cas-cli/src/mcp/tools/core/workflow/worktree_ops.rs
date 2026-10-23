@@ -3662,7 +3662,7 @@ impl CasCore {
         let recorded_anchor = selected.anchor.as_str();
         let assignee = selected.assignee.clone();
         // Live local workers retain their existing merge/dirty-tree policy.
-        if id != anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
+        if id != recorded_anchor && is_git_worktree(&manager.worktree_path_for_worker(&assignee)) {
             return Ok(None);
         }
         let refuse = |detail: String| McpError {

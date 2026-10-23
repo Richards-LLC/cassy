@@ -6889,10 +6889,20 @@ impl CasCore {
             return None;
         }
 
-        // GH #873 / #1355: a supervisor merge on the target is a delivery
-        // container, but an unmerged target-sync merge is a new park boundary.
-        // Side-parent ancestry alone cannot distinguish them; use the target
-        // integration check below, after the caller's attribution validation.
+        // GH #873 / #1355: a target-reachable tip is a delivery container,
+        // even when B's content proof is Unknown or Dropped. An unmerged
+        // target-sync merge can still advance the boundary. Push deliveries
+        // accept either target view; local_merge retains local authority.
+        if let (Some(repo_path), Some(parent_branch)) = (repo_path, parent_branch) {
+            let integrated = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+                git_commit_is_ancestor(repo_path, factory_branch_anchor, parent_branch)
+            } else {
+                commit_is_merged_into_parent(repo_path, factory_branch_anchor, parent_branch)
+            };
+            if integrated {
+                return None;
+            }
+        }
         // Once the recorded task delivery has landed, a later mutable
         // factory-branch tip cannot become this task's new delivery boundary.
         if let (Some(repo_path), Some(parent_branch), Some(recorded_anchor)) = (
@@ -31700,6 +31710,27 @@ esac
             matches!(out, MergeStateGateOutcome::Proceed),
             "an original content commit receipt must be accepted when it is an ancestor of the merged target, got {out:?}"
         );
+
+        // cas-189f: content proof can be Unknown for a real target-reachable
+        // delivery (here B has no first-parent effect). Its supervisor merge
+        // is still a container and must not replace the content boundary B.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "feat(cas-test1): empty delivery boundary"]);
+        let unknown_anchor = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge unknown-content delivery"]);
+        let supervisor_merge = rev_parse_local(p, "main");
+        assert!(matches!(
+            delivery_content_presence_on_target(p, &unknown_anchor, "main"),
+            DeliveryContentPresence::Unknown { .. }
+        ));
+        let mut advanced = worker_task("worker");
+        advanced.status = TaskStatus::AwaitingMerge;
+        advanced.deliverables.factory_branch_anchor = Some(unknown_anchor.clone());
+        assert!(CasCore::apply_awaiting_merge_anchor_advance(
+            &mut advanced, &supervisor_merge, chrono::Utc::now(), Some(p), Some("main"),
+        ).is_none(), "a target-reachable merge must retain B even when content proof is Unknown");
+        assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(unknown_anchor.as_str()));
     }
 
     #[test]

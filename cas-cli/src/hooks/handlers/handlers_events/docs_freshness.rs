@@ -83,12 +83,12 @@ impl Measurement {
         } else {
             "HEAD".into()
         };
-        // A worker ahead of integration must see its own new changes. A stale
-        // or divergent checkout must not hide drift on the integration ref.
+        // A checkout level with or ahead of integration must see its own files,
+        // including newly generated docs. A stale or divergent checkout must
+        // not hide drift on the integration ref.
         if !integration_only
             && reference != "HEAD"
             && git(&root, &["merge-base", "--is-ancestor", &reference, "HEAD"]).is_some()
-            && git(&root, &["rev-parse", &reference]) != git(&root, &["rev-parse", "HEAD"])
         {
             reference = "HEAD".into();
         }

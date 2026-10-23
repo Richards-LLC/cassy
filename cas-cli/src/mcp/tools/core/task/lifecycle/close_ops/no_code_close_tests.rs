@@ -1455,12 +1455,17 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
         task.deliverables.factory_branch_anchor = Some(receipt.clone());
         f.put(&task);
         claim(&f, id);
+        if recorded && !with_receipt {
+            // Without a recovery receipt, the hook still requires the
+            // checkout to contain this task's anchor. Keep that guard intact.
+            git(&worker_path, &["checkout", "-q", &parked]);
+        }
         let caller = if supervisor { &f.supervisor } else { &f.worker };
         let response = call(caller, serde_json::json!({
             "action": "close", "id": id, "reason": "Integrated parked delivery",
             "commit_receipt": with_receipt.then_some(receipt.as_str()), "supervisor_override": supervisor,
         })).await;
-        assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{recorded}: {response}");
+        assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{recorded}/{with_receipt}: {response}");
         if with_receipt {
             assert!(f.task(id).notes.contains(&start_base), "old base must remain audited");
         }

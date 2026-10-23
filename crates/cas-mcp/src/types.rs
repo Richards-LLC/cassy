@@ -357,7 +357,7 @@ pub struct TaskRequest {
     /// was inspected before waiving the gate, and it is stored next to the
     /// gate's own measurements. Only honored for a live registered supervisor.
     #[schemars(
-        description = "Supervisor override for the epic close stranded-branch gate: what you inspected (e.g. 'diffed all 11 delivered paths against main; content present, later refactored by PR #406'). Live registered supervisor only; logged with the gate's per-branch measurements as a decision note. Use it, not a workaround, when every lane is measurably stale."
+        description = "Epic close stranded-branch override: describe evidence that every lane is stale. Live registered supervisor only; logged with per-branch measurements."
     )]
     #[serde(default)]
     pub stranded_branch_override: Option<String>,
@@ -399,7 +399,7 @@ pub struct TaskRequest {
     /// Audit reference to the closed-unmerged PR or experimental branch,
     /// required when `negative_result=true`.
     #[schemars(
-        description = "Portable audit reference to the deliberately closed-unmerged PR or experimental branch (for example a PR URL or branch:factory/name). Required with negative_result=true."
+        description = "Unmerged negative-result PR URL or branch:factory/name audit pointer; required with negative_result=true."
     )]
     #[serde(default)]
     pub negative_result_reference: Option<String>,
@@ -427,7 +427,7 @@ pub struct TaskRequest {
     /// effect on the current target. It is only needed
     /// when no commit-time factory anchor was captured.
     #[schemars(
-        description = "Commit SHA (or unambiguous abbreviation) from this task, for work merged before close with no automatic factory anchor. Close stores the full ID after checking a non-empty diff, ancestry of the parent branch and that its tree effect is still present (or explicitly evolved) on the target."
+        description = "Task commit SHA or unambiguous prefix for merged work lacking a factory anchor. Stores full ID; checks non-empty diff, target ancestry and preserved or explicitly evolved tree effect."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,
@@ -489,12 +489,12 @@ pub struct TaskRequest {
     pub to_agent: Option<String>,
 
     /// Copy inherited task work to the receiver's own per-task branch.
-    #[schemars(description = "For transfer: fast-forward a clean registered receiver worktree to the delivery tip on factory/<receiver>-<task> and rebind its anchor. Refuses dirty, divergent or foreign repositories; keeps the original branch.")]
+    #[schemars(description = "transfer: fast-forward clean registered receiver to delivery tip on factory/<receiver>-<task>; rebind anchor. Refuses dirty/divergent/foreign repos; keeps original branch.")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub adopt_branch: Option<bool>,
 
     /// Existing replacement delivery branch approved by the task's supervisor.
-    #[schemars(description = "For rebind_branch: existing branch checked out by the assigned worker. A live registered supervisor and non-empty reason are required; records the old tip without changing Git, assignment or target.")]
+    #[schemars(description = "rebind_branch: assignee's checked-out branch. Live registered supervisor + non-empty reason required; audits old tip; no Git/assignment/target changes.")]
     #[serde(default)]
     pub branch: Option<String>,
 

@@ -4911,6 +4911,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         branch_transfer_git(root, &["add", "delivery.txt"]);
         branch_transfer_git(root, &["commit", "-m", message]);
         let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+        let content = std::fs::read(root.join("delivery.txt")).unwrap();
         for status in ["blocked", "open"] {
             let request = serde_json::from_value(serde_json::json!({
                 "action": "update", "id": task.id, "status": status,
@@ -4938,7 +4939,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         assert_eq!(saved.status, if allowed { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
         assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
-        assert_eq!(std::fs::read_to_string(root.join("delivery.txt")).unwrap(), "work before the block\n");
+        assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);
     }
 }
 

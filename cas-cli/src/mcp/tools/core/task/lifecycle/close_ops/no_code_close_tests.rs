@@ -1417,6 +1417,7 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
     for supervisor in [false, true] {
         for recorded in [false, true] {
             let f = fixture(&mut env, "main");
+            env.set("CAS_AGENT_ROLE", if supervisor { "supervisor" } else { "worker" });
             let repo = f.dir.path();
             let worker_path = f.cas_dir().join("worktrees").join(WORKER);
             let id = "cas-79fc";

@@ -6151,10 +6151,6 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         .unwrap();
     let report_text = get_text(&report);
     assert!(
-        report_text.contains(&orphan.display().to_string()),
-        "{report_text}"
-    );
-    assert!(
         root.join(&closed_id).join("trace.zip").is_file(),
         "report must not prune"
     );
@@ -6178,6 +6174,11 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
     let mut full_request = factory_req("gc_report");
     full_request.full = Some(true);
     let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
+    assert!(
+        get_text(&full).contains(&orphan.display().to_string()),
+        "{}",
+        get_text(&full)
+    );
     assert!(
         get_text(&full).contains(&format!(
             "Durable task artifacts: root={} closed-task candidates=1 stray inventory=2 mode=review-only",

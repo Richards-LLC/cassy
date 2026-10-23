@@ -520,6 +520,12 @@ impl CasCore {
 
         match release_result {
             Ok(()) => {
+                // QA rounds carry ownership separately from task leases.
+                cas_store::release_qa_claim_for_task(&self.cas_root, &req.task_id).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("release: failed to release QA pass claim: {e}")),
+                    data: None,
+                })?;
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
                 crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id)
                     .await;
@@ -597,6 +603,11 @@ impl CasCore {
                             && task.status != TaskStatus::Open
                             && task.status != TaskStatus::AwaitingMerge
                         {
+                            cas_store::release_qa_claim_for_task(&self.cas_root, &req.task_id).map_err(|e| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!("release recovery: failed to release QA pass claim: {e}")),
+                                data: None,
+                            })?;
                             let prior_status = task.status;
                             let prior_assignee = task.assignee.clone();
                             task.status = TaskStatus::Open;

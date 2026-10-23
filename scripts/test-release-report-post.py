@@ -404,6 +404,7 @@ def run_token_selection_proof() -> None:
         names = {
             "VIOLET_SLACK_TOKEN_ENV", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "VIOLET_SLACK_TOKEN",
             "VIOLET_SLACK_TOKEN_CASSY_PROXY", "VIOLET_SLACK_TOKEN_SOUNDWAVE", "VIOLET_SLACK_TOKEN_SOUNDWAVE_64AF90",
+            "VIOLET_ACCOUNT_TOKEN", "VIOLET_BOT_TOKEN",
             "CLAUDE_CONFIG_DIR", "CODEX_HOME",
             module.LEGACY_TRAIN_SELECTOR_ENV,
             module.LEGACY_TOKEN_SELECTOR_ENV,
@@ -430,15 +431,38 @@ def run_token_selection_proof() -> None:
             assert module.resolve_token(credentials) == "soundwave-token"
             os.environ.pop(module.LEGACY_TOKEN_SELECTOR_ENV)
 
+            codex_config = Path(os.environ["CODEX_HOME"]) / "config.toml"
+            codex_config.parent.mkdir(parents=True, exist_ok=True)
+            codex_config.write_text(
+                f'[mcp_servers.violet]\nbearer_token_env_var = "{registered}"\n',
+                encoding="utf-8",
+            )
+            (config_dir / ".claude.json").unlink()
+            assert module.registered_violet_token_env() == module.credential_names(registered)[0]
             credentials.pop(registered)
             try:
                 module.resolve_token(credentials)
             except module.AdapterError as exc:
-                assert str(exc) == (
-                    f"registered Violet token variable {registered} is unset or empty"
-                )
+                assert f"registered Violet token variable {module.credential_names(registered)[0]}" in str(exc)
+                assert "config.toml" in str(exc)
+                assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
             else:
                 raise AssertionError("missing registered token must fail")
+
+            for config, token_name in (
+                (
+                    '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_ACCOUNT_TOKEN"\n',
+                    "VIOLET_ACCOUNT_TOKEN",
+                ),
+                (
+                    '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_BOT_TOKEN"\n',
+                    "VIOLET_BOT_TOKEN",
+                ),
+            ):
+                codex_config.write_text(config, encoding="utf-8")
+                account_credentials = {token_name: "account-token"}
+                assert module.registered_violet_token_env() == token_name
+                assert module.resolve_token(account_credentials) == "account-token"
         finally:
             for name in names:
                 os.environ.pop(name, None)
@@ -512,6 +536,8 @@ def run_selector_safety_proof() -> None:
                     except module.AdapterError as exc:
                         assert "must name a Violet Slack token" in str(exc)
                         assert "unrelated-fixture" not in str(exc)
+                        assert "config.toml" in str(exc)
+                        assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
                     else:
                         raise AssertionError("non-token selector must fail closed")
                     if selected != "VIOLET_SLACK_TOKEN_ENV":
@@ -524,7 +550,14 @@ def run_selector_safety_proof() -> None:
             os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_B"
             assert module.resolve_token(credentials) == "b-fixture"
             os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_MISSING"
-            expect_adapter_error(module, lambda: module.resolve_token(credentials), "unset or empty")
+            try:
+                module.resolve_token(credentials)
+            except module.AdapterError as exc:
+                assert "unset or empty" in str(exc)
+                assert "config.toml" in str(exc)
+                assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
+            else:
+                raise AssertionError("missing explicit token must fail")
     print(f"Violet selector safety: {refusals} refusals + 3 legacy/modern authority controls passed")
 
 
@@ -537,6 +570,7 @@ def run_adapter(
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
     html_ref: str = "main",
+    html_url: str | None = None,
 ):
     module = adapter_module()
     state.remote_pdf = remote_pdf
@@ -559,7 +593,10 @@ def run_adapter(
         receipt = root / "release-report.receipt"
         environment = os.environ.copy()
         for name in list(environment):
-            if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX)) or name in {"VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV"}:
+            if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX)) or name in {
+                "VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV,
+                "VIOLET_ACCOUNT_TOKEN", "VIOLET_BOT_TOKEN", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV",
+            }:
                 environment.pop(name, None)
         environment.update(
             {
@@ -577,14 +614,34 @@ def run_adapter(
             }
         )
         environment.pop("CAS_RELEASE_TRAIN_REPORT_HTML_URL", None)
+        if html_url:
+            environment["CAS_RELEASE_TRAIN_REPORT_HTML_URL"] = html_url
         if credential_mode.startswith("codex-"):
             # Exercise the real subprocess resolver with competing credentials,
             # not an explicit selector that would bypass registration discovery.
-            credentials.write_text(
-                "export VIOLET_SLACK_TOKEN_TEST='stub-token'\n"
-                "export VIOLET_SLACK_TOKEN_OTHER='wrong-token'\n"
-                "export VIOLET_VERCEL_BYPASS='stub-bypass'\n", encoding="utf-8",
-            )
+            custom_registrations = {
+                "codex-account": (
+                    "VIOLET_ACCOUNT_TOKEN",
+                    '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_ACCOUNT_TOKEN"\n',
+                ),
+                "codex-env-header": (
+                    "VIOLET_BOT_TOKEN",
+                    '[mcp_servers.violet.env_http_headers]\nAuthorization = "VIOLET_BOT_TOKEN"\n',
+                ),
+            }
+            if credential_mode in custom_registrations:
+                token_name, registration = custom_registrations[credential_mode]
+                credentials.write_text(
+                    f"export {token_name}='stub-token'\nexport VIOLET_VERCEL_BYPASS='stub-bypass'\n",
+                    encoding="utf-8",
+                )
+            else:
+                registration = '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_SLACK_TOKEN_TEST"\n'
+                credentials.write_text(
+                    "export VIOLET_SLACK_TOKEN_TEST='stub-token'\n"
+                    "export VIOLET_SLACK_TOKEN_OTHER='wrong-token'\n"
+                    "export VIOLET_VERCEL_BYPASS='stub-bypass'\n", encoding="utf-8",
+                )
             environment.pop(module.LEGACY_TRAIN_SELECTOR_ENV)
             if credential_mode == "codex-default":
                 environment.pop("CODEX_HOME")
@@ -594,8 +651,7 @@ def run_adapter(
             config_dir.mkdir(parents=True)
             if credential_mode != "codex-unregistered":
                 (config_dir / "config.toml").write_text(
-                    '[mcp_servers.violet]\nbearer_token_env_var = "VIOLET_SLACK_TOKEN_TEST"\n',
-                    encoding="utf-8",
+                    registration, encoding="utf-8",
                 )
             if credential_mode == "codex-conflict":
                 claude_dir = Path(environment["CLAUDE_CONFIG_DIR"])
@@ -632,7 +688,10 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        for mode in ("violet", "both", "empty-violet", "codex-default", "codex-custom"):
+        for mode in (
+            "violet", "both", "empty-violet", "codex-default", "codex-custom",
+            "codex-account", "codex-env-header",
+        ):
             result, fields = run_adapter(server, state, pdf, credential_mode=mode)
             assert result.returncode == 0, (mode, result.stderr)
             assert fields is not None, mode
@@ -646,12 +705,22 @@ def main() -> int:
             assert result.returncode != 0 and expected in result.stderr, (mode, result.stderr)
             assert fields is None and state.requests == [], "ambiguous or missing authority must refuse before network"
             assert "stub-token" not in result.stderr and "wrong-token" not in result.stderr
+            assert "config.toml" in result.stderr and "VIOLET_SLACK_TOKEN_ENV" in result.stderr
         print("Codex registration: default/custom homes passed; ambiguous/conflicting/missing credentials refused before network")
         result, fields = run_adapter(server, state, pdf, html_ref="v9.99.0")
         assert result.returncode == 0 and fields is not None, result.stderr
         result, fields = run_adapter(server, state, pdf, html_ref="factory/temporary-report")
         assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
         assert fields is None and state.requests == [], "temporary report links must refuse before any upload"
+        result, fields = run_adapter(
+            server,
+            state,
+            pdf,
+            html_ref="factory/temporary-report",
+            html_url="https://example.test/manual-report.html",
+        )
+        assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
+        assert fields is None and state.requests == [], "manual HTML URLs must obey the ref policy"
         print("Report links: main/tag accepted; temporary branch refused before network")
         result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:

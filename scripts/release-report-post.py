@@ -197,8 +197,7 @@ def resolve_secret(name: str, explicit_env: str | None, credentials: dict[str, s
 def registered_claude_violet_token_env() -> str | None:
     """Read Claude's variable reference without evaluating a header or secret."""
 
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    config_path = (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
+    config_path = claude_config_path()
     try:
         document = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -224,28 +223,72 @@ def registered_claude_violet_token_env() -> str | None:
     return match.group(1) if match else None
 
 
-def registered_violet_token_env() -> str | None:
-    """Discover Claude/Codex registration; conflicting identities need a selector."""
+def claude_config_path() -> Path:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
 
-    claude = registered_claude_violet_token_env()
-    registered = [claude] if claude else []
+
+def codex_config_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
-    config_path = (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
+    return (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
+
+
+def registered_codex_violet_token_env() -> tuple[str, Path] | None:
+    """Read the registered Codex bearer reference without evaluating a secret."""
+
+    config_path = codex_config_path()
     try:
         document = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         document = {}
     servers = document.get("mcp_servers", {})
-    if isinstance(servers, dict):
-        server = servers.get("violet") or servers.get(COMPATIBILITY["retired_server"])
-        if isinstance(server, dict) and "bearer_token_env_var" in server:
-            name = server["bearer_token_env_var"]
-            if not isinstance(name, str):
-                fail("registered Violet bearer selector must name a Violet Slack token variable")
-            registered.append(validated_token_selector(name))
-    if len({credential_names(name)[0] for name in registered}) > 1:
-        fail("conflicting Violet registrations; set VIOLET_SLACK_TOKEN_ENV")
+    if not isinstance(servers, dict):
+        return None
+    server = servers.get("violet") or servers.get(COMPATIBILITY["retired_server"])
+    if not isinstance(server, dict):
+        return None
+
+    name = server.get("bearer_token_env_var")
+    if name is None:
+        env_headers = server.get("env_http_headers")
+        if isinstance(env_headers, dict):
+            name = env_headers.get("Authorization")
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        fail(
+            f"{config_path}: registered Violet bearer selector must name an environment variable; "
+            "set VIOLET_SLACK_TOKEN_ENV or correct the Codex registration"
+        )
+
+    name = name.strip()
+    if (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            or name in {"VIOLET_SLACK_TOKEN_ENV", LEGACY_TOKEN_SELECTOR_ENV,
+                        "VIOLET_VERCEL_BYPASS", LEGACY_BYPASS_ENV}):
+        fail(
+            f"{config_path}: registered Violet bearer selector must name a credential variable; "
+            "set VIOLET_SLACK_TOKEN_ENV or correct the Codex registration"
+        )
+    return credential_names(name)[0], config_path
+
+
+def registered_violet_token_registration() -> tuple[str, Path] | None:
+    """Discover Claude/Codex registration; conflicting identities need a selector."""
+
+    claude = registered_claude_violet_token_env()
+    registered = [(claude, claude_config_path())] if claude else []
+    codex = registered_codex_violet_token_env()
+    if codex:
+        registered.append(codex)
+    if len({credential_names(name)[0] for name, _ in registered}) > 1:
+        paths = ", ".join(str(path) for _, path in registered)
+        fail(f"conflicting Violet registrations in {paths}; set VIOLET_SLACK_TOKEN_ENV")
     return registered[0] if registered else None
+
+
+def registered_violet_token_env() -> str | None:
+    registration = registered_violet_token_registration()
+    return registration[0] if registration else None
 
 
 def select_token_env(candidates: set[str], registered_env: str | None) -> str | None:
@@ -270,7 +313,10 @@ def validated_token_selector(name: str) -> str:
             or not (canonical == "VIOLET_SLACK_TOKEN"
                     or canonical.startswith("VIOLET_SLACK_TOKEN_"))
             or canonical == "VIOLET_SLACK_TOKEN_ENV"):
-        fail("Violet bearer selector must name a Violet Slack token variable")
+        fail(
+            "Violet bearer selector must name a Violet Slack token variable; "
+            f"check {codex_config_path()} and set VIOLET_SLACK_TOKEN_ENV to a valid token variable"
+        )
     return canonical
 
 
@@ -281,7 +327,15 @@ def resolve_token(credentials: dict[str, str]) -> str:
                 or os.environ.get(LEGACY_TOKEN_SELECTOR_ENV))
     if explicit:
         explicit = validated_token_selector(explicit)
-    token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
+    try:
+        token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
+    except AdapterError as exc:
+        if not explicit:
+            raise
+        fail(
+            f"{exc}; check {codex_config_path()} and set VIOLET_SLACK_TOKEN_ENV "
+            "to a variable that contains the Violet token"
+        )
     if token:
         return token
 
@@ -294,18 +348,29 @@ def resolve_token(credentials: dict[str, str]) -> str:
             and value
         }
     )
-    registered_env = registered_violet_token_env()
+    registration = registered_violet_token_registration()
+    registered_env = registration[0] if registration else None
     selected_env = select_token_env(set(candidates), registered_env)
     if selected_env:
         token = resolve_secret(selected_env, None, credentials)
         if token:
             return token
         if selected_env == registered_env:
-            fail(f"registered Violet token variable {selected_env} is unset or empty")
+            config_path = registration[1] if registration else codex_config_path()
+            fail(
+                f"registered Violet token variable {selected_env} in {config_path} is unset or empty; "
+                "set VIOLET_SLACK_TOKEN_ENV or correct the registration"
+            )
     if len(candidates) > 1:
         names = ", ".join(candidates)
-        fail(f"multiple Violet token variables found ({names}); set VIOLET_SLACK_TOKEN_ENV")
-    fail("no Violet token found; set VIOLET_SLACK_TOKEN_ENV or configure credentials.env")
+        fail(
+            f"multiple Violet token variables found ({names}); check {codex_config_path()} "
+            "or set VIOLET_SLACK_TOKEN_ENV"
+        )
+    fail(
+        f"no Violet token found; check {codex_config_path()}, set VIOLET_SLACK_TOKEN_ENV, "
+        "or configure credentials.env"
+    )
 
 
 def request_json(
@@ -683,13 +748,13 @@ def verify_remote_pdf(
 
 
 def html_url(tag: str) -> str:
-    configured = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_URL")
-    if configured:
-        return configured
     repo = os.environ.get("CAS_RELEASE_TRAIN_REPO", DEFAULT_REPO).strip().strip("/")
     ref = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_REF", "main").strip() or "main"
     if ref not in {"main", tag}:
         fail("release report HTML ref must be main or the release tag; temporary delivery branches cannot be published")
+    configured = os.environ.get("CAS_RELEASE_TRAIN_REPORT_HTML_URL")
+    if configured:
+        return configured
     return f"https://github.com/{repo}/blob/{ref}/docs/release-reports/{tag}.html"
 
 

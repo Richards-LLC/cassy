@@ -5446,7 +5446,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     disable_system_a(&cas_root);
     std::fs::write(
         cas_root.join("config.toml"),
-        "[verification]\nenabled = true\n",
+        "[verification]\nenabled = true\n[project]\ncanonical_id = \"delivery-cleanup-fixture\"\n",
     )
     .expect("enable exact post-merge verification gate");
     let fixture = if system_a { "system-a" } else { "system-b" };
@@ -5500,11 +5500,12 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         task.worktree_id = Some(worktree_id.clone());
     }
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "remote:github.com/org/delivery".to_string(),
+        repo_selector: "project:delivery-cleanup-fixture".to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add delivery task");
-    let receipt = delivery_receipt(&task.id, &worker_id, &repo, "alice");
+    let mut receipt = delivery_receipt(&task.id, &worker_id, &repo, "alice");
+    receipt.repo_selector = "project:delivery-cleanup-fixture".into();
     submit_and_verify_delivery(&cas_root, &task.id, &worker_id, &supervisor_id, &receipt).await;
 
     // Arm a newer exact task proof cycle after the delivery proof is approved.

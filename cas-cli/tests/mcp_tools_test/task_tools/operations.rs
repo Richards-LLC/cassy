@@ -4992,7 +4992,7 @@ fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
 
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
-    for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch"] {
+    for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {
         let mut env = TestEnvGuard::temp_home();
         let fixture = branch_adoption_fixture(&mut env);
         let foreign = tempfile::TempDir::new().unwrap();
@@ -5010,7 +5010,21 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             assert!(agents.try_claim(&fixture.task.id, &holder.id, 600, None).unwrap().is_success());
             original_holder = holder.id;
         }
-        if mode == "foreign" {
+        let own_branch = format!("factory/{}-{}", fixture.receiver.name, fixture.task.id);
+        if matches!(mode, "ahead" | "foreign-source-ahead") {
+            // The delivery is integrated, but the receiver also holds another
+            // parked task's work. It must not migrate onto this task's branch.
+            branch_transfer_git(fixture.temp.path(), &["branch", "main", &fixture.tip]);
+            branch_transfer_git(fixture.destination.path(), &["merge", "--ff-only", "main"]);
+            std::fs::write(fixture.destination.path().join("own-work.txt"), "other parked task").unwrap();
+            branch_transfer_git(fixture.destination.path(), &["add", "own-work.txt"]);
+            branch_transfer_git(fixture.destination.path(), &["commit", "-m", "other parked task"]);
+            if mode == "foreign-source-ahead" {
+                branch_transfer_git(fixture.destination.path(), &["branch", &own_branch]);
+                branch_transfer_git(fixture.temp.path(), &["switch", "main"]);
+                branch_transfer_git(fixture.destination.path(), &["switch", "factory/test-agent"]);
+            }
+        } else if mode == "foreign" {
             branch_transfer_git(foreign.path(), &["init", "-b", "factory/new-worker"]);
             branch_transfer_git(foreign.path(), &["config", "user.name", "Test"]);
             branch_transfer_git(foreign.path(), &["config", "user.email", "test@example.test"]);
@@ -5027,6 +5041,8 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
                 branch_transfer_git(fixture.destination.path(), &["commit", "-m", "divergent receiver work"]);
             }
         }
+        let before_head = branch_transfer_git(fixture.destination.path(), &["rev-parse", "HEAD"]);
+        let before_branch = branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]);
         let request = serde_json::from_value(serde_json::json!({
             "action": "transfer", "id": fixture.task.id, "to_agent": fixture.receiver.name,
             "adopt_branch": true, "supervisor_override": mode == "dirty-force",
@@ -5037,14 +5053,16 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
         assert_eq!(after.assignee, fixture.task.assignee, "{mode}");
         assert_eq!(after.deliverables.parked_branch, fixture.task.deliverables.parked_branch, "{mode}");
         assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, original_holder, "{mode}");
-        let expected_branch = if mode == "unrelated-branch" { "factory/unrelated-worker" } else { "factory/new-worker" };
-        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), expected_branch);
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), before_branch);
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["rev-parse", "HEAD"]), before_head);
     }
 }
 
 #[tokio::test]
 async fn restarted_worker_closes_merged_receipt_and_adopts_descendant_cas_f9e0() {
-    for (adopt, existing_task_branch) in [(false, false), (true, false), (true, true)] {
+    for (adopt, existing_task_branch, foreign_source) in [
+        (false, false, false), (true, false, false), (true, true, false), (true, true, true),
+    ] {
         let mut env = TestEnvGuard::temp_home();
         let BranchAdoptionFixture { temp, destination, service, mut task, mut source, receiver, .. } =
             branch_adoption_fixture(&mut env);
@@ -5068,6 +5086,9 @@ async fn restarted_worker_closes_merged_receipt_and_adopts_descendant_cas_f9e0()
         let own_branch = format!("factory/{}-{}", receiver.name, task.id);
         if existing_task_branch {
             git(destination.path(), &["switch", "-c", &own_branch]);
+        }
+        if foreign_source {
+            git(destination.path(), &["switch", "factory/test-agent"]);
         }
         task.deliverables.factory_branch_anchor = Some(delivery.clone());
         let tasks = open_task_store(&cas_dir).unwrap();

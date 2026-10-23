@@ -10,6 +10,8 @@ use crate::bounded_process::{Deadline, run_command};
 use crate::factory_isolation::{
     WorkerBinding, classify_worker_binding, verify_worker_worktree_binding, worker_task_branch,
 };
+use crate::mcp::tools::core::task::lifecycle::close_ops;
+use crate::store::{open_task_store, open_worktree_store};
 
 pub(super) struct AdoptedBranch {
     pub source_branch: String,
@@ -63,6 +65,43 @@ impl Git<'_> {
         PathBuf::from(path)
             .canonicalize()
             .map_err(|e| e.to_string())
+    }
+
+    fn require_integrated(
+        &self,
+        cas_root: &Path,
+        repo_root: &Path,
+        task: &Task,
+        head: &str,
+        label: &str,
+    ) -> Result<(), String> {
+        let parent = open_task_store(cas_root)
+            .and_then(|store| Ok(store.get_parent_epic(&task.id)?))
+            .map_err(|error| format!("cannot resolve task integration target: {error}"))?;
+        let target = match close_ops::effective_close_work_target(task, parent.as_ref()) {
+            Some(target) => target.target_branch,
+            None => {
+                let worktree_parent = task.worktree_id.as_deref().map(|id| {
+                    open_worktree_store(cas_root)
+                        .and_then(|store| Ok(store.get(id)?))
+                        .map(|worktree| worktree.parent_branch)
+                        .map_err(|error| format!("cannot resolve task worktree target: {error}"))
+                }).transpose()?;
+                close_ops::resolve_close_parent_branch(
+                    worktree_parent,
+                    parent.as_ref().and_then(|epic| epic.branch.clone()),
+                    None,
+                    repo_root,
+                )?
+            }
+        };
+        let target_ref = close_ops::preferred_diff_target_ref_for_delivery(
+            self.root, &target, task.delivery_mode,
+        );
+        if !self.ancestor(head, &target_ref)? {
+            return Err(format!("{label} contains commits outside the integration target {target_ref}; preserve or integrate that work before adopting this delivery"));
+        }
+        Ok(())
     }
 }
 
@@ -171,12 +210,16 @@ pub(super) fn adopt_task_branch(
     // delivery merged. Preserve that HEAD rather than rewinding its checkout;
     // `tip` remains the task's immutable delivery anchor in the receipt.
     let receiver_tip = if !foreign_source && git.ancestor(&tip, "HEAD")? {
-        git.run(&["rev-parse", "HEAD"])?
+        let head = git.run(&["rev-parse", "HEAD"])?;
+        if head != tip {
+            git.require_integrated(cas_root, &repo_root, task, &head, "receiver HEAD")?;
+        }
+        head
     } else {
         tip.clone()
     };
     if !foreign_source && !git.ancestor("HEAD", &receiver_tip)? {
-        return Err("receiver HEAD cannot fast-forward to the task delivery tip; reconcile the branches first".into());
+        return Err("receiver HEAD diverges from the task delivery; reconcile the branches first".into());
     }
     let branch = worker_task_branch(&receiver.name, &task.id);
     let reference = format!("refs/heads/{branch}");
@@ -185,10 +228,11 @@ pub(super) fn adopt_task_branch(
         .status
         .success();
     if exists {
-        if !git.ancestor(&reference, &receiver_tip)?
-            && !git.ancestor(&receiver_tip, &reference)?
-        {
-            return Err("receiver task branch cannot fast-forward to the delivery tip".into());
+        if !git.ancestor(&reference, &receiver_tip)? {
+            if !git.ancestor(&receiver_tip, &reference)? {
+                return Err("receiver task branch diverges from the delivery ancestry; reconcile the branches first".into());
+            }
+            git.require_integrated(cas_root, &repo_root, task, &reference, "receiver task branch")?;
         }
         git.run(&["switch", &branch])?;
         git.run(&["merge", "--ff-only", &receiver_tip])?;

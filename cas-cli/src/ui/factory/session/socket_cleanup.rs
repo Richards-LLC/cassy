@@ -5,7 +5,8 @@
 use std::{fs, io, path::Path};
 
 #[cfg(unix)]
-fn transition_lock(base: &Path) -> io::Result<fs::File> {
+pub(super) fn transition_lock(base: &Path) -> io::Result<fs::File> {
+    use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = fs::symlink_metadata(base)?;
     let uid = unsafe { libc::geteuid() };
@@ -15,7 +16,7 @@ fn transition_lock(base: &Path) -> io::Result<fs::File> {
             "factory socket directory is not owned",
         ));
     }
-    let lock = fs::OpenOptions::new()
+    let mut lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -30,7 +31,122 @@ fn transition_lock(base: &Path) -> io::Result<fs::File> {
         ));
     }
     fs2::FileExt::lock_exclusive(&lock)?;
+    // A run-owned binding inventory must notice a bind or metadata writer
+    // without rescanning the machine registry for every project/channel.
+    lock.write_all(uuid::Uuid::new_v4().as_bytes())?;
+    lock.set_len(16)?;
     Ok(lock)
+}
+
+pub(super) fn inventory_lock(sessions: &Path, reap: bool) -> io::Result<Option<fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(base) = sessions.parent() else {
+        return Ok(None);
+    };
+    if !sessions.exists() {
+        return Ok(None);
+    }
+    if reap {
+        return transition_lock(base).map(Some);
+    }
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(base.join("factory-sockets.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    fs2::FileExt::lock_shared(&file)?;
+    Ok(Some(file))
+}
+
+/// Reap only the exact dead receipt inspected by update. The GUI probe is
+/// advisory for metadata; socket deletion still needs the Linux kernel proof.
+pub(super) fn reap_metadata_locked(
+    sessions: &Path,
+    path: &Path,
+    expected: &[u8],
+    gui_identity: Option<(u64, u64)>,
+) -> io::Result<bool> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+    let Some(base) = sessions.parent() else {
+        return Ok(false);
+    };
+    // The update inventory holds the exclusive transition lock for its scan.
+    let uid = unsafe { libc::geteuid() };
+    let directory = fs::symlink_metadata(sessions)?;
+    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o002 != 0 {
+        return Ok(false);
+    }
+    let receipt = fs::symlink_metadata(path)?;
+    if !receipt.is_file() || receipt.uid() != uid || receipt.nlink() != 1 {
+        return Ok(false);
+    }
+    // The app's progress/hold mutator uses this per-record lock. Take it after
+    // the namespace lock so it cannot rename an older receipt over our reap.
+    let json_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.with_extension("json.lock"))?;
+    let lock_metadata = json_lock.metadata()?;
+    if !lock_metadata.is_file() || lock_metadata.uid() != uid || lock_metadata.nlink() != 1 {
+        return Ok(false);
+    }
+    fs2::FileExt::lock_exclusive(&json_lock)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if opened.dev() != receipt.dev() || opened.ino() != receipt.ino() {
+        return Ok(false);
+    }
+    let metadata: super::SessionMetadata = match serde_json::from_slice(expected) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(false),
+    };
+    if !super::valid_session_name(&metadata.name)
+        || path != sessions.join(format!("{}.json", metadata.name))
+        || super::is_process_running(metadata.daemon_pid)
+        || fs::read(path)? != expected
+    {
+        return Ok(false);
+    }
+    let gui = base.join(format!("factory-{}.gui.sock", metadata.name));
+    match (gui_identity, fs::symlink_metadata(&gui)) {
+        (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => {}
+        (Some(identity), Ok(current))
+            if identity == (current.dev(), current.ino())
+                && current.file_type().is_socket()
+                && current.uid() == uid
+                && current.nlink() == 1 => {}
+        _ => return Ok(false),
+    }
+    #[cfg(target_os = "linux")]
+    for socket in [base.join(format!("factory-{}.sock", metadata.name)), gui] {
+        remove_locked(&socket, sessions, false)?;
+        if fs::symlink_metadata(socket).is_ok() {
+            return Ok(false); // Held/unknown paths retain their attribution.
+        }
+    }
+    let current = fs::symlink_metadata(path)?;
+    if current.dev() != receipt.dev()
+        || current.ino() != receipt.ino()
+        || !current.is_file()
+        || current.uid() != uid
+        || current.nlink() != 1
+        || fs::read(path)? != expected
+        || super::is_process_running(metadata.daemon_pid)
+    {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    Ok(true)
 }
 
 /// Serialize stale checks/unlink/bind with GC. After bind, the kernel holder

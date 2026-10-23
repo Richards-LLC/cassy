@@ -3,8 +3,11 @@
 use super::{
     binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope, PauseOrigin},
     binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
-    binding_runtime::RuntimeInventory,
+
 };
+pub(crate) use super::binding_runtime::RuntimeSnapshot;
+#[cfg(test)]
+use super::binding_runtime::RuntimeInventory;
 use serde::Serialize;
 use std::{io::Read, path::Path, time::Duration};
 use uuid::Uuid;
@@ -92,6 +95,15 @@ impl OrdinaryBindingClient {
     /// checked against the existing ordinary team-project read, never ensure().
     pub fn repair(&self, cas_dir: &Path, scope: &IntakeScope) -> Result<RepairReport, String> {
         scope.validate()?;
+        self.repair_with_inventory(cas_dir, scope, &RuntimeSnapshot::capture(false))
+    }
+    pub(crate) fn repair_with_inventory(
+        &self,
+        cas_dir: &Path,
+        scope: &IntakeScope,
+        inventory: &RuntimeSnapshot,
+    ) -> Result<RepairReport, String> {
+        scope.validate()?;
         let local =
             crate::cloud::CloudConfig::load_from_cas_dir(cas_dir).map_err(|e| e.to_string())?;
         if local.active_team_id().as_deref() != Some(scope.team_id.as_str())
@@ -134,14 +146,14 @@ impl OrdinaryBindingClient {
             };
             Ok(RepairReport::blocked(scope, pause.operation_id, error))
         };
-        let inventory = match RuntimeInventory::discover(cas_dir).and_then(|inventory| {
-            inventory.drain(scope, &pause)?;
-            Ok(inventory)
-        }) {
-            Ok(inventory) => inventory,
+        let drained = inventory.for_project(cas_dir).and_then(|runtime| {
+            runtime.drain(scope, &pause)?;
+            inventory.validate()
+        });
+        match drained {
+            Ok(()) => {},
             Err(error) => return blocked_before_submit(error),
         };
-        drop(inventory);
         if let Err(error) = crate::cloud::TeamRegistration::new(
             &self.endpoint,
             &self.token,

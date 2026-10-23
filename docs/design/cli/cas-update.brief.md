@@ -278,8 +278,16 @@ failures still prevent upkeep writes. Human notes fit within the existing
 
 Binding reconciliation filters the machine-wide session registry by project
 before checking process identity or GUI endpoints. Dead or stale sessions with
-refused or absent endpoints are skipped without deleting metadata or sockets;
+refused or absent endpoints are skipped during ordinary read-only repair;
 the same rule covers unattributed socket paths left by macOS shutdown. Each
 connect has a 250 ms bound. Held or unknown endpoints still block, naming the
 session and a safely quoted `cas kill -- <name>` remedy when attributable. The
 existing binding report carries that cause in human and JSON output.
+
+`cas update` captures one runtime inventory for all projects and channels.
+Outside dry run, it reaps only owned, unchanged dead metadata whose GUI probe
+is refused or missing. Held or unknown records retain project attribution.
+Linux socket removal retains its kernel-holder checks; macOS leaves socket
+paths alone pending cas-f2c7. Session writers invalidate a reused inventory;
+the update then asks for a rerun rather than trusting an older observation.
+Each channel still receives its own authenticated drain acknowledgement.

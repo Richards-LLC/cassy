@@ -1772,6 +1772,9 @@ fn refresh_all_projects_with_user_refresh(
         }
     }
 
+    // One lifecycle pass and runtime/socket inventory for this whole invocation,
+    // including every project and every channel. Dry-run never reaps records.
+    let runtime_inventory = crate::coordination::binding_repair::RuntimeSnapshot::capture(!args.dry_run);
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
     for (index, project) in discovery.projects.iter().enumerate() {
         live::set_activity(format!(
@@ -1871,7 +1874,7 @@ fn refresh_all_projects_with_user_refresh(
             // cas-9021: Slack channel bindings ride the cloud row; a project
             // with nothing to reconcile keeps today's receipt shape.
             let (bindings, binding_output, binding_docs) = capture_phase_documents(cli, || {
-                bindings::reconcile_project_bindings(&cas_root, args.dry_run, cli.json)
+                bindings::reconcile_project_bindings(&cas_root, args.dry_run, cli.json, &runtime_inventory)
             });
             let mut output = output;
             let cloud = match bindings {

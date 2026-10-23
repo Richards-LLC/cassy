@@ -276,10 +276,24 @@ impl SessionManager {
             ));
         }
         self.ensure_dir()?;
+        let _lock = socket_cleanup::transition_lock(self.sessions_dir.parent().unwrap())?;
         let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(path, json)
+    }
+
+    pub(crate) fn lock_inventory(&self, reap: bool) -> std::io::Result<Option<fs::File>> {
+        socket_cleanup::inventory_lock(&self.sessions_dir, reap)
+    }
+
+    pub(crate) fn reap_dead_record_locked(
+        &self,
+        path: &Path,
+        expected: &[u8],
+        gui_identity: Option<(u64, u64)>,
+    ) -> std::io::Result<bool> {
+        socket_cleanup::reap_metadata_locked(&self.sessions_dir, path, expected, gui_identity)
     }
 
     /// Load session metadata from a file

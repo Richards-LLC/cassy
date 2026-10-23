@@ -4866,6 +4866,83 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+#[tokio::test]
+async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
+    for (caller, message, allowed) in [
+        ("test-agent", "unnamed WIP before review", true),
+        ("test-agent", "fix(cas-abcd): another task's work", false),
+        ("other-worker", "unnamed WIP before review", false),
+        ("other-worker", "fix(cas-abcd): another task's work", false),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
+        let root = temp.path();
+        branch_transfer_git(root, &["init", "-b", "main"]);
+        branch_transfer_git(root, &["config", "user.name", "Test"]);
+        branch_transfer_git(root, &["config", "user.email", "test@example.test"]);
+        std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
+        branch_transfer_git(root, &["add", ".gitignore"]);
+        branch_transfer_git(root, &["commit", "-m", "base"]);
+        branch_transfer_git(root, &["switch", "-c", "factory/test-agent"]);
+        let cas_dir = root.join(".cas");
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"resume-fixture\"\n").unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let worker_id = format!("test-session-{}", std::process::id());
+        let mut worker = agents.get(&worker_id).unwrap();
+        worker.metadata.insert("clone_path".into(), root.display().to_string());
+        agents.update(&worker).unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-8ca7".into(), "Resume blocked work".into());
+        task.assignee = Some(worker.name.clone());
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: "project:resume-fixture".into(), target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        let service = CasService::new(core, None);
+        let start = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+            "action": "start", "id": task.id, "brief": true,
+        })).unwrap();
+        service.task(Parameters(start())).await.expect("initial start");
+        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        // No delivery anchor or task-naming subject: the server's start
+        // boundary must retain this worker's WIP across the hold.
+        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
+        branch_transfer_git(root, &["add", "delivery.txt"]);
+        branch_transfer_git(root, &["commit", "-m", message]);
+        let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+        let content = std::fs::read(root.join("delivery.txt")).unwrap();
+        for status in ["blocked", "open"] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "update", "id": task.id, "status": status,
+            })).unwrap();
+            service.task(Parameters(request)).await.expect("hold transition");
+        }
+        let result = if caller == worker.name {
+            service.task(Parameters(start())).await
+        } else {
+            let other = Agent::new_with_role("other-worker-id".into(), caller.into(), AgentRole::Worker);
+            agents.register(&other).unwrap();
+            let other_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+            other_core.set_agent_id_for_testing(other.id);
+            CasService::new(other_core, None).task(Parameters(start())).await
+        };
+        if allowed {
+            result.unwrap_or_else(|error| panic!("same worker's WIP must resume: {error}"));
+        } else {
+            let error = result.expect_err("foreign worker or other-task commits must refuse");
+            // pin: refusal must identify foreign-task provenance or the unauthorized caller.
+            assert!(error.message.contains("foreign commit") || error.message.contains("not you"),
+                "{caller}, {message}: {error}");
+        }
+        let saved = tasks.get(&task.id).unwrap();
+        assert_eq!(saved.status, if allowed { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
+        assert_eq!(saved.deliverables.factory_branch_start, boundary);
+        assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);
+    }
+}
+
 struct BranchAdoptionFixture {
     temp: tempfile::TempDir,
     destination: tempfile::TempDir,

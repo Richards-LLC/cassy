@@ -236,7 +236,7 @@ fn failed_retry_preserves_legacy_quiet_window_cas_40c97() {
 
 #[test]
 fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt() {
-    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let scope = scope();
     let root = env.home().join("project/.cas");
     project(&root, &scope.team_id);
@@ -289,19 +289,32 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         .unwrap();
         true
     });
+    let inventory = RuntimeSnapshot::capture(false);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_FACTORY_SESSION", "bind-fx");
+    env.set("CAS_AGENT_NAME", "supervisor");
+    crate::ui::factory::record_supervisor_mcp_call();
+    for key in ["CAS_AGENT_ROLE", "CAS_FACTORY_SESSION", "CAS_AGENT_NAME"] {
+        env.remove(key);
+    }
+    let metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(
+        &std::fs::read(crate::ui::factory::metadata_path("bind-fx")).unwrap(),
+    )
+    .unwrap();
+    assert!(metadata.last_supervisor_mcp_call_at.is_some());
     let report = OrdinaryBindingClient::new(&endpoint, "ordinary-fixture-user")
         .unwrap()
-        .repair(&root, &scope)
+        .repair_with_inventory(&root, &scope, &inventory)
         .unwrap();
+    assert!(
+        matches!(report.outcome, RepairOutcome::Managed),
+        "{report:?}"
+    );
     gui.join().unwrap();
     let posted = remote.join().unwrap();
     assert!(
         posted,
         "reconciliation must reach the ordinary HTTP path after actual local drain"
-    );
-    assert!(
-        matches!(report.outcome, RepairOutcome::Managed),
-        "{report:?}"
     );
     let state = IntakeJournal::new(&root).read().unwrap();
     assert_eq!(state.pauses[0].operation_id, report.operation_id);

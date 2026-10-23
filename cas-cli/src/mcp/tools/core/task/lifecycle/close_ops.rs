@@ -14959,6 +14959,20 @@ pub(crate) fn resolve_close_delivery_branch(
     task: &Task,
     assignee: &str,
 ) -> Result<String, String> {
+    // GH #1353: older starts recorded the reusable lane before the worker
+    // cut its own per-task branch. That lane may still back another task's
+    // open PR. Measure the task lane, keeping the original base and all
+    // start-to-delivery ownership checks on the branch actually delivered.
+    if task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+        start.branch == format!("factory/{assignee}")
+    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+        let mut measured = task.clone();
+        measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
+            .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
+        return Ok(task_attribution::started_delivery(repo_path, &measured)?
+            .map(|delivery| delivery.branch)
+            .unwrap_or(branch));
+    }
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
     }

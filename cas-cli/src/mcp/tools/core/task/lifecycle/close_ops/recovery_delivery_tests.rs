@@ -357,8 +357,9 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
         let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
         assert_eq!(rounds.len(), 2);
-        assert_eq!(rounds[0].state, cas_types::QaPassState::Superseded);
-        assert_eq!(rounds.last().unwrap().bound_head, tip);
+        assert_eq!(rounds.iter().find(|round| round.bound_head == f.predecessor).unwrap().state,
+            cas_types::QaPassState::Superseded);
+        assert_eq!(rounds[0].bound_head, tip);
         let service = crate::mcp::CasService::new(f.core, None);
         let request = serde_json::from_value(serde_json::json!({
             "action": "message", "target": "supervisor", "task_id": TASK,

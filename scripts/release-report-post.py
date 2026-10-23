@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -193,8 +194,8 @@ def resolve_secret(name: str, explicit_env: str | None, credentials: dict[str, s
     return ""
 
 
-def registered_violet_token_env() -> str | None:
-    """Return the token variable named by this machine's Claude registration."""
+def registered_claude_violet_token_env() -> str | None:
+    """Read Claude's variable reference without evaluating a header or secret."""
 
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     config_path = (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
@@ -221,6 +222,30 @@ def registered_violet_token_env() -> str | None:
         authorization,
     )
     return match.group(1) if match else None
+
+
+def registered_violet_token_env() -> str | None:
+    """Discover Claude/Codex registration; conflicting identities need a selector."""
+
+    claude = registered_claude_violet_token_env()
+    registered = [claude] if claude else []
+    codex_home = os.environ.get("CODEX_HOME")
+    config_path = (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
+    try:
+        document = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        document = {}
+    servers = document.get("mcp_servers", {})
+    if isinstance(servers, dict):
+        server = servers.get("violet") or servers.get(COMPATIBILITY["retired_server"])
+        if isinstance(server, dict) and "bearer_token_env_var" in server:
+            name = server["bearer_token_env_var"]
+            if not isinstance(name, str):
+                fail("registered Violet bearer selector must name a Violet Slack token variable")
+            registered.append(validated_token_selector(name))
+    if len({credential_names(name)[0] for name in registered}) > 1:
+        fail("conflicting Violet registrations; set VIOLET_SLACK_TOKEN_ENV")
+    return registered[0] if registered else None
 
 
 def select_token_env(candidates: set[str], registered_env: str | None) -> str | None:

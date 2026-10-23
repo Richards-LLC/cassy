@@ -17600,6 +17600,14 @@ mod tests {
         assert!(prompts[0].prompt.contains("request 407"));
         // pin: worker status relies on the registration-failure stage saved in the notice.
         assert!(prompts[0].prompt.contains("stage=register"));
+        assert_eq!(prompts[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(prompts[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon, "keen-crane", &prompts[0].source, &prompts[0].prompt,
+            ),
+            Some(SupervisorWakeClass::Blocker),
+        );
     }
 
     // -----------------------------------------------------------------------

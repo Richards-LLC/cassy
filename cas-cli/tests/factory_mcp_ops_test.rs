@@ -1444,6 +1444,39 @@ async fn test_coordination_focus_epic_routes_clear_field() {
 // =============================================================================
 
 #[tokio::test]
+async fn spawn_workers_refuses_diverged_base_before_enqueue_cas_52b7() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+    let env = FactoryTestEnv::new();
+    init_sync_repo(&env, "unused-worker");
+    let repo = env.cas_root.parent().unwrap();
+    let initial = git_stdout(repo, &["rev-parse", "main"]);
+    git_stdout(repo, &["remote", "add", "origin", "/unused-origin"]);
+    git_stdout(repo, &["update-ref", "refs/remotes/origin/main", &initial]);
+    let task = Task::new("cas-spawn-base".into(), "spawn base fixture".into());
+    env.task_store().add(&task).unwrap();
+    let request = || {
+        let mut req = factory_req("spawn_workers");
+        req.cli = Some("grok".into());
+        req.isolate = Some(true);
+        req.task_id = Some(task.id.clone());
+        req
+    };
+    env.service.factory_request(Parameters(request())).await.unwrap();
+    let queued = env.spawn_queue().peek(10).unwrap();
+    assert_eq!(queued.len(), 1);
+    env.spawn_queue().mark_processed(queued[0].id).unwrap();
+    // Both tips share the original main but contain different work.
+    git_stdout(repo, &["update-ref", "refs/heads/main", "epic/requested"]);
+    git_stdout(repo, &["update-ref", "refs/remotes/origin/main", "epic/foreign"]);
+    let result = env.service.factory_request(Parameters(request())).await;
+    let error = result.expect_err("a diverged base must fail before enqueue").to_string();
+    assert!(error.contains("SPAWN BASE DIVERGED"), "{error}");
+    assert!(error.contains("rebase --autostash"), "{error}");
+    assert!(error.contains("origin/main"), "{error}");
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty(), "no second request queued");
+}
+
+#[tokio::test]
 async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
     let env = FactoryTestEnv::new();
     let mut req = coord_req("spawn_workers");

@@ -58,7 +58,8 @@ receipts. Run the red test before fixing it, then commit and run the green test.
 
 Prove shared surfaces whole: for every changed production function, run its
 whole lib test module and every integration harness that calls it, for example
-`-E 'test(close_ops::)'` plus `--test worktree_surface_test -E 'test(close)'`.
+`--lib -E 'test(close_ops::)'` plus
+`--test integration_factory -E 'test(worktree_surface_test::)'`.
 Before rewording user-facing text, grep the tests for the old wording. Measure
 a size or count claim on a real tree as well as a fixture. List each module run
 in the close reason. Named-only proofs missed same-module assertions

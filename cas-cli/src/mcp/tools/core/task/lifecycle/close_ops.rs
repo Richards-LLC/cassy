@@ -7705,9 +7705,14 @@ impl CasCore {
         if let Some(receipt) = req.commit_receipt.as_deref()
             && task.deliverables.factory_branch_start.is_some()
         {
-            let lease_history = self.open_agent_store().ok()
-                .and_then(|store| store.get_lease_history(&req.id, None).ok())
-                .unwrap_or_default();
+            let lease_history = self.open_agent_store()
+                .map_err(|error| error.to_string())
+                .and_then(|store| store.get_lease_history(&req.id, None).map_err(|error| error.to_string()))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(task_id = %req.id, %error,
+                        "integrated receipt recovery could not read lease history; using the task-creation window");
+                    Vec::new()
+                });
             task_attribution::recover_stale_start_for_integrated_receipt(
                 &close_project_root, &mut task, receipt, &lease_history,
             );
@@ -10521,17 +10526,30 @@ impl CasCore {
             && (close_repo_verified || worker_worktree_path.is_some())
         {
             if let Some(assignee) = task.assignee.as_deref() {
+                // A local parked ref need not have been published under its
+                // preservation name. Actual attributable, nonempty content
+                // integrated on the target is stronger proof than origin's
+                // tracking ref. Bare ancestry alone still proves nothing.
+                let recorded_anchor = anchored_parked_delivery_branch(&close_project_root, &task)
+                    .and(task.deliverables.factory_branch_anchor.as_deref());
+                let integrated_delivery = req.commit_receipt.as_deref().or(recorded_anchor)
+                    .zip(commit_receipt_window.as_ref())
+                    .is_some_and(|(receipt, window)| validate_task_commit_receipt(
+                        &close_project_root, receipt, &resolved_parent_branch, window,
+                    ).is_ok());
                 // cas-7efe: single close-time resolver, not a bare "main".
-                match check_factory_branch_merge_reality_with_delivery_mode(
-                    &close_project_root,
-                    assignee,
-                    &resolved_parent_branch,
-                    task.delivery_mode,
-                    Some(&task.id),
-                ) {
-                    MergeRealityOutcome::Proceed => {}
-                    MergeRealityOutcome::Refuse(msg) => {
-                        return Ok(Self::tool_error(msg));
+                if !integrated_delivery {
+                    match check_factory_branch_merge_reality_with_delivery_mode(
+                        &close_project_root,
+                        assignee,
+                        &resolved_parent_branch,
+                        task.delivery_mode,
+                        Some(&task.id),
+                    ) {
+                        MergeRealityOutcome::Proceed => {}
+                        MergeRealityOutcome::Refuse(msg) => {
+                            return Ok(Self::tool_error(msg));
+                        }
                     }
                 }
             }
@@ -14852,6 +14870,19 @@ fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> Strin
     )
 }
 
+/// A preservation ref is evidence of this delivery only while it still names
+/// the immutable recorded anchor. Prefer it to a reused worker lane, locally
+/// or on origin, without accepting a ref recycled for later work.
+fn anchored_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Option<String> {
+    let parked = task.deliverables.parked_branch.as_deref()?;
+    let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
+    if !is_safe_git_refname(parked) {
+        return None;
+    }
+    [parked.to_string(), format!("origin/{parked}")].into_iter()
+        .find(|branch| resolve_branch_sha(repo, branch).as_deref() == Some(anchor))
+}
+
 /// [`close_measured_factory_branch`], refusing instead of binding to another
 /// task's delivery (cas-93db). A worker's plain `factory/<assignee>` whose
 /// recent commits claim another task, and none this one, is that task's
@@ -14867,6 +14898,9 @@ pub(crate) fn resolve_close_delivery_branch(
 ) -> Result<String, String> {
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
+    }
+    if let Some(branch) = anchored_parked_delivery_branch(repo_path, task) {
+        return Ok(branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
         return Ok(branch);

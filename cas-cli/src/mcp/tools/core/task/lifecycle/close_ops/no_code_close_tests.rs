@@ -1414,54 +1414,59 @@ async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
 #[tokio::test]
 async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
     let mut env = TestEnvGuard::temp_home();
-    for supervisor in [false, true] {
-        for recorded in [false, true] {
-            let f = fixture(&mut env, "main");
-            env.set("CAS_AGENT_ROLE", if supervisor { "supervisor" } else { "worker" });
-            let repo = f.dir.path();
-            let worker_path = f.cas_dir().join("worktrees").join(WORKER);
-            let id = "cas-79fc";
-            let parked = if recorded { format!("{LANE}-cas-aabb") } else { format!("{LANE}-{id}") };
-            let base = git(repo, &["rev-parse", "main"]);
-            git(&worker_path, &["reset", "--hard", "main"]);
-            std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
-            git(&worker_path, &["add", "own.rs"]);
-            git(&worker_path, &["commit", "-q", "-m", "fix(cas-79fc): parked delivery"]);
-            let receipt = git(&worker_path, &["rev-parse", "HEAD"]);
-            git(repo, &["branch", &parked, &receipt]);
-            git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge parked delivery"]);
-            git(repo, &["push", "-q", "origin", "main"]);
-            assert!(!git_ref_exists(repo, &format!("origin/{parked}")), "parked ref was never pushed");
-            if recorded {
-                // Legacy start used a different task's suffixed name. The
-                // unused bare lane is empty and never published afterwards.
-                git(&worker_path, &["reset", "--hard", &base]);
-                git(repo, &["push", "-q", "origin", "--delete", LANE]);
-            } else {
-                std::fs::write(worker_path.join("next.rs"), "pub fn next() {}\n").unwrap();
-                git(&worker_path, &["add", "next.rs"]);
-                git(&worker_path, &["commit", "-q", "-m", "fix(cas-0ddf): next task"]);
-            }
-            let next_tip = git(&worker_path, &["rev-parse", "HEAD"]);
-            let mut task = assigned(id, TaskType::Bug, "main");
-            let start_base = if recorded { f.foreign_tip.clone() } else { base };
-            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-                work_target: task.deliverables.work_target.clone().unwrap(),
-                assignee: WORKER.into(), branch: LANE.into(), base_sha: start_base.clone(),
-            });
-            task.deliverables.parked_branch = Some(parked.clone());
-            task.deliverables.factory_branch_anchor = Some(receipt.clone());
-            f.put(&task);
-            claim(&f, id);
-            let caller = if supervisor { &f.supervisor } else { &f.worker };
-            let response = call(caller, serde_json::json!({
-                "action": "close", "id": id, "reason": "Integrated parked delivery",
-                "commit_receipt": receipt, "supervisor_override": supervisor,
-            })).await;
-            assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{recorded}: {response}");
-            assert!(f.task(id).notes.contains(&start_base), "old base must remain audited");
-            assert_eq!(git(repo, &["rev-parse", &parked]), receipt);
-            assert_eq!(git(repo, &["rev-parse", LANE]), next_tip, "never move the next task's lane");
+    for (supervisor, recorded, with_receipt) in [
+        (false, false, true), (true, false, true), (false, true, true), (true, true, true),
+        (false, false, false), (true, false, false), (false, true, false), (true, true, false),
+    ] {
+        let f = fixture(&mut env, "main");
+        env.set("CAS_AGENT_ROLE", if supervisor { "supervisor" } else { "worker" });
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-79fc";
+        let parked = if recorded { format!("{LANE}-cas-aabb") } else { format!("{LANE}-{id}") };
+        let base = git(repo, &["rev-parse", "main"]);
+        git(&worker_path, &["reset", "--hard", "main"]);
+        std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(&worker_path, &["add", "own.rs"]);
+        git(&worker_path, &["commit", "-q", "-m", "fix(cas-79fc): parked delivery"]);
+        let receipt = git(&worker_path, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", &parked, &receipt]);
+        git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "Merge parked delivery"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        assert!(!git_ref_exists(repo, &format!("origin/{parked}")), "parked ref was never pushed");
+        if recorded {
+            // Legacy start used a different task's suffixed name. The
+            // unused bare lane is empty and never published afterwards.
+            git(&worker_path, &["reset", "--hard", &base]);
+            git(repo, &["push", "-q", "origin", "--delete", LANE]);
+        } else {
+            std::fs::write(worker_path.join("next.rs"), "pub fn next() {}\n").unwrap();
+            git(&worker_path, &["add", "next.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-0ddf): next task"]);
         }
+        let next_tip = git(&worker_path, &["rev-parse", "HEAD"]);
+        let mut task = assigned(id, TaskType::Bug, "main");
+        let start_base = if recorded { f.foreign_tip.clone() } else { base };
+        task.deliverables.factory_branch_start = with_receipt.then(|| cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(), branch: LANE.into(), base_sha: start_base.clone(),
+        });
+        task.deliverables.parked_branch = Some(parked.clone());
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        f.put(&task);
+        claim(&f, id);
+        let caller = if supervisor { &f.supervisor } else { &f.worker };
+        let response = call(caller, serde_json::json!({
+            "action": "close", "id": id, "reason": "Integrated parked delivery",
+            "commit_receipt": with_receipt.then_some(receipt.as_str()), "supervisor_override": supervisor,
+        })).await;
+        assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{recorded}: {response}");
+        if with_receipt {
+            assert!(f.task(id).notes.contains(&start_base), "old base must remain audited");
+        }
+        assert_eq!(resolve_close_delivery_branch(repo, &f.task(id), WORKER).unwrap(), parked,
+            "the recorded anchored delivery must outrank the worker lane");
+        assert_eq!(git(repo, &["rev-parse", &parked]), receipt);
+        assert_eq!(git(repo, &["rev-parse", LANE]), next_tip, "never move the next task's lane");
     }
 }

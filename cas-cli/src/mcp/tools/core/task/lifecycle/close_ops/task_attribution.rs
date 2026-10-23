@@ -161,6 +161,9 @@ pub(crate) fn started_delivery(
 /// switched to its own. An already-integrated, attributable receipt can
 /// retire that stale boundary for close; it cannot rebind a live delivery or
 /// waive any of the ordinary receipt/content/review gates.
+/// The validated retirement is kept in memory with its original-base audit;
+/// it may persist if a later gate refuses and saves the task. Retrying close
+/// still runs every other gate against the immutable delivery evidence.
 pub(super) fn recover_stale_start_for_integrated_receipt(
     repo: &Path,
     task: &mut Task,

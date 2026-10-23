@@ -419,4 +419,11 @@ fn provisioning_failure_marks_the_spawn_request_failed_with_its_reason_cas_d741(
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(notified(), "the supervisor is told the spawn failed");
+    let notices = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+    let notice = notices.iter().find(|row| row.target == "supervisor" && row.prompt.contains(&request)).unwrap();
+    assert_eq!(notice.priority, cas_store::NotificationPriority::Critical);
+    assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+    assert_eq!(FactoryDaemon::supervisor_wake_class(
+        &super::queue_and_events::WakeSender::Daemon, "supervisor", &notice.source, &notice.prompt,
+    ), Some(super::queue_and_events::SupervisorWakeClass::Blocker));
 }

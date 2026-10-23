@@ -1629,31 +1629,26 @@ pub(super) fn report_provision_failure(
             detail,
         );
     }
-    let notified = enqueue_spawn_outcome_notice(
-        cas_dir,
-        supervisor_name,
-        factory_session,
-        request_id,
-        worker_name,
-        "provision",
-        false,
-        detail,
-    );
-    if notified.is_err() {
-        let request = request_id
-            .map(|id| format!("request {id}"))
-            .unwrap_or_else(|| "a direct spawn".to_string());
-        notify_supervisor_or_defer(
-            cas_dir,
-            supervisor_name,
-            factory_session,
-            format!("Worker spawn failed: {worker_name}"),
-            format!(
-                "Factory spawn {request} for worker '{worker_name}' failed in provisioning: \
-                 {detail}"
-            ),
-        );
-    }
+    // A spent loop budget must not downgrade the deferred notice to ordinary
+    // inbox traffic: retry the same blocker-bearing enqueue off the loop.
+    let cas_dir = cas_dir.to_path_buf();
+    let supervisor = supervisor_name.to_owned();
+    let session = factory_session.to_owned();
+    let worker = worker_name.to_owned();
+    let detail = detail.to_owned();
+    super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
+        enqueue_spawn_outcome_notice(
+            &cas_dir,
+            &supervisor,
+            &session,
+            request_id,
+            &worker,
+            "provision",
+            false,
+            &detail,
+        )
+        .map(|_| ())
+    });
 }
 
 /// Queue a director notice to the supervisor that must not be lost to a spent
@@ -1717,13 +1712,27 @@ fn enqueue_spawn_outcome_notice(
             ),
         )
     };
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let id = if !success && matches!(stage, "provision" | "register") {
+        queue.enqueue_urgent_with_outcome(
+            "director",
+            supervisor_name,
+            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, None),
+            Some(factory_session),
+            Some(&summary),
+            Some(cas_store::NotificationPriority::Critical),
+            false,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )?
+        .id()
+    } else {
+        queue.enqueue_with_summary(
+            "director",
+            supervisor_name,
+            &message,
+            Some(factory_session),
+            Some(&summary),
+        )?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }
@@ -17600,6 +17609,14 @@ mod tests {
         assert!(prompts[0].prompt.contains("request 407"));
         // pin: worker status relies on the registration-failure stage saved in the notice.
         assert!(prompts[0].prompt.contains("stage=register"));
+        assert_eq!(prompts[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(prompts[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon, "keen-crane", &prompts[0].source, &prompts[0].prompt,
+            ),
+            Some(SupervisorWakeClass::Blocker),
+        );
     }
 
     // -----------------------------------------------------------------------

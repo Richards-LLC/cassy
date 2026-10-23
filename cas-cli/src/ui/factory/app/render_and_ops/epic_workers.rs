@@ -821,6 +821,95 @@ fn stale_spawn_base_notice(
     ))
 }
 
+/// Cheap, read-only checks shared by the MCP enqueue path. Provisioning still
+/// fetches and checks again, since refs may change after a request is queued.
+pub(crate) fn preflight_spawn_base(
+    cas_dir: &std::path::Path,
+    session_repo_root: &std::path::Path,
+    task_id: Option<&str>,
+    focused_epic_branch: Option<&str>,
+) -> Result<(), String> {
+    let task_base = task_id
+        .map(|id| task_epic_base(cas_dir, session_repo_root, id))
+        .unwrap_or(TaskBase::Unresolved);
+    if let Some(epic) = task_base.epic()
+        && epic.work_target.is_none()
+        && (epic.branch.is_empty() || !epic.branch_exists)
+    {
+        return Err(format!(
+            "spawn refused: task {} belongs to epic {} but the epic has no recorded WorkTarget or resolvable branch; nothing was queued",
+            epic.task_id, epic.epic_id,
+        ));
+    }
+    let repo = resolve_spawn_worktree_repo(cas_dir, session_repo_root, task_base.work_target())
+        .map_err(|error| error.to_string())?;
+    let git = crate::worktree::GitOperations::new(repo.clone());
+    if !git.has_commits().map_err(|error| error.to_string())? {
+        return Err("Repository has no commits. Make an initial commit before spawning workers; nothing was queued.".into());
+    }
+    let configured_trunk = Config::configured_epic_base_branch(&repo)
+        .unwrap_or_else(|| git.detect_default_branch());
+    let trunk = task_base.target_branch().unwrap_or(&configured_trunk);
+    let (base, _) = resolve_spawn_base(&task_base, focused_epic_branch, trunk);
+    let recorded_epic = open_task_store_cached(cas_dir)
+        .map_err(|error| error.to_string())?
+        .epic_for_branch(&base)
+        .map_err(|error| error.to_string())?;
+    if let Some(epic) = &recorded_epic
+        && epic.is_terminal()
+    {
+        return Err(format!(
+            "spawn refused: epic {} is {}; nothing was queued", epic.id, epic.status,
+        ));
+    }
+    // Managed lanes have a separate reconciliation/publication policy. Their
+    // provisioner can preserve unpublished work instead of refusing divergence.
+    if base.starts_with("epic/") && recorded_epic.is_some() {
+        return Ok(());
+    }
+    let remote = format!("origin/{base}");
+    if git.has_origin_remote()
+        && !base.starts_with("origin/")
+        && let (Some(ahead), Some(behind)) = (
+            commits_behind(&repo, &remote, &base),
+            commits_behind(&repo, &base, &remote),
+        )
+        && ahead > 0
+        && behind > 0
+    {
+        return Err(format!(
+            "{}\nNothing was queued.",
+            spawn_base_divergence_refusal(&repo, &base, &remote, ahead, behind)?,
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_base_divergence_refusal(
+    repo: &std::path::Path,
+    base: &str,
+    remote: &str,
+    ahead: usize,
+    behind: usize,
+) -> Result<String, String> {
+    let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+    let checkout = git.list_worktrees().map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|checkout| checkout.branch.as_deref() == Some(base));
+    let path = checkout.as_ref()
+        .map(|checkout| checkout.path.as_path())
+        .unwrap_or(repo);
+    let [rebase] = crate::worktree::GitOperations::git_remedies([
+        &["-C", &path.to_string_lossy(), "rebase", "--autostash", remote, base],
+    ])?;
+    Ok(format!(
+        "SPAWN BASE DIVERGED: local '{base}' ({}), '{remote}' ({}); {ahead} local-only, {behind} remote-only commit(s). No worker was created and neither branch was moved. Reconcile before retrying:\n{rebase}{}",
+        full_sha(repo, base).unwrap_or_else(|| "unresolved".into()),
+        full_sha(repo, remote).unwrap_or_else(|| "unresolved".into()),
+        git.reconcile_commit_cause(base, remote),
+    ))
+}
+
 /// cas-d897 (GH #146): resolve the *fresher* of a base branch's local ref and
 /// its `origin/` counterpart, and say which one won.
 ///
@@ -924,10 +1013,7 @@ fn prefer_fresher_base_ref_observed(
     let behind = behind.unwrap_or(0);
     let ahead = ahead.unwrap_or(0);
     if verify_origin && behind > 0 && ahead > 0 {
-        return Err(format!(
-            "SPAWN BASE DIVERGED: {}. No worker was created and neither branch was moved. Reconcile '{base}' with '{remote}' before retrying.{}",
-            observed_state(), git.reconcile_commit_cause(base, &remote),
-        ));
+        return Err(spawn_base_divergence_refusal(repo_root, base, &remote, ahead, behind)?);
     }
 
     Ok(match (behind, ahead) {

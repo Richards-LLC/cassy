@@ -1550,7 +1550,7 @@ fn walk_owners(
                 })
             {
                 union_checked = true;
-                let bases = cached_merge_bases(repo, fields[1], fields[2])?;
+                let bases = text(repo, &["merge-base", "--all", fields[1], fields[2]])?;
                 let bases: Vec<_> = bases.lines().collect();
                 if let [base] = bases.as_slice() {
                     union_base = Some(base.to_string());

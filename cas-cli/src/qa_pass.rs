@@ -928,7 +928,7 @@ pub(crate) fn validate_round_evidence(
                 task_id: &task.id,
                 task_artifacts_dir: ledger_path.parent().ok_or("API ledger has no parent")?,
                 repo: &repo, delivered_head: &pass.bound_head, notes: "",
-                deployed_origins: &qa.deployed_origins,
+                deployed_origins: &qa.deployed_origins, rebind_scope: None,
             };
             if verdict == cas_types::QaVerdict::Approved {
                 crate::qa_evidence::validate_ledger(&ctx).map_err(|e| e.problem)?;

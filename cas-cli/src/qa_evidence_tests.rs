@@ -168,7 +168,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes,
-            deployed_origins: &[],
+            deployed_origins: &[], rebind_scope: None,
         })
     }
 }
@@ -275,7 +275,7 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
             repo: &fx.repo,
             delivered_head: &fx.head,
             notes: &fx.notes(),
-            deployed_origins: &[],
+            deployed_origins: &[], rebind_scope: None,
         };
         let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
         if missing.is_empty() {
@@ -781,7 +781,7 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     assert!(
         validate_ledger(&ctx)
@@ -949,7 +949,7 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: &notes,
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
@@ -1005,7 +1005,7 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let error = run_close_gate(
         &ctx,
@@ -1202,7 +1202,7 @@ fn ledger_pass_row_must_be_real_build() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
@@ -1223,7 +1223,7 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let refusal = validate_terminal_qa(&ctx).unwrap_err();
     assert!(refusal.problem.starts_with("missing"), "{refusal:?}");
@@ -1782,7 +1782,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes: &notes,
-            deployed_origins: origins,
+            deployed_origins: origins, rebind_scope: None,
         })
     }
 }
@@ -2462,7 +2462,7 @@ fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes,
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     }
 }
 

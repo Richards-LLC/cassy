@@ -31700,6 +31700,27 @@ esac
             matches!(out, MergeStateGateOutcome::Proceed),
             "an original content commit receipt must be accepted when it is an ancestor of the merged target, got {out:?}"
         );
+
+        // cas-189f: content proof can be Unknown for a real target-reachable
+        // delivery (here B has no first-parent effect). Its supervisor merge
+        // is still a container and must not replace the content boundary B.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "feat(cas-test1): empty delivery boundary"]);
+        let unknown_anchor = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge unknown-content delivery"]);
+        let supervisor_merge = rev_parse_local(p, "main");
+        assert!(matches!(
+            delivery_content_presence_on_target(p, &unknown_anchor, "main"),
+            DeliveryContentPresence::Unknown { .. }
+        ));
+        let mut advanced = worker_task("worker");
+        advanced.status = TaskStatus::AwaitingMerge;
+        advanced.deliverables.factory_branch_anchor = Some(unknown_anchor.clone());
+        assert!(CasCore::apply_awaiting_merge_anchor_advance(
+            &mut advanced, &supervisor_merge, chrono::Utc::now(), Some(p), Some("main"),
+        ).is_none(), "a target-reachable merge must retain B even when content proof is Unknown");
+        assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(unknown_anchor.as_str()));
     }
 
     #[test]

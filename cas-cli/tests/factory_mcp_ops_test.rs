@@ -10555,6 +10555,186 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
     );
 }
 
+/// GH #1357/#1353: approval recovers a replaced start boundary, including
+/// linked checkouts whose project identity lives only at the common root.
+#[tokio::test]
+async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
+    let mut failures = Vec::new();
+    for shape in [
+        "squashed-anchor",
+        "reset-to-origin",
+        "per-task-branch",
+        "empty",
+        "foreign",
+    ] {
+        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
+        let env = FactoryTestEnv::with_server_supervisor();
+        let worker = "rebind-worker";
+        let path = init_pushed_worker_repo(&env, worker);
+        let project = env.cas_root.parent().unwrap();
+        let git = |args: &[&str]| git_stdout(&path, args);
+        let target_tip = git(&["rev-parse", "main"]);
+        git(&["push", "-q", "origin", "main"]);
+        // Only the primary checkout has project configuration, as in a
+        // managed linked worktree; common Git identity was validated already.
+        std::fs::write(
+            env.cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"rebind-project\"\n",
+        )
+        .unwrap();
+        let worker_id = register_codex_worker_at(&env, worker, "session-88c1", &path);
+        let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
+        supervisor.factory_session = Some("session-88c1".into());
+        env.agent_store().update(&supervisor).unwrap();
+        // The start inherited a local-only supervisor commit. Its replacement
+        // is based on origin/main and cannot descend from that old boundary.
+        git(&[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "supervisor local-only base",
+        ]);
+        let old_base = git(&["rev-parse", "HEAD"]);
+        git(&[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "cas-88c1: original delivery",
+        ]);
+        let old_anchor = git(&["rev-parse", "HEAD"]);
+        let old_branch = format!("factory/{worker}");
+        let mut task = Task::new("cas-88c1".into(), "Recover replacement delivery".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.into());
+        let target = WorkTarget {
+            repo_selector: "project:rebind-project".into(),
+            target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target,
+            assignee: worker.into(),
+            branch: old_branch.clone(),
+            base_sha: old_base.clone(),
+        });
+        task.deliverables.factory_branch_anchor = Some(old_anchor.clone());
+        env.task_store().add(&task).unwrap();
+        assert!(
+            env.agent_store()
+                .try_claim(&task.id, &worker_id, 600, None)
+                .unwrap()
+                .is_success()
+        );
+        let previous = env.task_store().get(&task.id).unwrap();
+        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
+        let branch = if shape == "per-task-branch" {
+            let branch = format!("factory/{worker}-{}", task.id);
+            git(&["switch", "-qc", &branch, "origin/main"]);
+            branch
+        } else {
+            git(&["reset", "--hard", "origin/main"]);
+            old_branch.clone()
+        };
+        if shape != "empty" {
+            std::fs::write(path.join("delivery.txt"), "replacement delivery\n").unwrap();
+            git(&["add", "delivery.txt"]);
+            // Unnamed work is valid on the assigned lane. A foreign task
+            // subject overrides worker authorship and the task's time window.
+            let subject = if shape == "foreign" {
+                "cas-dead: another task"
+            } else if shape == "squashed-anchor" {
+                "cas-88c1: squashed replacement"
+            } else {
+                "replacement delivery"
+            };
+            git(&["commit", "-qm", subject]);
+        }
+        git(&["push", "-q", "--force", "origin", &branch]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        let request = || {
+            task_req(serde_json::json!({
+                "action": "rebind_branch", "id": task.id, "branch": branch,
+                "reason": "Supervisor approved recovery onto the corrected target base",
+            }))
+        };
+        let result = env.service.task(Parameters(request())).await;
+        if matches!(shape, "empty" | "foreign") {
+            let error = result.expect_err("empty and foreign deliveries must refuse");
+            let reason = if shape == "empty" {
+                "no unmerged task delivery"
+            } else {
+                "foreign commit"
+            };
+            if !error.message.contains(reason) {
+                failures.push(format!("{shape}: expected {reason}: {error}"));
+            }
+            assert_eq!(
+                serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap(),
+                serde_json::to_value(&previous).unwrap(),
+                "refusal must preserve all task evidence"
+            );
+        } else {
+            if let Err(error) = result {
+                failures.push(format!("{shape}: {error}"));
+                continue;
+            }
+            let rebound = env.task_store().get(&task.id).unwrap();
+            let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
+            assert_eq!(start.branch, branch, "{shape}");
+            assert_eq!(
+                start.base_sha, target_tip,
+                "{shape}: replace the obsolete start base"
+            );
+            assert_eq!(rebound.assignee, previous.assignee);
+            assert_eq!(
+                rebound.deliverables.work_target,
+                previous.deliverables.work_target
+            );
+            assert!(rebound.deliverables.factory_branch_anchor.is_none());
+            assert!(
+                rebound
+                    .deliverables
+                    .historical_factory_branch_anchors
+                    .contains(&old_anchor)
+            );
+            let audit = rebound
+                .notes
+                .lines()
+                .find_map(|line| line.split_once("DELIVERY BRANCH REBOUND: "))
+                .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
+                .expect("persist the old-tip audit even when the branch name stays the same");
+            assert_eq!(audit["previous_start"]["base_sha"], old_base);
+            assert_eq!(audit["previous_anchor"], old_anchor);
+            assert_eq!(
+                audit["previous_tip"],
+                if branch == old_branch {
+                    tip.clone()
+                } else {
+                    old_anchor.clone()
+                }
+            );
+            assert_eq!(audit["tip"], tip);
+            env.service
+                .task(Parameters(request()))
+                .await
+                .expect("repeated approval is idempotent");
+            assert_eq!(env.task_store().get(&task.id).unwrap().notes, rebound.notes);
+        }
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            tip,
+            "approval never moves Git refs"
+        );
+        assert_eq!(git_stdout(project, &["rev-parse", "main"]), target_tip);
+        assert_eq!(
+            serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
+            lease
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 // ===========================================================================
 // cas-0a6f (GH #103): sync_all_workers must not rebase a worktree that is
 // dirty or whose assignee is mid-task, and a stranded stash must reach both
@@ -14316,184 +14496,4 @@ async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
         .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
         .await;
     assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
-}
-
-/// GH #1357/#1353: approval recovers a replaced start boundary, including
-/// linked checkouts whose project identity lives only at the common root.
-#[tokio::test]
-async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
-    let mut failures = Vec::new();
-    for shape in [
-        "squashed-anchor",
-        "reset-to-origin",
-        "per-task-branch",
-        "empty",
-        "foreign",
-    ] {
-        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
-        let env = FactoryTestEnv::with_server_supervisor();
-        let worker = "rebind-worker";
-        let path = init_pushed_worker_repo(&env, worker);
-        let project = env.cas_root.parent().unwrap();
-        let git = |args: &[&str]| git_stdout(&path, args);
-        let target_tip = git(&["rev-parse", "main"]);
-        git(&["push", "-q", "origin", "main"]);
-        // Only the primary checkout has project configuration, as in a
-        // managed linked worktree; common Git identity was validated already.
-        std::fs::write(
-            env.cas_root.join("config.toml"),
-            "[project]\ncanonical_id = \"rebind-project\"\n",
-        )
-        .unwrap();
-        let worker_id = register_codex_worker_at(&env, worker, "session-88c1", &path);
-        let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
-        supervisor.factory_session = Some("session-88c1".into());
-        env.agent_store().update(&supervisor).unwrap();
-        // The start inherited a local-only supervisor commit. Its replacement
-        // is based on origin/main and cannot descend from that old boundary.
-        git(&[
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "supervisor local-only base",
-        ]);
-        let old_base = git(&["rev-parse", "HEAD"]);
-        git(&[
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "cas-88c1: original delivery",
-        ]);
-        let old_anchor = git(&["rev-parse", "HEAD"]);
-        let old_branch = format!("factory/{worker}");
-        let mut task = Task::new("cas-88c1".into(), "Recover replacement delivery".into());
-        task.status = TaskStatus::InProgress;
-        task.assignee = Some(worker.into());
-        let target = WorkTarget {
-            repo_selector: "project:rebind-project".into(),
-            target_branch: "main".into(),
-        };
-        task.deliverables.work_target = Some(target.clone());
-        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-            work_target: target,
-            assignee: worker.into(),
-            branch: old_branch.clone(),
-            base_sha: old_base.clone(),
-        });
-        task.deliverables.factory_branch_anchor = Some(old_anchor.clone());
-        env.task_store().add(&task).unwrap();
-        assert!(
-            env.agent_store()
-                .try_claim(&task.id, &worker_id, 600, None)
-                .unwrap()
-                .is_success()
-        );
-        let previous = env.task_store().get(&task.id).unwrap();
-        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
-        let branch = if shape == "per-task-branch" {
-            let branch = format!("factory/{worker}-{}", task.id);
-            git(&["switch", "-qc", &branch, "origin/main"]);
-            branch
-        } else {
-            git(&["reset", "--hard", "origin/main"]);
-            old_branch.clone()
-        };
-        if shape != "empty" {
-            std::fs::write(path.join("delivery.txt"), "replacement delivery\n").unwrap();
-            git(&["add", "delivery.txt"]);
-            // Unnamed work is valid on the assigned lane. A foreign task
-            // subject overrides worker authorship and the task's time window.
-            let subject = if shape == "foreign" {
-                "cas-dead: another task"
-            } else if shape == "squashed-anchor" {
-                "cas-88c1: squashed replacement"
-            } else {
-                "replacement delivery"
-            };
-            git(&["commit", "-qm", subject]);
-        }
-        git(&["push", "-q", "--force", "origin", &branch]);
-        let tip = git(&["rev-parse", "HEAD"]);
-        assert!(git(&["status", "--porcelain"]).is_empty());
-        let request = || {
-            task_req(serde_json::json!({
-                "action": "rebind_branch", "id": task.id, "branch": branch,
-                "reason": "Supervisor approved recovery onto the corrected target base",
-            }))
-        };
-        let result = env.service.task(Parameters(request())).await;
-        if matches!(shape, "empty" | "foreign") {
-            let error = result.expect_err("empty and foreign deliveries must refuse");
-            let reason = if shape == "empty" {
-                "no unmerged task delivery"
-            } else {
-                "foreign commit"
-            };
-            if !error.message.contains(reason) {
-                failures.push(format!("{shape}: expected {reason}: {error}"));
-            }
-            assert_eq!(
-                serde_json::to_value(env.task_store().get(&task.id).unwrap()).unwrap(),
-                serde_json::to_value(&previous).unwrap(),
-                "refusal must preserve all task evidence"
-            );
-        } else {
-            if let Err(error) = result {
-                failures.push(format!("{shape}: {error}"));
-                continue;
-            }
-            let rebound = env.task_store().get(&task.id).unwrap();
-            let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
-            assert_eq!(start.branch, branch, "{shape}");
-            assert_eq!(
-                start.base_sha, target_tip,
-                "{shape}: replace the obsolete start base"
-            );
-            assert_eq!(rebound.assignee, previous.assignee);
-            assert_eq!(
-                rebound.deliverables.work_target,
-                previous.deliverables.work_target
-            );
-            assert!(rebound.deliverables.factory_branch_anchor.is_none());
-            assert!(
-                rebound
-                    .deliverables
-                    .historical_factory_branch_anchors
-                    .contains(&old_anchor)
-            );
-            let audit = rebound
-                .notes
-                .lines()
-                .find_map(|line| line.split_once("DELIVERY BRANCH REBOUND: "))
-                .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
-                .expect("persist the old-tip audit even when the branch name stays the same");
-            assert_eq!(audit["previous_start"]["base_sha"], old_base);
-            assert_eq!(audit["previous_anchor"], old_anchor);
-            assert_eq!(
-                audit["previous_tip"],
-                if branch == old_branch {
-                    tip.clone()
-                } else {
-                    old_anchor.clone()
-                }
-            );
-            assert_eq!(audit["tip"], tip);
-            env.service
-                .task(Parameters(request()))
-                .await
-                .expect("repeated approval is idempotent");
-            assert_eq!(env.task_store().get(&task.id).unwrap().notes, rebound.notes);
-        }
-        assert_eq!(
-            git(&["rev-parse", "HEAD"]),
-            tip,
-            "approval never moves Git refs"
-        );
-        assert_eq!(git_stdout(project, &["rev-parse", "main"]), target_tip);
-        assert_eq!(
-            serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
-            lease
-        );
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -80,6 +80,15 @@ pub(crate) fn started_delivery(
                 repo, anchor, &tip, &task.id, None, &target,
             );
         if !restored_start {
+            if !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+                && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            {
+                return Err(refuse(&format!(
+                    "parked anchor {anchor} predates the start base; current tip {tip} contains \
+                     that base but is not an attributable continuation. Ask the supervisor to \
+                     request_changes or rebind_branch before re-parking"
+                )));
+            }
             tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
                 .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
         }

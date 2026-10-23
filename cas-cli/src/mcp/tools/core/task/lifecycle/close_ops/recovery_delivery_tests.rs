@@ -311,6 +311,14 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
             base_sha: target_base.clone(),
         });
         tasks.update(&task).unwrap();
+        cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
+            task_id: TASK,
+            implementer_agent_id: "recovery-session",
+            branch: BRANCH,
+            bound_head: &f.predecessor,
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        }, chrono::Utc::now()).unwrap();
         if target_first || rewrite {
             git(&f.worker_path, &["reset", "--hard", "main"]);
             if rewrite {
@@ -348,6 +356,8 @@ async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
         assert!(output.contains("MERGE REQUIRED"), "{output}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
         let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].state, cas_types::QaPassState::Superseded);
         assert_eq!(rounds.last().unwrap().bound_head, tip);
         let service = crate::mcp::CasService::new(f.core, None);
         let request = serde_json::from_value(serde_json::json!({

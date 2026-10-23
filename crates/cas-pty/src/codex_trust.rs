@@ -512,16 +512,7 @@ fn visible_hook_path(path: &Path) -> String {
         .to_string()
         .chars()
         .map(|character| {
-            if character.is_control()
-                || matches!(character,
-                    '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}'
-                    | '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}'
-                    | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
-                    | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
-                    | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
-                    | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
-                    | '\u{e0000}'..='\u{e0fff}')
-            {
+            if crate::is_unsafe_terminal_character(character) {
                 character.escape_default().to_string()
             } else {
                 character.to_string()
@@ -653,7 +644,7 @@ impl CodexLaunchReadiness {
         if !self.project_trusted {
             reasons.push(format!(
                 "directory {} is not trusted in Codex [projects]",
-                self.cwd.display()
+                visible_hook_path(&self.cwd)
             ));
         }
         for hook in self.hooks.iter().filter(|hook| hook.cas_owned) {
@@ -661,7 +652,11 @@ impl CodexLaunchReadiness {
                 hook.trust,
                 CodexHookTrust::Untrusted | CodexHookTrust::Modified
             ) {
-                reasons.push(format!("CAS hook {} is {:?}", hook.key, hook.trust));
+                reasons.push(format!(
+                    "CAS hook {} is {:?}",
+                    visible_hook_path(Path::new(&hook.key)),
+                    hook.trust
+                ));
             }
         }
         reasons
@@ -712,7 +707,7 @@ fn hook_file_readiness(
     let hooks: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("failed to parse {}: {error}", hooks_path.display()),
+            format!("failed to parse {}: {error}", visible_hook_path(hooks_path)),
         )
     })?;
     let state = config.get("hooks").and_then(|hooks| hooks.get("state"));
@@ -1508,6 +1503,57 @@ mod tests {
             blocking[0].contains(":stop:0:0") && blocking[0].contains("Modified"),
             "{blocking:?}"
         );
+
+        // cas-015d: display paths safely while retaining Codex's raw trust key.
+        for (suffix, visible) in [("\u{202e}", "\\u{202e}"), ("\u{200b}", "\\u{200b}")] {
+            let unsafe_home = dir.join(&format!("codex{suffix}home"));
+            let unsafe_cwd = dir.join(&format!("project{suffix}cwd"));
+            std::fs::create_dir_all(&unsafe_home).unwrap();
+            std::fs::create_dir_all(&unsafe_cwd).unwrap();
+            let hooks = unsafe_home.join("hooks.json");
+            std::fs::copy(home.join("hooks.json"), &hooks).unwrap();
+            let unsafe_config = unsafe_home.join("config.toml");
+            let config_before = std::fs::read_to_string(&config)
+                .unwrap()
+                .replace(home.to_str().unwrap(), unsafe_home.to_str().unwrap());
+            std::fs::write(&unsafe_config, &config_before).unwrap();
+            let readiness = codex_launch_readiness(&unsafe_config, &unsafe_home, &unsafe_cwd).unwrap();
+            let key = format!("{}:pre_tool_use:0:0", hooks.display());
+            assert!(
+                readiness
+                    .hooks
+                    .iter()
+                    .any(|hook| hook.key == key && hook.trust == CodexHookTrust::Trusted),
+                "raw identity must still find its stored hash"
+            );
+            let blocking = readiness.blocking();
+            assert!(
+                blocking
+                    .iter()
+                    .any(|reason| reason.contains(&format!("project{visible}cwd"))
+                        && reason.contains("is not trusted")),
+                "{blocking:?}"
+            );
+            assert!(
+                blocking.iter().all(|reason| !reason.contains(suffix)),
+                "{blocking:?}"
+            );
+            std::fs::write(&hooks, "{invalid JSON").unwrap();
+            let error = codex_launch_readiness(&unsafe_config, &unsafe_home, &unsafe_cwd)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("codex{visible}home")) && error.contains("failed to parse"),
+                "{error:?}"
+            );
+            assert!(!error.contains(suffix), "{error:?}");
+            assert_eq!(
+                std::fs::read_to_string(&unsafe_config).unwrap(),
+                config_before
+            );
+            // pin: readiness must leave even malformed hook bytes untouched.
+            assert_eq!(std::fs::read_to_string(&hooks).unwrap(), "{invalid JSON");
+        }
     }
 
     #[test]

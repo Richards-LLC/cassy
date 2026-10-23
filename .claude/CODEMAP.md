@@ -94,6 +94,7 @@
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch, readiness and terminal snapshots.
 - `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, input injection and submit gating.
 - `crates/cas-pty/src/store_isolation.rs`, `crates/cas-pty/conformance/` - credential-store masking and harness conformance proofs.
+- `crates/cas-pty/src/display.rs` - shared terminal character policy for hook/readiness labels and CLI Git remedies.
 
 ## MCP and transport
 

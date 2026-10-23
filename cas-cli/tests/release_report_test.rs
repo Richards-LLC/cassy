@@ -128,8 +128,9 @@ esac
 fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let project = TempDir::new().unwrap();
     for args in [
-        vec!["init", "-q"],
+        vec!["init", "-q", "-b", "feature/report"],
         vec!["remote", "add", "origin", "git@github.com:example/project.git"],
+        vec!["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"],
     ] {
         assert!(ProcessCommand::new("git")
             .current_dir(project.path())
@@ -205,7 +206,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert!(html.contains("https://github.com/example/project/issues/746"));
     for extension in ["md", "pdf"] {
         assert!(html.contains(&format!(
-            "href=\"https://github.com/example/project/blob/main/docs/release-reports/v3.19.0.{extension}\""
+            "href=\"https://github.com/example/project/blob/master/docs/release-reports/v3.19.0.{extension}\""
         )), "{html}");
     }
 

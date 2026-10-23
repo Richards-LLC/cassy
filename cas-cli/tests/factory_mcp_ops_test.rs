@@ -11822,28 +11822,18 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         }))
         .unwrap();
         let started = env.service.task(Parameters(start)).await;
-        if per_task {
-            let error = started.expect_err("a parked per-task branch must stay frozen");
-            assert!(error.message.contains("cas-pk01's per-task branch"), "{error}");
-            assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), parked_tip);
-            assert_eq!(store.get(&task_b).unwrap().status, TaskStatus::Open);
-            assert!(
-                !cas::worktree::GitOperations::new(worker_path.clone())
-                    .branch_exists(&format!("{branch}-cas-pk01"))
-                    .unwrap()
-            );
-        } else {
-            let text = get_text(&started.unwrap());
-            assert!(text.contains("PARKED BRANCH MOVED"), "{text}");
-            assert_eq!(
-                git_stdout(&worker_path, &["rev-parse", "HEAD"]),
-                git_stdout(&worker_path, &["rev-parse", "epic/requested"])
-            );
-            assert_eq!(
-                git_stdout(&worker_path, &["rev-parse", &format!("{branch}-cas-pk01")]),
-                parked_tip
-            );
-        }
+        let text = get_text(&started.expect("a parked delivery must allow a separate task lane"));
+        let own = format!("factory/{worker}-{task_b}");
+        assert!(text.contains("PARKED BRANCH PRESERVED"), "{text}");
+        assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", &branch]), parked_tip);
+        assert_eq!(
+            git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+            git_stdout(&worker_path, &["rev-parse", "epic/requested"])
+        );
+        let start = store.get(&task_b).unwrap().deliverables.factory_branch_start.unwrap();
+        assert_eq!(start.branch, own, "close must retain the new task's branch");
+        assert_eq!(start.base_sha, git_stdout(&worker_path, &["rev-parse", "HEAD"]));
     }
 }
 

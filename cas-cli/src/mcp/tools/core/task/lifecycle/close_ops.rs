@@ -29819,6 +29819,42 @@ esac
         assert!(deliverables.handoff_branches.is_empty());
     }
 
+    #[test]
+    fn per_task_close_ignores_legacy_start_on_parked_lane_gh1353() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = head_sha(p);
+        std::fs::create_dir_all(p.join(".cas")).unwrap();
+        std::fs::write(p.join(".cas/config.toml"), "[project]\ncanonical_id = \"gh1353\"\n").unwrap();
+        let target = cas_types::WorkTarget {
+            repo_selector: "project:gh1353".into(), target_branch: "main".into(),
+        };
+        // The old runtime recorded the reusable lane, which still backs
+        // the parked task's open PR. It must never be suggested for push.
+        std::fs::write(p.join("parked.rs"), "// parked\n").unwrap();
+        git(p, &["add", "parked.rs"]);
+        git(p, &["commit", "-q", "-m", "parked work"]);
+        let parked = head_sha(p);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1", "main"]);
+        std::fs::write(p.join("own.rs"), "// own\n").unwrap();
+        git(p, &["add", "own.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): own work"]);
+        let tip = head_sha(p);
+        let mut task = worker_task("worker");
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(),
+            branch: "factory/worker".into(), base_sha: base.clone(),
+        });
+        let branch = resolve_close_delivery_branch(p, &task, "worker").unwrap();
+        assert_eq!(branch, "factory/worker-cas-test1");
+        let refusal = unpushed_delivery_tip_refusal(&branch, &tip, &base);
+        assert!(refusal.contains("git push origin factory/worker-cas-test1"), "{refusal}");
+        assert!(!refusal.contains("git push origin factory/worker`"), "{refusal}");
+        assert_eq!(head_sha(p), tip);
+        assert_eq!(rev_parse_local(p, "factory/worker"), parked);
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]

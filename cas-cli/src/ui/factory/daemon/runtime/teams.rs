@@ -5004,6 +5004,18 @@ mod tests {
         let frozen = git(&["push", "-u", "origin", "factory/credit-repairs"]);
         assert!(frozen.status.success(), "{}", String::from_utf8_lossy(&frozen.stderr));
 
+        // GH #1353: publishing the parked tip under its own stable name
+        // while the original lane stays checked out must succeed.
+        let archive = "factory/credit-repairs-cas-parked";
+        assert!(git(&["branch", archive]).status.success());
+        let archived = git(&["push", "origin", archive]);
+        assert!(archived.status.success(), "{}", String::from_utf8_lossy(&archived.stderr));
+        // A different task name cannot receive HEAD through a refspec.
+        for destination in ["factory/credit-repairs-cas-other", "factory/support-triage-cas-parked"] {
+            let refused = git(&["push", "origin", &format!("HEAD:refs/heads/{destination}")]);
+            assert!(!refused.status.success(), "{destination}");
+        }
+
         // Next task on the per-task branch: commit and push both succeed.
         assert!(git(&["switch", "-c", "factory/credit-repairs-cas-1185"]).status.success());
         std::fs::write(wt_path.join("next.txt"), "next task\n").unwrap();

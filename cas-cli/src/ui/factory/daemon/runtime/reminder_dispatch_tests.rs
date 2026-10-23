@@ -284,6 +284,28 @@ async fn cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_t
     }
 }
 
+/// cas-c0d0 (GH #1246): an idle Claude supervisor with a running background
+/// task keeps repainting, so its pane is never 2 s silent. In the live cas-ca26 probe its
+/// own fired reminder sat gated 98.5 s until an unrelated turn started. With
+/// the transcript showing the turn ended, the first pass must type it once.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_c0d0_repainting_idle_supervisor_wakes_once_for_its_own_reminder() {
+    if !child("cas_c0d0_repainting_idle_supervisor_wakes_once_for_its_own_reminder") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    idle_transcript_replaying_a_finished_call(&root, &daemon);
+    let (_, body) = dispatch(&mut daemon, false, false);
+    let name = daemon.app.supervisor_name().to_string();
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
+    daemon.process_prompt_queue().await.unwrap();
+    daemon.pane_silent_since.insert(name, Instant::now());
+    let typed = typed_once(&root, &mut daemon, &body).await;
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "no second injection");
+}
+
 /// Also when the reminder's owner is a replaced supervisor (takeover).
 async fn busy_self_reminder_is_never_abandoned(takeover: bool) {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();

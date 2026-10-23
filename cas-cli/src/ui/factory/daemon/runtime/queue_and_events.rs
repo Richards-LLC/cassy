@@ -7172,6 +7172,26 @@ impl FactoryDaemon {
         }))
     }
 
+    /// cas-c0d0 (GH #1246): the supervisor's own fired reminder, once its
+    /// transcript records that the last turn ended. A Claude supervisor with a
+    /// running background task repaints its pane, so the 2-second silence bar
+    /// held these wakes until an unrelated turn started (98.5 s in the live
+    /// cas-ca26 probe). The typing, readiness and tool-call vetoes stay. Without that
+    /// transcript evidence (`None` or mid-turn) the ordinary policy decides.
+    pub fn supervisor_self_reminder_wake(
+        pane_target: &str,
+        supervisor_name: &str,
+        mid_turn: Option<bool>,
+        pane: PaneWakeState,
+    ) -> Option<WakeDecision> {
+        if pane_target != supervisor_name || mid_turn != Some(false) {
+            return None;
+        }
+        Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
+            WakeDecision::allow("fired self-reminder to a supervisor whose transcript shows its turn ended")
+        }))
+    }
+
     /// cas-cd3f: the startup brief begins a supervisor's first turn. A
     /// just-launched harness has a fresh heartbeat and repaints while it
     /// loads, so the quiet-pane bar would hold the brief until the operator
@@ -10032,7 +10052,17 @@ impl FactoryDaemon {
                         // to a worker parked on it wakes promptly; everything
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
-                            None
+                            // cas-c0d0 (GH #1246): the supervisor's own fired reminder.
+                            self_addressed_reminder(&queued)
+                                .then(|| {
+                                    Self::supervisor_self_reminder_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        self.prepared_mid_turn(&pane_target),
+                                        pane_state,
+                                    )
+                                })
+                                .flatten()
                         } else if self_addressed_reminder(&queued) {
                             // cas-901f: the worker's own fired reminder.
                             self.queue_jobs

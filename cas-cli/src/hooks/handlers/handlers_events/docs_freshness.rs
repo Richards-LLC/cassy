@@ -396,7 +396,12 @@ mod tests {
         std::fs::write(store.join("config.toml"), "[factory]\nepic_base_branch = \"main\"\n").unwrap();
         crate::store::SqliteTaskStore::open(&store).unwrap();
         let run_git = |root: &Path, args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(root).output().unwrap();
+            // Uncommitted maps use an mtime baseline with second precision.
+            // Keep fixture history strictly older without a timing-dependent sleep.
+            let output = Command::new("git").args(args).current_dir(root)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .output().unwrap();
             assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         };
         run_git(&repo, &["init", "-q", "-b", "main"]);

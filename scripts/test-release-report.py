@@ -290,6 +290,32 @@ Source: release assets.
 
 @unittest.skipUnless(importlib.util.find_spec('pymupdf'), 'check-pdf needs PyMuPDF')
 class PdfCheckTests(unittest.TestCase):
+    def test_empty_assets_header_requires_its_first_row_on_the_same_page(self):
+        """A printable PDF may pass bounds while leaving a table header alone."""
+        import pymupdf, subprocess, sys
+        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for orphaned in (True, False):
+                pdf = pymupdf.open()
+                first = pdf.new_page()
+                first.insert_text((60, 80), 'Install')
+                header_page = first if orphaned else pdf.new_page()
+                header_page.insert_text((60, 730 if orphaned else 80), 'Release assets')
+                header_page.insert_text((60, 750 if orphaned else 100), 'Asset       Digest       Size')
+                row_page = pdf.new_page() if orphaned else header_page
+                row_page.insert_text((60, 80 if orphaned else 120),
+                                     'No published assets       unavailable       unavailable')
+                path = Path(tmp) / 'report.pdf'
+                pdf.save(path)
+                result = subprocess.run([sys.executable, str(check), str(path), tmp],
+                                        capture_output=True, text=True)
+                if orphaned:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('assets header', result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_footer_only_last_page_is_refused(self):
         """GH #1305: a last page holding only the closing folio stays inside the
         bounds yet prints an empty sheet; check-pdf must refuse it."""

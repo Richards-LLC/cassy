@@ -2,6 +2,29 @@ use crate::ui::factory::daemon::imports::*;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+fn record_client_resize(client: &mut ClientConnection, client_id: usize, cols: u16, rows: u16) {
+    client.client_cols = cols;
+    client.client_rows = rows;
+    if cols < COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Full {
+        client.view_mode = ClientViewMode::Compact;
+        tracing::info!(
+            "Client {} auto-switched to compact mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    } else if cols >= COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Compact {
+        client.view_mode = ClientViewMode::Full;
+        tracing::info!(
+            "Client {} auto-switched to full mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    }
+    client.needs_full_redraw = true;
+}
+
 impl FactoryDaemon {
     pub(super) fn accept_clients(&mut self) -> anyhow::Result<bool> {
         let mut any_new = false;
@@ -104,42 +127,21 @@ impl FactoryDaemon {
                 if events.iter().any(|event| matches!(event, ControlEvent::Detach)) {
                     client.detaching = true;
                 }
-                // Every client owns its terminal dimensions, even while another
-                // client owns input. Keep viewer sizes current for owner loss.
-                for event in &events {
-                    if let ControlEvent::Resize(cols, rows) = event {
-                        client.client_cols = *cols;
-                        client.client_rows = *rows;
-                        if *cols < COMPACT_WIDTH_THRESHOLD
-                            && client.view_mode == ClientViewMode::Full
-                        {
-                            client.view_mode = ClientViewMode::Compact;
-                            tracing::info!(
-                                "Client {} auto-switched to compact mode ({}x{})",
-                                client_id,
-                                cols,
-                                rows
-                            );
-                        } else if *cols >= COMPACT_WIDTH_THRESHOLD
-                            && client.view_mode == ClientViewMode::Compact
-                        {
-                            client.view_mode = ClientViewMode::Full;
-                            tracing::info!(
-                                "Client {} auto-switched to full mode ({}x{})",
-                                client_id,
-                                cols,
-                                rows
-                            );
-                        }
-                        client.needs_full_redraw = true;
-                    }
-                }
                 let has_activity = !input_data.is_empty() || !events.is_empty();
                 if has_activity {
                     let can_take = self.owner_client_id.is_none()
                         || self.owner_client_id == Some(client_id)
                         || self.owner_last_activity.elapsed()
                             > Duration::from_secs(INPUT_OWNER_IDLE_SECS);
+                    if !can_take {
+                        // Viewers retain their own latest size for owner loss,
+                        // without changing input ownership or the shared layout.
+                        for event in &events {
+                            if let ControlEvent::Resize(cols, rows) = event {
+                                record_client_resize(client, client_id, *cols, *rows);
+                            }
+                        }
+                    }
                     if can_take {
                         if self.owner_client_id != Some(client_id)
                             && client.client_cols > 0
@@ -160,6 +162,9 @@ impl FactoryDaemon {
                             match event {
                                 ControlEvent::Detach => {},
                                 ControlEvent::Resize(cols, rows) => {
+                                    if let Some(c) = self.clients.get_mut(&client_id) {
+                                        record_client_resize(c, client_id, cols, rows);
+                                    }
                                     resize_event = Some((cols, rows));
                                 }
                                 ControlEvent::SetMode(mode) => {

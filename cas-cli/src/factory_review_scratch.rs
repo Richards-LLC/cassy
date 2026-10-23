@@ -517,7 +517,7 @@ pub(crate) fn pending_reclaim_bytes(cas: &Path) -> u64 {
         .into_iter()
         .flat_map(|task| entries(&task))
         .filter_map(|directory| trash(cas, &directory).ok().flatten())
-        .map(|path| bytes(&path.join("target"), None))
+        .map(|path| freeable_bytes(&path.join("target")))
         .sum()
 }
 
@@ -552,9 +552,32 @@ fn bytes(path: &Path, limit: Option<u64>) -> u64 {
     size
 }
 
+fn freeable_file_bytes(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            return 0;
+        }
+    }
+    metadata.len()
+}
+
+fn freeable_bytes(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| freeable_file_bytes(&metadata))
+        .fold(0u64, u64::saturating_add)
+}
+
 #[derive(Default)]
 struct ReviewBytes {
     total: u64,
+    reclaimable: u64,
     target: u64,
     pending: u64,
 }
@@ -572,10 +595,12 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
     {
         if let Ok(metadata) = entry.metadata() {
             sizes.total = sizes.total.saturating_add(metadata.len());
+            let freeable = freeable_file_bytes(&metadata);
+            sizes.reclaimable = sizes.reclaimable.saturating_add(freeable);
             if entry.path().starts_with(&target) {
-                sizes.target = sizes.target.saturating_add(metadata.len());
+                sizes.target = sizes.target.saturating_add(freeable);
             } else if entry.path().starts_with(&pending) {
-                sizes.pending = sizes.pending.saturating_add(metadata.len());
+                sizes.pending = sizes.pending.saturating_add(freeable);
             }
         }
     }
@@ -699,7 +724,7 @@ fn reclaim(
         return Ok(("target queued; source retained", 0));
     }
     let queued_bytes = queued.as_ref().map_or(0, |path| {
-        measured.map_or_else(|| bytes(&path.join("target"), None), |sizes| sizes.pending)
+        measured.map_or_else(|| freeable_bytes(&path.join("target")), |sizes| sizes.pending)
     });
     if clean && let Some(path) = &queued {
         // Keep ownership durable until every payload byte is gone. A verifier
@@ -750,7 +775,7 @@ fn reclaim(
             "review target contains tracked source"
         );
         let size = measured
-            .map_or_else(|| bytes(&target, None), |sizes| sizes.target)
+            .map_or_else(|| freeable_bytes(&target), |sizes| sizes.target)
             .saturating_add(queued_bytes);
         if clean {
             fs::remove_dir_all(&target)?;
@@ -765,8 +790,8 @@ fn reclaim(
         ));
     }
     let size = measured.map_or_else(
-        || bytes(directory, None).saturating_add(if clean { queued_bytes } else { 0 }),
-        |sizes| sizes.total,
+        || freeable_bytes(directory).saturating_add(if clean { queued_bytes } else { 0 }),
+        |sizes| sizes.reclaimable,
     );
     if !clean {
         return Ok(("reclaimable", size));
@@ -1012,6 +1037,7 @@ mod tests {
         assert_eq!(sizes.total, 26, "logical row size includes every path");
         assert_eq!(sizes.target, 4, "deleting the target frees only private bytes");
         assert_eq!(sizes.pending, 0, "shared pending bytes remain in the worker");
+        assert_eq!(sizes.reclaimable, 4, "full review deletion retains worker inode");
     }
 
     #[test]

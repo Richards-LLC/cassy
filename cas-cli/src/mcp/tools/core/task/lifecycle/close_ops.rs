@@ -949,6 +949,8 @@ pub(crate) struct SourceModule {
     segments: Vec<String>,
     /// Actual parent module of a mounted sibling test; display stays physical.
     test_parent: Option<Vec<String>>,
+    /// Distinct mounting files when no single parent alias can be trusted.
+    ambiguous_test_parents: Vec<String>,
 }
 
 impl SourceModule {
@@ -2054,7 +2056,7 @@ impl SiblingTestParents {
 
     /// Resolve a sibling only through an explicit AST mount whose canonical
     /// target is the changed file. Comments and lookalike names prove nothing.
-    fn parent(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
+    fn parents(&mut self, proof_repo: &std::path::Path, path: &str) -> Option<Vec<String>> {
         let file = std::path::Path::new(path);
         let parent_name = file.file_stem()?.to_str()?.strip_suffix("_tests")?;
         if parent_name.is_empty() {
@@ -2077,11 +2079,16 @@ impl SiblingTestParents {
                 candidates.sort();
                 candidates
             });
+        // A parent beside the test directory can mount directory/*_tests.rs.
+        let adjacent_parent = directory.parent()?
+            .join(format!("{}.rs", directory.file_name()?.to_str()?));
+        let mut parents = std::collections::BTreeSet::new();
         // Keep conventional foo/mod.rs mounts, including ../foo_tests.rs.
         for parent in candidates
             .iter()
             .cloned()
             .chain(std::iter::once(directory.join(parent_name).join("mod.rs")))
+            .chain(std::iter::once(adjacent_parent))
         {
             if parent == file {
                 continue;
@@ -2102,13 +2109,9 @@ impl SiblingTestParents {
             if !mounts.contains(&changed_file) {
                 continue;
             }
-            let normalized = parent.to_str()?.replace('\\', "/");
-            let (_, source) = normalized.split_once("/src/")?;
-            let source = source.strip_suffix(".rs")?;
-            let source = source.strip_suffix("/mod").unwrap_or(source);
-            return Some(source.split('/').map(str::to_string).collect());
+            parents.insert(parent.to_str()?.replace('\\', "/"));
         }
-        None
+        Some(parents.into_iter().collect())
     }
 }
 
@@ -2132,6 +2135,24 @@ pub(crate) fn changed_source_modules(
             continue;
         };
         let source = source.strip_suffix("/mod").unwrap_or(source);
+        let parents = if normalized.ends_with("_tests.rs") {
+            sibling_tests
+                .get_or_insert_with(SiblingTestParents::new)
+                .parents(proof_repo, &normalized)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let test_parent = if let [parent] = parents.as_slice() {
+            parent.split_once("/src/")
+                .and_then(|(_, source)| source.strip_suffix(".rs"))
+                .map(|source| {
+                    source.strip_suffix("/mod").unwrap_or(source)
+                        .split('/').map(str::to_string).collect()
+                })
+        } else {
+            None
+        };
         modules.insert(SourceModule {
             crate_dir: crate_path
                 .rsplit('/')
@@ -2139,12 +2160,11 @@ pub(crate) fn changed_source_modules(
                 .unwrap_or(crate_path)
                 .to_ascii_lowercase(),
             segments: source.split('/').map(str::to_string).collect(),
-            test_parent: if normalized.ends_with("_tests.rs") {
-                sibling_tests
-                    .get_or_insert_with(SiblingTestParents::new)
-                    .parent(proof_repo, &normalized)
+            test_parent,
+            ambiguous_test_parents: if parents.len() > 1 {
+                parents
             } else {
-                None
+                Vec::new()
             },
         });
     }
@@ -2169,18 +2189,42 @@ pub(crate) fn uncovered_blast_radius_modules(
     changed_paths: &[String],
     proof_targets: &[String],
 ) -> Vec<String> {
+    uncovered_blast_radius_scope(proof_repo, changed_paths, proof_targets).0
+}
+
+/// Keep proof-target module names separate from explanatory mount diagnostics.
+fn uncovered_blast_radius_scope(
+    proof_repo: &std::path::Path,
+    changed_paths: &[String],
+    proof_targets: &[String],
+) -> (Vec<String>, String) {
     let proof_targets = cas_types::normalize_proof_targets(proof_targets);
     let mut uncovered = Vec::new();
+    let mut ambiguities = Vec::new();
     for module in changed_source_modules(proof_repo, changed_paths) {
         let covered = proof_targets
             .iter()
             .any(|target| proof_target_matches_module(target, &module));
         let name = module.display();
         if !covered && !uncovered.contains(&name) {
+            if !module.ambiguous_test_parents.is_empty() {
+                ambiguities.push(format!(
+                    "{name} (mounting parents: {})",
+                    module.ambiguous_test_parents.join(", "),
+                ));
+            }
             uncovered.push(name);
         }
     }
-    uncovered
+    let notice = if ambiguities.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; ambiguous test mounts: {}. Declare the physical test module explicitly",
+            ambiguities.join("; "),
+        )
+    };
+    (uncovered, notice)
 }
 
 fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
@@ -2272,12 +2316,13 @@ fn declared_risk_close_gaps(
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered =
-            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let (uncovered, notice) =
+            uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             gaps.push(format!(
-                "blast-radius uncovered source modules: {}",
-                uncovered.join(", ")
+                "blast-radius uncovered source modules: {}{}",
+                uncovered.join(", "),
+                notice,
             ));
         }
     }
@@ -2653,13 +2698,14 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
-        let uncovered =
-            uncovered_blast_radius_modules(proof_repo, changed_paths, &task.proof_targets);
+        let (uncovered, notice) =
+            uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. {}",
+                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}{}. {}",
                 task.id,
                 uncovered.join(", "),
+                notice,
                 proof_targets_scope_fix_command(task, &uncovered),
             ));
         }
@@ -14870,17 +14916,30 @@ fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> Strin
     )
 }
 
-/// A preservation ref is evidence of this delivery only while it still names
-/// the immutable recorded anchor. Prefer it to a reused worker lane, locally
-/// or on origin, without accepting a ref recycled for later work.
+/// Prefer a preservation ref to a reused lane only while its immutable anchor
+/// is integrated. A moved local branch must be measured live, never hidden by
+/// a stale origin ref; an unmerged old anchor cannot displace a current receipt.
 fn anchored_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Option<String> {
     let parked = task.deliverables.parked_branch.as_deref()?;
     let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
     if !is_safe_git_refname(parked) {
         return None;
     }
-    [parked.to_string(), format!("origin/{parked}")].into_iter()
-        .find(|branch| resolve_branch_sha(repo, branch).as_deref() == Some(anchor))
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{parked}")) {
+        parked.to_string()
+    } else {
+        format!("origin/{parked}")
+    };
+    if resolve_branch_sha(repo, &branch).as_deref() != Some(anchor) {
+        return None;
+    }
+    let target = task.deliverables.work_target.as_ref()?.target_branch.trim();
+    if !is_safe_git_refname(target) {
+        return None;
+    }
+    [target.to_string(), format!("origin/{target}")].into_iter()
+        .any(|target| git_commit_is_ancestor(repo, anchor, &target))
+        .then_some(branch)
 }
 
 /// [`close_measured_factory_branch`], refusing instead of binding to another

@@ -1414,9 +1414,12 @@ async fn integrated_receipt_recovers_a_previous_tasks_start_lane_cas_8603() {
 #[tokio::test]
 async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
     let mut env = TestEnvGuard::temp_home();
-    for (supervisor, recorded, with_receipt) in [
-        (false, false, true), (true, false, true), (false, true, true), (true, true, true),
-        (false, false, false), (true, false, false), (false, true, false), (true, true, false),
+    for (supervisor, recorded, with_receipt, valid_anchor) in [
+        (false, false, true, true), (true, false, true, true),
+        (false, true, true, true), (true, true, true, true),
+        (false, false, false, true), (true, false, false, true),
+        (false, true, false, true), (true, true, false, true),
+        (false, true, false, false),
     ] {
         let f = fixture(&mut env, "main");
         env.set("CAS_AGENT_ROLE", if supervisor { "supervisor" } else { "worker" });
@@ -1446,13 +1449,13 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
         }
         let next_tip = git(&worker_path, &["rev-parse", "HEAD"]);
         let mut task = assigned(id, TaskType::Bug, "main");
-        let start_base = if recorded { f.foreign_tip.clone() } else { base };
+        let start_base = if recorded { f.foreign_tip.clone() } else { base.clone() };
         task.deliverables.factory_branch_start = with_receipt.then(|| cas_types::FactoryBranchStart {
             work_target: task.deliverables.work_target.clone().unwrap(),
             assignee: WORKER.into(), branch: LANE.into(), base_sha: start_base.clone(),
         });
         task.deliverables.parked_branch = Some(parked.clone());
-        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.factory_branch_anchor = Some(if valid_anchor { receipt.clone() } else { base });
         f.put(&task);
         claim(&f, id);
         if recorded && !with_receipt {
@@ -1465,6 +1468,11 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
             "action": "close", "id": id, "reason": "Integrated parked delivery",
             "commit_receipt": with_receipt.then_some(receipt.as_str()), "supervisor_override": supervisor,
         })).await;
+        if !valid_anchor {
+            assert_ne!(f.task(id).status, TaskStatus::Closed, "an empty anchor is not delivery proof: {response}");
+            assert!(response.contains("MERGE REALITY CHECK FAILED"), "worker B2 must still refuse: {response}");
+            continue;
+        }
         assert_eq!(f.task(id).status, TaskStatus::Closed, "{supervisor}/{recorded}/{with_receipt}: {response}");
         if with_receipt {
             assert!(f.task(id).notes.contains(&start_base), "old base must remain audited");

@@ -58,7 +58,15 @@ pub(super) async fn peer_fixture() -> (tempfile::TempDir, FactoryDaemon) {
         &name,
         cas_mux::PtyConfig {
             command: "/bin/sh".into(),
-            args: vec!["-c".into(), "printf ready; exec /bin/sleep 60".into()],
+            // cas-ac6c: consume input like a harness. A sleeping child leaves
+            // the cooked PTY buffer full when two peer replies are batched,
+            // so payload/submit receipts cannot settle within the test bound.
+            args: vec![
+                "-c".into(),
+                "stty raw -echo; printf ready; exec cat > \"$1\"".into(),
+                "peer-fixture".into(),
+                root.path().join("input").to_str().unwrap().into(),
+            ],
             cwd: Some(root.path().into()),
             env: vec![],
             env_remove: vec![],

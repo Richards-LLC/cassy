@@ -136,7 +136,7 @@ pub struct TaskTransferRequest {
     pub to_agent: String,
 
     /// Adopt delivery work on the receiver's own per-task branch.
-    #[schemars(description = "Fast-forward a clean receiver worktree to the task delivery tip on its own per-task branch; rebind the anchor and preserve the source branch")]
+    #[schemars(description = "Adopt the delivery on a clean receiver's own per-task branch, retaining its HEAD or existing task branch ahead of the delivery only when the integration target contains it; refuse unintegrated receiver work, retain the delivery anchor and preserve the source branch")]
     #[serde(default)]
     pub adopt_branch: Option<bool>,
 

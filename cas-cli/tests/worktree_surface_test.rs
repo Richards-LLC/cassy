@@ -2243,14 +2243,18 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
     let fixture_cwd = std::env::current_dir().unwrap();
     // cas-4fe8: task identity, not the spelling of its delivery ref, owns the merge.
     let long_task_id = "cas-c28b6df4a2b653af";
-    for (branch, exact_sha) in [
-        ("factory/peer-worker", false),
-        ("factory/peer-worker", true),
-        ("factory/peer-worker-cas-c28b6df4a2b653af", false),
-        ("factory/peer-worker-cas-c28b", false),
-        ("factory/peer-worker-cas-c28b-r2", false),
-        ("factory/peer-worker-cas-c28b-fix", false),
-        ("factory/peer-worker-cas-c28b-resume", false),
+    let mut failures = Vec::new();
+    for (branch, exact_sha, discover_with_bare) in [
+        ("factory/peer-worker", false, false),
+        ("factory/peer-worker", true, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af", false, false),
+        ("factory/peer-worker-cas-c28b", false, false),
+        ("factory/peer-worker-cas-c28b-r2", false, false),
+        ("factory/peer-worker-cas-c28b-fix", false, false),
+        ("factory/peer-worker-cas-c28b-resume", false, false),
+        ("delivery/reviewed-correction", false, false),
+        ("factory/peer-worker-cas-0700", false, false),
+        ("factory/peer-worker-cas-c28b6df4a2b653af", false, true),
     ] {
         let repo = GitRepo::new();
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -2312,10 +2316,23 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             "factory/peer-worker-cas-c28b-fix" => Some("factory/peer-worker-cas-c28b6df4a2b653af-r9".into()),
             _ => Some(branch.into()),
         };
+        if discover_with_bare {
+            task.deliverables.parked_branch = None;
+            run_git(&["push", "origin", "main:refs/heads/factory/peer-worker"], &peer);
+        }
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "project:peer-delivery".into(),
             target_branch: "epic/peer".into(),
         });
+        if branch.ends_with("-cas-0700") {
+            // cas-8001: start recorded this worker on its preceding task's name.
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: task.deliverables.work_target.clone().unwrap(),
+                assignee: "peer-worker".into(),
+                branch: branch.into(),
+                base_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
+            });
+        }
         tasks.add(&task).unwrap();
         let mut supervisor = Agent::new("receiving-supervisor".into(), "receiver".into());
         supervisor.role = AgentRole::Supervisor;
@@ -2336,6 +2353,49 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         request.task_id = Some(task.id.clone());
         request.cleanup = Some(false);
         let before = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
+        if branch == "delivery/reviewed-correction" {
+            let refused = svc.coordination(Parameters(request)).await
+                .expect_err("an unsupported recorded name needs an actionable supervisor remedy");
+            let message = refused.message.as_ref();
+            if !message.contains(branch) || !message.contains("request_changes")
+                || !message.contains("rebind_branch")
+            {
+                failures.push(format!("descriptive recorded source needs its recovery actions: {message}"));
+            }
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
+            env.set_current_dir(&fixture_cwd);
+            continue;
+        }
+        if discover_with_bare {
+            env.set(cas::github_issue_attach::GH_BIN_ENV,
+                ci_check_run::ci_concluded(remote.path(), "failure"));
+            let refused = svc.coordination(Parameters(request.clone())).await
+                .expect_err("per-task discovery must still reach the normal CI gate");
+            if !refused.message.contains("CI RED") {
+                failures.push(format!("per-task source must outrank bare worker branch: {refused}"));
+                env.set_current_dir(&fixture_cwd);
+                continue;
+            }
+        } else if branch == "factory/peer-worker-cas-c28b6df4a2b653af" {
+            let stale = "factory/peer-worker";
+            run_git(&["push", "origin", "main:refs/heads/factory/peer-worker"], &peer);
+            // Cached origin data must not hide the real remote-only stale tip.
+            run_git(&["update-ref", &format!("refs/remotes/origin/{stale}"), &anchor], &repo.root);
+            assert!(git_stdout(&repo.root, &["branch", "--list", stale]).is_empty());
+            env.set(cas::github_issue_attach::GH_BIN_ENV,
+                ci_check_run::ci_concluded(remote.path(), "failure"));
+            let mut stale_request = request.clone();
+            stale_request.id = Some(stale.into());
+            let refused = svc.coordination(Parameters(stale_request)).await
+                .expect_err("stale remote-only source must refuse before merging another parked round");
+            let message = refused.message.as_ref();
+            if !message.contains("PARKED DELIVERY SOURCE CHANGED")
+                || !message.contains(stale) || !message.contains(&before)
+            {
+                failures.push(format!("remote stale refusal must name requested {stale} at {before}: {message}"));
+            }
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
+        }
         let sibling = "factory/peer-worker-cas-c28b6df4a2b653af-resume";
         if branch == "factory/peer-worker-cas-c28b" || branch.ends_with("-r2") {
             run_git(&["push", "origin", &format!("HEAD:refs/heads/{sibling}")], &peer);
@@ -2471,6 +2531,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
         );
         env.set_current_dir(&fixture_cwd);
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[tokio::test]
@@ -5560,6 +5621,10 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     assert!(get_text(&gate_clear).contains("approved"));
     let mut gate_cleared_task = task_store.get(&task.id).expect("gate-cleared task");
     gate_cleared_task.depth = TaskDepth::Light;
+    if !system_a {
+        // Legacy park metadata survives cleanup; the immutable receipt owns resume.
+        gate_cleared_task.deliverables.parked_branch = Some(receipt.source_branch.clone());
+    }
     task_store
         .update(&gate_cleared_task)
         .expect("isolate retry from unrelated review gate");

@@ -2378,7 +2378,7 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             let landed = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
             assert_ne!(landed, before);
             assert_eq!(landed, git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/peer"]));
-            assert!(repo.root.join("delivery.rs").is_file());
+            assert!(git_stdout(&repo.root, &["show", "epic/peer:delivery.rs"]).contains("delivered"));
             env.set_current_dir(&fixture_cwd);
             continue;
         }

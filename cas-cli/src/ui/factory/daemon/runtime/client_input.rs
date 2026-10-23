@@ -139,6 +139,9 @@ impl FactoryDaemon {
                         for event in &events {
                             if let ControlEvent::Resize(cols, rows) = event {
                                 record_client_resize(client, client_id, *cols, *rows);
+                                // Build/resize the viewer's compact render target too.
+                                // Full layout dimensions still come from the owner.
+                                resize_event = Some((*cols, *rows));
                             }
                         }
                     }

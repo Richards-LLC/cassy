@@ -329,6 +329,31 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
     // A viewer's resize records its own geometry without replacing the active owner.
     resize(&mut operator, 121, 41);
     assert!(wait_until(Duration::from_secs(5), || gui_size(&gui_socket) == (121, 41)));
+
+    // A narrow viewer needs its own compact frames while the full owner is active.
+    let mut narrow_viewer = connect_tui(&tui_socket);
+    resize(&mut narrow_viewer, 60, 20);
+    narrow_viewer.set_nonblocking(true).unwrap();
+    let mut screen = ghostty_vt::Terminal::new(20, 60).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let mut bytes = [0u8; 8192];
+            match narrow_viewer.read(&mut bytes) {
+                Ok(0) => panic!("narrow viewer disconnected before receiving compact frames"),
+                Ok(n) => screen.feed(&bytes[..n]).unwrap(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                Err(error) => panic!("narrow viewer read: {error}"),
+            }
+            screen.dump_viewport().unwrap().lines().next().is_some_and(|line| {
+                line.trim_start().starts_with("Cassy") && line.contains("no epic")
+            })
+        }),
+        "narrow non-owner must receive a rendered compact screen; got {:?}",
+        screen.dump_viewport().unwrap()
+    );
+    assert_eq!(gui_size(&gui_socket), (121, 41), "viewer must preserve the owner's full layout");
+    drop(narrow_viewer);
+
     resize(&mut launch_client, 105, 33);
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(gui_size(&gui_socket), (121, 41));

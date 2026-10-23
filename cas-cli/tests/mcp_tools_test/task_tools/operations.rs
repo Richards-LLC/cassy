@@ -4930,6 +4930,7 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             result.unwrap_or_else(|error| panic!("same worker's WIP must resume: {error}"));
         } else {
             let error = result.expect_err("foreign worker or other-task commits must refuse");
+            // pin: refusal must identify foreign-task provenance or the unauthorized caller.
             assert!(error.message.contains("foreign commit") || error.message.contains("not you"),
                 "{caller}, {message}: {error}");
         }

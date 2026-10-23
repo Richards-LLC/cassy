@@ -316,6 +316,8 @@ def run_download_policy_proof() -> None:
 
     module = adapter_module()
     client = module.McpClient("https://hub.example.test/mcp", "stub-token", "stub-bypass", 1)
+    prefixed = module.McpClient("https://hub.example.test/mcp", "bEaReR stub-token", "", 1)
+    assert prefixed.headers["Authorization"] == "bEaReR stub-token"
     external = FakeOpener([FakeResponse(200, b"signed-pdf")])
     client.opener = external
     assert client.download("https://signed.example.test/report.pdf") == b"signed-pdf"
@@ -769,6 +771,19 @@ def main() -> int:
         )
         assert result.returncode != 0 and "main or the release tag" in result.stderr, result.stderr
         assert fields is None and state.requests == [], "manual factory URLs must refuse before network"
+        for segment in (".", ".."):
+            result, fields = run_adapter(
+                server,
+                state,
+                pdf,
+                html_ref=None,
+                html_url=(
+                    "https://github.com/Richards-LLC/cassy/blob/main/docs/"
+                    f"{segment}/release-reports/v9.99.0.html"
+                ),
+            )
+            assert result.returncode != 0 and "path segments" in result.stderr, result.stderr
+            assert fields is None and state.requests == [], "dot path segments must refuse before network"
         print("Report links: main/tag accepted; temporary branch refused before network")
         result, fields = run_adapter(
             server,

@@ -378,15 +378,6 @@ def resolve_token(credentials: dict[str, str]) -> str:
     )
 
 
-def authorization_value(token: str) -> str:
-    """Use Codex env_http_headers.Authorization as a complete header value."""
-
-    if any(os.environ.get(name) for name in TOKEN_SELECTOR_ENV_NAMES):
-        return f"Bearer {token}"
-    registration = registered_violet_token_registration()
-    return token if registration and registration[2] else f"Bearer {token}"
-
-
 def request_json(
     url: str,
     headers: dict[str, str],
@@ -442,8 +433,6 @@ class McpClient:
         token: str,
         bypass: str,
         timeout: float,
-        *,
-        authorization: str | None = None,
     ) -> None:
         self.url = url
         self.timeout = timeout
@@ -452,7 +441,7 @@ class McpClient:
             fail("Violet MCP URL must use HTTPS outside a loopback test endpoint")
         self.opener = urllib.request.build_opener(NoRedirectHandler())
         self.headers = {
-            "Authorization": authorization if authorization is not None else f"Bearer {token}",
+            "Authorization": token if token.lower().startswith("bearer ") else f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
@@ -781,6 +770,8 @@ def html_url(tag: str) -> str:
             port = parsed.port
         except ValueError:
             fail("CAS_RELEASE_TRAIN_REPORT_HTML_URL must use a GitHub blob URL for main or the release tag")
+        if any(segment in {".", ".."} for segment in urllib.parse.unquote(parsed.path).split("/")):
+            fail("CAS_RELEASE_TRAIN_REPORT_HTML_URL cannot contain '.' or '..' path segments")
         path_prefix = f"/{repo}/blob/"
         ref_and_path = parsed.path[len(path_prefix):] if parsed.path.startswith(path_prefix) else ""
         configured_ref, separator, report_path = ref_and_path.partition("/")
@@ -871,7 +862,7 @@ def main(argv: list[str]) -> int:
         url = os.environ.get("CAS_RELEASE_TRAIN_REPORT_MCP_URL", DEFAULT_MCP_URL)
         channel = os.environ.get("CAS_RELEASE_TRAIN_REPORT_CHANNEL", DEFAULT_CHANNEL)
         timeout = float(os.environ.get("CAS_RELEASE_TRAIN_REPORT_TIMEOUT_SECS", "30"))
-        client = McpClient(url, token, bypass, timeout, authorization=authorization_value(token))
+        client = McpClient(url, token, bypass, timeout)
         client.call(
             "initialize",
             {

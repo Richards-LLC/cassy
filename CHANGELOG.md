@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.76.0] - 2026-10-23
+
 ### Changed
 
 - **Own branch per task** — Refuse `task start` while the worker's checkout is on another task's `factory/<worker>-cas-<id>` branch, printing the exact fetch, switch and push that cut the new task's own branch; a branch approved through `rebind_branch` still starts. The cas-worker skill now requires whole-module proof for shared surfaces.

@@ -374,3 +374,70 @@ fn task_target(root: &Path, store: &Path) -> Option<String> {
     };
     (matches(root) || store.parent().is_some_and(matches)).then_some(target.target_branch)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_finds_documents_generated_only_in_level_worktree() {
+        if let Ok(document) = std::env::var("CAS_930C_STATUS") {
+            use clap::Parser;
+            let cli = crate::cli::Cli::parse_from(["cas", &document, "status"]);
+            crate::cli::run(cli).unwrap();
+            return;
+        }
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let repo = fixture.path().canonicalize().unwrap().join("main");
+        let worker = repo.join(".cas/worktrees/worker");
+        let store = repo.join(".cas");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("config.toml"), "[factory]\nepic_base_branch = \"main\"\n").unwrap();
+        crate::store::SqliteTaskStore::open(&store).unwrap();
+        let run_git = |root: &Path, args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(root).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["config", "user.name", "Fixture"]);
+        run_git(&repo, &["config", "user.email", "fixture@example.test"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        run_git(&repo, &["add", ".gitignore"]);
+        run_git(&repo, &["commit", "-qm", "initial"]);
+        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git(&repo, &["worktree", "add", "-qb", "factory/worker", worker.to_str().unwrap()]);
+        std::fs::create_dir_all(worker.join(".claude")).unwrap();
+        std::fs::create_dir_all(worker.join("docs")).unwrap();
+        std::fs::write(worker.join(".claude/CODEMAP.md"), "# Worker map\n").unwrap();
+        std::fs::write(worker.join("docs/PRODUCT_OVERVIEW.md"), "# Worker product\n").unwrap();
+        env.set("CAS_ROOT", &store);
+
+        // Exercise the real status dispatch from a nested caller directory.
+        let name = concat!(module_path!(), "::status_finds_documents_generated_only_in_level_worktree");
+        let name = name.strip_prefix("cas::").unwrap_or(name);
+        let mut failures = Vec::new();
+        for (cwd, expected, root) in [
+            (worker.join("docs"), "Status: up to date", &worker),
+            (repo.clone(), "Status: not found", &repo),
+        ] {
+            for (command, path) in [("codemap", ".claude/CODEMAP.md"), ("project-overview", "docs/PRODUCT_OVERVIEW.md")] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name, "--nocapture"])
+                    .current_dir(&cwd).env("CAS_930C_STATUS", command).output().unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(output.status.success(), "{stdout} {}", String::from_utf8_lossy(&output.stderr));
+                crate::test_child::assert_passed(&stdout, name);
+                if !stdout.contains(expected) || !stdout.contains(&root.join(path).display().to_string()) {
+                    failures.push(format!("{command} from {} expected {expected}: {stdout}", cwd.display()));
+                }
+            }
+        }
+        // Integration reports must still describe committed origin, not local docs.
+        let integration = Measurement::integration_at(&worker, &store);
+        for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md"] {
+            assert!(integration.read(path).is_none());
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
